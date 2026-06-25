@@ -1,0 +1,14 @@
+[general]
+contrib=contrib-title-conventional-commits
+# Fast-forward-only merge policy (enforced via branch protection: require
+# linear history), so there are no merge commits to handle here.
+ignore-revert-commits=true
+
+[contrib-title-conventional-commits]
+types = feat,fix,docs,style,refactor,perf,test,build,ci,chore,revert,spec
+
+[title-max-length]
+line-length=50
+
+[body-max-line-length]
+line-length=72

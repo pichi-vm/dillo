@@ -1,0 +1,256 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  NIGHTLY: nightly-2026-06-04
+
+# dillo needs nightly: it consumes arma as a `-Z bindeps` artifact dependency
+# (which cross-builds tatu for a bare-metal target) and snuffler as a musl
+# artifact. See the pichi-vm split checklist's toolchain carve-out.
+jobs:
+  license-headers:
+    name: license headers
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: korandoru/hawkeye@v6
+
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # artifact deps make `cargo metadata` nightly-only, so install the pinned
+      # toolchain (from rust-toolchain.toml) before cargo-deny reads the tree.
+      - run: rustup show
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  commit-messages:
+    name: commit messages
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: pipx run gitlint --commits "origin/${{ github.base_ref || 'main' }}..HEAD"
+
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        shell: bash
+        run: |
+          rustup toolchain install "$NIGHTLY" --profile minimal --component rustfmt,clippy,rust-src
+          rustup default "$NIGHTLY"
+          # arma embeds native-arch tatu (bare-metal); snuffler cross-builds for
+          # the x86_64 guest musl triple on this x86_64 lint host.
+          rustup target add x86_64-unknown-none aarch64-unknown-none x86_64-unknown-linux-musl
+
+      # dillo consumes arma as a git artifact dep, whose transitive tatu artifact
+      # dep (a non-default bare-metal target) panics stock cargo
+      # (rust-lang/cargo#10647). Build + install the patched cargo from the fork.
+      - name: Cache patched cargo
+        id: patched-cargo
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/patched-cargo
+          key: patched-cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.NIGHTLY }}-v1
+      - name: Build patched cargo
+        if: steps.patched-cargo.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          git clone --depth 1 --branch fix/bindeps-transitive-artifact-target \
+            https://github.com/npmccallum/cargo "$RUNNER_TEMP/cargo-fork"
+          # The NixOS self-hosted runner exposes no system OpenSSL on the default
+          # path; provide it from the nix store via nix-shell (only that runner
+          # has nix-shell). Every other runner builds directly against system
+          # OpenSSL (Linux/macOS) or schannel (Windows).
+          # Hosted runners (ubuntu/windows) have system OpenSSL/curl (or schannel)
+          # and no nix-shell, so build directly. The self-hosted nix boxes
+          # (linux-arm64, macos-arm64) expose no system OpenSSL/curl on the
+          # default path, so provide both from nixpkgs (sourced via the flake
+          # registry; flakes force-enabled since the two boxes' nix configs
+          # differ — one has flakes off, one has no channel). cargo links libcurl
+          # + libssl, hence both packages.
+          if command -v nix-shell >/dev/null 2>&1; then
+            ( cd "$RUNNER_TEMP/cargo-fork" \
+              && NIX_CONFIG="experimental-features = nix-command flakes" \
+                 nix-shell -I nixpkgs=flake:nixpkgs -p openssl curl pkg-config --run 'cargo build --release' )
+          else
+            ( cd "$RUNNER_TEMP/cargo-fork" && cargo build --release )
+          fi
+          mkdir -p "$RUNNER_TEMP/patched-cargo"
+          cp "$RUNNER_TEMP/cargo-fork/target/release/cargo"* "$RUNNER_TEMP/patched-cargo/"
+      - name: Install patched cargo into the nightly toolchain
+        shell: bash
+        run: |
+          dest="$(rustup which --toolchain "$NIGHTLY" cargo)"
+          cp "$RUNNER_TEMP/patched-cargo/cargo"* "$(dirname "$dest")/"
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features
+
+  # Real same-arch guest boot on every supported platform. dillo builds its
+  # per-OS backend (KVM on Linux, WHP on Windows, HVF on macOS) and boots an
+  # Alpine guest; the boot suite asserts the guest's self-report. The plain
+  # workspace test run precedes it (Windows/macOS exclude the Unix/Linux-only
+  # crates, matching dillo's own cfg gating).
+  ci:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu-24.04      # Linux x86_64 - full workspace + real KVM boot
+            os: ubuntu-24.04
+            runs_on: '["ubuntu-24.04"]'
+            guest_musl: x86_64-unknown-linux-musl
+          - name: linux-arm64       # Linux arm64 - full workspace + real KVM boot
+            os: linux-arm64
+            runs_on: '["self-hosted","Linux","ARM64","bare-metal","aarch64","kvm"]'
+            guest_musl: aarch64-unknown-linux-musl
+          - name: windows-2025      # Windows x86_64 - build + real WHP boot
+            os: windows-2025
+            runs_on: '["windows-2025"]'
+            guest_musl: x86_64-unknown-linux-musl
+          - name: macos-arm64       # macOS arm64 - build + real HVF boot
+            os: macos-arm64
+            runs_on: '["self-hosted","macOS","ARM64","bare-metal","m1"]'
+            guest_musl: aarch64-unknown-linux-musl
+    runs-on: ${{ fromJSON(matrix.runs_on) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        shell: bash
+        run: |
+          rustup toolchain install "$NIGHTLY" --profile minimal --component rust-src
+          rustup default "$NIGHTLY"
+          # arma embeds native-arch tatu; snuffler is cross-built for the guest
+          # musl triple matching this host's arch.
+          rustup target add x86_64-unknown-none aarch64-unknown-none "${{ matrix.guest_musl }}"
+
+      # dillo consumes arma as a git artifact dep, whose transitive tatu artifact
+      # dep (a non-default bare-metal target) panics stock cargo
+      # (rust-lang/cargo#10647). Build + install the patched cargo from the fork.
+      - name: Cache patched cargo
+        id: patched-cargo
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/patched-cargo
+          key: patched-cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.NIGHTLY }}-v1
+      - name: Build patched cargo
+        if: steps.patched-cargo.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          git clone --depth 1 --branch fix/bindeps-transitive-artifact-target \
+            https://github.com/npmccallum/cargo "$RUNNER_TEMP/cargo-fork"
+          # The NixOS self-hosted runner exposes no system OpenSSL on the default
+          # path; provide it from the nix store via nix-shell (only that runner
+          # has nix-shell). Every other runner builds directly against system
+          # OpenSSL (Linux/macOS) or schannel (Windows).
+          # Hosted runners (ubuntu/windows) have system OpenSSL/curl (or schannel)
+          # and no nix-shell, so build directly. The self-hosted nix boxes
+          # (linux-arm64, macos-arm64) expose no system OpenSSL/curl on the
+          # default path, so provide both from nixpkgs (sourced via the flake
+          # registry; flakes force-enabled since the two boxes' nix configs
+          # differ — one has flakes off, one has no channel). cargo links libcurl
+          # + libssl, hence both packages.
+          if command -v nix-shell >/dev/null 2>&1; then
+            ( cd "$RUNNER_TEMP/cargo-fork" \
+              && NIX_CONFIG="experimental-features = nix-command flakes" \
+                 nix-shell -I nixpkgs=flake:nixpkgs -p openssl curl pkg-config --run 'cargo build --release' )
+          else
+            ( cd "$RUNNER_TEMP/cargo-fork" && cargo build --release )
+          fi
+          mkdir -p "$RUNNER_TEMP/patched-cargo"
+          cp "$RUNNER_TEMP/cargo-fork/target/release/cargo"* "$RUNNER_TEMP/patched-cargo/"
+      - name: Install patched cargo into the nightly toolchain
+        shell: bash
+        run: |
+          dest="$(rustup which --toolchain "$NIGHTLY" cargo)"
+          cp "$RUNNER_TEMP/patched-cargo/cargo"* "$(dirname "$dest")/"
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Versions
+        shell: bash
+        run: |
+          cargo --version
+          rustc --version
+
+      - name: Enable KVM (Linux)
+        if: runner.os == 'Linux'
+        run: ls -l /dev/kvm && sudo chmod 666 /dev/kvm || true
+
+      - name: Test (Linux, full workspace)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+        run: cargo test --workspace
+
+      - name: Test (Windows, workspace minus Unix-only crates)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+        run: |
+          # dillo-virtio-vsock bridges vsock to host Unix sockets (UnixStream),
+          # so it is Unix-only; dillo depends on it via cfg(unix) and never
+          # builds it on Windows. snuffler is the Linux guest probe.
+          cargo test --workspace --exclude snuffler --exclude dillo-virtio-vsock
+
+      - name: Test (macOS, workspace minus Linux-only crates)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+        run: cargo test --workspace --exclude snuffler
+
+      - name: Reserve hugepages for guest RAM (Linux/KVM)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # Hosted runners start with a fragmented page allocator, so a single
+          # `sysctl -w vm.nr_hugepages=1024` often only secures a fraction. Free
+          # the page cache + compact memory and retry so enough 2 MiB-contiguous
+          # regions become available. This is allocation flakiness, not a gap.
+          want=1024
+          pages=$(sysctl -n vm.nr_hugepages)
+          for attempt in 1 2 3 4 5 6; do
+            if [ "$pages" -ge "$want" ]; then break; fi
+            sync || true
+            echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null || true
+            echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null || true
+            sudo sysctl -w vm.nr_hugepages=$want || true
+            pages=$(sysctl -n vm.nr_hugepages)
+            echo "hugepage reservation attempt $attempt: nr_hugepages=$pages (want $want)"
+            sleep 3
+          done
+          if [ "$pages" -lt "$want" ]; then
+            echo "Linux runner must provide vm.nr_hugepages >= $want; got $pages" >&2
+            exit 1
+          fi
+          grep -i huge /proc/meminfo
+
+      - name: Boot tests (KVM / WHP / HVF)
+        shell: bash
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+        run: cargo test -p dillo --features vm-tests -- --test-threads=1 --nocapture

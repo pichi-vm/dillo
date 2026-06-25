@@ -1,0 +1,244 @@
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "deps/dillo-config",
+    "deps/dillo-devtree",
+    "deps/dillo-machine",
+    "deps/dillo-machine-hvf",
+    "deps/dillo-machine-kvm",
+    "deps/dillo-machine-whp",
+    "deps/dillo-mmio",
+    "deps/dillo-mmio-uart",
+    "deps/dillo-mmio-virtio",
+    "deps/dillo-pci",
+    "deps/dillo-pci-virtio",
+    "deps/dillo-virtio",
+    "deps/dillo-virtio-blk",
+    "deps/dillo-virtio-console",
+    "deps/dillo-virtio-fs",
+    "deps/dillo-virtio-gpt",
+    "deps/dillo-virtio-net",
+    "deps/dillo-virtio-vsock",
+    "deps/snuffler",
+]
+exclude = [
+    # cargo-fuzz harnesses: nightly + libfuzzer-sys, built out-of-band.
+    "fuzz",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+repository = "https://github.com/pichi-vm/dillo"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+doc_markdown = "allow"
+type_complexity = "allow"
+similar_names = "allow"
+struct_field_names = "allow"
+needless_continue = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+too_many_lines = "allow"
+missing_panics_doc = "allow"
+needless_pass_by_value = "allow"
+uninlined_format_args = "allow"
+
+[workspace.dependencies]
+# Cross-product shared crates (git deps)
+pmi = { git = "https://github.com/pichi-vm/pmi" }
+devtree = { git = "https://github.com/pichi-vm/devtree" }
+# Dev-only caching URL downloader (shared by arma/dillo tests).
+burrow = { git = "https://github.com/pichi-vm/burrow" }
+
+# dillo-internal crates
+dillo-config = { path = "deps/dillo-config" }
+dillo-devtree = { path = "deps/dillo-devtree" }
+dillo-machine = { path = "deps/dillo-machine" }
+dillo-machine-hvf = { path = "deps/dillo-machine-hvf" }
+dillo-machine-kvm = { path = "deps/dillo-machine-kvm" }
+dillo-machine-whp = { path = "deps/dillo-machine-whp" }
+dillo-mmio = { path = "deps/dillo-mmio" }
+dillo-mmio-uart = { path = "deps/dillo-mmio-uart" }
+dillo-mmio-virtio = { path = "deps/dillo-mmio-virtio" }
+dillo-pci = { path = "deps/dillo-pci" }
+dillo-pci-virtio = { path = "deps/dillo-pci-virtio" }
+dillo-virtio = { path = "deps/dillo-virtio" }
+dillo-virtio-blk = { path = "deps/dillo-virtio-blk" }
+dillo-virtio-console = { path = "deps/dillo-virtio-console" }
+dillo-virtio-fs = { path = "deps/dillo-virtio-fs" }
+dillo-virtio-gpt = { path = "deps/dillo-virtio-gpt" }
+dillo-virtio-net = { path = "deps/dillo-virtio-net" }
+dillo-virtio-vsock = { path = "deps/dillo-virtio-vsock" }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# CLI
+argh = "0.1"
+
+# PE + CBOR
+object = { version = "0.36", default-features = false, features = ["read_core", "pe", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-keyvalue = "0.1"
+ciborium = "0.2"
+
+# Memory + KVM (Linux)
+vm-memory = { version = "0.17", default-features = false, features = ["backend-mmap", "backend-atomic"] }
+kvm-ioctls = "0.24"
+kvm-bindings = "0.14"
+
+# Hypervisor backends
+applevisor = "1"
+applevisor-sys = "1"
+windows-sys = { version = "0.61", features = ["Win32_System_Hypervisor"] }
+
+# Battle-tested 16550 UART implementation.
+vm-superio = "0.8"
+
+# Process / signal / fd plumbing
+nix = { version = "0.30", features = ["fs", "process", "signal", "ioctl", "mman", "socket", "term"] }
+
+# virtio-net user-mode backend: in-process TCP/IP stack (smoltcp) plus a
+# cross-platform host-socket event loop (mio).
+smoltcp = { version = "0.13", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp", "auto-icmp-echo-reply"] }
+mio = { version = "1", features = ["os-poll", "net"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Utility
+vmm-sys-util = "0.15"
+
+# Block device backends (virtio-blk + virtualized-GPT)
+gpt = "4.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+hex = "0.4"
+sha2 = "0.10"
+
+# Test/dev utilities
+tempfile = "3"
+libc = "0.2"
+
+# tatu must fit its 2 MiB slab (linker ASSERT in tatu/linker/tatu.ld), so it
+# must always be built with release-equivalent codegen even when the rest of
+# the workspace is built in dev — a debug build's larger .text overflows the
+# slab. tatu is consumed by arma as an artifact dependency, so the profile
+# that applies is this workspace's, not tatu's own.
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[profile.dev.package.tatu]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[package]
+name = "dillo"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "VMM that boots PMI files (Linux/KVM, macOS/HVF, Windows/WHP)"
+
+[[bin]]
+name = "dillo"
+path = "src/main.rs"
+
+[features]
+default = []
+# Gates tests that actually launch a VM (need /dev/kvm, HVF, WHP, and the
+# OS permissions to use them). Off by default so `cargo test` runs anywhere;
+# CI's hardware lane runs `cargo test -p dillo --features vm-tests`.
+vm-tests = []
+
+[dependencies]
+dillo-machine.workspace = true
+dillo-mmio.workspace = true
+dillo-mmio-uart.workspace = true
+dillo-mmio-virtio.workspace = true
+dillo-pci.workspace = true
+dillo-pci-virtio.workspace = true
+dillo-virtio.workspace = true
+dillo-virtio-blk.workspace = true
+dillo-virtio-console.workspace = true
+# virtio-fs serves a host directory into the Linux guest; it runs in-process and
+# reads files via std::fs, so it works on every host (incl. Windows/WHP).
+dillo-virtio-fs.workspace = true
+dillo-virtio-gpt.workspace = true
+# virtio-net's frontend + NullBackend are cross-platform; its TAP/macvtap
+# backends are `#[cfg(target_os = "linux")]` inside the crate, so it builds on
+# every host.
+dillo-virtio-net.workspace = true
+dillo-config.workspace = true
+dillo-devtree.workspace = true
+pmi.workspace = true
+object.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ciborium.workspace = true
+argh.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+env_logger.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dillo-machine-kvm.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+dillo-machine-hvf.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+dillo-machine-whp.workspace = true
+
+# virtio-vsock bridges to host Unix sockets, so it is Unix-only. The Windows
+# (WHP) lane builds dillo without it; `--vsock` is `#[cfg(unix)]` in main.rs.
+[target.'cfg(unix)'.dependencies]
+dillo-virtio-vsock.workspace = true
+
+[dev-dependencies]
+# Boot/e2e tests build a PMI with arma and assert on the Report that snuffler
+# emits from inside the guest.
+arma = { git = "https://github.com/pichi-vm/arma", artifact = "bin" } # image builder, host target
+serde_json = "1"                                   # decode the Report on the host
+rstest = "0.23"                                    # parameterized boot matrix
+burrow = { workspace = true }               # cached kernel download
+tempfile = "3"                                      # scratch dirs for PMIs
+wait-timeout = "0.2"                                # cross-platform boot timeout
+sha2 = "0.10"                                       # verify pinned kernel digests
+hex = "0.4"                                         # hex-encode digests
+
+# snuffler is pulled once, as both a library (the Report schema, host target)
+# and a binary artifact (the guest probe, cross-built for the guest musl
+# triple that matches dillo's host arch — dillo boots same-arch guests).
+# `lib = true` keeps the library on the host; `target` retargets only the
+# binary. Same key in both cfg tables → one env var,
+# `CARGO_BIN_FILE_SNUFFLER_snuffler`, regardless of arch.
+[target.'cfg(target_arch = "x86_64")'.dev-dependencies]
+snuffler = { path = "deps/snuffler", artifact = "bin", lib = true, target = "x86_64-unknown-linux-musl" }
+
+[target.'cfg(target_arch = "aarch64")'.dev-dependencies]
+snuffler = { path = "deps/snuffler", artifact = "bin", lib = true, target = "aarch64-unknown-linux-musl" }
+
+[lints]
+workspace = true

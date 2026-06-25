@@ -1,0 +1,20 @@
+dillo
+Copyright the dillo authors.
+
+This product includes software derived from Firecracker
+(https://github.com/firecracker-microvm/firecracker),
+Copyright Amazon.com, Inc. or its affiliates,
+licensed under Apache-2.0 OR BSD-3-Clause.
+
+Portions of the following crates are derived from Firecracker:
+
+  * dillo-pci (deps/dillo-pci): the PCI configuration space, BAR/BDF/ECAM
+    address decoding, capability list, and MSI-X handling
+    (src/address.rs, src/bar.rs, src/bdf.rs, src/capability.rs,
+    src/configuration.rs, src/msix.rs).
+
+  * dillo-virtio-vsock (deps/dillo-virtio-vsock): the connection state
+    machine and credit-based flow control (src/csm.rs).
+
+Those files carry an `SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause`
+header; the remainder of dillo is licensed under Apache-2.0.

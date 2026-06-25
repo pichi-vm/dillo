@@ -1,0 +1,40 @@
+[package]
+name = "dillo-virtio-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "In-process virtio-net device for dillo: cross-platform frontend, a no-privilege user-mode (smoltcp) backend, plus Linux bridge/macvtap backends."
+
+[lints]
+workspace = true
+
+[dependencies]
+dillo-virtio = { workspace = true }
+dillo-mmio = { workspace = true }
+log = { workspace = true }
+# The `user` backend (default, all platforms, no privilege) is a smoltcp-based
+# transport-terminating proxy driven by a mio host-socket event loop. Both are
+# cross-platform, so they're unconditional.
+smoltcp = { workspace = true }
+mio = { workspace = true }
+
+[dev-dependencies]
+# The frontend's queue marshalling is unit-tested against a real guest-memory
+# mmap, exactly like dillo-virtio-console.
+vm-memory = { workspace = true }
+
+# The bridge backend's Linux path (create a tap + enslave it to a bridge) and
+# the macvtap backend are Linux-only host backends. The cross-platform frontend
+# and the user-mode backend need none of this, so libc/nix are pulled only on
+# Linux and those backends are `#[cfg(target_os = "linux")]`.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+nix = { workspace = true }
+
+# macOS bridge mode uses Apple's vmnet framework, whose APIs take Objective-C
+# blocks (a completion handler + a packet-available event callback). `block2`
+# creates those blocks from safe Rust closures; all of the unsafe FFI is
+# isolated in `src/bridge/macos.rs`.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"

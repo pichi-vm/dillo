@@ -1,0 +1,29 @@
+# Artifact dependencies (`artifact = "bin"`) are still unstable. arma uses one
+# native-arch tatu artifact dependency per host, and dillo tests use snuffler as
+# a guest artifact, so stock nightly Cargo only needs `-Z bindeps`.
+[unstable]
+bindeps = true
+
+# Guest build of `snuffler` (deps/snuffler), pulled as an artifact dep by
+# dillo's tests. Only musl builds — i.e. only snuffler — see these.
+#   * rust-lld: link a Linux static binary without a musl cross-gcc (also lets
+#     a non-Linux host cross-compile it).
+#   * relocation-model=static: emit a fixed-address non-PIE ET_EXEC so there
+#     is no runtime self-relocation as PID 1. (Inherited from the old fixture;
+#     to be re-tested — plain static-PIE may well boot fine.)
+# `link-self-contained=+linker` makes rustc link with its bundled rust-lld
+# instead of the host `cc`, so the snuffler guest binary cross-links from any
+# host (macOS/Windows `cc` can't emit a Linux ELF). Unlike the `linker` key,
+# rustflags reach artifact-dependency builds.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "relocation-model=static", "-C", "linker=rust-lld"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "relocation-model=static", "-C", "linker=rust-lld"]
+
+# smoltcp sizes the interface's address list at build time (default 2). The
+# user-mode virtio-net backend (dillo-virtio-net) owns four interface addresses
+# — IPv4 gateway + DNS aliases and their IPv6 equivalents — so raise the cap.
+# Without this, the extra addresses silently fail to register and IPv6 breaks.
+[env]
+SMOLTCP_IFACE_MAX_ADDR_COUNT = "4"

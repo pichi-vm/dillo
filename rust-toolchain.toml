@@ -1,0 +1,15 @@
+# dillo embeds two cross-built artifact dependencies (`artifact = "bin"`, see
+# .cargo/config.toml `-Z bindeps`), which is nightly only:
+#   * arma → the bare-metal `tatu` firmware (the *-unknown-none targets);
+#   * snuffler → the guest probe (the *-linux-musl targets).
+# This is pinned for reproducibility. Both host arches are listed so the
+# workspace builds on x86_64 and aarch64 hosts.
+[toolchain]
+channel = "nightly-2026-06-04"
+components = ["rustfmt", "clippy", "rust-src"]
+targets = [
+    "x86_64-unknown-none",
+    "aarch64-unknown-none",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+]

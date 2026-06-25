@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "dillo-config"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "dillo device-configuration schema (shared by the --blk/--gpt CLI and --layout JSON), with resolution and a bus/slot allocator"
+
+[features]
+# `argh` adds `argh::FromArgValue` impls so the spec types can be used directly
+# as argh option values. On by default for the dillo binary; pure serde / JSON
+# consumers can opt out with `default-features = false`.
+default = ["argh"]
+argh = ["dep:argh"]
+
+[dependencies]
+serde.workspace = true
+serde-keyvalue.workspace = true
+uuid.workspace = true
+hex.workspace = true
+sha2.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+argh = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

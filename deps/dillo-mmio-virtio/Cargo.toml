@@ -1,0 +1,16 @@
+[package]
+name = "dillo-mmio-virtio"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Virtio MMIO transport adapter for dillo-mmio devices."
+
+[dependencies]
+dillo-mmio.workspace = true
+dillo-virtio.workspace = true
+vm-memory.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true

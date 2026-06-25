@@ -1,0 +1,28 @@
+# cargo-deny for dillo (and its arma/tatu/snuffler artifact deps). License
+# allowlist tailored to the actual dependency tree (cargo metadata). Includes
+# BSD-3-Clause for the Firecracker-derived dillo-pci / dillo-virtio-vsock files
+# and the crosvm serde-keyvalue crate.
+
+[licenses]
+allow = [
+    "Apache-2.0", "MIT", "Unicode-3.0",
+    "BSD-3-Clause", "BSD-2-Clause", "0BSD",
+    "ISC", "Zlib", "Unlicense",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[advisories]
+version = 2
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true   # workspace-internal path deps (tatu, dtb2*)
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+[sources.allow-org]
+github = ["pichi-vm"]   # pmi / devtree / burrow git deps

@@ -1,0 +1,52 @@
+[package]
+name = "dillo-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone from the parent workspace (it's in the parent's `exclude`): an
+# empty table makes this its own workspace root so cargo-fuzz can build it.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+dillo = { path = ".." }
+dillo-virtio-net = { path = "../deps/dillo-virtio-net" }
+
+[[bin]]
+name = "pmi_parse"
+path = "fuzz_targets/pmi_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "net_demux"
+path = "fuzz_targets/net_demux.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns_query"
+path = "fuzz_targets/dns_query.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dhcp_parse"
+path = "fuzz_targets/dhcp_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ndp_parse"
+path = "fuzz_targets/ndp_parse.rs"
+test = false
+doc = false
+bench = false

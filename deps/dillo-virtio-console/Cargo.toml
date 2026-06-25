@@ -1,0 +1,17 @@
+[package]
+name = "dillo-virtio-console"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "virtio-console device implementing dillo_virtio::VirtioDevice. Drives hvc0 to stdout."
+
+[dependencies]
+dillo-mmio.workspace = true
+dillo-virtio.workspace = true
+vm-memory.workspace = true
+log.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

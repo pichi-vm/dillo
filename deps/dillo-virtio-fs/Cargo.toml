@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
+[package]
+name = "dillo-virtio-fs"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "In-process virtio-fs (FUSE) device for dillo (VirtioDevice transport-agnostic)"
+
+[dependencies]
+dillo-virtio.workspace = true
+dillo-mmio.workspace = true
+vm-memory.workspace = true
+log.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

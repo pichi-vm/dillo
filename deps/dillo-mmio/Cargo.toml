@@ -1,0 +1,15 @@
+[package]
+name = "dillo-mmio"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "MMIO device traits, windows, attachment helpers, and compatibility bus for dillo."
+
+[dependencies]
+log.workspace = true
+thiserror.workspace = true
+vm-memory.workspace = true
+
+[lints]
+workspace = true

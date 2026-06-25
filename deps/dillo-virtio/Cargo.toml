@@ -1,0 +1,15 @@
+[package]
+name = "dillo-virtio"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Virtio device primitives: split virtqueue, device trait, feature constants. Migrated from ~/Projects/dillo/virtio."
+
+[dependencies]
+dillo-mmio.workspace = true
+thiserror.workspace = true
+vm-memory.workspace = true
+
+[lints]
+workspace = true

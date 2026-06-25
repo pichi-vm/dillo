@@ -1,0 +1,18 @@
+inlineHeader = """
+SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
+SPDX-License-Identifier: Apache-2.0
+"""
+includes = ["**/*.rs"]
+excludes = [
+    "target/**",
+    # Firecracker-derived files carry their own dual SPDX header
+    # (Apache-2.0 OR BSD-3-Clause) plus an attribution comment; hawkeye must
+    # not rewrite them to the AMD-only Apache-2.0 header. See NOTICE.
+    "deps/dillo-pci/src/address.rs",
+    "deps/dillo-pci/src/bar.rs",
+    "deps/dillo-pci/src/bdf.rs",
+    "deps/dillo-pci/src/capability.rs",
+    "deps/dillo-pci/src/configuration.rs",
+    "deps/dillo-pci/src/msix.rs",
+    "deps/dillo-virtio-vsock/src/csm.rs",
+]
