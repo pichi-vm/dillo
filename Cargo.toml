@@ -204,6 +204,12 @@ env_logger.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dillo-machine-kvm.workspace = true
+# Safe mmap wrapper (no caller-side unsafe, satisfying the workspace
+# unsafe_code=deny lint) used to map the PMI read-only instead of read_to_end —
+# the PMI granularity spec is designed for this (aligned chunks, demand-paged,
+# so ~53MB of 2M zero padding is never read). Linux-only; other hosts fall back
+# to read_to_end in launch::read.
+mmarinus = "0.4"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 dillo-machine-hvf.workspace = true

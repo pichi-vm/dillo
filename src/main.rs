@@ -1086,7 +1086,11 @@ mod overlay {
 
 mod launch {
 
+    // File/Read are only used by the non-Linux read_to_end fallback; on Linux the
+    // PMI is mmap'd (mmarinus) so these would be unused imports (-D warnings).
+    #[cfg(not(target_os = "linux"))]
     use std::fs::File;
+    #[cfg(not(target_os = "linux"))]
     use std::io::Read;
     use std::path::Path;
 
@@ -1125,22 +1129,46 @@ mod launch {
             memory_mib: u32,
             vcpus: u32,
         ) -> Result<Self, LaunchError> {
-            let mut bytes = Vec::new();
-            File::open(pmi_path)
-                .map_err(|source| LaunchError::ReadPmi {
+            // Map the PMI read-only rather than reading it whole. The PMI
+            // granularity spec places sections at aligned offsets precisely so a
+            // VMM can map the file and touch only the section bytes; a 70MB PMI is
+            // mostly 2M zero padding that read_to_end would copy needlessly. On
+            // Linux we mmap via mmarinus (safe wrapper — no caller unsafe, so the
+            // workspace unsafe_code=deny lint still holds); other hosts fall back
+            // to read_to_end. `bytes` borrows the backing store, which lives for
+            // the rest of this function (its data is copied into owned buffers by
+            // parse/guest_writes before we return), so nothing escapes the map.
+            #[cfg(target_os = "linux")]
+            let pmi_map = mmarinus::Map::load(pmi_path, mmarinus::Private, mmarinus::perms::Read)
+                .map_err(|e| LaunchError::ReadPmi {
                     path: pmi_path.display().to_string(),
-                    source,
-                })?
-                .read_to_end(&mut bytes)
-                .map_err(|source| LaunchError::ReadPmi {
-                    path: pmi_path.display().to_string(),
-                    source,
+                    source: std::io::Error::other(format!("mmap: {e:?}")),
                 })?;
+            #[cfg(target_os = "linux")]
+            let bytes: &[u8] = &pmi_map;
+
+            #[cfg(not(target_os = "linux"))]
+            let pmi_bytes = {
+                let mut b = Vec::new();
+                File::open(pmi_path)
+                    .map_err(|source| LaunchError::ReadPmi {
+                        path: pmi_path.display().to_string(),
+                        source,
+                    })?
+                    .read_to_end(&mut b)
+                    .map_err(|source| LaunchError::ReadPmi {
+                        path: pmi_path.display().to_string(),
+                        source,
+                    })?;
+                b
+            };
+            #[cfg(not(target_os = "linux"))]
+            let bytes: &[u8] = &pmi_bytes;
 
             crate::boot_trace::mark("pmi_read");
             let pmi_arch = pmi_arch(host_arch);
             let parsed = dillo::pmi_parse::parse(
-                &bytes,
+                bytes,
                 &ParseOptions {
                     host_arch: pmi_arch,
                     memory_mib,
@@ -1149,7 +1177,7 @@ mod launch {
             validate_cpu_profile(parsed.cpu_profile.as_str(), pmi_arch)?;
             crate::boot_trace::mark("pmi_parsed");
 
-            let dtb = merged_dtb(&bytes, &parsed)?.to_vec();
+            let dtb = merged_dtb(bytes, &parsed)?.to_vec();
             let platform = PlatformMachine::survey(&dtb, platform_arch(host_arch))
                 .map_err(LaunchError::Coverage)?;
 
@@ -1174,7 +1202,7 @@ mod launch {
                 platform.placement_regions(),
             )?;
             let guest_writes = guest_writes(
-                &bytes,
+                bytes,
                 &parsed,
                 &memory,
                 platform.arch,
