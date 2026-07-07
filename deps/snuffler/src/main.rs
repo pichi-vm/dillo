@@ -73,6 +73,24 @@ fn run() {
         }));
     }
     let mut report = observe();
+    // Cmdline-gated diagnostics via /dev/kmsg: unlike snuffler's own console fd
+    // (which can silently drop output on a slow/absent MMIO console), writing to
+    // /dev/kmsg rides the *kernel* console path, which is reliable on serial. Emits
+    // what observe() actually found so no-PCI/MMIO boot failures are debuggable.
+    if report.cmdline.contains("dillo.panic_report") {
+        let diag = format!(
+            "SNUFFLER-DIAG blk={} pci={} net={} serial={} consoles={:?} boot_ns={:?}\n",
+            report.block.len(),
+            report.pci.len(),
+            report.net.len(),
+            report.serial.len(),
+            report.consoles,
+            report.boot_to_userspace_ns,
+        );
+        if let Ok(fd) = rustix::fs::open("/dev/kmsg", OFlags::WRONLY, Mode::empty()) {
+            let _ = rustix::io::write(&fd, diag.as_bytes());
+        }
+    }
     // Gated + additive: only surface the ns timestamp when explicitly requested.
     if report
         .cmdline
