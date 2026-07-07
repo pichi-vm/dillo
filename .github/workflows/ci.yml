@@ -8,7 +8,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-  NIGHTLY: nightly-2026-06-04
+  NIGHTLY: nightly-2026-07-06
 
 # dillo needs nightly: it consumes arma as a `-Z bindeps` artifact dependency
 # (which cross-builds tatu for a bare-metal target) and snuffler as a musl
@@ -58,48 +58,6 @@ jobs:
           # the x86_64 guest musl triple on this x86_64 lint host.
           rustup target add x86_64-unknown-none aarch64-unknown-none x86_64-unknown-linux-musl
 
-      # dillo consumes arma as a git artifact dep, whose transitive tatu artifact
-      # dep (a non-default bare-metal target) panics stock cargo
-      # (rust-lang/cargo#10647). Build + install the patched cargo from the fork.
-      - name: Cache patched cargo
-        id: patched-cargo
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/patched-cargo
-          key: patched-cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.NIGHTLY }}-v1
-      - name: Build patched cargo
-        if: steps.patched-cargo.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          git clone --depth 1 --branch fix/bindeps-transitive-artifact-target \
-            https://github.com/npmccallum/cargo "$RUNNER_TEMP/cargo-fork"
-          # The NixOS self-hosted runner exposes no system OpenSSL on the default
-          # path; provide it from the nix store via nix-shell (only that runner
-          # has nix-shell). Every other runner builds directly against system
-          # OpenSSL (Linux/macOS) or schannel (Windows).
-          # Hosted runners (ubuntu/windows) have system OpenSSL/curl (or schannel)
-          # and no nix-shell, so build directly. The self-hosted nix boxes
-          # (linux-arm64, macos-arm64) expose no system OpenSSL/curl on the
-          # default path, so provide both from nixpkgs (sourced via the flake
-          # registry; flakes force-enabled since the two boxes' nix configs
-          # differ — one has flakes off, one has no channel). cargo links libcurl
-          # + libssl, hence both packages.
-          if command -v nix-shell >/dev/null 2>&1; then
-            ( cd "$RUNNER_TEMP/cargo-fork" \
-              && NIX_CONFIG="experimental-features = nix-command flakes" \
-                 nix-shell -I nixpkgs=flake:nixpkgs -p openssl curl pkg-config --run 'cargo build --release' )
-          else
-            ( cd "$RUNNER_TEMP/cargo-fork" && cargo build --release )
-          fi
-          mkdir -p "$RUNNER_TEMP/patched-cargo"
-          cp "$RUNNER_TEMP/cargo-fork/target/release/cargo"* "$RUNNER_TEMP/patched-cargo/"
-      - name: Install patched cargo into the nightly toolchain
-        shell: bash
-        run: |
-          dest="$(rustup which --toolchain "$NIGHTLY" cargo)"
-          cp "$RUNNER_TEMP/patched-cargo/cargo"* "$(dirname "$dest")/"
-          cargo --version
-
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features
@@ -143,48 +101,6 @@ jobs:
           # arma embeds native-arch tatu; snuffler is cross-built for the guest
           # musl triple matching this host's arch.
           rustup target add x86_64-unknown-none aarch64-unknown-none "${{ matrix.guest_musl }}"
-
-      # dillo consumes arma as a git artifact dep, whose transitive tatu artifact
-      # dep (a non-default bare-metal target) panics stock cargo
-      # (rust-lang/cargo#10647). Build + install the patched cargo from the fork.
-      - name: Cache patched cargo
-        id: patched-cargo
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/patched-cargo
-          key: patched-cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.NIGHTLY }}-v1
-      - name: Build patched cargo
-        if: steps.patched-cargo.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          git clone --depth 1 --branch fix/bindeps-transitive-artifact-target \
-            https://github.com/npmccallum/cargo "$RUNNER_TEMP/cargo-fork"
-          # The NixOS self-hosted runner exposes no system OpenSSL on the default
-          # path; provide it from the nix store via nix-shell (only that runner
-          # has nix-shell). Every other runner builds directly against system
-          # OpenSSL (Linux/macOS) or schannel (Windows).
-          # Hosted runners (ubuntu/windows) have system OpenSSL/curl (or schannel)
-          # and no nix-shell, so build directly. The self-hosted nix boxes
-          # (linux-arm64, macos-arm64) expose no system OpenSSL/curl on the
-          # default path, so provide both from nixpkgs (sourced via the flake
-          # registry; flakes force-enabled since the two boxes' nix configs
-          # differ — one has flakes off, one has no channel). cargo links libcurl
-          # + libssl, hence both packages.
-          if command -v nix-shell >/dev/null 2>&1; then
-            ( cd "$RUNNER_TEMP/cargo-fork" \
-              && NIX_CONFIG="experimental-features = nix-command flakes" \
-                 nix-shell -I nixpkgs=flake:nixpkgs -p openssl curl pkg-config --run 'cargo build --release' )
-          else
-            ( cd "$RUNNER_TEMP/cargo-fork" && cargo build --release )
-          fi
-          mkdir -p "$RUNNER_TEMP/patched-cargo"
-          cp "$RUNNER_TEMP/cargo-fork/target/release/cargo"* "$RUNNER_TEMP/patched-cargo/"
-      - name: Install patched cargo into the nightly toolchain
-        shell: bash
-        run: |
-          dest="$(rustup which --toolchain "$NIGHTLY" cargo)"
-          cp "$RUNNER_TEMP/patched-cargo/cargo"* "$(dirname "$dest")/"
-          cargo --version
 
       - uses: Swatinem/rust-cache@v2
 

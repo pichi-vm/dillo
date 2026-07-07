@@ -82,8 +82,31 @@ struct Args {
     layout: Option<std::path::PathBuf>,
 }
 
+/// Boot-time tracer for decomposing VMM setup latency (PMI parse, placement,
+/// memslot/vCPU bring-up) from in-guest boot time; the guest side is measured
+/// separately via snuffler's `uptime_secs`. [`mark`] logs `<label> +<micros>us`
+/// at `trace` level under the `dillo::boot` target — enable with
+/// `RUST_LOG=dillo::boot=trace`. Off by default, and the clock is not even read
+/// unless the target is enabled, so it never perturbs a normal boot.
+mod boot_trace {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    /// t0 anchor, set lazily on the first mark while tracing is enabled.
+    static START: OnceLock<Instant> = OnceLock::new();
+
+    pub(crate) fn mark(label: &str) {
+        if !log::log_enabled!(target: "dillo::boot", log::Level::Trace) {
+            return;
+        }
+        let start = START.get_or_init(Instant::now);
+        log::trace!(target: "dillo::boot", "{label} +{}us", start.elapsed().as_micros());
+    }
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    boot_trace::mark("start");
     let args: Args = argh::from_env();
 
     // Validate BEFORE entering raw mode — otherwise a validation
@@ -118,6 +141,7 @@ fn main() {
         guest_writes,
         ..
     } = launch;
+    boot_trace::mark("launch_read");
 
     // Resolve the device layout, open backing files, and allocate bus/slots
     // NOW so config/I/O/placement errors surface before we enter raw terminal
@@ -149,6 +173,7 @@ fn main() {
         }),
         placements,
     );
+    boot_trace::mark("preflight");
 
     // Per ARCH §13.5: if stdin is a TTY, enter raw mode for the
     // session. A Drop guard restores cooked mode at exit; a custom
@@ -172,6 +197,7 @@ fn main() {
         cpus,
     );
 
+    boot_trace::mark("run_enter");
     match runner::run(preflight, cpus, &SUPERVISOR_SHUTDOWN) {
         Ok(code) => std::process::exit(code),
         Err(e) => {
@@ -1997,6 +2023,7 @@ mod machine_select {
                 supervisor_shutdown,
             });
             let cpu_profile = parsed.cpu_profile.as_str();
+            crate::boot_trace::mark("guest_loaded");
             let mut outcome = run_vcpus::<M, E>(
                 &mut vm,
                 vcpus,
