@@ -47,6 +47,7 @@ mod imp {
     pub use crate::hypervisor::Error;
     use crate::irq::IrqManager;
     use crate::memory;
+    pub use crate::memory::set_preallocate;
     use crate::msi::KvmMessageInterruptDomain;
 
     const VCPU_KICK_SIGNAL: nix::sys::signal::Signal = nix::sys::signal::Signal::SIGUSR1;

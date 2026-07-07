@@ -80,6 +80,13 @@ struct Args {
     /// `--blk`/`--gpt`/`--vsock`/`--fs`/`--net`/`--bus`/`--console`.
     #[argh(option)]
     layout: Option<std::path::PathBuf>,
+
+    /// eagerly commit all guest RAM up front (fallocate) so hugepage-pool
+    /// exhaustion fails at launch instead of a mid-run SIGBUS. Default is
+    /// lazy first-touch commit (faster boot, denser warm pools). Linux/KVM
+    /// only; ignored on other backends.
+    #[argh(switch)]
+    preallocate: bool,
 }
 
 /// Boot-time tracer for decomposing VMM setup latency (PMI parse, placement,
@@ -116,6 +123,13 @@ fn main() {
         eprintln!("dillo: {e}");
         std::process::exit(2);
     }
+    // Guest-RAM commit policy. Lazy first-touch by default; `--preallocate`
+    // opts into eager fallocate. Only the KVM backend honors this (hugetlb);
+    // it is accepted but inert on other backends.
+    #[cfg(target_os = "linux")]
+    machine::set_preallocate(args.preallocate);
+    #[cfg(not(target_os = "linux"))]
+    let _ = args.preallocate;
     let pmi = args.pmi.clone().expect("validated");
     let memory = args.memory;
     let cpus = args.cpus;
@@ -2114,9 +2128,12 @@ mod machine_select {
                 min_addr_space_bits: platform.min_addr_space_bits(),
             })
             .map_err(RunError::machine)?;
+            crate::boot_trace::mark("vm_created");
             let memory = M::Memory::from_ranges(&plan.ram_ranges()).map_err(RunError::machine)?;
             Attach::attach(&mut vm, memory).map_err(RunError::machine)?;
+            crate::boot_trace::mark("mem_attached");
             apply_load_sections(&mut vm, &guest_writes, pmi.bytes())?;
+            crate::boot_trace::mark("sections_loaded");
 
             attach_uart(&mut vm, &platform)?;
             attach_syscon(&mut vm, &platform)?;

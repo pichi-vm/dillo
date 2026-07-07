@@ -6,6 +6,7 @@
 use std::ffi::CString;
 use std::num::NonZeroUsize;
 use std::os::fd::{AsFd, BorrowedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::os::fd::{AsRawFd, FromRawFd};
 
@@ -29,16 +30,31 @@ impl AsFd for Memfd {
     }
 }
 
-/// Create a memfd, size it to `total_bytes`, and pre-allocate all
-/// physical pages.
+/// Whether to eagerly commit all guest RAM at creation. Default off:
+/// pages commit lazily on first touch, which is faster to boot and lets
+/// a warm pool pack more guests than the sum of their `--memory` maxima.
+/// Enable via `--preallocate` (see [`set_preallocate`]) when the caller
+/// wants OOM to surface cleanly at launch instead of a mid-run SIGBUS.
+static PREALLOCATE: AtomicBool = AtomicBool::new(false);
+
+/// Select eager guest-RAM commit. Called once from the entrypoint when
+/// `--preallocate` is passed, before any VM is constructed.
+pub fn set_preallocate(on: bool) {
+    PREALLOCATE.store(on, Ordering::Relaxed);
+}
+
+/// Create a memfd and size it to `total_bytes`, committing pages eagerly
+/// only when preallocation is enabled.
 ///
-/// Per ARCHITECTURE.md §8.1, guest memory is backed by 2 MiB huge
-/// pages exclusively (`MFD_HUGETLB | MFD_HUGE_2MB`) and physically
-/// pre-allocated via `fallocate(FALLOC_FL_KEEP_SIZE)` so OOM surfaces
-/// at boot rather than mid-execution.
-///
-/// Host requirement: `vm.nr_hugepages` configured for enough 2 MiB
-/// pages to cover the request, or `memfd_create` fails with ENOMEM.
+/// Per ARCHITECTURE.md §8.1, guest memory is backed by 2 MiB huge pages
+/// exclusively (`MFD_HUGETLB | MFD_HUGE_2MB`). By default pages are
+/// committed lazily on first touch — faster boot, denser warm pools —
+/// which means an exhausted hugepage pool surfaces as a **SIGBUS in the
+/// guest at run time**, not a launch error. With [`set_preallocate`] on,
+/// every page is `fallocate`d up front (~22ms/256MB) so pool exhaustion
+/// fails cleanly at boot; use it when you don't own the pool's capacity
+/// math. Either way the pool must have enough pages, or `memfd_create`
+/// (or the first fault) fails.
 fn create_and_size(total_bytes: u64) -> Result<Memfd> {
     let name = CString::new("dillo-guest").expect("static C string");
     let fd = memfd_create(
@@ -48,11 +64,10 @@ fn create_and_size(total_bytes: u64) -> Result<Memfd> {
     .context("memfd_create (need 2 MiB huge pages; check vm.nr_hugepages)")?;
     let len = i64::try_from(total_bytes).context("memfd size > i64::MAX")?;
     ftruncate(&fd, len).context("ftruncate memfd")?;
-    // Pre-allocate every page so the kernel commits hugetlb reservations
-    // up front. Without this, the first guest write to an unbacked page
-    // would fault into SIGBUS at runtime if the hugepage pool is short.
-    fallocate(&fd, FallocateFlags::FALLOC_FL_KEEP_SIZE, 0, len)
-        .context("fallocate memfd (2 MiB hugepage pool exhausted?)")?;
+    if PREALLOCATE.load(Ordering::Relaxed) {
+        fallocate(&fd, FallocateFlags::FALLOC_FL_KEEP_SIZE, 0, len)
+            .context("fallocate memfd (2 MiB hugepage pool exhausted?)")?;
+    }
     Ok(Memfd { fd })
 }
 
