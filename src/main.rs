@@ -1136,6 +1136,7 @@ mod launch {
     enum PmiBacking {
         #[cfg(target_os = "linux")]
         Mapped(mmarinus::Map<mmarinus::perms::Read>),
+        #[cfg(not(target_os = "linux"))]
         Owned(Vec<u8>),
     }
 
@@ -1211,6 +1212,7 @@ mod launch {
             match self.backing.as_ref().expect("PMI backing released") {
                 #[cfg(target_os = "linux")]
                 PmiBacking::Mapped(m) => &m[..],
+                #[cfg(not(target_os = "linux"))]
                 PmiBacking::Owned(v) => v,
             }
         }
