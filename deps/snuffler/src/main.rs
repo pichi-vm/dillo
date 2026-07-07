@@ -54,6 +54,24 @@ fn run() {
     let entry_ns = monotonic_ns();
     setup_mounts();
     reopen_console_stdio();
+    // Cmdline-gated + additive: with `dillo.panic_report`, a panic (which as PID 1
+    // would otherwise become abort()->`hlt`->GP-fault->kernel "Attempted to kill
+    // init") is instead printed bracketed on the console and the VM is powered
+    // off, making the panic diagnosable. Default behavior is unchanged.
+    if std::fs::read_to_string("/proc/cmdline")
+        .unwrap_or_default()
+        .contains("dillo.panic_report")
+    {
+        std::panic::set_hook(Box::new(|info| {
+            use std::io::Write as _;
+            println!("<<<SNUFFLER-PANIC>>>{info}<<<END>>>");
+            eprintln!("<<<SNUFFLER-PANIC>>>{info}<<<END>>>");
+            let _ = std::io::stdout().flush();
+            let _ = std::io::stderr().flush();
+            #[cfg(not(test))]
+            poweroff();
+        }));
+    }
     let mut report = observe();
     // Gated + additive: only surface the ns timestamp when explicitly requested.
     if report
