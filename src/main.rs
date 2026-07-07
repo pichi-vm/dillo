@@ -1120,10 +1120,10 @@ mod launch {
     /// guest RAM (one copy) instead of being staged into owned `Vec`s (two
     /// copies). On Linux the backing is an mmap; elsewhere a `read_to_end`
     /// buffer. The backing is resident only while sections are being copied:
-    /// after the initial load the caller [`release`](PmiImage::release)s it so
+    /// after the initial load the caller [`release`](Pmi::release)s it so
     /// the mapping does not stay resident for the VM's lifetime, and the rare
-    /// guest-reboot replay [`remap`](PmiImage::remap)s it from `path`.
-    pub(crate) struct PmiImage {
+    /// guest-reboot replay [`remap`](Pmi::remap)s it from `path`.
+    pub(crate) struct Pmi {
         /// Held open for the VM lifetime: the mapping and any reboot re-map are
         /// pinned to this fd's inode, so a replay is always the exact bytes that
         /// were loaded and measured — never whatever the path resolves to later.
@@ -1139,7 +1139,7 @@ mod launch {
         Owned(Vec<u8>),
     }
 
-    impl PmiImage {
+    impl Pmi {
         /// Open the PMI at `path`, hold the fd, and map (Linux) / read (other) it
         /// resident.
         pub(crate) fn open(path: &Path) -> Result<Self, LaunchError> {
@@ -1147,7 +1147,7 @@ mod launch {
                 path: path.display().to_string(),
                 source,
             })?;
-            let mut img = PmiImage {
+            let mut img = Pmi {
                 file,
                 path: path.to_path_buf(),
                 backing: None,
@@ -1216,18 +1216,18 @@ mod launch {
         }
     }
 
-    impl std::fmt::Debug for PmiImage {
+    impl std::fmt::Debug for Pmi {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match &self.backing {
-                Some(_) => write!(f, "PmiImage({} bytes, resident)", self.bytes().len()),
-                None => write!(f, "PmiImage(released)"),
+                Some(_) => write!(f, "Pmi({} bytes, resident)", self.bytes().len()),
+                None => write!(f, "Pmi(released)"),
             }
         }
     }
 
     /// Source of a launch-time write's bytes: either bytes derived by dillo
     /// (DTB overlay, cmdline, cpu bootstate), or a byte range of the PMI image
-    /// (raw `load` sections — copied directly from [`PmiImage`], never staged).
+    /// (raw `load` sections — copied directly from [`Pmi`], never staged).
     #[derive(Debug, Clone)]
     pub(crate) enum WriteSrc {
         Owned(Vec<u8>),
@@ -1242,7 +1242,7 @@ mod launch {
         pub(crate) platform: PlatformMachine,
         pub(crate) memory: MemoryPlan,
         pub(crate) guest_writes: Vec<GuestWrite>,
-        pub(crate) pmi: PmiImage,
+        pub(crate) pmi: Pmi,
     }
 
     /// One launch-time write into guest RAM.
@@ -1272,7 +1272,7 @@ mod launch {
             // to read_to_end. `bytes` borrows the backing store, which lives for
             // the rest of this function (its data is copied into owned buffers by
             // parse/guest_writes before we return), so nothing escapes the map.
-            let pmi = PmiImage::open(pmi_path)?;
+            let pmi = Pmi::open(pmi_path)?;
             let bytes: &[u8] = pmi.bytes();
 
             crate::boot_trace::mark("pmi_read");
@@ -1728,7 +1728,7 @@ mod machine_select {
             memory_nodes: Vec<RunRegion>,
             guest_writes: Vec<RunWrite>,
             placements: Vec<DevicePlacement>,
-            pmi: crate::launch::PmiImage,
+            pmi: crate::launch::Pmi,
         }
 
         impl Preflight {
@@ -1740,7 +1740,7 @@ mod machine_select {
                 memory_nodes: impl IntoIterator<Item = RunRegion>,
                 guest_writes: impl IntoIterator<Item = RunWrite>,
                 placements: Vec<DevicePlacement>,
-                pmi: crate::launch::PmiImage,
+                pmi: crate::launch::Pmi,
             ) -> Self {
                 Self {
                     parsed,
@@ -1763,7 +1763,7 @@ mod machine_select {
                 RunMemoryPlan,
                 Vec<RunWrite>,
                 Vec<DevicePlacement>,
-                crate::launch::PmiImage,
+                crate::launch::Pmi,
             ) {
                 (
                     self.parsed,
