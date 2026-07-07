@@ -593,6 +593,7 @@ name = "dillo-virtio"
 version = "0.1.0"
 dependencies = [
  "dillo-mmio",
+ "log",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
 ]

@@ -8,6 +8,7 @@ description = "Virtio device primitives: split virtqueue, device trait, feature 
 
 [dependencies]
 dillo-mmio.workspace = true
+log.workspace = true
 thiserror.workspace = true
 vm-memory.workspace = true
 

@@ -263,10 +263,7 @@ impl VirtioDeviceHandle {
     }
 
     fn log_join_error(e: &DeviceJoinError) {
-        #[cfg(any(test, debug_assertions))]
-        eprintln!("virtio device worker join failed during drop: {e}");
-        #[cfg(not(any(test, debug_assertions)))]
-        let _ = e;
+        log::warn!("virtio device worker join failed during drop: {e}");
     }
 }
 
