@@ -1959,7 +1959,9 @@ mod machine_select {
                 },
                 uart.reg_shift,
                 line_requirement(&uart.interrupt),
-                Box::new(std::io::stderr()),
+                // Guest console output goes to stdout (like virtio-console), so
+                // dillo's own logging on stderr stays cleanly separable.
+                Box::new(std::io::stdout()),
             ));
             let attachment = Attach::attach(vm, Arc::clone(&serial)).map_err(RunError::machine)?;
             serial.set_attachment(attachment.as_ref());
