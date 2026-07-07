@@ -206,10 +206,22 @@ fn write_report_fd(fd: BorrowedFd<'_>, json: &str) {
 }
 
 fn write_all_fd(fd: BorrowedFd<'_>, mut bytes: &[u8]) {
+    // The console fds are O_NONBLOCK, so a full UART FIFO / virtio-console ring
+    // returns EAGAIN partway through a multi-KiB report. The original code gave up
+    // on any error (EAGAIN included), silently truncating the report on a slow or
+    // MMIO serial console so the host saw no `<<<DILLO-E2E-REPORT>>>…<<<END>>>`.
+    // Retry EAGAIN with a bounded spin budget — enough for the FIFO to drain, but
+    // finite so a genuinely dead console (no reader) can never hang PID 1.
+    let mut eagain_budget: u32 = 50_000_000;
     while !bytes.is_empty() {
         match rustix::io::write(fd, bytes) {
-            Ok(0) | Err(_) => return,
+            Ok(0) => return,
             Ok(n) => bytes = &bytes[n..],
+            Err(rustix::io::Errno::AGAIN) if eagain_budget > 0 => {
+                eagain_budget -= 1;
+                core::hint::spin_loop();
+            }
+            Err(_) => return,
         }
     }
 }
