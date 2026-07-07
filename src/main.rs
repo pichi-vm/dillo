@@ -1734,6 +1734,9 @@ mod machine_select {
         }
 
         impl Preflight {
+            // Aggregates the target-neutral launch facts; the fields are
+            // genuinely distinct inputs, so a builder would add noise here.
+            #[allow(clippy::too_many_arguments)]
             pub(crate) fn new(
                 parsed: dillo::pmi_parse::ParsedPmi,
                 platform: PlatformMachine,
