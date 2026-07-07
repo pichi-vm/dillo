@@ -731,14 +731,14 @@ mod placement {
 
         let islands_total: u64 = islands.iter().map(|i| i.end - i.start).sum();
 
-        log::info!(
+        log::debug!(
             "placement: budget={} MiB, islands={} ({} MiB)",
             budget >> 20,
             islands.len(),
             islands_total >> 20,
         );
         for i in &islands {
-            log::info!(
+            log::debug!(
                 "  island [{:#x}..{:#x}) ({} MiB)",
                 i.start,
                 i.end,
@@ -759,9 +759,9 @@ mod placement {
         holes.extend(islands.iter().copied());
         merge_intervals(&mut holes);
 
-        log::info!("placement: device+island holes ({} ranges):", holes.len());
+        log::debug!("placement: device+island holes ({} ranges):", holes.len());
         for h in &holes {
-            log::info!("  hole [{:#x}..{:#x})", h.start, h.end);
+            log::debug!("  hole [{:#x}..{:#x})", h.start, h.end);
         }
 
         let big_chunk = if remaining == 0 {
@@ -775,7 +775,7 @@ mod placement {
         };
 
         if let Some(c) = big_chunk {
-            log::info!(
+            log::debug!(
                 "placement: big_chunk [{:#x}..{:#x}) ({} MiB)",
                 c.start,
                 c.end,
@@ -1898,7 +1898,7 @@ mod machine_select {
                         bar2,
                     );
                     pci_root.register(placement.index as u8, Box::new(VirtioPciAdapter::new(dev)));
-                    log::info!(
+                    log::debug!(
                         "{} on PCI slot {} (BAR0 {bar0:#x})",
                         placement.name,
                         placement.index
@@ -1930,7 +1930,7 @@ mod machine_select {
                 let attachment =
                     Attach::attach(vm, Arc::clone(&transport)).map_err(RunError::machine)?;
                 transport.set_attachment(attachment);
-                log::info!(
+                log::debug!(
                     "{} on virtio-mmio slot {} ({:#x}, SPI {})",
                     placement.name,
                     placement.index,
@@ -1963,7 +1963,7 @@ mod machine_select {
             ));
             let attachment = Attach::attach(vm, Arc::clone(&serial)).map_err(RunError::machine)?;
             serial.set_attachment(attachment.as_ref());
-            log::info!(
+            log::debug!(
                 "serial: ns16550a @ {:#x} (size {:#x}, reg-shift {}, IRQ {})",
                 uart.base,
                 uart.size,
@@ -2154,26 +2154,26 @@ mod machine_select {
         {
             let (parsed, platform, dtb, plan, guest_writes, placements, mut pmi) =
                 preflight.into_parts();
-            log::info!(
+            log::debug!(
                 "PMI parsed: arch={:?}, {} actions, merged_dtb={}",
                 parsed.arch,
                 parsed.actions.len(),
                 parsed.merged_dtb_section
             );
-            log::info!(
+            log::debug!(
                 "coverage: base DTB fully claimed - {} declared region(s), pcie={}",
                 platform.plan.regions().len(),
                 platform.has_pcie
             );
             let total_backed: u64 = plan.memslots.iter().map(|r| r.size).sum();
-            log::info!(
+            log::debug!(
                 "memslots: {} region(s), {} bytes",
                 plan.memslots.len(),
                 total_backed
             );
-            log::info!("/memory@N nodes: {} region(s)", plan.memory_nodes.len());
+            log::debug!("/memory@N nodes: {} region(s)", plan.memory_nodes.len());
             for r in &plan.memory_nodes {
-                log::info!("  [{:#x}..{:#x}) ({} bytes)", r.gpa, r.gpa + r.size, r.size);
+                log::debug!("  [{:#x}..{:#x}) ({} bytes)", r.gpa, r.gpa + r.size, r.size);
             }
 
             let mut vm = M::from_launch_config(LaunchConfig {
