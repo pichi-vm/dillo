@@ -42,10 +42,27 @@ fn main() {
     run();
 }
 
+/// Nanoseconds since kernel start (CLOCK_MONOTONIC), for high-resolution boot
+/// timing captured at snuffler entry before any probing.
+fn monotonic_ns() -> u64 {
+    let ts = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
+}
+
 fn run() {
+    // FIRST thing: stamp boot->userspace time before any probe work runs.
+    let entry_ns = monotonic_ns();
     setup_mounts();
     reopen_console_stdio();
-    let report = observe();
+    let mut report = observe();
+    // Gated + additive: only surface the ns timestamp when explicitly requested.
+    if report
+        .cmdline
+        .split_whitespace()
+        .any(|t| t == "dillo.uptime_ns")
+    {
+        report.boot_to_userspace_ns = Some(entry_ns);
+    }
     let json = serde_json::to_string(&report)
         .unwrap_or_else(|e| format!("{{\"error\":\"serialize: {e}\"}}"));
     write_report(&json);
@@ -189,6 +206,9 @@ fn observe() -> Report {
     Report {
         arch: uname_machine(),
         uptime_secs: parse_uptime(),
+        // Set later in run() when the cmdline requests it; None keeps the
+        // report byte-identical by default.
+        boot_to_userspace_ns: None,
         cpu: read_cpu(),
         memory: read_memory(),
         consoles: read_consoles(),

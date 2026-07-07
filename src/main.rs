@@ -1137,6 +1137,7 @@ mod launch {
                     source,
                 })?;
 
+            crate::boot_trace::mark("pmi_read");
             let pmi_arch = pmi_arch(host_arch);
             let parsed = dillo::pmi_parse::parse(
                 &bytes,
@@ -1146,6 +1147,7 @@ mod launch {
                 },
             )?;
             validate_cpu_profile(parsed.cpu_profile.as_str(), pmi_arch)?;
+            crate::boot_trace::mark("pmi_parsed");
 
             let dtb = merged_dtb(&bytes, &parsed)?.to_vec();
             let platform = PlatformMachine::survey(&dtb, platform_arch(host_arch))
@@ -1179,6 +1181,7 @@ mod launch {
                 cpu_compatible,
                 vcpus,
             )?;
+            crate::boot_trace::mark("guest_writes_built");
 
             Ok(Self {
                 parsed,

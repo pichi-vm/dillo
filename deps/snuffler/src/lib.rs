@@ -24,6 +24,14 @@ pub struct Report {
     pub arch: String,
     pub cmdline: String,
     pub uptime_secs: f64,
+    /// High-resolution nanoseconds from kernel start (CLOCK_MONOTONIC) captured
+    /// at snuffler entry, *before* any probing — the kernel+initramfs boot time
+    /// to userspace at ns resolution (vs `uptime_secs`' 10ms `/proc/uptime`
+    /// granularity, read post-probe). Populated only when the kernel cmdline
+    /// carries `dillo.uptime_ns`; `None` otherwise. Additive and gated, so
+    /// default report behavior is unchanged.
+    #[serde(default)]
+    pub boot_to_userspace_ns: Option<u64>,
     pub cpu: CpuInfo,
     pub memory: MemoryInfo,
     pub consoles: Vec<String>,
