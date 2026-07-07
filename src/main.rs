@@ -1101,12 +1101,12 @@ mod overlay {
 
 mod launch {
 
-    // File/Read are only used by the non-Linux read_to_end fallback; on Linux the
-    // PMI is mmap'd (mmarinus) so these would be unused imports (-D warnings).
-    #[cfg(not(target_os = "linux"))]
+    // The PMI File (fd) is held for the VM lifetime so the mapping — and any
+    // reboot re-map — is pinned to that inode, not re-resolved by path. Read/Seek
+    // are only used by the non-Linux read_to_end fallback (Linux mmaps the fd).
     use std::fs::File;
     #[cfg(not(target_os = "linux"))]
-    use std::io::Read;
+    use std::io::{Read, Seek};
     use std::path::Path;
 
     use dillo_devtree::platform::{Arch, Machine as PlatformMachine, SurveyError};
@@ -1116,29 +1116,112 @@ mod launch {
     use crate::placement::{self, MemoryPlan};
     use dillo::pmi_parse::{Action as PmiAction, FillKind, HostArch, ParseOptions};
 
-    /// The PMI byte source, kept alive for the whole launch so that raw section
-    /// loads can be copied straight from it into guest RAM (one copy) instead of
-    /// being staged into owned `Vec`s first (two copies). On Linux this is the
-    /// mmap; elsewhere the `read_to_end` buffer.
-    pub(crate) enum PmiImage {
+    /// The PMI byte source. Raw section loads are copied straight from it into
+    /// guest RAM (one copy) instead of being staged into owned `Vec`s (two
+    /// copies). On Linux the backing is an mmap; elsewhere a `read_to_end`
+    /// buffer. The backing is resident only while sections are being copied:
+    /// after the initial load the caller [`release`](PmiImage::release)s it so
+    /// the mapping does not stay resident for the VM's lifetime, and the rare
+    /// guest-reboot replay [`remap`](PmiImage::remap)s it from `path`.
+    pub(crate) struct PmiImage {
+        /// Held open for the VM lifetime: the mapping and any reboot re-map are
+        /// pinned to this fd's inode, so a replay is always the exact bytes that
+        /// were loaded and measured — never whatever the path resolves to later.
+        file: File,
+        /// Retained for error messages only; never used to re-open the file.
+        path: std::path::PathBuf,
+        backing: Option<PmiBacking>,
+    }
+
+    enum PmiBacking {
         #[cfg(target_os = "linux")]
         Mapped(mmarinus::Map<mmarinus::perms::Read>),
         Owned(Vec<u8>),
     }
 
     impl PmiImage {
+        /// Open the PMI at `path`, hold the fd, and map (Linux) / read (other) it
+        /// resident.
+        pub(crate) fn open(path: &Path) -> Result<Self, LaunchError> {
+            let file = File::open(path).map_err(|source| LaunchError::ReadPmi {
+                path: path.display().to_string(),
+                source,
+            })?;
+            let mut img = PmiImage {
+                file,
+                path: path.to_path_buf(),
+                backing: None,
+            };
+            img.remap()?;
+            Ok(img)
+        }
+
+        /// (Re-)acquire the backing store from the held fd. Used for the initial
+        /// load and to replay launch writes on guest reboot after a [`release`].
+        pub(crate) fn remap(&mut self) -> Result<(), LaunchError> {
+            // Owned label up front so the error path doesn't borrow `self` while
+            // we mutably borrow `self.file` for the mapping.
+            let path = self.path.display().to_string();
+            #[cfg(target_os = "linux")]
+            {
+                let len = self
+                    .file
+                    .metadata()
+                    .map_err(|source| LaunchError::ReadPmi {
+                        path: path.clone(),
+                        source,
+                    })?
+                    .len() as usize;
+                let m = mmarinus::Map::bytes(len)
+                    .anywhere()
+                    .from(&mut self.file, 0)
+                    .with(mmarinus::perms::Read)
+                    .map_err(|e| LaunchError::ReadPmi {
+                        path: path.clone(),
+                        source: std::io::Error::other(format!("mmap: {e:?}")),
+                    })?;
+                self.backing = Some(PmiBacking::Mapped(m));
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                self.file.rewind().map_err(|source| LaunchError::ReadPmi {
+                    path: path.clone(),
+                    source,
+                })?;
+                let mut b = Vec::new();
+                self.file
+                    .read_to_end(&mut b)
+                    .map_err(|source| LaunchError::ReadPmi {
+                        path: path.clone(),
+                        source,
+                    })?;
+                self.backing = Some(PmiBacking::Owned(b));
+            }
+            Ok(())
+        }
+
+        /// Drop the backing store (munmap on Linux), freeing its resident pages
+        /// while keeping the fd open for a possible reboot re-map. Safe to call
+        /// once sections have been copied into guest RAM.
+        pub(crate) fn release(&mut self) {
+            self.backing = None;
+        }
+
         pub(crate) fn bytes(&self) -> &[u8] {
-            match self {
+            match self.backing.as_ref().expect("PMI backing released") {
                 #[cfg(target_os = "linux")]
-                PmiImage::Mapped(m) => &m[..],
-                PmiImage::Owned(v) => v,
+                PmiBacking::Mapped(m) => &m[..],
+                PmiBacking::Owned(v) => v,
             }
         }
     }
 
     impl std::fmt::Debug for PmiImage {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "PmiImage({} bytes)", self.bytes().len())
+            match &self.backing {
+                Some(_) => write!(f, "PmiImage({} bytes, resident)", self.bytes().len()),
+                None => write!(f, "PmiImage(released)"),
+            }
         }
     }
 
@@ -1189,32 +1272,8 @@ mod launch {
             // to read_to_end. `bytes` borrows the backing store, which lives for
             // the rest of this function (its data is copied into owned buffers by
             // parse/guest_writes before we return), so nothing escapes the map.
-            #[cfg(target_os = "linux")]
-            let pmi_map = mmarinus::Map::load(pmi_path, mmarinus::Private, mmarinus::perms::Read)
-                .map_err(|e| LaunchError::ReadPmi {
-                    path: pmi_path.display().to_string(),
-                    source: std::io::Error::other(format!("mmap: {e:?}")),
-                })?;
-            #[cfg(target_os = "linux")]
-            let bytes: &[u8] = &pmi_map;
-
-            #[cfg(not(target_os = "linux"))]
-            let pmi_bytes = {
-                let mut b = Vec::new();
-                File::open(pmi_path)
-                    .map_err(|source| LaunchError::ReadPmi {
-                        path: pmi_path.display().to_string(),
-                        source,
-                    })?
-                    .read_to_end(&mut b)
-                    .map_err(|source| LaunchError::ReadPmi {
-                        path: pmi_path.display().to_string(),
-                        source,
-                    })?;
-                b
-            };
-            #[cfg(not(target_os = "linux"))]
-            let bytes: &[u8] = &pmi_bytes;
+            let pmi = PmiImage::open(pmi_path)?;
+            let bytes: &[u8] = pmi.bytes();
 
             crate::boot_trace::mark("pmi_read");
             let pmi_arch = pmi_arch(host_arch);
@@ -1262,14 +1321,9 @@ mod launch {
             )?;
             crate::boot_trace::mark("guest_writes_built");
 
-            // `bytes` is no longer used past here, so move the backing store into
-            // the returned plan: raw section loads reference it by offset and are
-            // copied straight into guest RAM at apply time (single copy).
-            #[cfg(target_os = "linux")]
-            let pmi = PmiImage::Mapped(pmi_map);
-            #[cfg(not(target_os = "linux"))]
-            let pmi = PmiImage::Owned(pmi_bytes);
-
+            // `bytes` (a borrow of `pmi`) is unused past here, so `pmi` can move
+            // into the plan: raw section loads reference it by offset and are
+            // copied straight from it into guest RAM at apply time (single copy).
             Ok(Self {
                 parsed,
                 merged_dtb: dtb,
@@ -2098,7 +2152,7 @@ mod machine_select {
             M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn MmioAttachment>>,
             M: Attach<Arc<syscon::SysconDevice>, Error = E>,
         {
-            let (parsed, platform, dtb, plan, guest_writes, placements, pmi) =
+            let (parsed, platform, dtb, plan, guest_writes, placements, mut pmi) =
                 preflight.into_parts();
             log::info!(
                 "PMI parsed: arch={:?}, {} actions, merged_dtb={}",
@@ -2133,6 +2187,9 @@ mod machine_select {
             Attach::attach(&mut vm, memory).map_err(RunError::machine)?;
             crate::boot_trace::mark("mem_attached");
             apply_load_sections(&mut vm, &guest_writes, pmi.bytes())?;
+            // Sections are now in guest RAM; drop the PMI backing so it does not
+            // stay resident for the VM's lifetime. A guest reboot re-maps it.
+            pmi.release();
             crate::boot_trace::mark("sections_loaded");
 
             attach_uart(&mut vm, &platform)?;
@@ -2154,7 +2211,11 @@ mod machine_select {
             while matches!(outcome, VcpuStop::GuestReset) {
                 log::info!("guest requested reboot - replaying launch writes");
                 vm.reset_for_reboot().map_err(RunError::machine)?;
+                // Re-map the PMI just to replay the raw section loads, then drop
+                // it again — it is not held resident between boots.
+                pmi.remap().map_err(RunError::machine)?;
                 apply_load_sections(&mut vm, &guest_writes, pmi.bytes())?;
+                pmi.release();
                 let control = Arc::new(SupervisorControl {
                     supervisor_shutdown,
                 });
