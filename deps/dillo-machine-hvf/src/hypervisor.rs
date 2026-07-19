@@ -230,7 +230,7 @@ impl Vcpu {
             self.inner.set_reg(gpr(n as u8), v)?;
         }
         self.inner.set_reg(Reg::PC, state.pc)?;
-        self.inner.set_reg(Reg::CPSR, state.pstate)?;
+        self.inner.set_reg(Reg::CPSR, state.pstate.get())?;
         self.inner.set_sys_reg(SysReg::SP_EL1, state.sp_el1)?;
         self.inner.set_sys_reg(SysReg::SCTLR_EL1, state.sctlr_el1)?;
         self.inner.set_sys_reg(SysReg::VBAR_EL1, state.vbar_el1)?;

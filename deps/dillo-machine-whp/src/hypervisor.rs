@@ -479,7 +479,11 @@ impl Vcpu {
         push_reg64(
             &mut registers,
             WHvX64RegisterRflags,
-            if state.rflags == 0 { 0x2 } else { state.rflags },
+            if state.rflags.get() == 0 {
+                0x2
+            } else {
+                state.rflags.get()
+            },
         );
         push_reg64(&mut registers, WHvX64RegisterRax, state.rax);
         push_reg64(&mut registers, WHvX64RegisterRbx, state.rbx);
@@ -594,6 +598,11 @@ fn push_segment(
     name: WHV_REGISTER_NAME,
     segment: &pmi::vm::vcpu::x86_64::SegReg,
 ) {
+    // vm.md packs the AVL/L/D-B/G flags at bits 8-11; WHV_X64_SEGMENT_REGISTER
+    // expects them at bits 12-15 (Available/Long/Default/Granularity), with
+    // 8-11 reserved. Shift the flag nibble up while keeping type/S/DPL/P.
+    let pmi_attr = segment.attributes.get();
+    let whv_attr = (pmi_attr & 0x00FF) | ((pmi_attr & 0x0F00) << 4);
     push_whp_segment(
         registers,
         name,
@@ -602,7 +611,7 @@ fn push_segment(
             Limit: segment.limit,
             Selector: segment.selector,
             Anonymous: WHV_X64_SEGMENT_REGISTER_0 {
-                Attributes: segment.attributes,
+                Attributes: whv_attr,
             },
         },
     );
