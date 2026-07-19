@@ -1831,19 +1831,19 @@ mod tests {
     fn real_mode_state(code_base: u64, rip: u64) -> pmi::vm::vcpu::x86_64::CpuState {
         let code = pmi::vm::vcpu::x86_64::SegReg {
             selector: 0,
-            attributes: 0x9B,
+            attributes: pmi::vm::vcpu::x86_64::SegAttributes::new(0x9B).unwrap(),
             limit: 0xFFFF,
             base: code_base,
         };
         let data = pmi::vm::vcpu::x86_64::SegReg {
             selector: 0,
-            attributes: 0x93,
+            attributes: pmi::vm::vcpu::x86_64::SegAttributes::new(0x93).unwrap(),
             limit: 0xFFFF,
             base: 0,
         };
         pmi::vm::vcpu::x86_64::CpuState {
             rip,
-            rflags: 0x2,
+            rflags: pmi::vm::vcpu::x86_64::RFlags::new(0x2).unwrap(),
             cr0: 0x10,
             cs: code,
             ds: data.clone(),
