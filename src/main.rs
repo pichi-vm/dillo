@@ -87,6 +87,13 @@ struct Args {
     /// only; ignored on other backends.
     #[argh(switch)]
     preallocate: bool,
+
+    /// path to an out-of-band base DTB. Required to launch a detached image (a
+    /// `dt:dtb` fill with no bundled base); in optional mode it overrides the
+    /// bundled fallback. Rejected for a bundled image, whose base is loaded and
+    /// measured and cannot be substituted.
+    #[argh(option)]
+    dtb: Option<std::path::PathBuf>,
 }
 
 /// Boot-time tracer for decomposing VMM setup latency (PMI parse, placement,
@@ -140,6 +147,7 @@ fn main() {
         <machine::Vm as Host>::cpu_compatible(),
         memory,
         cpus,
+        args.dtb.as_deref(),
     ) {
         Ok(plan) => plan,
         Err(e) => {
@@ -1264,6 +1272,7 @@ mod launch {
             cpu_compatible: Option<&str>,
             memory_mib: u32,
             vcpus: u32,
+            base_dtb_path: Option<&Path>,
         ) -> Result<Self, LaunchError> {
             // Map the PMI read-only rather than reading it whole. The PMI
             // granularity spec places sections at aligned offsets precisely so a
@@ -1289,7 +1298,17 @@ mod launch {
             validate_cpu_profile(parsed.cpu_profile.as_str(), pmi_arch)?;
             crate::boot_trace::mark("pmi_parsed");
 
-            let dtb = merged_dtb(bytes, &parsed)?.to_vec();
+            // Resolve the launch base DTB per channel mode: an out-of-band
+            // `--dtb` (detached, or optional override), else the bundled base
+            // the `dt:dtb` attribute names (bundled load / optional fallback).
+            let oob_base: Option<Vec<u8>> = match base_dtb_path {
+                Some(p) => Some(std::fs::read(p).map_err(|source| LaunchError::ReadBaseDtb {
+                    path: p.to_path_buf(),
+                    source,
+                })?),
+                None => None,
+            };
+            let dtb = resolve_base(bytes, &parsed, oob_base.as_deref())?;
             let platform = PlatformMachine::survey(&dtb, platform_arch(host_arch))
                 .map_err(LaunchError::Coverage)?;
 
@@ -1320,6 +1339,7 @@ mod launch {
                 platform.arch,
                 cpu_compatible,
                 vcpus,
+                &dtb,
             )?;
             crate::boot_trace::mark("guest_writes_built");
 
@@ -1364,11 +1384,24 @@ mod launch {
         #[error("PMI parse: {0}")]
         PmiParse(#[from] dillo::pmi_parse::Error),
 
+        #[error("read base DTB {path}: {source}")]
+        ReadBaseDtb {
+            path: std::path::PathBuf,
+            #[source]
+            source: std::io::Error,
+        },
+
         #[error(
-            "base DTB is detached (delivered out-of-band); an out-of-band base \
-             source is not yet supported"
+            "this PMI delivers its base DTB out-of-band (detached); pass the base \
+             with --dtb <path>"
         )]
-        DetachedBaseUnsupported,
+        DetachedBaseRequiresDtb,
+
+        #[error(
+            "--dtb was given, but this PMI bundles its base DTB (no dt:dtb fill); \
+             a bundled base is measured and cannot be substituted"
+        )]
+        UnexpectedBaseOverride,
 
         #[error("base DTB ({actual} bytes) exceeds its reserved fill section ({cap} bytes)")]
         BaseDtbTooLarge { actual: u64, cap: u64 },
@@ -1400,8 +1433,9 @@ mod launch {
         #[must_use]
         pub(crate) fn exit_code(&self) -> i32 {
             match self {
-                Self::ReadPmi { .. } | Self::PmiParse(_) => 10,
-                Self::DetachedBaseUnsupported
+                Self::ReadPmi { .. } | Self::PmiParse(_) | Self::ReadBaseDtb { .. } => 10,
+                Self::DetachedBaseRequiresDtb
+                | Self::UnexpectedBaseOverride
                 | Self::BaseDtbTooLarge { .. }
                 | Self::Coverage(_)
                 | Self::DtbCrossValidate(_)
@@ -1421,6 +1455,7 @@ mod launch {
         arch: Arch,
         cpu_compatible: Option<&str>,
         vcpus: u32,
+        base_dtb: &[u8],
     ) -> Result<Vec<GuestWrite>, LaunchError> {
         let mut writes = Vec::new();
         for action in &parsed.actions {
@@ -1468,26 +1503,20 @@ mod launch {
                     section,
                     kind: FillKind::DtDtb,
                 } => {
-                    // Deliver the measured base into its reserved Zero section
-                    // (detached/optional). With no out-of-band base wired up
-                    // yet, the source is the bundled base named by `dt:dtb`.
-                    let base = bundled_base(parsed)?;
+                    // Deliver the resolved measured base into its reserved Zero
+                    // section (detached/optional). The base was resolved once in
+                    // `read` (out-of-band `--dtb`, or the bundled fallback).
                     let target = &parsed.sections[section];
-                    if base.file_size > target.virtual_size {
+                    if base_dtb.len() as u64 > target.virtual_size {
                         return Err(LaunchError::BaseDtbTooLarge {
-                            actual: base.file_size,
+                            actual: base_dtb.len() as u64,
                             cap: target.virtual_size,
                         });
                     }
-                    read_section(bytes, base.file_offset, base.file_size)
-                        .ok_or(LaunchError::MalformedMergedDtb)?;
                     writes.push(GuestWrite {
                         section: section.clone(),
                         gpa: target.gpa,
-                        data: WriteSrc::Image {
-                            offset: base.file_offset as usize,
-                            len: base.file_size as usize,
-                        },
+                        data: WriteSrc::Owned(base_dtb.to_vec()),
                     });
                 }
             }
@@ -1495,24 +1524,39 @@ mod launch {
         Ok(writes)
     }
 
-    /// The bundled base DTB named by the `dt:dtb` attribute. Detached images
-    /// carry no bundled base, which is not yet supported.
-    fn bundled_base(
+    /// Resolve the launch base DTB for this channel mode. An out-of-band base
+    /// (`--dtb`) is used when the image expects a filled base (detached, or an
+    /// optional override); otherwise the bundled base named by the `dt:dtb`
+    /// attribute is used (bundled load source, or optional fallback). A detached
+    /// image with no `--dtb` cannot launch; an out-of-band base is rejected for
+    /// a bundled image, whose base is loaded and measured.
+    fn resolve_base(
+        bytes: &[u8],
         parsed: &dillo::pmi_parse::ParsedPmi,
-    ) -> Result<&dillo::pmi_parse::SectionInfo, LaunchError> {
-        parsed
-            .dt_dtb_source
-            .as_ref()
-            .ok_or(LaunchError::DetachedBaseUnsupported)
-    }
-
-    fn merged_dtb<'a>(
-        bytes: &'a [u8],
-        parsed: &dillo::pmi_parse::ParsedPmi,
-    ) -> Result<&'a [u8], LaunchError> {
-        let dtb_info = bundled_base(parsed)?;
-        read_section(bytes, dtb_info.file_offset, dtb_info.file_size)
-            .ok_or(LaunchError::MalformedMergedDtb)
+        oob: Option<&[u8]>,
+    ) -> Result<Vec<u8>, LaunchError> {
+        let has_fill = parsed.actions.iter().any(|a| {
+            matches!(
+                a,
+                PmiAction::Fill {
+                    kind: FillKind::DtDtb,
+                    ..
+                }
+            )
+        });
+        match oob {
+            Some(_) if !has_fill => Err(LaunchError::UnexpectedBaseOverride),
+            Some(base) => Ok(base.to_vec()),
+            None => {
+                let src = parsed
+                    .dt_dtb_source
+                    .as_ref()
+                    .ok_or(LaunchError::DetachedBaseRequiresDtb)?;
+                read_section(bytes, src.file_offset, src.file_size)
+                    .map(<[u8]>::to_vec)
+                    .ok_or(LaunchError::MalformedMergedDtb)
+            }
+        }
     }
 
     fn read_section(bytes: &[u8], offset: u64, size: u64) -> Option<&[u8]> {

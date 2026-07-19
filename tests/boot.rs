@@ -1305,3 +1305,119 @@ fn boots_with_net_user() {
     let _ = tcp_echo.join();
     let _ = udp_echo.join();
 }
+
+// ---------------------------------------------------------------------------
+// dt extension channel modes (pmi/spec/dt.md). Each mode is exercised through
+// the real arma → dillo path: attached and detached boot, and the two clear
+// refusals (detached without --dtb; --dtb against a bundled image).
+// ---------------------------------------------------------------------------
+
+/// Build a PMI selecting an arma `--dtb` channel mode: `None` = optional (the
+/// default), `Some("attached")` = bundled, or `Some(<path>)` = detached (arma
+/// writes the base DTB to that path).
+fn build_pmi_mode(dir: &Path, cmdline: &str, dtb: Option<&str>) -> PathBuf {
+    let kernel = require(&["PCI", "VIRTIO_PCI", "VIRTIO_BLK", "VIRTIO_CONSOLE"], &[])
+        .expect("kernel DB: no PCI + virtio-blk kernel available");
+    let cfg = dir.join("kernel.config");
+    std::fs::write(&cfg, host::CONFIG).unwrap();
+    let pmi = dir.join("boot.pmi");
+    let mut cmd = Command::new(env!("CARGO_BIN_FILE_ARMA_arma"));
+    cmd.arg("build")
+        .args(["--cmdline", cmdline])
+        .args(["--profile", host::PROFILE])
+        .arg("--config")
+        .arg(&cfg)
+        .arg("--kernel")
+        .arg(&kernel)
+        .arg("--initrd")
+        .arg(env!("CARGO_BIN_FILE_SNUFFLER_snuffler"));
+    if let Some(d) = dtb {
+        cmd.args(["--dtb", d]);
+    }
+    let st = cmd.arg(&pmi).status().expect("spawn arma");
+    assert!(st.success(), "arma build failed");
+    pmi
+}
+
+fn subdir(base: &Path, name: &str) -> PathBuf {
+    let p = base.join(name);
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+/// Attached (bundled) mode: the base is loaded, dillo boots it with no `--dtb`.
+#[test]
+fn attached_mode_boots() {
+    if !hypervisor_available() {
+        eprintln!("skip: no usable /dev/kvm on this host (local dev only)");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let pmi = build_pmi_mode(tmp.path(), "console=hvc0", Some("attached"));
+    let output = boot(&pmi, 256, 1, tmp.path());
+    parse_report(&output)
+        .unwrap_or_else(|| panic!("attached PMI produced no guest report:\n{output}"));
+}
+
+/// Detached mode: the base is delivered out-of-band; dillo boots it with
+/// `--dtb <base>`.
+#[test]
+fn detached_mode_boots_with_dtb() {
+    if !hypervisor_available() {
+        eprintln!("skip: no usable /dev/kvm on this host (local dev only)");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base.dtb");
+    let pmi = build_pmi_mode(tmp.path(), "console=hvc0", Some(base.to_str().unwrap()));
+    let base_arg = base.to_str().unwrap();
+    let output = boot_with(&pmi, 256, 1, tmp.path(), &["--dtb", base_arg]);
+    parse_report(&output)
+        .unwrap_or_else(|| panic!("detached PMI produced no guest report with --dtb:\n{output}"));
+}
+
+/// Detached mode without `--dtb` is refused with a clear message. This is a
+/// preflight failure, so it needs no hypervisor.
+#[test]
+fn detached_mode_without_dtb_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base.dtb");
+    let pmi = build_pmi_mode(tmp.path(), "console=hvc0", Some(base.to_str().unwrap()));
+    let output = boot(&pmi, 256, 1, tmp.path()); // no --dtb
+    assert!(
+        parse_report(&output).is_none(),
+        "detached PMI must not boot without --dtb:\n{output}"
+    );
+    assert!(
+        output.contains("detached") && output.contains("--dtb"),
+        "refusal should name detached mode and --dtb:\n{output}"
+    );
+}
+
+/// Passing `--dtb` for a bundled image is refused with a clear message.
+#[test]
+fn dtb_rejected_for_bundled_image() {
+    let tmp = TempDir::new().unwrap();
+    // A real base DTB, obtained from a detached build.
+    let base = tmp.path().join("base.dtb");
+    build_pmi_mode(
+        &subdir(tmp.path(), "detached"),
+        "console=hvc0",
+        Some(base.to_str().unwrap()),
+    );
+    // A bundled image whose base cannot be substituted.
+    let pmi = build_pmi_mode(
+        &subdir(tmp.path(), "bundled"),
+        "console=hvc0",
+        Some("attached"),
+    );
+    let output = boot_with(&pmi, 256, 1, tmp.path(), &["--dtb", base.to_str().unwrap()]);
+    assert!(
+        parse_report(&output).is_none(),
+        "bundled image must not boot with a substituted base:\n{output}"
+    );
+    assert!(
+        output.contains("bundles its base") || output.contains("cannot be substituted"),
+        "refusal should explain the bundled base cannot be substituted:\n{output}"
+    );
+}
