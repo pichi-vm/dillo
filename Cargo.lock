@@ -134,7 +134,7 @@ dependencies = [
 [[package]]
 name = "arma"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma#113aeb2f6d5fc11aa67b4160290aca8b18d9c3b8"
+source = "git+https://github.com/pichi-vm/arma?branch=dt-compliance#fe0dc49bc078d7221dc24a814183eabb21a1727d"
 dependencies = [
  "anyhow",
  "ciborium",
@@ -407,7 +407,7 @@ dependencies = [
 [[package]]
 name = "devtree"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/devtree#7a7e3a26485eeda5420c92fcd23d43a4717721a0"
+source = "git+https://github.com/pichi-vm/devtree#95b8d62cce42b77cb08ed9922de012a5d416bee7"
 
 [[package]]
 name = "digest"
@@ -683,7 +683,7 @@ dependencies = [
 [[package]]
 name = "dtb2acpi"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma#113aeb2f6d5fc11aa67b4160290aca8b18d9c3b8"
+source = "git+https://github.com/pichi-vm/arma?branch=dt-compliance#fe0dc49bc078d7221dc24a814183eabb21a1727d"
 dependencies = [
  "devtree",
  "zerocopy",
@@ -692,7 +692,7 @@ dependencies = [
 [[package]]
 name = "dtb2e820"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma#113aeb2f6d5fc11aa67b4160290aca8b18d9c3b8"
+source = "git+https://github.com/pichi-vm/arma?branch=dt-compliance#fe0dc49bc078d7221dc24a814183eabb21a1727d"
 dependencies = [
  "devtree",
 ]
@@ -733,7 +733,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1539,7 +1539,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1782,7 +1782,7 @@ dependencies = [
 [[package]]
 name = "tatu"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma#113aeb2f6d5fc11aa67b4160290aca8b18d9c3b8"
+source = "git+https://github.com/pichi-vm/arma?branch=dt-compliance#fe0dc49bc078d7221dc24a814183eabb21a1727d"
 dependencies = [
  "arrayvec",
  "devtree",
@@ -1800,7 +1800,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
