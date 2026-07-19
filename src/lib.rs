@@ -148,11 +148,11 @@ pub mod pmi_parse {
         )]
         VcpuVariantMismatch { variant: &'static str, machine: u16 },
 
-        #[error("merged:dtbo fill present but merged:dtb attribute missing (or vice versa)")]
-        MergedExtensionPartial,
+        #[error("no base DTB: neither a dt:dtb attribute nor a dt:dtb fill is present")]
+        NoBaseDtb,
 
-        #[error("merged:dtb attribute names section `{section}` which is not present")]
-        MergedDtbSectionMissing { section: String },
+        #[error("dt:dtb attribute names section `{section}` which is not present")]
+        DtDtbSectionMissing { section: String },
 
         // ─── Pathological-spread refusal (§5.5) ─────────────────────
         #[error(
@@ -250,11 +250,15 @@ pub mod pmi_parse {
         Fill { section: String, kind: FillKind },
     }
 
-    /// Fill kinds dillo recognizes.
+    /// Fill kinds dillo recognizes (the `dt` extension, `pmi/spec/dt.md`).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum FillKind {
-        /// `merged:dtbo` — host-supplied DTB overlay (the merged extension).
-        MergedDtbo,
+        /// `dt:dtb` — the measured base DTB, delivered into a reserved Zero
+        /// section (detached and optional channel modes).
+        DtDtb,
+
+        /// `dt:dtbo` — host-supplied, unmeasured DTB overlay.
+        DtDtbo,
     }
 
     /// Successfully-parsed PMI.
@@ -268,12 +272,15 @@ pub mod pmi_parse {
         /// carries the bytes faithfully.
         pub cpu_profile: pmi::cpu::Profile,
         pub actions: Vec<Action>,
-        /// Every section reachable from `actions` plus the section named by
-        /// `merged:dtb`.
+        /// Every section placed in guest memory (named by a load or fill
+        /// action). The bundled base named by `dt:dtb` is excluded — see
+        /// `dt_dtb_source`.
         pub sections: BTreeMap<String, SectionInfo>,
-        /// Name of the section holding the measured base DTB (from the
-        /// `merged:dtb` target attribute).
-        pub merged_dtb_section: String,
+        /// The bundled base DTB named by the `dt:dtb` target attribute, as a
+        /// read-only source. `Some` in bundled and optional modes (the image
+        /// carries a base or fallback); `None` in detached mode, where the base
+        /// is delivered out-of-band. Not placed in guest memory by itself.
+        pub dt_dtb_source: Option<SectionInfo>,
     }
 
     /// Parse and validate a PMI file's bytes.
@@ -361,23 +368,32 @@ pub mod pmi_parse {
         let (actions, active_section_names, fill_kinds) =
             resolve_actions(&actions_raw, &raw_sections)?;
 
-        // §5 spec: `merged:dtb` and `merged:dtbo` MUST both be present or both
-        // absent.
-        let has_dtbo_fill = fill_kinds.iter().any(|k| matches!(k, FillKind::MergedDtbo));
-        let (Some(merged_dtb_section), true) = (merged_dtb, has_dtbo_fill) else {
-            return Err(Error::MergedExtensionPartial);
-        };
-        if !raw_sections.contains_key(&merged_dtb_section) {
-            return Err(Error::MergedDtbSectionMissing {
-                section: merged_dtb_section,
+        // dt extension channel resolution (pmi/spec/dt.md, VMM selection
+        // table). A base DTB must be available through either the `dt:dtb`
+        // attribute (bundled / optional fallback) or a `dt:dtb` fill (detached /
+        // optional); with neither, no base exists and the VMM MUST refuse. The
+        // `dt:dtbo` overlay fill is orthogonal — present only when the image
+        // delegates a resource.
+        let has_dt_dtb_fill = fill_kinds.iter().any(|k| matches!(k, FillKind::DtDtb));
+        let dt_dtb_attr = merged_dtb;
+        if dt_dtb_attr.is_none() && !has_dt_dtb_fill {
+            return Err(Error::NoBaseDtb);
+        }
+        // A named bundled base must actually be present in the image.
+        if let Some(section) = &dt_dtb_attr
+            && !raw_sections.contains_key(section)
+        {
+            return Err(Error::DtDtbSectionMissing {
+                section: section.clone(),
             });
         }
 
-        // Unique set of section names reachable from this target.
-        let mut all_active: Vec<String> = active_section_names.clone();
-        if !all_active.iter().any(|n| n == &merged_dtb_section) {
-            all_active.push(merged_dtb_section.clone());
-        }
+        // Sections placed in guest memory are exactly those named by a load or
+        // fill action. The `dt:dtb` attribute names a bundled base the VMM only
+        // reads (in bundled mode it is separately loaded; in optional mode it is
+        // an unplaced fallback), so it is NOT part of this set — including it
+        // would false-overlap with the section it reserves.
+        let all_active: Vec<String> = active_section_names.clone();
 
         // Validate every active-target section: alignment, GPA bounds.
         for name in &all_active {
@@ -443,7 +459,7 @@ pub mod pmi_parse {
         for name in actions.iter().filter_map(|a| match a {
             Action::Fill {
                 section,
-                kind: FillKind::MergedDtbo,
+                kind: FillKind::DtDtbo,
             } => Some(section),
             _ => None,
         }) {
@@ -472,13 +488,27 @@ pub mod pmi_parse {
             );
         }
 
+        // The bundled base the `dt:dtb` attribute names, as a read-only source
+        // (file bytes). It is deliberately kept out of `sections` so it never
+        // enters placement, overlap, or coverage — the VMM only reads it, to
+        // load (bundled) or to fill the reserved base section (optional).
+        let dt_dtb_source = dt_dtb_attr.as_ref().map(|name| {
+            let s = &raw_sections[name];
+            SectionInfo {
+                file_offset: s.file_offset,
+                file_size: s.file_size,
+                gpa: s.gpa,
+                virtual_size: s.virtual_size,
+            }
+        });
+
         Ok(ParsedPmi {
             arch: opts.host_arch,
             vcpu,
             cpu_profile,
             actions,
             sections,
-            merged_dtb_section,
+            dt_dtb_source,
         })
     }
 
@@ -616,7 +646,7 @@ pub mod pmi_parse {
                     VcpuState::X86_64(spec.vcpu),
                     spec.cpu_profile,
                     actions,
-                    spec.merged_dtb,
+                    spec.dt_dtb,
                 ))
             }
             HostArch::Aarch64 => {
@@ -633,7 +663,7 @@ pub mod pmi_parse {
                     VcpuState::Aarch64(spec.vcpu),
                     spec.cpu_profile,
                     actions,
-                    spec.merged_dtb,
+                    spec.dt_dtb,
                 ))
             }
         }
@@ -721,7 +751,8 @@ pub mod pmi_parse {
 
     fn translate_fill_kind(k: PmiFillKind) -> FillKind {
         match k {
-            PmiFillKind::MergedDtbo => FillKind::MergedDtbo,
+            PmiFillKind::DtDtb => FillKind::DtDtb,
+            PmiFillKind::DtDtbo => FillKind::DtDtbo,
         }
     }
 

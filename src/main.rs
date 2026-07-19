@@ -1364,8 +1364,14 @@ mod launch {
         #[error("PMI parse: {0}")]
         PmiParse(#[from] dillo::pmi_parse::Error),
 
-        #[error("merged_dtb section missing from parsed.sections")]
-        MissingMergedDtb,
+        #[error(
+            "base DTB is detached (delivered out-of-band); an out-of-band base \
+             source is not yet supported"
+        )]
+        DetachedBaseUnsupported,
+
+        #[error("base DTB ({actual} bytes) exceeds its reserved fill section ({cap} bytes)")]
+        BaseDtbTooLarge { actual: u64, cap: u64 },
 
         #[error("base DTB coverage: {0}")]
         Coverage(SurveyError),
@@ -1395,7 +1401,8 @@ mod launch {
         pub(crate) fn exit_code(&self) -> i32 {
             match self {
                 Self::ReadPmi { .. } | Self::PmiParse(_) => 10,
-                Self::MissingMergedDtb
+                Self::DetachedBaseUnsupported
+                | Self::BaseDtbTooLarge { .. }
                 | Self::Coverage(_)
                 | Self::DtbCrossValidate(_)
                 | Self::MalformedMergedDtb
@@ -1440,7 +1447,7 @@ mod launch {
                 }
                 PmiAction::Fill {
                     section,
-                    kind: FillKind::MergedDtbo,
+                    kind: FillKind::DtDtbo,
                 } => {
                     let s = &parsed.sections[section];
                     let data = crate::overlay::synthesize_dtbo(
@@ -1457,19 +1464,53 @@ mod launch {
                         data: WriteSrc::Owned(data),
                     });
                 }
+                PmiAction::Fill {
+                    section,
+                    kind: FillKind::DtDtb,
+                } => {
+                    // Deliver the measured base into its reserved Zero section
+                    // (detached/optional). With no out-of-band base wired up
+                    // yet, the source is the bundled base named by `dt:dtb`.
+                    let base = bundled_base(parsed)?;
+                    let target = &parsed.sections[section];
+                    if base.file_size > target.virtual_size {
+                        return Err(LaunchError::BaseDtbTooLarge {
+                            actual: base.file_size,
+                            cap: target.virtual_size,
+                        });
+                    }
+                    read_section(bytes, base.file_offset, base.file_size)
+                        .ok_or(LaunchError::MalformedMergedDtb)?;
+                    writes.push(GuestWrite {
+                        section: section.clone(),
+                        gpa: target.gpa,
+                        data: WriteSrc::Image {
+                            offset: base.file_offset as usize,
+                            len: base.file_size as usize,
+                        },
+                    });
+                }
             }
         }
         Ok(writes)
+    }
+
+    /// The bundled base DTB named by the `dt:dtb` attribute. Detached images
+    /// carry no bundled base, which is not yet supported.
+    fn bundled_base(
+        parsed: &dillo::pmi_parse::ParsedPmi,
+    ) -> Result<&dillo::pmi_parse::SectionInfo, LaunchError> {
+        parsed
+            .dt_dtb_source
+            .as_ref()
+            .ok_or(LaunchError::DetachedBaseUnsupported)
     }
 
     fn merged_dtb<'a>(
         bytes: &'a [u8],
         parsed: &dillo::pmi_parse::ParsedPmi,
     ) -> Result<&'a [u8], LaunchError> {
-        let dtb_info = parsed
-            .sections
-            .get(&parsed.merged_dtb_section)
-            .ok_or(LaunchError::MissingMergedDtb)?;
+        let dtb_info = bundled_base(parsed)?;
         read_section(bytes, dtb_info.file_offset, dtb_info.file_size)
             .ok_or(LaunchError::MalformedMergedDtb)
     }
@@ -2162,10 +2203,10 @@ mod machine_select {
             let (parsed, platform, dtb, plan, guest_writes, placements, mut pmi) =
                 preflight.into_parts();
             log::debug!(
-                "PMI parsed: arch={:?}, {} actions, merged_dtb={}",
+                "PMI parsed: arch={:?}, {} actions, dt:dtb source={:?}",
                 parsed.arch,
                 parsed.actions.len(),
-                parsed.merged_dtb_section
+                parsed.dt_dtb_source.is_some()
             );
             log::debug!(
                 "coverage: base DTB fully claimed - {} declared region(s), pcie={}",

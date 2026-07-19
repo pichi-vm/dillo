@@ -331,7 +331,11 @@ impl Vcpu {
         let regs = kvm_regs {
             rip: state.rip,
             rsp: state.rsp,
-            rflags: if state.rflags == 0 { 0x2 } else { state.rflags },
+            rflags: if state.rflags.get() == 0 {
+                0x2
+            } else {
+                state.rflags.get()
+            },
             rax: state.rax,
             rbx: state.rbx,
             rcx: state.rcx,
@@ -429,10 +433,10 @@ impl Vcpu {
         self.set_one_u64(core_reg(32), state.pc)?;
         self.set_one_u64(
             core_reg(33),
-            if state.pstate == 0 {
+            if state.pstate.get() == 0 {
                 0x3c5
             } else {
-                state.pstate
+                state.pstate.get()
             },
         )?;
         self.set_one_u64(core_reg(34), state.sp_el1)?;
@@ -615,7 +619,9 @@ fn seg_from_pmi(s: &pmi::vm::vcpu::x86_64::SegReg) -> kvm_segment {
     //   bit  13   = l   (64-bit code segment)
     //   bit  14   = db
     //   bit  15   = g   (4 KiB granularity)
-    let attr = s.attributes;
+    // vm.md segment-attribute encoding: type[0:3], S[4], DPL[5:6], P[7],
+    // AVL[8], L[9], D/B[10], G[11].
+    let attr = s.attributes.get();
     kvm_segment {
         base: s.base,
         limit: s.limit,
@@ -624,10 +630,10 @@ fn seg_from_pmi(s: &pmi::vm::vcpu::x86_64::SegReg) -> kvm_segment {
         s: ((attr >> 4) & 0x1) as u8,
         dpl: ((attr >> 5) & 0x3) as u8,
         present: ((attr >> 7) & 0x1) as u8,
-        avl: ((attr >> 12) & 0x1) as u8,
-        l: ((attr >> 13) & 0x1) as u8,
-        db: ((attr >> 14) & 0x1) as u8,
-        g: ((attr >> 15) & 0x1) as u8,
+        avl: ((attr >> 8) & 0x1) as u8,
+        l: ((attr >> 9) & 0x1) as u8,
+        db: ((attr >> 10) & 0x1) as u8,
+        g: ((attr >> 11) & 0x1) as u8,
         unusable: 0,
         padding: 0,
     }
