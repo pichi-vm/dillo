@@ -63,15 +63,34 @@ fn output_tx() -> &'static Mutex<mpsc::Sender<OutputMessage>> {
 fn output_worker(rx: mpsc::Receiver<OutputMessage>) {
     let stdout = io::stdout();
     let mut stdout = BufWriter::with_capacity(128 * 1024, stdout.lock());
+    pump_output(&rx, &mut stdout);
+}
+
+/// Drain `rx` into `out`, flushing after every burst. hvc0 is a console:
+/// its output must reach the host promptly, not languish in the BufWriter
+/// until an explicit flush — which, mid-boot, never comes (boot output is
+/// well under the 128 KiB buffer, so without this a `console=hvc0` guest
+/// appears to emit nothing at all). Each `recv` wakeup drains everything
+/// already queued into one write batch, then flushes once. Returns when
+/// the channel closes.
+fn pump_output(rx: &mpsc::Receiver<OutputMessage>, out: &mut impl Write) {
     while let Ok(msg) = rx.recv() {
-        match msg {
-            OutputMessage::Data(output) => {
-                let _ = stdout.write_all(&output);
-            }
-            OutputMessage::Flush(done) => {
-                let _ = stdout.flush();
-                let _ = done.send(());
-            }
+        handle_output_message(msg, out);
+        while let Ok(msg) = rx.try_recv() {
+            handle_output_message(msg, out);
+        }
+        let _ = out.flush();
+    }
+}
+
+fn handle_output_message(msg: OutputMessage, out: &mut impl Write) {
+    match msg {
+        OutputMessage::Data(output) => {
+            let _ = out.write_all(&output);
+        }
+        OutputMessage::Flush(done) => {
+            let _ = out.flush();
+            let _ = done.send(());
         }
     }
 }
@@ -468,6 +487,42 @@ mod tests {
     use dillo_virtio::queue::VIRTQ_DESC_F_WRITE;
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
     use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryMmap};
+
+    /// A `Write` that records bytes and counts `flush` calls.
+    #[derive(Default)]
+    struct RecordingWriter {
+        data: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.data.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    /// Console output must be flushed after each burst — otherwise a
+    /// `console=hvc0` guest's boot messages sit in the BufWriter and never
+    /// reach the host. Regression test for that bug.
+    #[test]
+    fn output_is_flushed_after_each_burst() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(OutputMessage::Data(b"hello".to_vec())).unwrap();
+        tx.send(OutputMessage::Data(b" world".to_vec())).unwrap();
+        drop(tx); // close the channel so pump_output returns
+
+        let mut writer = RecordingWriter::default();
+        pump_output(&rx, &mut writer);
+
+        assert_eq!(writer.data, b"hello world");
+        assert!(writer.flushes >= 1, "console output was never flushed");
+    }
 
     #[test]
     fn rx_drains_pending_input_into_guest_buffer() {
