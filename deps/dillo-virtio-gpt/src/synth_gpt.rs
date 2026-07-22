@@ -32,7 +32,7 @@
 //! verbatim into the GPT header.
 
 use std::collections::BTreeMap;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -77,6 +77,125 @@ pub struct SynthResult {
     pub partition_lba_ends: Vec<u64>,
     /// Total disk size in bytes (`total_sectors * 512`).
     pub total_size_bytes: u64,
+}
+
+/// A disk-shaped `Read + Write + Seek` scratch device that materializes ONLY
+/// the two GPT metadata windows while presenting the full `total_size_bytes`
+/// length to the `gpt` crate.
+///
+/// GPT metadata is confined to a front window (LBA 0..`FRONT_RESERVED_LBAS`:
+/// protective MBR + primary header + primary entry array) and a back window
+/// (the last `BACK_RESERVED_LBAS` LBAs: backup entry array + backup header at
+/// the final LBA). The `gpt` crate must be able to seek to the last LBA to
+/// place the backup header, so the device reports the true length — but the
+/// partition-data region between the windows is served at run time from the
+/// per-partition backing files and is never touched here. Writes that land in
+/// the middle are discarded and reads from it return zeros, so synthesis costs
+/// ~34 KiB regardless of disk size (was O(disk): a full `vec![0u8; disk_len]`).
+// `Debug` is required by the gpt crate's `DiskDevice` bound.
+#[derive(Debug)]
+struct GptScratch {
+    /// Virtual device length in bytes (the whole synthetic disk).
+    len: u64,
+    /// Current cursor position (may sit past `len`, mirroring `Cursor`).
+    pos: u64,
+    /// Bytes `[0, front.len())` — the front GPT window.
+    front: Vec<u8>,
+    /// Byte offset where the back GPT window begins.
+    back_start: u64,
+    /// Bytes `[back_start, len)` — the back GPT window.
+    back: Vec<u8>,
+}
+
+impl GptScratch {
+    fn new(len: u64, front_len: u64, back_start: u64) -> Self {
+        debug_assert!(front_len <= back_start && back_start <= len);
+        Self {
+            len,
+            pos: 0,
+            front: vec![0u8; front_len as usize],
+            back_start,
+            back: vec![0u8; (len - back_start) as usize],
+        }
+    }
+}
+
+impl Seek for GptScratch {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        let target: i128 = match from {
+            SeekFrom::Start(o) => o as i128,
+            SeekFrom::End(o) => self.len as i128 + o as i128,
+            SeekFrom::Current(o) => self.pos as i128 + o as i128,
+        };
+        if target < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid seek to a negative position",
+            ));
+        }
+        self.pos = target as u64;
+        Ok(self.pos)
+    }
+}
+
+impl Write for GptScratch {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let start = self.pos;
+        let end = start.saturating_add(buf.len() as u64);
+        let front_len = self.front.len() as u64;
+        // Front-window overlap.
+        if start < front_len {
+            let fe = end.min(front_len);
+            let cnt = (fe - start) as usize;
+            self.front[start as usize..fe as usize].copy_from_slice(&buf[..cnt]);
+        }
+        // Back-window overlap.
+        if end > self.back_start {
+            let bs = start.max(self.back_start);
+            let be = end.min(self.len);
+            if bs < be {
+                let src = (bs - start) as usize;
+                let dst = (bs - self.back_start) as usize;
+                let cnt = (be - bs) as usize;
+                self.back[dst..dst + cnt].copy_from_slice(&buf[src..src + cnt]);
+            }
+        }
+        // Middle (partition-data) and past-end writes are intentionally dropped.
+        self.pos = end;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Read for GptScratch {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let start = self.pos;
+        if start >= self.len {
+            return Ok(0);
+        }
+        let end = start.saturating_add(buf.len() as u64).min(self.len);
+        let n = (end - start) as usize;
+        let out = &mut buf[..n];
+        out.fill(0);
+        let front_len = self.front.len() as u64;
+        if start < front_len {
+            let fe = end.min(front_len);
+            let cnt = (fe - start) as usize;
+            out[..cnt].copy_from_slice(&self.front[start as usize..fe as usize]);
+        }
+        if end > self.back_start {
+            let bs = start.max(self.back_start);
+            let dst = (bs - start) as usize;
+            let cnt = (end - bs) as usize;
+            let src = (bs - self.back_start) as usize;
+            out[dst..dst + cnt].copy_from_slice(&self.back[src..src + cnt]);
+        }
+        self.pos = end;
+        Ok(n)
+    }
 }
 
 /// Synthesize a standard GPT layout over `partitions` with byte sizes
@@ -165,36 +284,37 @@ pub fn build(
         .checked_mul(SECTOR_SIZE)
         .ok_or_else(|| anyhow!("Pitfall C: total byte count would exceed u64::MAX"))?;
 
-    // total_sectors must fit in usize for the in-RAM Cursor allocation.
-    let total_size_usize = usize::try_from(total_size_bytes)
-        .map_err(|_| anyhow!("Pitfall C: total byte count {total_size_bytes} exceeds usize"))?;
-
     // ---- 3. Use the caller-supplied disk GUID verbatim (D-run-AMEND) -------
     let disk_guid_uuid = uuid::Uuid::from_bytes(disk_guid);
 
-    // ---- 4. Build the in-RAM Cursor + protective MBR + GPT layout ----------
-    let cursor = Cursor::new(vec![0u8; total_size_usize]);
+    // ---- 4. Synthesize the GPT into a SPARSE scratch device ----------------
+    // GptScratch presents the full `total_size_bytes` length (so the gpt crate
+    // can place the backup header at the last LBA) while allocating only the
+    // two ~17 KiB GPT windows — no full-disk buffer. Cost is O(GPT), not
+    // O(disk): a multi-hundred-MB carapace no longer inflates VM launch.
+    let front_len = FRONT_RESERVED_LBAS
+        .checked_mul(SECTOR_SIZE)
+        .ok_or_else(|| anyhow!("Pitfall C: front GPT region size overflow"))?;
+    let backup_start_bytes = total_sectors
+        .checked_sub(BACK_RESERVED_LBAS)
+        .and_then(|s| s.checked_mul(SECTOR_SIZE))
+        .ok_or_else(|| anyhow!("Pitfall C: backup GPT region offset overflow"))?;
+    let mut scratch = GptScratch::new(total_size_bytes, front_len, backup_start_bytes);
 
-    // The protective MBR's `with_lb_size` argument is the disk size in LBAs
-    // minus 1 (clamped to 0xFFFF_FFFF for disks >= 2TiB, per UEFI spec).
+    // Protective MBR at LBA 0. `with_lb_size` is disk size in LBAs minus 1
+    // (clamped to 0xFFFF_FFFF for disks >= 2TiB, per UEFI spec).
     let mbr_lb_size = u32::try_from(total_sectors - 1).unwrap_or(0xFFFF_FFFF);
-    let mbr = gpt::mbr::ProtectiveMBR::with_lb_size(mbr_lb_size);
-    let mut cursor = {
-        let mut c = cursor;
-        mbr.overwrite_lba0(&mut c)
-            .map_err(|e| anyhow!("failed to write protective MBR: {e}"))?;
-        c
-    };
-    // Reset the cursor position so `create_from_device` starts from offset 0
-    // (it seeks internally, but be defensive against future gpt-crate changes).
-    cursor
+    gpt::mbr::ProtectiveMBR::with_lb_size(mbr_lb_size)
+        .overwrite_lba0(&mut scratch)
+        .map_err(|e| anyhow!("failed to write protective MBR: {e}"))?;
+    scratch
         .seek(SeekFrom::Start(0))
-        .context("failed to rewind cursor before create_from_device")?;
+        .context("failed to rewind scratch before create_from_device")?;
 
     let mut gdisk = gpt::GptConfig::default()
         .writable(true)
         .logical_block_size(gpt::disk::LogicalBlockSize::Lb512)
-        .create_from_device(cursor, Some(disk_guid_uuid))
+        .create_from_device(scratch, Some(disk_guid_uuid))
         .map_err(|e| anyhow!("failed to create_from_device: {e}"))?;
 
     // ---- 5. Populate partition entries via update_partitions (Pitfall B) ---
@@ -230,10 +350,13 @@ pub fn build(
         .write()
         .map_err(|e| anyhow!("gdisk.write failed: {e}"))?;
 
-    // ---- 6. Pitfall C defense-in-depth: re-parse the synthesized bytes -----
+    // ---- 6. Pitfall C defense-in-depth: re-parse the synthesized GPT. The
+    // parser reads only the GPT structures (headers, entry arrays, and the
+    // backup header at the last LBA) — all served from the scratch windows, so
+    // this stays O(GPT).
     written
         .seek(SeekFrom::Start(0))
-        .context("failed to rewind cursor for re-parse")?;
+        .context("failed to rewind scratch for re-parse")?;
     let parsed = gpt::GptConfig::default()
         .writable(false)
         .logical_block_size(gpt::disk::LogicalBlockSize::Lb512)
@@ -247,27 +370,17 @@ pub fn build(
         );
     }
 
-    // ---- 7. Slice the in-memory disk into primary / backup GPT regions -----
-    written
-        .seek(SeekFrom::Start(0))
-        .context("failed to rewind cursor for primary slice")?;
-    let mut full = vec![0u8; total_size_usize];
-    written
-        .read_exact(&mut full)
-        .context("failed to read synthesized disk bytes")?;
-
-    let primary_end_usize = (FRONT_RESERVED_LBAS as usize) * (SECTOR_SIZE as usize);
-    let backup_start_usize =
-        ((total_sectors - BACK_RESERVED_LBAS) as usize) * (SECTOR_SIZE as usize);
-
-    let primary_gpt_bytes = Arc::new(full[..primary_end_usize].to_vec());
-    let backup_gpt_bytes = Arc::new(full[backup_start_usize..].to_vec());
+    // ---- 7. Hand out the two GPT windows directly — no full-disk read ------
+    // The scratch device already holds exactly the primary/backup windows; move
+    // them out instead of reading back a disk-sized buffer.
+    let primary_gpt_bytes = Arc::new(std::mem::take(&mut written.front));
+    let backup_gpt_bytes = Arc::new(std::mem::take(&mut written.back));
 
     Ok(SynthResult {
         primary_gpt_bytes,
         backup_gpt_bytes,
-        primary_gpt_end_bytes: primary_end_usize as u64,
-        backup_gpt_start_bytes: backup_start_usize as u64,
+        primary_gpt_end_bytes: front_len,
+        backup_gpt_start_bytes: backup_start_bytes,
         partition_lba_starts,
         partition_lba_ends,
         total_size_bytes,
@@ -282,6 +395,7 @@ pub fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::path::PathBuf;
 
     fn spec(label: &str, partuuid: u128, typeguid: u128, attrs: u64) -> PartitionSpec {
