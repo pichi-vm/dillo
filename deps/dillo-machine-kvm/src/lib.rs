@@ -6,6 +6,8 @@
 #[cfg(target_arch = "x86_64")]
 mod cpuid_x86;
 mod hypervisor;
+#[cfg(target_arch = "x86_64")]
+mod intc_x86;
 mod irq;
 mod memory;
 mod msi;
@@ -31,10 +33,10 @@ mod imp {
     use std::time::Duration;
 
     #[cfg(target_arch = "aarch64")]
-    use dillo_devtree::{
-        FromDevTree,
-        devtree::{NodeView, OwnedTree, PropertyView, Tree},
-    };
+    use dillo_devtree::FromDevTree;
+    #[cfg(target_arch = "aarch64")]
+    use dillo_devtree::devtree::{NodeView, PropertyView};
+    use dillo_devtree::devtree::{OwnedTree, Tree};
     use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
     use dillo_mmio::{
         Attach, InterruptError, InterruptLine, MmioAttachment, MmioBus, MmioDevice,
@@ -443,7 +445,6 @@ mod imp {
 
     #[derive(Debug, Clone)]
     struct Config {
-        #[cfg(target_arch = "aarch64")]
         dtb: Vec<u8>,
     }
 
@@ -452,15 +453,17 @@ mod imp {
 
         fn try_from(config: Config) -> Result<Self, Self::Error> {
             let exit_requester = VcpuExitRequester::new();
+            // The devicetree is the machine contract: the interrupt-controller
+            // substrate is constructed from what it declares, on both arches.
+            let parsed: Tree<'_> = Tree::parse(&config.dtb).map_err(Error::ParseDtb)?;
+            let mut tree = OwnedTree::materialize(&parsed);
             #[cfg(target_arch = "x86_64")]
             let inner = {
-                let _ = config;
-                crate::hypervisor::Vm::new()?
+                let intc = crate::intc_x86::X86Intc::from_tree(&mut tree)?;
+                crate::hypervisor::Vm::new_with_intc(intc)?
             };
             #[cfg(target_arch = "aarch64")]
             let inner = {
-                let parsed: Tree<'_> = Tree::parse(&config.dtb).map_err(Error::ParseDtb)?;
-                let mut tree = OwnedTree::materialize(&parsed);
                 let substrate = Aarch64Substrate::from_devtree(&mut tree)?
                     .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
                 crate::hypervisor::Vm::new_with_gic(&substrate)?
@@ -609,12 +612,7 @@ mod imp {
         type Memory = Memory;
 
         fn from_launch_config(config: LaunchConfig) -> Result<Self, Self::Error> {
-            #[cfg(target_arch = "x86_64")]
-            let _ = config;
-            Self::try_from(Config {
-                #[cfg(target_arch = "aarch64")]
-                dtb: config.dtb,
-            })
+            Self::try_from(Config { dtb: config.dtb })
         }
 
         fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Self::Error> {
@@ -1078,6 +1076,161 @@ mod imp {
     impl AsRawFd for Vcpu {
         fn as_raw_fd(&self) -> RawFd {
             self.inner.as_raw_fd()
+        }
+    }
+
+    // Declaration-to-realization tests for the x86 interrupt-controller
+    // contract. These drive the real `Machine::from_launch_config` path against
+    // `/dev/kvm` and then read back from KVM what was actually constructed, so
+    // a backend that accepted the declaration without realizing it fails here.
+    #[cfg(all(test, target_arch = "x86_64"))]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    mod intc_realization_tests {
+        use dillo_machine::Machine as _;
+
+        use super::*;
+        use crate::intc_x86::{IOAPIC_FIXED_BASE, tests::tree};
+
+        const LAPIC_STD: u64 = 0xFEE0_0000;
+
+        /// Build a VM from a tree declaring the given controller windows.
+        fn vm_from(
+            lapic_base: u64,
+            lapic_size: u64,
+            ioapic_base: u64,
+            ioapic_size: u64,
+        ) -> Result<Vm, Error> {
+            let dtb = tree(lapic_base, lapic_size, ioapic_base, ioapic_size)
+                .encode()
+                .expect("encode declaration");
+            Vm::from_launch_config(LaunchConfig {
+                dtb,
+                vcpus: 1,
+                min_addr_space_bits: 32,
+            })
+        }
+
+        /// The base a freshly created vCPU's LAPIC actually decodes at.
+        fn realized_lapic_base(vm: &Vm, idx: u32) -> u64 {
+            vm.create_vcpu_inner(idx, "x86-64-v1")
+                .expect("create vCPU")
+                .inner
+                .realized_lapic_base()
+                .expect("read back IA32_APIC_BASE")
+        }
+
+        #[test]
+        fn standard_layout_realizes_both_controllers() {
+            let vm = vm_from(LAPIC_STD, 0x1000, IOAPIC_FIXED_BASE, 0x1000)
+                .expect("standard layout boots");
+            assert_eq!(realized_lapic_base(&vm, 0), LAPIC_STD);
+            assert_eq!(
+                vm.inner.realized_ioapic_base().expect("read back IOAPIC"),
+                IOAPIC_FIXED_BASE
+            );
+        }
+
+        #[test]
+        fn declared_lapic_base_moves_the_realized_lapic() {
+            // Vary the LAPIC alone: the IOAPIC stays where the contract (and
+            // KVM) put it, so a pass here is the LAPIC declaration reaching the
+            // backend and nothing else.
+            for base in [0x1100_0000u64, 0x4000_0000, 0xF000_0000] {
+                let vm = vm_from(base, 0x1000, IOAPIC_FIXED_BASE, 0x1000)
+                    .expect("relocated LAPIC realizable");
+                assert_eq!(
+                    realized_lapic_base(&vm, 0),
+                    base,
+                    "LAPIC declared at {base:#x} was not realized there"
+                );
+            }
+        }
+
+        #[test]
+        fn every_vcpu_gets_the_declared_lapic_base() {
+            // IA32_APIC_BASE is per-vCPU, so a backend that programmed only the
+            // boot vCPU would leave the others on KVM's default.
+            let vm =
+                vm_from(0x1100_0000, 0x1000, IOAPIC_FIXED_BASE, 0x1000).expect("VM constructed");
+            for idx in 0..4 {
+                assert_eq!(realized_lapic_base(&vm, idx), 0x1100_0000, "vCPU {idx}");
+            }
+        }
+
+        #[test]
+        fn declared_lapic_window_size_does_not_move_the_lapic() {
+            // Size is varied independently of base: KVM decodes a fixed 4 KiB
+            // span, and a larger declared window must not shift where it lands.
+            for size in [0x1000u64, 0x2000, 0x10_0000] {
+                let vm = vm_from(0x1100_0000, size, IOAPIC_FIXED_BASE, 0x1000)
+                    .expect("LAPIC window realizable");
+                assert_eq!(realized_lapic_base(&vm, 0), 0x1100_0000, "size {size:#x}");
+            }
+        }
+
+        #[test]
+        fn declared_ioapic_window_size_does_not_move_the_ioapic() {
+            for size in [0x100u64, 0x1000] {
+                let vm = vm_from(LAPIC_STD, 0x1000, IOAPIC_FIXED_BASE, size)
+                    .expect("IOAPIC window realizable");
+                assert_eq!(
+                    vm.inner.realized_ioapic_base().expect("read back IOAPIC"),
+                    IOAPIC_FIXED_BASE,
+                    "size {size:#x}"
+                );
+            }
+        }
+
+        #[test]
+        fn unrealizable_lapic_is_refused_before_any_vcpu() {
+            // Construction fails, so no vCPU is ever created — the declaration
+            // is refused rather than quietly replaced by KVM's default.
+            let err = vm_from(0x1100_0800, 0x1000, IOAPIC_FIXED_BASE, 0x1000)
+                .expect_err("misaligned LAPIC refused");
+            assert!(
+                matches!(err, Error::UnsupportedLapicBase { .. }),
+                "unexpected error: {err}"
+            );
+
+            let err = vm_from(LAPIC_STD, 0x800, IOAPIC_FIXED_BASE, 0x1000)
+                .expect_err("short LAPIC window refused");
+            assert!(
+                matches!(err, Error::UnsupportedLapicSize { .. }),
+                "unexpected error: {err}"
+            );
+        }
+
+        #[test]
+        fn unrealizable_ioapic_is_refused_before_any_vcpu() {
+            let err = vm_from(LAPIC_STD, 0x1000, 0x1200_0000, 0x1000)
+                .expect_err("relocated IOAPIC refused");
+            assert!(
+                matches!(err, Error::UnsupportedIoapicBase { .. }),
+                "unexpected error: {err}"
+            );
+
+            let err = vm_from(LAPIC_STD, 0x1000, IOAPIC_FIXED_BASE, 0x80)
+                .expect_err("short IOAPIC window refused");
+            assert!(
+                matches!(err, Error::UnsupportedIoapicSize { .. }),
+                "unexpected error: {err}"
+            );
+        }
+
+        #[test]
+        fn missing_controller_declaration_is_refused() {
+            let root = dillo_devtree::devtree::OwnedNode::new("");
+            let dtb = OwnedTree::new(root).encode().expect("encode empty tree");
+            let err = Vm::from_launch_config(LaunchConfig {
+                dtb,
+                vcpus: 1,
+                min_addr_space_bits: 32,
+            })
+            .expect_err("undeclared controllers refused");
+            assert!(
+                matches!(err, Error::MissingSubstrate("/lapic")),
+                "unexpected error: {err}"
+            );
         }
     }
 }
