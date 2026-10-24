@@ -52,6 +52,33 @@ pub enum Error {
     #[error("create IRQ chip: {0}")]
     CreateIrqChip(std::io::Error),
 
+    #[error("set vCPU {0} LAPIC base: {1}")]
+    SetLapicBase(u32, std::io::Error),
+
+    #[error(
+        "declared LAPIC at {base:#x} cannot be realized by KVM ({reason}); \
+         the contract must declare a base KVM can program"
+    )]
+    UnsupportedLapicBase { base: u64, reason: &'static str },
+
+    #[error(
+        "declared LAPIC window of {size:#x} bytes is smaller than the \
+         {decoded:#x} bytes KVM decodes at the LAPIC base"
+    )]
+    UnsupportedLapicSize { size: u64, decoded: u64 },
+
+    #[error(
+        "declared IOAPIC at {base:#x} cannot be realized: KVM's in-kernel \
+         IOAPIC decodes only {default:#x} and offers no interface to move it"
+    )]
+    UnsupportedIoapicBase { base: u64, default: u64 },
+
+    #[error(
+        "declared IOAPIC window of {size:#x} bytes is smaller than the \
+         {decoded:#x} bytes KVM decodes at the IOAPIC base"
+    )]
+    UnsupportedIoapicSize { size: u64, decoded: u64 },
+
     #[error("configure IRQ routing: {0}")]
     Irq(String),
 
@@ -61,15 +88,12 @@ pub enum Error {
     #[error("configure VGIC: {0}")]
     ConfigureVgic(std::io::Error),
 
-    #[cfg(target_arch = "aarch64")]
     #[error("parse DTB for KVM platform substrate: {0:?}")]
     ParseDtb(dillo_devtree::devtree::Error),
 
-    #[cfg(target_arch = "aarch64")]
     #[error("DTB missing KVM platform substrate node `{0}`")]
     MissingSubstrate(&'static str),
 
-    #[cfg(target_arch = "aarch64")]
     #[error("DTB property `{prop}` on `{node}` is malformed ({reason})")]
     BadSubstrateProperty {
         node: &'static str,
@@ -132,6 +156,10 @@ struct VmInner {
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     kvm: Kvm,
     vm: std::sync::Arc<VmFd>,
+    /// The declared controller model this VM realizes. The LAPIC base is
+    /// per-vCPU, so it must outlive construction to reach every vCPU.
+    #[cfg(target_arch = "x86_64")]
+    intc: crate::intc_x86::X86Intc,
     #[cfg(target_arch = "aarch64")]
     vgic: Option<DeviceFd>,
     #[cfg(target_arch = "aarch64")]
@@ -147,10 +175,16 @@ impl Vm {
         std::sync::Arc::clone(&self.inner.vm)
     }
 
-    /// Open `/dev/kvm`, create a VM, and (on x86_64) set up the in-kernel
-    /// LAPIC + I/O APIC.
+    /// Open `/dev/kvm`, create a VM, and set up the in-kernel LAPIC + I/O APIC
+    /// realizing the interrupt-controller model `intc` declares.
+    ///
+    /// `intc` has already been checked against what KVM can configure, so the
+    /// IOAPIC lands where the contract declares it by construction. The LAPIC
+    /// base is per-vCPU state in `IA32_APIC_BASE`; it is carried here and
+    /// programmed by [`Vm::create_vcpu`] as each vCPU appears, before any of
+    /// them runs.
     #[cfg(target_arch = "x86_64")]
-    pub(crate) fn new() -> Result<Self, Error> {
+    pub(crate) fn new_with_intc(intc: crate::intc_x86::X86Intc) -> Result<Self, Error> {
         let kvm = Kvm::new().map_err(io).map_err(Error::OpenKvm)?;
         let api = kvm.get_api_version();
         if api != 12 {
@@ -158,31 +192,25 @@ impl Vm {
         }
         let vm = kvm.create_vm().map_err(io).map_err(Error::CreateVm)?;
 
-        #[cfg(target_arch = "x86_64")]
-        {
-            // In-kernel IRQchip (LAPIC + I/O APIC + PIC). Must be created
-            // before any vCPU.
-            vm.create_irq_chip()
-                .map_err(io)
-                .map_err(Error::CreateIrqChip)?;
-            // KVM_SET_TSS_ADDR is required by Intel VMX (Intel CPUs that
-            // don't support unrestricted guest). AMD/SVM does not need it.
-            // Place at a low GPA below arma's first loaded section
-            // (which on x86 starts at 0x3EE00000) to avoid any memslot
-            // collision. AMD-SVM accepts and ignores the value.
-            vm.set_tss_address(0x3000_0000)
-                .map_err(io)
-                .map_err(Error::SetTss)?;
-        }
+        // In-kernel IRQchip (LAPIC + I/O APIC + PIC). Must be created
+        // before any vCPU.
+        vm.create_irq_chip()
+            .map_err(io)
+            .map_err(Error::CreateIrqChip)?;
+        // KVM_SET_TSS_ADDR is required by Intel VMX (Intel CPUs that
+        // don't support unrestricted guest). AMD/SVM does not need it.
+        // Place at a low GPA below arma's first loaded section
+        // (which on x86 starts at 0x3EE00000) to avoid any memslot
+        // collision. AMD-SVM accepts and ignores the value.
+        vm.set_tss_address(0x3000_0000)
+            .map_err(io)
+            .map_err(Error::SetTss)?;
 
         Ok(Self {
             inner: Arc::new(VmInner {
                 kvm,
                 vm: std::sync::Arc::new(vm),
-                #[cfg(target_arch = "aarch64")]
-                vgic: None,
-                #[cfg(target_arch = "aarch64")]
-                vgic_initialized: AtomicBool::new(false),
+                intc,
             }),
         })
     }
@@ -288,6 +316,13 @@ impl Vm {
             }
             fd.set_cpuid2(&supported)
                 .map_err(|e| Error::CreateVcpu(idx, io(e)))?;
+
+            // Point this vCPU's in-kernel LAPIC at the declared base. KVM
+            // resets `IA32_APIC_BASE` to its own default when the vCPU is
+            // created, so the contract's base is applied here — before the
+            // vCPU can run, and before any PMI boot state is written, which
+            // `set_x86_64_state` layers on top of this same sregs block.
+            set_lapic_base(&fd, idx, self.inner.intc.lapic_base())?;
         }
 
         #[cfg(not(target_arch = "x86_64"))]
@@ -532,6 +567,76 @@ impl AsRawFd for Vcpu {
     fn as_raw_fd(&self) -> std::os::fd::RawFd {
         self.fd.as_raw_fd()
     }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+impl Vcpu {
+    /// The base this vCPU's in-kernel LAPIC actually decodes at, read back
+    /// from KVM. Lets a test check realized hardware, not intent.
+    pub(crate) fn realized_lapic_base(&self) -> Result<u64, Error> {
+        let sregs = self
+            .fd
+            .get_sregs()
+            .map_err(|e| Error::GetSregs(self.idx, io(e)))?;
+        Ok(sregs.apic_base & (0xF_FFFF << 12))
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+impl Vm {
+    /// The base KVM's in-kernel IOAPIC reports for this VM, read back via
+    /// `KVM_GET_IRQCHIP`.
+    pub(crate) fn realized_ioapic_base(&self) -> Result<u64, Error> {
+        let mut chip = kvm_bindings::kvm_irqchip {
+            chip_id: kvm_bindings::KVM_IRQCHIP_IOAPIC,
+            ..Default::default()
+        };
+        self.inner
+            .vm
+            .get_irqchip(&mut chip)
+            .map_err(io)
+            .map_err(Error::CreateIrqChip)?;
+        // SAFETY: `chip_id` selects the IOAPIC variant of the union, so the
+        // kernel filled `ioapic`.
+        #[allow(unsafe_code)]
+        Ok(unsafe { chip.chip.ioapic }.base_address)
+    }
+}
+
+/// Move `fd`'s in-kernel LAPIC to `base` via `IA32_APIC_BASE`, preserving the
+/// enable and BSP bits KVM set at vCPU reset.
+///
+/// `kvm_apic_set_base` re-points the APIC's MMIO decode at the new address, so
+/// this is what actually realizes a relocated LAPIC declaration. The base is
+/// validated before VM construction (see [`crate::intc_x86`]), so a value KVM
+/// would truncate never reaches here.
+#[cfg(target_arch = "x86_64")]
+fn set_lapic_base(fd: &VcpuFd, idx: u32, base: u64) -> Result<(), Error> {
+    /// `IA32_APIC_BASE` base field — bits 12-31 (`MSR_IA32_APICBASE_BASE`).
+    const APIC_BASE_MASK: u64 = 0xF_FFFF << 12;
+
+    let mut sregs = fd.get_sregs().map_err(|e| Error::GetSregs(idx, io(e)))?;
+    let wanted = (sregs.apic_base & !APIC_BASE_MASK) | (base & APIC_BASE_MASK);
+    if sregs.apic_base == wanted {
+        return Ok(());
+    }
+    sregs.apic_base = wanted;
+    fd.set_sregs(&sregs)
+        .map_err(|e| Error::SetLapicBase(idx, io(e)))?;
+
+    // KVM silently keeps the old base if it rejects the mode transition, so
+    // confirm the controller actually moved rather than assume it did.
+    let applied = fd.get_sregs().map_err(|e| Error::GetSregs(idx, io(e)))?;
+    if applied.apic_base & APIC_BASE_MASK != base & APIC_BASE_MASK {
+        return Err(Error::SetLapicBase(
+            idx,
+            std::io::Error::other(format!(
+                "KVM held IA32_APIC_BASE at {:#x} instead of the declared {base:#x}",
+                applied.apic_base & APIC_BASE_MASK
+            )),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_arch = "aarch64")]
