@@ -80,6 +80,8 @@ that set `ports=` without an explicit endpoint.
 | `rx`   | no | Host→guest data path (`pipe:N`). Omit ⇒ that direction **closed**. |
 | `tx`   | no | Guest→host data path (`pipe:N`). Omit ⇒ that direction **closed**. |
 
+**Validation:** each named port must set at least one of `rx` / `tx`; reject when both are omitted.
+
 Names must be unique within the console's `ports` list. Uniqueness vs port 0's
 unnamed identity is automatic (port 0 has no `name` field).
 
@@ -93,8 +95,11 @@ Align with virtio-console device TX/RX, not "operator send/receive":
 | `rx=` | Device receive  | **host → guest** |
 
 Omitting `rx` or `tx` means that direction is **closed** (uni-directional port).
-Omission is **not** a silent default to stdio. A port with both omitted is
-name-only (control-plane advertised, no data workers).
+Omission is **not** a silent default to stdio. Uni-directional ports are valid
+(e.g. build CBOR with `rx=pipe:…` only).
+
+**Reject** a named port when **both** `rx` and `tx` are omitted: at least one
+direction is required. There is no name-only / control-plane-only port.
 
 ## `pipe:N` host mapping
 
@@ -146,6 +151,8 @@ Do **not** accept or document:
 - Follow-on `--console port,…` after the primary `--console`
 - Packed loose `port=` without nested `[[…]]` list syntax
 - Moving console (or its ports) into `devices[]`
+
+- Named port with both `rx` and `tx` omitted (name-only / no directions)
 
 ## Non-goals (this design)
 

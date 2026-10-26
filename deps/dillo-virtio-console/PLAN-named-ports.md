@@ -16,7 +16,7 @@ This document settles divergences among the three drafts. Where drafts agree wit
 | # | Topic | Consensus |
 |---|--------|-----------|
 | S1 | `ConsoleSpec.endpoint` type | **`Option<String>`**. Empty/omitted `ports` ⇒ default `stdio` (incl. `--console bus=mmio`). Non-empty `ports` ⇒ endpoint key **must be present** and equal `stdio`. Bare `--console stdio` keeps working via the existing argh shim. |
-| S2 | Both `rx` and `tx` omitted | **Legal** (name-only / control-plane-only port). Matches design. Not a silent stdio fallback. |
+| S2 | Both `rx` and `tx` omitted | **Reject** at `resolve()` — at least one of `rx` / `tx` required. Uni-directional (exactly one set) remains OK; omit still means that direction closed. No name-only ports. |
 | S3 | Duplicate `pipe:N` across ports/directions | **Reject** at `resolve()` (one N → one direction on one port). |
 | S4 | Queue map (MULTIPORT) | **0/1** port0 RX/TX; **2/3** control RX/TX; named port *i* (id = i, i≥1) at **2i+2 / 2i+3**. `max_nr_ports = 1+N`. |
 | S5 | Port 0 under MULTIPORT | Port 0 stays **unnamed** (no `PORT_NAME`). Once MULTIPORT is negotiated, Linux only creates ports from control messages — so port 0 **must** still get `PORT_ADD(id=0)` + `CONSOLE_PORT(id=0,1)` + `PORT_OPEN(id=0)` (minus `PORT_NAME`). Named ports: `PORT_ADD` + `PORT_NAME` + `PORT_OPEN` (+ READY as required). |
@@ -60,7 +60,7 @@ This document settles divergences among the three drafts. Where drafts agree wit
 - Constructor takes resolved named ports (+ adopted ends or adopt inside builder).
 - Features: VERSION_1 only when no ports; add `VIRTIO_CONSOLE_F_MULTIPORT` when non-empty.
 - Queues/config per S4–S5; control worker + state machine per S16.
-- Port-0 workers = today’s stdio path; named-port workers only for open directions; name-only ⇒ no data threads (S2).
+- Port-0 workers = today’s stdio path; named-port workers only for open directions (closed half ⇒ no worker). Both-omitted ports never reach the device (rejected in resolve, S2).
 - Aggregate shutdown/join (S12).
 
 ### WP4 — `main` / runner
@@ -116,3 +116,12 @@ External schema (`ports`, `name`, `rx`, `tx`, `pipe:N`, polarity, DT-006) is loc
 - **Codex:** `ACK_CONSENSUS` (2026-10-26)
 - **Claude Opus:** `DISSENT` then accepted via incorporation of five impl fixes into S5/S16/S17/S18 (port-0 `PORT_ADD` under MULTIPORT; DEVICE_READY floor; NUL `PORT_NAME`; EOF/EPIPE teardown; O_NONBLOCK on dup'd owned FD only)
 - **Dillo:** accepts this document as the consensus plan for step 3
+
+
+---
+
+## Amendment (Nathaniel, Oct 26)
+
+ConsolePortSpec validation: reject when both `rx` and `tx` are omitted; at least one
+direction required. Uni-directional ports remain valid. Design + this plan updated;
+implementers must enforce in `dillo_config::resolve` (not only docs).
