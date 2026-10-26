@@ -11,6 +11,8 @@ pub use devtree;
 
 pub mod platform;
 
+pub use platform::{CompatMismatch, NodeExt, OwnedNodeExt, PropExt};
+
 /// Construct one object by consuming its DTB-owned facts from a mutable tree.
 pub trait FromDevTree: Sized {
     type Error;

@@ -32,11 +32,9 @@ mod imp {
     use std::thread;
     use std::time::Duration;
 
-    #[cfg(target_arch = "aarch64")]
-    use dillo_devtree::FromDevTree;
-    #[cfg(target_arch = "aarch64")]
-    use dillo_devtree::devtree::{NodeView, PropertyView};
     use dillo_devtree::devtree::{OwnedTree, Tree};
+    #[cfg(target_arch = "aarch64")]
+    use dillo_devtree::{CompatMismatch, FromDevTree, NodeExt, OwnedNodeExt, PropExt};
     use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
     use dillo_mmio::{
         Attach, InterruptError, InterruptLine, MmioAttachment, MmioBus, MmioDevice,
@@ -492,14 +490,25 @@ mod imp {
                 .children()
                 .find(|node| {
                     node.name().starts_with("interrupt-controller@")
-                        && compatible_contains(*node, "arm,gic-v3")
+                        && node.compatible_contains("arm,gic-v3")
                 })
                 .map(|node| node.name().to_string())
                 .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
             let mut intc = root
                 .remove_child(&intc_name)
                 .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
-            consume_compatible(&mut intc, "/interrupt-controller", "arm,gic-v3")?;
+            intc.take_compatible("arm,gic-v3").map_err(|e| match e {
+                CompatMismatch::Missing => Error::BadSubstrateProperty {
+                    node: "/interrupt-controller",
+                    prop: "compatible",
+                    reason: "missing",
+                },
+                CompatMismatch::Unsupported => Error::BadSubstrateProperty {
+                    node: "/interrupt-controller",
+                    prop: "compatible",
+                    reason: "unsupported compatible",
+                },
+            })?;
             let reg = intc
                 .remove_property("reg")
                 .ok_or(Error::BadSubstrateProperty {
@@ -507,12 +516,12 @@ mod imp {
                     prop: "reg",
                     reason: "missing",
                 })?;
-            let (dist_base, _) = reg_pair(&reg, 0).ok_or(Error::BadSubstrateProperty {
+            let (dist_base, _) = (&reg).reg_pair(0).ok_or(Error::BadSubstrateProperty {
                 node: "/interrupt-controller",
                 prop: "reg",
                 reason: "missing GICD pair",
             })?;
-            let (redist_base, _) = reg_pair(&reg, 1).ok_or(Error::BadSubstrateProperty {
+            let (redist_base, _) = (&reg).reg_pair(1).ok_or(Error::BadSubstrateProperty {
                 node: "/interrupt-controller",
                 prop: "reg",
                 reason: "missing GICR pair",
@@ -525,14 +534,26 @@ mod imp {
                 .children()
                 .find(|node| {
                     node.name().starts_with("msi-controller@")
-                        && compatible_contains(*node, "arm,gic-v2m-frame")
+                        && node.compatible_contains("arm,gic-v2m-frame")
                 })
                 .map(|node| node.name().to_string())
                 .ok_or(Error::MissingSubstrate("/msi-controller@*"))?;
             let mut v2m = root
                 .remove_child(&v2m_name)
                 .ok_or(Error::MissingSubstrate("/msi-controller@*"))?;
-            consume_compatible(&mut v2m, "/msi-controller", "arm,gic-v2m-frame")?;
+            v2m.take_compatible("arm,gic-v2m-frame")
+                .map_err(|e| match e {
+                    CompatMismatch::Missing => Error::BadSubstrateProperty {
+                        node: "/msi-controller",
+                        prop: "compatible",
+                        reason: "missing",
+                    },
+                    CompatMismatch::Unsupported => Error::BadSubstrateProperty {
+                        node: "/msi-controller",
+                        prop: "compatible",
+                        reason: "unsupported compatible",
+                    },
+                })?;
             let spi_count = v2m
                 .remove_property("arm,msi-num-spis")
                 .and_then(|prop| prop.as_u32())
@@ -552,57 +573,6 @@ mod imp {
                 spi_count,
             }))
         }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    fn compatible_contains<N: NodeView>(node: N, value: &str) -> bool {
-        let Some(prop) = node.property("compatible") else {
-            return false;
-        };
-        stringlist_contains(prop.as_ref(), value)
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    fn consume_compatible(
-        node: &mut dillo_devtree::devtree::OwnedNode,
-        node_name: &'static str,
-        value: &str,
-    ) -> Result<(), Error> {
-        let prop = node
-            .remove_property("compatible")
-            .ok_or(Error::BadSubstrateProperty {
-                node: node_name,
-                prop: "compatible",
-                reason: "missing",
-            })?;
-        if stringlist_contains(prop.as_ref(), value) {
-            Ok(())
-        } else {
-            Err(Error::BadSubstrateProperty {
-                node: node_name,
-                prop: "compatible",
-                reason: "unsupported compatible",
-            })
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    fn stringlist_contains(bytes: &[u8], value: &str) -> bool {
-        bytes
-            .split(|byte| *byte == 0)
-            .filter(|item| !item.is_empty())
-            .any(|item| item == value.as_bytes())
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    fn reg_pair<P: PropertyView>(prop: P, pair_index: usize) -> Option<(u64, u64)> {
-        let cells: Vec<u32> = prop.as_u32s()?.collect();
-        let base = cells.get(pair_index * 4..pair_index * 4 + 2)?;
-        let size = cells.get(pair_index * 4 + 2..pair_index * 4 + 4)?;
-        Some((
-            (u64::from(base[0]) << 32) | u64::from(base[1]),
-            (u64::from(size[0]) << 32) | u64::from(size[1]),
-        ))
     }
 
     impl dillo_machine::Machine for Vm {

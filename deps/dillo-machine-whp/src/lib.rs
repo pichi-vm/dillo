@@ -25,8 +25,8 @@ mod imp {
     use std::sync::{Arc, Mutex};
 
     use dillo_devtree::{
-        FromDevTree,
-        devtree::{NodeView, OwnedTree, PropertyView, Tree},
+        CompatMismatch, FromDevTree, NodeExt, OwnedNodeExt, PropExt,
+        devtree::{OwnedTree, Tree},
     };
     use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
     use dillo_mmio::{
@@ -240,7 +240,7 @@ mod imp {
                 .children()
                 .find(|node| {
                     node.name().starts_with("interrupt-controller@")
-                        && compatible_contains(*node, "intel,ce4100-ioapic")
+                        && node.compatible_contains("intel,ce4100-ioapic")
                 })
                 .map(|node| node.name().to_string())
             else {
@@ -249,7 +249,19 @@ mod imp {
             let mut node = root
                 .remove_child(&name)
                 .ok_or(Error::MissingSubstrate("/ioapic"))?;
-            consume_compatible(&mut node, "/ioapic", "intel,ce4100-ioapic")?;
+            node.take_compatible("intel,ce4100-ioapic")
+                .map_err(|e| match e {
+                    CompatMismatch::Missing => Error::BadSubstrateProperty {
+                        node: "/ioapic",
+                        prop: "compatible",
+                        reason: "missing",
+                    },
+                    CompatMismatch::Unsupported => Error::BadSubstrateProperty {
+                        node: "/ioapic",
+                        prop: "compatible",
+                        reason: "missing expected compatible",
+                    },
+                })?;
             let reg = node
                 .remove_property("reg")
                 .ok_or(Error::BadSubstrateProperty {
@@ -257,7 +269,7 @@ mod imp {
                     prop: "reg",
                     reason: "missing",
                 })?;
-            let (base, size) = reg_pair(&reg, 0).ok_or(Error::BadSubstrateProperty {
+            let (base, size) = (&reg).reg_pair(0).ok_or(Error::BadSubstrateProperty {
                 node: "/ioapic",
                 prop: "reg",
                 reason: "missing reg pair",
@@ -291,53 +303,6 @@ mod imp {
                 ioapic: IoApic::new(MmioWindow { base, size }),
             }))
         }
-    }
-
-    fn compatible_contains(node: impl NodeView, needle: &str) -> bool {
-        let Some(prop) = node.property("compatible") else {
-            return false;
-        };
-        stringlist_contains(prop.as_ref(), needle)
-    }
-
-    fn consume_compatible(
-        node: &mut dillo_devtree::devtree::OwnedNode,
-        path: &'static str,
-        needle: &'static str,
-    ) -> Result<(), Error> {
-        let prop = node
-            .remove_property("compatible")
-            .ok_or(Error::BadSubstrateProperty {
-                node: path,
-                prop: "compatible",
-                reason: "missing",
-            })?;
-        if stringlist_contains(prop.as_ref(), needle) {
-            Ok(())
-        } else {
-            Err(Error::BadSubstrateProperty {
-                node: path,
-                prop: "compatible",
-                reason: "missing expected compatible",
-            })
-        }
-    }
-
-    fn stringlist_contains(bytes: &[u8], value: &str) -> bool {
-        bytes
-            .split(|byte| *byte == 0)
-            .filter(|item| !item.is_empty())
-            .any(|item| item == value.as_bytes())
-    }
-
-    fn reg_pair<P: PropertyView>(prop: P, pair_index: usize) -> Option<(u64, u64)> {
-        let cells = prop.as_u32s()?.collect::<Vec<_>>();
-        let base = cells.get(pair_index * 4..pair_index * 4 + 2)?;
-        let size = cells.get(pair_index * 4 + 2..pair_index * 4 + 4)?;
-        Some((
-            (u64::from(base[0]) << 32) | u64::from(base[1]),
-            (u64::from(size[0]) << 32) | u64::from(size[1]),
-        ))
     }
 
     #[derive(Debug)]
