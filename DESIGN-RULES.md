@@ -51,6 +51,8 @@ Platform UART / early serial devices remain device-tree governed when present.
 
 Do not add device-tree nodes for virtio-console or console ports.
 
+Named MULTIPORT ports (CLI/schema): see `deps/dillo-virtio-console/DESIGN-named-ports.md`.
+
 ## 2. Host and guest scope
 
 ### PLATFORM-001 — Support the three host operating systems
