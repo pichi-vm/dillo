@@ -9,6 +9,10 @@
 
 use std::sync::atomic::AtomicBool;
 
+/// x86_64 `cpu:profile` validation policy shared by KVM and WHP backends.
+#[cfg(target_arch = "x86_64")]
+pub mod cpuid_x86;
+
 /// Selected-machine launch configuration derived by dillo from PMI and DTB.
 #[derive(Debug)]
 pub struct LaunchConfig {
