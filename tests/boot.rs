@@ -1123,7 +1123,11 @@ fn boots_with_net_user() {
         l.local_addr().unwrap().port()
     };
     let tcp_echo_port = free_port();
-    let udp_echo_port = free_port();
+    // Bind the UDP echo socket to an OS-chosen UDP port. Reusing a port
+    // probed via TCP can land in a Windows UDP excluded-port range and
+    // fail with WSAEACCES (10013).
+    let udp_echo_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let udp_echo_port = udp_echo_sock.local_addr().unwrap().port();
     let fwd_host_port = free_port();
 
     // 1. Host TCP echo server (the guest dials it via the gateway).
@@ -1148,7 +1152,7 @@ fn boots_with_net_user() {
 
     // 2. Host UDP echo server.
     let udp_echo = {
-        let sock = UdpSocket::bind(("127.0.0.1", udp_echo_port)).unwrap();
+        let sock = udp_echo_sock;
         sock.set_read_timeout(Some(Duration::from_secs(30))).ok();
         std::thread::spawn(move || {
             let mut buf = [0u8; 2048];
