@@ -78,20 +78,102 @@ pub enum Device {
     Net(NetSpec),
 }
 
-/// Console placement + endpoint.
-#[derive(Debug, Clone, Deserialize)]
+/// Console placement + endpoint, plus any named MULTIPORT ports.
+///
+/// `endpoint` is optional: it defaults to `stdio` while `ports` is empty, and
+/// is **required** (and must be `stdio`) as soon as `ports` is non-empty — see
+/// `deps/dillo-virtio-console/DESIGN-named-ports.md`.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct ConsoleSpec {
-    #[serde(default = "default_console_endpoint")]
-    pub endpoint: String,
+    #[serde(default)]
+    pub endpoint: Option<String>,
     #[serde(default)]
     pub bus: Option<Bus>,
     #[serde(default)]
     pub slot: Option<u32>,
+    /// Named MULTIPORT ports **in addition to** the unnamed port 0. Non-empty
+    /// ⇒ the device negotiates `VIRTIO_CONSOLE_F_MULTIPORT`.
+    #[serde(default)]
+    pub ports: Vec<ConsolePortSpec>,
 }
 
-fn default_console_endpoint() -> String {
-    "stdio".to_string()
+/// One named virtio-console MULTIPORT port.
+///
+/// Polarity is device-perspective: `tx` is guest → host, `rx` is host → guest.
+/// An omitted direction is **closed** (no host backend, no data worker), so a
+/// uni-directional port is valid — but at least one direction is required: a
+/// port with both omitted is rejected.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ConsolePortSpec {
+    /// Free-form, unique among this console's ports.
+    pub name: String,
+    /// Host → guest: dillo **reads** this inherited pipe end.
+    #[serde(default)]
+    pub rx: Option<PipeRef>,
+    /// Guest → host: dillo **writes** this inherited pipe end.
+    #[serde(default)]
+    pub tx: Option<PipeRef>,
+}
+
+/// A `pipe:N` host backend: `N` is an inherited file-descriptor (Unix) or
+/// handle (Windows) number for the device-side end of a pipe the **parent**
+/// process created. dillo never creates the pipe itself.
+///
+/// Parsed as `u64` so a Windows HANDLE fits; Unix narrows to a `RawFd` when it
+/// adopts the number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PipeRef(u64);
+
+impl PipeRef {
+    /// The inherited FD / handle number.
+    pub fn number(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for PipeRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "pipe:{}", self.0)
+    }
+}
+
+impl FromStr for PipeRef {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let n = s
+            .strip_prefix("pipe:")
+            .ok_or_else(|| format!("console port backend {s:?} must be `pipe:N`"))?;
+        let n = n
+            .parse::<u64>()
+            .map_err(|e| format!("console port backend {s:?}: bad pipe number: {e}"))?;
+        Ok(PipeRef(n))
+    }
+}
+
+impl<'de> Deserialize<'de> for PipeRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct PipeVisitor;
+
+        impl Visitor<'_> for PipeVisitor {
+            type Value = PipeRef;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an inherited pipe end as `pipe:N`")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<PipeRef, E> {
+                PipeRef::from_str(v).map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_str(PipeVisitor)
+    }
 }
 
 /// Traditional single-file virtio-blk device.
@@ -424,6 +506,20 @@ pub struct Placement {
 #[derive(Debug, Clone)]
 pub struct ResolvedConsole {
     pub placement: Placement,
+    /// Named MULTIPORT ports, in declaration order. Port *i* in this list is
+    /// virtio console port id `i + 1` (port 0 is the unnamed stdio console).
+    /// Empty ⇒ today's single-port console (no MULTIPORT).
+    pub ports: Vec<ResolvedConsolePort>,
+}
+
+/// A validated named console port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedConsolePort {
+    pub name: String,
+    /// Host → guest inherited pipe end, or `None` when that direction is closed.
+    pub rx: Option<PipeRef>,
+    /// Guest → host inherited pipe end, or `None` when that direction is closed.
+    pub tx: Option<PipeRef>,
 }
 
 #[derive(Debug, Clone)]
@@ -499,28 +595,27 @@ const MAX_LABEL_UTF16: usize = 36;
 const MAX_FS_TAG: usize = 36;
 /// `IFNAMSIZ`: Linux interface-name bound including the NUL terminator.
 const IFNAMSIZ: usize = 16;
+/// Maximum named console ports (port 0 is additional and not counted).
+///
+/// The MULTIPORT queue map is 0/1 for port 0, 2/3 for the control pair, and
+/// 2i+2 / 2i+3 for named port id *i*. With 31 named ports the device needs
+/// 2 + 2 + 2*31 = 66 queues, so 67 MSI-X vectors (num_queues + 1) — inside the
+/// 2048-entry MSI-X table limit and comfortable for every transport we attach.
+pub const MAX_CONSOLE_PORTS: usize = 31;
+/// `virtio_console_control` name payloads are NUL-terminated; keep names short
+/// enough to fit a control buffer with room to spare.
+const MAX_CONSOLE_PORT_NAME: usize = 255;
 
 /// Resolve a parsed [`Layout`] into validated facts.
 pub fn resolve(layout: Layout) -> anyhow::Result<Resolved> {
     let console = match layout.console {
-        Some(c) => {
-            anyhow::ensure!(
-                c.endpoint == "stdio",
-                "console endpoint `{}` unsupported (only `stdio`)",
-                c.endpoint
-            );
-            ResolvedConsole {
-                placement: Placement {
-                    bus: c.bus,
-                    slot: c.slot,
-                },
-            }
-        }
+        Some(c) => resolve_console(c)?,
         None => ResolvedConsole {
             placement: Placement {
                 bus: None,
                 slot: None,
             },
+            ports: Vec::new(),
         },
     };
 
@@ -533,6 +628,95 @@ pub fn resolve(layout: Layout) -> anyhow::Result<Resolved> {
         default_bus: layout.bus,
         console,
         devices,
+    })
+}
+
+/// Validate a [`ConsoleSpec`]: endpoint rules, port-name uniqueness/bounds, and
+/// the `pipe:N` reservations (no stdio FDs, no number used twice).
+fn resolve_console(c: ConsoleSpec) -> anyhow::Result<ResolvedConsole> {
+    // `endpoint` is optional only while there are no named ports: a MULTIPORT
+    // console must state port 0's host endpoint explicitly.
+    if c.ports.is_empty() {
+        if let Some(endpoint) = &c.endpoint {
+            anyhow::ensure!(
+                endpoint == "stdio",
+                "console endpoint `{endpoint}` unsupported (only `stdio`)"
+            );
+        }
+    } else {
+        let endpoint = c.endpoint.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("console `ports` requires an explicit `endpoint=stdio`")
+        })?;
+        anyhow::ensure!(
+            endpoint == "stdio",
+            "console endpoint `{endpoint}` unsupported (only `stdio`)"
+        );
+    }
+
+    anyhow::ensure!(
+        c.ports.len() <= MAX_CONSOLE_PORTS,
+        "console has {} named ports (max is {MAX_CONSOLE_PORTS})",
+        c.ports.len()
+    );
+
+    let mut names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    // One inherited pipe end backs exactly one direction of one port.
+    let mut pipes: std::collections::BTreeMap<u64, String> = std::collections::BTreeMap::new();
+    let mut ports = Vec::with_capacity(c.ports.len());
+    for p in &c.ports {
+        anyhow::ensure!(!p.name.is_empty(), "console port name must not be empty");
+        anyhow::ensure!(
+            p.name.len() <= MAX_CONSOLE_PORT_NAME,
+            "console port name {:?} exceeds {MAX_CONSOLE_PORT_NAME} bytes",
+            p.name
+        );
+        anyhow::ensure!(
+            !p.name.contains('\0'),
+            "console port name {:?} contains a NUL byte",
+            p.name
+        );
+        anyhow::ensure!(
+            names.insert(p.name.as_str()),
+            "duplicate console port name {:?}",
+            p.name
+        );
+        // Uni-directional is fine; no directions at all is not — there is no
+        // name-only / control-plane-only port.
+        anyhow::ensure!(
+            p.rx.is_some() || p.tx.is_some(),
+            "console port {:?} sets neither `rx` nor `tx` (at least one is required)",
+            p.name
+        );
+        for (direction, pipe) in [("rx", p.rx), ("tx", p.tx)] {
+            let Some(pipe) = pipe else { continue };
+            let n = pipe.number();
+            // 0/1/2 are the process's own stdio; port 0's endpoint owns them.
+            anyhow::ensure!(
+                n > 2,
+                "console port {:?} {direction}={pipe}: FDs 0/1/2 are reserved for process stdio",
+                p.name
+            );
+            let who = format!("{}.{direction}", p.name);
+            if let Some(prev) = pipes.insert(n, who) {
+                anyhow::bail!(
+                    "console port {:?} {direction}={pipe} reuses an inherited end already bound to {prev}",
+                    p.name
+                );
+            }
+        }
+        ports.push(ResolvedConsolePort {
+            name: p.name.clone(),
+            rx: p.rx,
+            tx: p.tx,
+        });
+    }
+
+    Ok(ResolvedConsole {
+        placement: Placement {
+            bus: c.bus,
+            slot: c.slot,
+        },
+        ports,
     })
 }
 
@@ -1224,10 +1408,224 @@ mod tests {
     #[test]
     fn console_bare_value_shim() {
         let c = <ConsoleSpec as argh::FromArgValue>::from_arg_value("stdio").expect("bare");
-        assert_eq!(c.endpoint, "stdio");
+        assert_eq!(c.endpoint.as_deref(), Some("stdio"));
         let c = <ConsoleSpec as argh::FromArgValue>::from_arg_value("endpoint=stdio,bus=mmio")
             .expect("kv");
         assert_eq!(c.bus, Some(Bus::Mmio));
+    }
+
+    // --- console: named MULTIPORT ports ---
+
+    /// The exact CLI / JSON pair locked by `DESIGN-named-ports.md`.
+    #[cfg(feature = "argh")]
+    #[test]
+    fn console_ports_kv_matches_json() {
+        let kv = <ConsoleSpec as argh::FromArgValue>::from_arg_value(
+            "endpoint=stdio,ports=[[name=build,rx=pipe:3,tx=pipe:4],[name=log,tx=pipe:5]]",
+        )
+        .expect("kv parse");
+        let json: ConsoleSpec = serde_json::from_str(
+            r#"{"endpoint":"stdio","ports":[{"name":"build","rx":"pipe:3","tx":"pipe:4"},{"name":"log","tx":"pipe:5"}]}"#,
+        )
+        .expect("json parse");
+
+        for c in [&kv, &json] {
+            assert_eq!(c.endpoint.as_deref(), Some("stdio"));
+            assert_eq!(c.ports.len(), 2);
+            assert_eq!(c.ports[0].name, "build");
+            assert_eq!(c.ports[0].rx, Some(PipeRef(3)));
+            assert_eq!(c.ports[0].tx, Some(PipeRef(4)));
+            assert_eq!(c.ports[1].name, "log");
+            assert_eq!(c.ports[1].rx, None);
+            assert_eq!(c.ports[1].tx, Some(PipeRef(5)));
+        }
+    }
+
+    fn console(c: ConsoleSpec) -> Layout {
+        Layout {
+            bus: None,
+            console: Some(c),
+            devices: Vec::new(),
+        }
+    }
+
+    fn port(name: &str, rx: Option<u64>, tx: Option<u64>) -> ConsolePortSpec {
+        ConsolePortSpec {
+            name: name.to_string(),
+            rx: rx.map(PipeRef),
+            tx: tx.map(PipeRef),
+        }
+    }
+
+    fn console_with_ports(ports: Vec<ConsolePortSpec>) -> Layout {
+        console(ConsoleSpec {
+            endpoint: Some("stdio".into()),
+            bus: None,
+            slot: None,
+            ports,
+        })
+    }
+
+    #[test]
+    fn console_without_ports_defaults_endpoint() {
+        // `--console bus=mmio` (no endpoint key) stays valid and single-port.
+        let r = resolve(console(ConsoleSpec {
+            endpoint: None,
+            bus: Some(Bus::Mmio),
+            slot: None,
+            ports: Vec::new(),
+        }))
+        .expect("resolve");
+        assert!(r.console.ports.is_empty());
+        assert_eq!(r.console.placement.bus, Some(Bus::Mmio));
+    }
+
+    #[test]
+    fn console_ports_require_explicit_endpoint() {
+        let err = resolve(console(ConsoleSpec {
+            endpoint: None,
+            bus: None,
+            slot: None,
+            ports: vec![port("build", Some(3), None)],
+        }))
+        .expect_err("ports without endpoint must error");
+        assert!(err.to_string().contains("endpoint"), "{err}");
+    }
+
+    #[test]
+    fn console_endpoint_must_be_stdio() {
+        assert!(
+            resolve(console(ConsoleSpec {
+                endpoint: Some("file".into()),
+                bus: None,
+                slot: None,
+                ports: Vec::new(),
+            }))
+            .is_err()
+        );
+        assert!(
+            resolve(console(ConsoleSpec {
+                endpoint: Some("file".into()),
+                bus: None,
+                slot: None,
+                ports: vec![port("build", Some(3), None)],
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn console_port_requires_at_least_one_direction() {
+        // There is no name-only / control-plane-only port.
+        let err = resolve(console_with_ports(vec![port("quiet", None, None)]))
+            .expect_err("a port with neither rx nor tx must be rejected");
+        assert!(err.to_string().contains("at least one"), "{err}");
+    }
+
+    #[test]
+    fn uni_directional_console_ports_are_legal() {
+        // Exactly one direction set is valid; the other stays closed.
+        let r = resolve(console_with_ports(vec![
+            port("to-guest", Some(3), None),
+            port("from-guest", None, Some(4)),
+        ]))
+        .expect("resolve");
+        assert_eq!(
+            r.console.ports,
+            vec![
+                ResolvedConsolePort {
+                    name: "to-guest".into(),
+                    rx: Some(PipeRef(3)),
+                    tx: None,
+                },
+                ResolvedConsolePort {
+                    name: "from-guest".into(),
+                    rx: None,
+                    tx: Some(PipeRef(4)),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn console_rejects_duplicate_port_names() {
+        let err = resolve(console_with_ports(vec![
+            port("build", Some(3), None),
+            port("build", Some(4), None),
+        ]))
+        .expect_err("duplicate names must error");
+        assert!(err.to_string().contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn console_rejects_duplicate_pipe_numbers() {
+        // Same N on two ports...
+        let err = resolve(console_with_ports(vec![
+            port("build", Some(3), None),
+            port("log", Some(3), None),
+        ]))
+        .expect_err("duplicate pipe must error");
+        assert!(err.to_string().contains("reuses"), "{err}");
+        // ...and the same N on both directions of one port.
+        assert!(resolve(console_with_ports(vec![port("build", Some(3), Some(3))])).is_err());
+    }
+
+    #[test]
+    fn console_rejects_stdio_pipe_numbers() {
+        for n in 0..=2 {
+            let err = resolve(console_with_ports(vec![port("build", Some(n), None)]))
+                .expect_err("process stdio FDs must be rejected as port backends");
+            assert!(err.to_string().contains("reserved"), "pipe:{n}: {err}");
+            let err = resolve(console_with_ports(vec![port("build", None, Some(n))]))
+                .expect_err("process stdio FDs must be rejected as port backends");
+            assert!(err.to_string().contains("reserved"), "pipe:{n}: {err}");
+        }
+    }
+
+    #[test]
+    fn console_port_cap_enforced() {
+        // Each port needs a direction, and each inherited end a distinct
+        // number above the reserved stdio FDs.
+        let ports = |n: usize| -> Vec<ConsolePortSpec> {
+            (0..n)
+                .map(|i| port(&format!("p{i}"), Some(i as u64 + 3), None))
+                .collect()
+        };
+        assert!(resolve(console_with_ports(ports(MAX_CONSOLE_PORTS))).is_ok());
+
+        let too_many = ports(MAX_CONSOLE_PORTS + 1);
+        let err = resolve(console_with_ports(too_many)).expect_err("over the cap must error");
+        assert!(err.to_string().contains("max is"), "{err}");
+    }
+
+    #[test]
+    fn console_port_name_bounds() {
+        assert!(resolve(console_with_ports(vec![port("", Some(3), None)])).is_err());
+        let long = "x".repeat(MAX_CONSOLE_PORT_NAME + 1);
+        assert!(resolve(console_with_ports(vec![port(&long, Some(3), None)])).is_err());
+        assert!(resolve(console_with_ports(vec![port("a\0b", Some(3), None)])).is_err());
+    }
+
+    #[test]
+    fn pipe_ref_grammar() {
+        assert_eq!("pipe:7".parse::<PipeRef>().unwrap(), PipeRef(7));
+        assert!("fd:7".parse::<PipeRef>().is_err());
+        assert!("pipe:".parse::<PipeRef>().is_err());
+        assert!("pipe:-1".parse::<PipeRef>().is_err());
+        assert!("7".parse::<PipeRef>().is_err());
+        // Windows HANDLEs are pointer-sized, so N is parsed as u64.
+        assert_eq!(
+            "pipe:4294967296".parse::<PipeRef>().unwrap().number(),
+            4_294_967_296
+        );
+    }
+
+    #[test]
+    fn console_port_unknown_field_rejected() {
+        assert!(
+            serde_json::from_str::<ConsolePortSpec>(r#"{"name":"x","bogus":1}"#).is_err(),
+            "deny_unknown_fields must hold for console ports"
+        );
     }
 
     // --- allocator ---
