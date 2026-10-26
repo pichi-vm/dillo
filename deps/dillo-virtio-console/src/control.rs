@@ -23,6 +23,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 
 /// `struct virtio_console_control` header length.
 pub(crate) const CONTROL_HEADER_LEN: usize = 8;
@@ -122,6 +123,10 @@ pub(crate) enum PortKind {
 #[derive(Debug)]
 pub(crate) struct ControlPlane {
     ports: Vec<PortKind>,
+    /// Per-port: has a guest process opened it? Host → guest data is held
+    /// until this is set, because Linux drops inbound buffers for a port
+    /// nobody has opened.
+    guest_open: Vec<AtomicBool>,
     state: Mutex<State>,
 }
 
@@ -136,9 +141,18 @@ impl ControlPlane {
     /// `ports[i]` describes port id `i`, so index 0 is always the console.
     pub(crate) fn new(ports: Vec<PortKind>) -> Self {
         Self {
+            guest_open: ports.iter().map(|_| AtomicBool::new(false)).collect(),
             ports,
             state: Mutex::new(State::default()),
         }
+    }
+
+    /// Has a guest process opened port `id`? Host → guest data must wait for
+    /// this, or Linux will silently drop it.
+    pub(crate) fn guest_has_opened(&self, id: u32) -> bool {
+        self.guest_open
+            .get(id as usize)
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Acquire))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -197,9 +211,16 @@ impl ControlPlane {
                     .push_back(ControlMessage::new(msg.id, event::PORT_OPEN, 1));
             }
             event::PORT_OPEN => {
+                // Linux discards inbound data for a port no guest process has
+                // opened yet (`virtio_console`'s `in_intr` drops buffers while
+                // `guest_connected` is false), so RX must wait for this.
+                let open = msg.value != 0;
+                if let Some(flag) = self.guest_open.get(msg.id as usize) {
+                    flag.store(open, std::sync::atomic::Ordering::Release);
+                }
                 log::debug!(
                     "virtio-console: guest {} port {}",
-                    if msg.value == 0 { "closed" } else { "opened" },
+                    if open { "opened" } else { "closed" },
                     msg.id
                 );
             }
@@ -323,6 +344,30 @@ mod tests {
         let _ = drain(&plane);
         plane.handle(&ControlMessage::new(9, event::PORT_READY, 1));
         assert!(drain(&plane).is_empty());
+    }
+
+    #[test]
+    fn a_port_is_not_guest_open_until_the_guest_opens_it() {
+        let plane = plane();
+        assert!(
+            !plane.guest_has_opened(1),
+            "a port must start closed — Linux drops inbound data for a port \
+             no guest process has opened"
+        );
+
+        plane.handle(&ControlMessage::new(1, event::PORT_OPEN, 1));
+        assert!(plane.guest_has_opened(1));
+        assert!(!plane.guest_has_opened(2), "only the named port opened");
+
+        plane.handle(&ControlMessage::new(1, event::PORT_OPEN, 0));
+        assert!(!plane.guest_has_opened(1), "the guest closed it again");
+    }
+
+    #[test]
+    fn guest_open_of_an_unknown_port_is_ignored() {
+        let plane = plane();
+        plane.handle(&ControlMessage::new(9, event::PORT_OPEN, 1));
+        assert!(!plane.guest_has_opened(9));
     }
 
     #[test]

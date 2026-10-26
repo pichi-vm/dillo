@@ -31,7 +31,13 @@ struct Args {
     cpus: u32,
 
     /// console device. `stdio` (default), or key/value with placement, e.g.
-    /// `endpoint=stdio,bus=mmio,slot=0`.
+    /// `endpoint=stdio,bus=mmio,slot=0`. Add named MULTIPORT ports alongside
+    /// the unnamed hvc0 with
+    /// `endpoint=stdio,ports=[[name=build,rx=pipe:3,tx=pipe:4],[name=log,tx=pipe:5]]`:
+    /// `rx` is host→guest and `tx` is guest→host, each `pipe:N` an inherited
+    /// descriptor the parent process created; an omitted direction is closed,
+    /// and each port must set at least one. `endpoint` is required once
+    /// `ports=` is present.
     #[argh(option)]
     console: Option<dillo_config::ConsoleSpec>,
 
@@ -308,15 +314,16 @@ fn build_placements(
 
     let resolved = dillo_config::resolve(layout_from_args(args)?)?;
 
-    // Requests + constructed devices, console first.
+    // Requests + constructed devices, console first. Each device reports the
+    // queues it will use; the MSI-X table gets one vector per queue plus one
+    // for config-space changes.
     let mut requests: Vec<dillo_config::Placement> = Vec::with_capacity(resolved.devices.len() + 1);
-    let mut built: Vec<(u16, &'static str, Box<dyn VirtioDevice>)> = Vec::new();
+    let mut built: Vec<(&'static str, Box<dyn VirtioDevice>)> = Vec::new();
 
     requests.push(resolved.console.placement.clone());
     built.push((
-        3, // 2 queues + config
         "virtio-console",
-        Box::new(dillo_virtio_console::VirtioConsole::new()),
+        Box::new(build_console_device(&resolved.console)?),
     ));
 
     for device in &resolved.devices {
@@ -324,9 +331,7 @@ fn build_placements(
         match device {
             #[cfg(unix)]
             dillo_config::ResolvedDevice::Vsock { cid, uds, .. } => {
-                // 3 queues (rx/tx/event) + 1 config vector.
                 built.push((
-                    4,
                     "virtio-vsock",
                     Box::new(dillo_virtio_vsock::VirtioVsock::new(*cid, uds.clone())),
                 ));
@@ -342,10 +347,9 @@ fn build_placements(
                 ..
             } => {
                 use anyhow::Context as _;
-                // 1 hiprio + 1 request queue + 1 config vector.
                 let fs = dillo_virtio_fs::VirtioFs::passthrough(tag, source.clone(), *readonly)
                     .with_context(|| format!("sharing virtio-fs source {}", source.display()))?;
-                built.push((3, "virtio-fs", Box::new(fs)));
+                built.push(("virtio-fs", Box::new(fs)));
             }
             dillo_config::ResolvedDevice::Net {
                 backend,
@@ -355,12 +359,11 @@ fn build_placements(
                 ..
             } => {
                 let net = build_net_device(*backend, iface.as_deref(), *mac, forwards)?;
-                // 2 queues (rx/tx) + 1 config vector.
-                built.push((3, "virtio-net", Box::new(net)));
+                built.push(("virtio-net", Box::new(net)));
             }
             other => {
                 let (name, blk) = build_block_device(other)?;
-                built.push((2, name, Box::new(blk)));
+                built.push((name, Box::new(blk)));
             }
         }
     }
@@ -373,16 +376,47 @@ fn build_placements(
     Ok(placed
         .into_iter()
         .zip(built)
-        .map(
-            |(placed, (msix_vectors, name, device))| runner::DevicePlacement {
-                bus: placed.bus,
-                index: placed.index,
-                msix_vectors,
-                name,
-                device,
-            },
-        )
+        .map(|(placed, (name, device))| runner::DevicePlacement {
+            bus: placed.bus,
+            index: placed.index,
+            // One MSI-X vector per virtqueue, plus one for config-space
+            // changes. Taken from the constructed device, so a MULTIPORT
+            // console with N named ports gets its 2N+4 queues' worth.
+            msix_vectors: msix_vectors_for(device.as_ref()),
+            name,
+            device,
+        })
         .collect())
+}
+
+/// MSI-X table entries for a device: one per virtqueue plus one for config.
+fn msix_vectors_for(device: &dyn dillo_virtio::VirtioDevice) -> u16 {
+    u16::try_from(device.num_queues())
+        .unwrap_or(u16::MAX - 1)
+        .saturating_add(1)
+}
+
+/// Build the virtio-console, adopting each named port's inherited `pipe:N`
+/// ends. Runs inside `build_placements`, i.e. before raw-terminal mode, so a
+/// bad descriptor is a plain startup error rather than a mid-boot surprise.
+fn build_console_device(
+    console: &dillo_config::ResolvedConsole,
+) -> anyhow::Result<dillo_virtio_console::VirtioConsole> {
+    use dillo_virtio_console::pipe::{Direction, PipeEnd};
+
+    let mut ports = Vec::with_capacity(console.ports.len());
+    for port in &console.ports {
+        let adopt = |direction, pipe: Option<dillo_config::PipeRef>| {
+            pipe.map(|p| PipeEnd::adopt(&port.name, direction, p.number()))
+                .transpose()
+        };
+        ports.push(dillo_virtio_console::NamedPort::new(
+            port.name.clone(),
+            adopt(Direction::Rx, port.rx)?,
+            adopt(Direction::Tx, port.tx)?,
+        ));
+    }
+    Ok(dillo_virtio_console::VirtioConsole::with_ports(ports))
 }
 
 /// Construct the `VirtioBlk` for one resolved device (opening its backing files).

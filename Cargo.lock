@@ -449,6 +449,7 @@ dependencies = [
  "dillo-virtio-vsock",
  "env_logger",
  "hex",
+ "libc",
  "log",
  "mmarinus",
  "object",
