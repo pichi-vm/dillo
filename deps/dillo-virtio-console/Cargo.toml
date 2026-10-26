@@ -13,5 +13,21 @@ vm-memory.workspace = true
 log.workspace = true
 thiserror.workspace = true
 
+# Named-port host backends are inherited pipe ends. Unix adopts a file
+# descriptor (nix: dup + O_NONBLOCK on our own copy); Windows adopts a handle
+# (DuplicateHandle + PeekNamedPipe-before-ReadFile). Both stay behind
+# `cfg(unix)` / `cfg(windows)` so the portable core builds everywhere.
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
 [lints]
 workspace = true
