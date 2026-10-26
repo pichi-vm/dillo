@@ -89,6 +89,40 @@ pub struct Report {
     /// optional UDP echo, and an optional inbound-forward accept.
     #[serde(default)]
     pub net_bench: Option<NetBench>,
+    /// Result of the guest-side virtio-console named-port probe. `None` unless
+    /// the cmdline carries `dillo.console_port=NAME`, in which case the probe
+    /// looks the name up among the MULTIPORT ports the guest's
+    /// `virtio_console` driver discovered, and optionally round-trips bytes
+    /// over it.
+    #[serde(default)]
+    pub console_port: Option<ConsolePortProbe>,
+}
+
+/// Outcome of the guest-side virtio-console named-port probe.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsolePortProbe {
+    /// The port name the host asked the guest to find
+    /// (`dillo.console_port=NAME`).
+    pub requested_name: String,
+    /// Every port name the guest's virtio-console driver discovered, sorted —
+    /// one per `/sys/class/virtio-ports/vport*/name`.
+    #[serde(default)]
+    pub names: Vec<String>,
+    /// A port with the requested name exists.
+    pub found: bool,
+    /// The `/dev/vport*` node backing it, when found.
+    #[serde(default)]
+    pub device: Option<String>,
+    /// Bytes the probe read from the port (`dillo.console_port_read=N`
+    /// requests a read of up to N bytes).
+    #[serde(default)]
+    pub read: Option<String>,
+    /// The probe wrote `dillo.console_port_write=TEXT` to the port.
+    #[serde(default)]
+    pub wrote: bool,
+    /// Failure detail, if any stage errored.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// Guest-side virtio-net datapath results. Like [`BlkBench`], snuffler measures
