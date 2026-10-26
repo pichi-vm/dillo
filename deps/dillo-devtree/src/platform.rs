@@ -14,7 +14,7 @@
 //! claimed property ([`ResourcePlan::declare_from`]), so no constant can reach
 //! the resource plan.
 
-use devtree::{OwnedNode, OwnedProperty, OwnedTree, Tree};
+use devtree::{NodeView, OwnedNode, OwnedProperty, OwnedTree, PropertyView, Tree};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -654,12 +654,12 @@ impl GicConfig {
         let mut intc = root.remove_child(&intc_name).expect("just located");
         require_compatible(&mut intc, "/interrupt-controller", "arm,gic-v3")?;
         let reg = intc.require("reg", "/interrupt-controller")?;
-        let (dist_base, dist_size) = reg.reg_pair(0).ok_or(SurveyError::BadProperty {
+        let (dist_base, dist_size) = (&reg).reg_pair(0).ok_or(SurveyError::BadProperty {
             node: "/interrupt-controller",
             prop: "reg",
             reason: "missing GICD pair",
         })?;
-        let (redist_base, redist_size) = reg.reg_pair(1).ok_or(SurveyError::BadProperty {
+        let (redist_base, redist_size) = (&reg).reg_pair(1).ok_or(SurveyError::BadProperty {
             node: "/interrupt-controller",
             prop: "reg",
             reason: "missing GICR pair",
@@ -703,7 +703,7 @@ impl GicConfig {
         require_compatible(&mut v2m, "/msi-controller", "arm,gic-v2m-frame")?;
         let vreg = v2m.require("reg", "/msi-controller")?;
         let (msi_frame_base, msi_frame_size) =
-            vreg.reg_pair(0).ok_or(SurveyError::BadProperty {
+            (&vreg).reg_pair(0).ok_or(SurveyError::BadProperty {
                 node: "/msi-controller",
                 prop: "reg",
                 reason: "missing MSI frame pair",
@@ -812,7 +812,7 @@ impl Uart {
         let mut serial = root.remove_child(&name).expect("just located");
         require_compatible(&mut serial, "/serial", "ns16550a")?;
         let reg = serial.require("reg", "/serial")?;
-        let (base, size) = reg.reg_pair(0).ok_or(SurveyError::BadProperty {
+        let (base, size) = (&reg).reg_pair(0).ok_or(SurveyError::BadProperty {
             node: "/serial",
             prop: "reg",
             reason: "missing reg pair",
@@ -855,7 +855,7 @@ impl VirtioMmioSlots {
             let mut node = root.remove_child(&name).expect("just located");
             require_compatible(&mut node, "/virtio_mmio", "virtio,mmio")?;
             let reg = node.require("reg", "/virtio_mmio")?;
-            let (base, size) = reg.reg_pair(0).ok_or(SurveyError::BadProperty {
+            let (base, size) = (&reg).reg_pair(0).ok_or(SurveyError::BadProperty {
                 node: "/virtio_mmio",
                 prop: "reg",
                 reason: "missing reg pair",
@@ -897,7 +897,7 @@ impl Pcie {
 
         require_compatible(&mut pci, "/pcie", "pci-host-ecam-generic")?;
         let reg = pci.require("reg", "/pcie")?;
-        let (ecam_base, ecam_size) = reg.reg_pair(0).ok_or(SurveyError::BadProperty {
+        let (ecam_base, ecam_size) = (&reg).reg_pair(0).ok_or(SurveyError::BadProperty {
             node: "/pcie",
             prop: "reg",
             reason: "missing ECAM pair",
@@ -1055,7 +1055,7 @@ impl X86Intc {
         let mut node = root.remove_child(&name).expect("just located");
         node.ack("compatible"); // matched above
         let reg = node.require("reg", path)?;
-        let (base, size) = reg.reg_pair(0).ok_or(SurveyError::BadProperty {
+        let (base, size) = (&reg).reg_pair(0).ok_or(SurveyError::BadProperty {
             node: path,
             prop: "reg",
             reason: "missing reg pair",
@@ -1110,7 +1110,7 @@ fn syscon_action(
     let mut node = root.remove_child(&name).expect("just located");
     require_compatible(&mut node, path, compat)?;
     let reg = node.require("reg", path)?;
-    let (base, size) = reg.reg_pair(0).ok_or(SurveyError::BadProperty {
+    let (base, size) = (&reg).reg_pair(0).ok_or(SurveyError::BadProperty {
         node: path,
         prop: "reg",
         reason: "missing reg pair",
@@ -1217,8 +1217,11 @@ fn residual_report(root: &OwnedNode) -> String {
     parts.join("; ")
 }
 
-/// Draining/claiming helpers on the foreign owned types.
-trait NodeExt {
+/// Draining/claiming helpers used by the platform survey.
+///
+/// Kept crate-private (and named apart from the public [`NodeExt`]) so the
+/// survey-only `SurveyError` surface is not part of the shared helper API.
+trait SurveyNodeExt {
     /// Remove a required property, or error if absent.
     fn require(
         &mut self,
@@ -1235,7 +1238,7 @@ trait NodeExt {
     fn ensure_drained(&self) -> Result<(), SurveyError>;
 }
 
-impl NodeExt for OwnedNode {
+impl SurveyNodeExt for OwnedNode {
     fn require(
         &mut self,
         prop: &'static str,
@@ -1289,22 +1292,84 @@ impl NodeExt for OwnedNode {
     }
 }
 
-trait PropExt {
-    /// Read the `idx`-th `(base, size)` pair from a root-governed (2-cell/2-cell)
-    /// `reg` property.
-    fn reg_pair(&self, idx: usize) -> Option<(u64, u64)>;
+/// Why [`OwnedNodeExt::take_compatible`] rejected a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompatMismatch {
+    /// No `compatible` property was present.
+    Missing,
+    /// `compatible` was present but did not contain the expected string.
+    Unsupported,
 }
 
-impl PropExt for OwnedProperty {
-    fn reg_pair(&self, idx: usize) -> Option<(u64, u64)> {
-        let cells: Vec<u32> = self.as_u32s()?.collect();
-        let i = idx * 4;
-        let b = cells.get(i..i + 4)?;
-        let base = (u64::from(b[0]) << 32) | u64::from(b[1]);
-        let size = (u64::from(b[2]) << 32) | u64::from(b[3]);
-        Some((base, size))
+/// Shared NUL-split stringlist membership (lenient: empty pieces ignored;
+/// no UTF-8 check). Matches the historical backend helpers; do **not** replace
+/// with [`PropertyView::as_strs`], which is stricter.
+fn stringlist_contains(bytes: &[u8], value: &str) -> bool {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|item| !item.is_empty())
+        .any(|item| item == value.as_bytes())
+}
+
+/// Read helpers on foreign [`NodeView`] types.
+pub trait NodeExt: NodeView {
+    /// True if `compatible` contains `value` as a NUL-separated stringlist
+    /// item. Missing `compatible` is false.
+    fn compatible_contains(&self, value: &str) -> bool {
+        let Some(prop) = self.property("compatible") else {
+            return false;
+        };
+        stringlist_contains(prop.as_ref(), value)
     }
 }
+
+impl<N: NodeView> NodeExt for N {}
+
+/// Mutation helpers on foreign [`OwnedNode`].
+pub trait OwnedNodeExt {
+    /// Remove `compatible` and require it contains `expected` as a
+    /// NUL-separated stringlist item. Backends map [`CompatMismatch`] onto
+    /// their own error enums.
+    fn take_compatible(&mut self, expected: &str) -> Result<(), CompatMismatch>;
+}
+
+impl OwnedNodeExt for OwnedNode {
+    fn take_compatible(&mut self, expected: &str) -> Result<(), CompatMismatch> {
+        let prop = self
+            .remove_property("compatible")
+            .ok_or(CompatMismatch::Missing)?;
+        if stringlist_contains(prop.as_ref(), expected) {
+            Ok(())
+        } else {
+            Err(CompatMismatch::Unsupported)
+        }
+    }
+}
+
+/// Read helpers on foreign [`PropertyView`] types.
+///
+/// `reg_pair` decodes a fixed **`#address-cells = 2` / `#size-cells = 2`**
+/// layout (four `u32` cells per pair). It does **not** honor a parent node's
+/// declared cell counts — PCIe nodes with `#address-cells = 3` must not use
+/// this helper.
+///
+/// Call as `(&prop).reg_pair(i)` when `prop` is an [`OwnedProperty`]: only
+/// `&OwnedProperty` implements [`PropertyView`], so autoref cannot pick this
+/// trait up from the owned value alone.
+pub trait PropExt: PropertyView {
+    /// Read the `idx`-th `(base, size)` pair from a 2/2-cell `reg` property.
+    fn reg_pair(&self, idx: usize) -> Option<(u64, u64)> {
+        let cells: Vec<u32> = self.as_u32s()?.collect();
+        let base = cells.get(idx * 4..idx * 4 + 2)?;
+        let size = cells.get(idx * 4 + 2..idx * 4 + 4)?;
+        Some((
+            (u64::from(base[0]) << 32) | u64::from(base[1]),
+            (u64::from(size[0]) << 32) | u64::from(size[1]),
+        ))
+    }
+}
+
+impl<P: PropertyView> PropExt for P {}
 
 #[cfg(test)]
 mod tests {

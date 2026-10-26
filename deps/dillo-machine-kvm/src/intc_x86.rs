@@ -47,7 +47,8 @@
 //! to the controller (DT-003). A longer declared window is honored — the tail
 //! simply decodes to nothing, which instantiates no undeclared hardware.
 
-use dillo_devtree::devtree::{NodeView, OwnedNode, OwnedTree, PropertyView};
+use dillo_devtree::devtree::{OwnedNode, OwnedTree};
+use dillo_devtree::{NodeExt, PropExt};
 
 use crate::hypervisor::Error;
 
@@ -182,7 +183,7 @@ fn claim(
     let name = root
         .children()
         .find(|node| {
-            node.name().starts_with("interrupt-controller@") && compatible_is(*node, compat)
+            node.name().starts_with("interrupt-controller@") && node.compatible_contains(compat)
         })
         .map(|node| node.name().to_string())
         .ok_or(Error::MissingSubstrate(path))?;
@@ -193,7 +194,7 @@ fn claim(
     // `compatible` matched above; the rest must be present and are consumed
     // here so an unexpected property cannot pass unnoticed.
     let reg = require(&mut node, path, "reg")?;
-    let (base, size) = reg_pair(&reg).ok_or(Error::BadSubstrateProperty {
+    let (base, size) = (&reg).reg_pair(0).ok_or(Error::BadSubstrateProperty {
         node: path,
         prop: "reg",
         reason: "missing reg pair",
@@ -227,27 +228,6 @@ fn require(
             prop,
             reason: "missing",
         })
-}
-
-fn compatible_is(node: impl NodeView, value: &str) -> bool {
-    node.property("compatible").is_some_and(|prop| {
-        prop.as_ref()
-            .split(|byte| *byte == 0)
-            .filter(|item| !item.is_empty())
-            .any(|item| item == value.as_bytes())
-    })
-}
-
-/// Decode `reg` pair `index` as `<2 address cells, 2 size cells>` — the cell
-/// shape the x86 base tree declares at its root.
-fn reg_pair<P: PropertyView>(prop: P) -> Option<(u64, u64)> {
-    let cells: Vec<u32> = prop.as_u32s()?.collect();
-    let base = cells.get(0..2)?;
-    let size = cells.get(2..4)?;
-    Some((
-        (u64::from(base[0]) << 32) | u64::from(base[1]),
-        (u64::from(size[0]) << 32) | u64::from(size[1]),
-    ))
 }
 
 #[cfg(test)]
