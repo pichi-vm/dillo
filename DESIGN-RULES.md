@@ -43,6 +43,14 @@ Where the contract permits child-resource derivation, preserve its bounds and re
 
 Successful parsing, complete claim coverage, and provenance labels do not prove faithful realization. Conformance requires tracing both declarations to realized hardware and realized hardware back to its authority.
 
+### DT-006 — Virtio-console is discovered, not described in the device tree
+
+Virtio-console devices are found at runtime through their virtio transport (virtio-mmio or PCI). The device tree may declare those transports; it does not describe virtio-console devices or their ports.
+
+Platform UART / early serial devices remain device-tree governed when present.
+
+Do not add device-tree nodes for virtio-console or console ports.
+
 ## 2. Host and guest scope
 
 ### PLATFORM-001 — Support the three host operating systems
