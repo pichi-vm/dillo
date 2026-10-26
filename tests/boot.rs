@@ -1310,6 +1310,223 @@ fn boots_with_net_user() {
     let _ = udp_echo.join();
 }
 
+/// A `--console endpoint=stdio,ports=[[…]]` turns the single virtio-console
+/// into a MULTIPORT device: port 0 stays the unnamed `hvc0` the guest boots on,
+/// and each `ports=` entry becomes an additional **named** port the guest's
+/// `virtio_console` driver discovers over the control plane.
+///
+/// This exercises the whole path in one boot:
+///   1. port 0 is untouched — the guest still boots on `hvc0` and its report
+///      still reaches the host over it (if MULTIPORT broke port 0, there would
+///      be no report at all);
+///   2. the control plane announced both named ports — snuffler reads every
+///      `/sys/class/virtio-ports/*/name` and must see both;
+///   3. the `rx=pipe:N` data path works host → guest — the host writes to its
+///      end of the pipe before boot and the guest reads those exact bytes off
+///      `/dev/vport*`;
+///   4. the `tx=pipe:N` data path works guest → host — the guest writes to the
+///      named port and the host reads it back off its own pipe end.
+///
+/// Linux-only: it passes the device-side pipe ends to dillo by inheritance,
+/// which needs `pre_exec` to clear `FD_CLOEXEC`. The schema, the device, and
+/// the control plane are host-agnostic and covered by unit tests everywhere.
+#[cfg(target_os = "linux")]
+#[test]
+fn boots_with_named_console_ports() {
+    use std::io::{Read, Write};
+    use std::os::fd::IntoRawFd;
+    use std::os::unix::process::CommandExt as _;
+
+    /// Host → guest payload, written before boot so it is already queued.
+    const TO_GUEST: &str = "dillo-console-port-rx";
+    /// Guest → host payload the probe writes to the named port.
+    const FROM_GUEST: &str = "dillo-console-port-tx";
+
+    if !hypervisor_available() {
+        eprintln!("skip: no usable /dev/kvm on this host (local dev only)");
+        return;
+    }
+    let Some(kernel) = require(&["VIRTIO_PCI", "VIRTIO_CONSOLE"], &[]) else {
+        eprintln!("skip: kernel DB has no downloadable virtio-console kernel");
+        return;
+    };
+
+    let tmp = TempDir::new().unwrap();
+
+    // The parent creates every pipe; dillo only ever adopts an inherited end.
+    // `build` is bi-directional; `log` is uni-directional (guest → host only,
+    // its rx direction closed) — both must be announced to the guest.
+    let (device_rx, host_tx) = pipe_pair();
+    let (host_rx, device_tx) = pipe_pair();
+    let (_log_host_rx, log_device_tx) = pipe_pair();
+
+    // Queue the host → guest bytes now: dillo's rx worker will find them
+    // waiting the moment the guest opens the port.
+    (&host_tx)
+        .write_all(TO_GUEST.as_bytes())
+        .expect("host write to the rx pipe");
+
+    let cmdline = format!(
+        "console=hvc0 dillo.console_port=build dillo.console_port_read={} \
+         dillo.console_port_write={FROM_GUEST}",
+        TO_GUEST.len()
+    );
+    let pmi = build_pmi_from_path(tmp.path(), &kernel, host::CONFIG, &cmdline, false);
+
+    // dillo names the ends by the descriptor numbers it inherits, so the
+    // numbers must survive exec: hand over the raw fds with CLOEXEC cleared.
+    let device_rx = device_rx.into_raw_fd();
+    let device_tx = device_tx.into_raw_fd();
+    let log_device_tx = log_device_tx.into_raw_fd();
+    let console = format!(
+        "endpoint=stdio,ports=[[name=build,rx=pipe:{device_rx},tx=pipe:{device_tx}],\
+         [name=log,tx=pipe:{log_device_tx}]]"
+    );
+
+    let out_path = tmp.path().join("console.out");
+    let err_path = tmp.path().join("console.err");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dillo"));
+    cmd.arg("--pmi")
+        .arg(&pmi)
+        .args(["--memory", "256", "--cpus", "1"])
+        .args(["--console", &console])
+        .stdout(File::create(&out_path).unwrap())
+        .stderr(File::create(&err_path).unwrap());
+    // SAFETY: `fcntl` is async-signal-safe, and this closure touches nothing
+    // else between fork and exec.
+    #[allow(unsafe_code)]
+    unsafe {
+        cmd.pre_exec(move || {
+            for fd in [device_rx, device_tx, log_device_tx] {
+                clear_cloexec(fd)?;
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().expect("spawn dillo");
+
+    // Our copies of the device-side ends are now the child's business: close
+    // them so the guest sees a real EOF if dillo ever drops its own.
+    close_raw(device_rx);
+    close_raw(device_tx);
+    close_raw(log_device_tx);
+
+    // Read the guest → host side while dillo runs, so a full pipe can never
+    // wedge the boot.
+    let tx_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 256];
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while buf.len() < FROM_GUEST.len() && std::time::Instant::now() < deadline {
+            match (&host_rx).read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(e) => panic!("host read from the tx pipe: {e}"),
+            }
+        }
+        buf
+    });
+
+    if child
+        .wait_timeout(Duration::from_secs(120))
+        .expect("wait dillo")
+        .is_none()
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("dillo boot timed out");
+    }
+    // Drop the write end so the reader thread sees EOF rather than blocking.
+    drop(host_tx);
+
+    let mut output = std::fs::read_to_string(&out_path).unwrap_or_default();
+    output.push_str(&std::fs::read_to_string(&err_path).unwrap_or_default());
+
+    // (1) Port 0 is untouched: the report still arrives over hvc0.
+    let r = parse_report(&output).unwrap_or_else(|| {
+        panic!("boot produced no snuffler report (MULTIPORT broke port 0?):\n{output}")
+    });
+    assert!(
+        r.consoles.iter().any(|c| c.starts_with("hvc0")),
+        "hvc0 not among consoles under MULTIPORT: {:?}",
+        r.consoles
+    );
+
+    let probe = r
+        .console_port
+        .expect("console-port probe absent (cmdline requested dillo.console_port)");
+
+    // (2) Both named ports were announced over the control plane.
+    assert!(
+        !probe.names.is_empty(),
+        "guest enumerated no virtio-ports — MULTIPORT control plane failed \
+         (expected named ports when VIRTIO_CONSOLE_F_MULTIPORT is on): {probe:?}\n{output}"
+    );
+    for name in ["build", "log"] {
+        assert!(
+            probe.names.iter().any(|n| n == name),
+            "named port {name:?} missing from the guest's ports {:?}",
+            probe.names
+        );
+    }
+    assert!(
+        probe.found,
+        "the guest did not find the `build` port: {probe:?}"
+    );
+
+    // (3) host → guest over rx=pipe:N.
+    assert_eq!(
+        probe.read.as_deref(),
+        Some(TO_GUEST),
+        "guest did not read the host's bytes off the named port: {probe:?}\n{output}"
+    );
+
+    // (4) guest → host over tx=pipe:N.
+    assert!(
+        probe.wrote,
+        "guest write to the named port failed: {probe:?}"
+    );
+    let from_guest = tx_reader.join().expect("tx reader thread");
+    assert_eq!(
+        String::from_utf8_lossy(&from_guest),
+        FROM_GUEST,
+        "host did not receive the guest's bytes on the tx pipe"
+    );
+}
+
+/// An anonymous pipe as `(read_end, write_end)`, the way a parent process
+/// creates one before handing a device-side end to dillo.
+#[cfg(target_os = "linux")]
+fn pipe_pair() -> (std::fs::File, std::fs::File) {
+    let (read_end, write_end) = nix::unistd::pipe().expect("pipe");
+    (
+        std::fs::File::from(read_end),
+        std::fs::File::from(write_end),
+    )
+}
+
+/// Clear `FD_CLOEXEC` so `fd` survives into the child under the same number.
+#[cfg(target_os = "linux")]
+fn clear_cloexec(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+    use std::os::fd::BorrowedFd;
+
+    // SAFETY: `fd` is a descriptor this process still owns (from into_raw_fd
+    // on a pipe end we created); we only clear FD_CLOEXEC on it.
+    #[allow(unsafe_code)]
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    let flags = fcntl(borrowed, FcntlArg::F_GETFD).map_err(std::io::Error::from)?;
+    let cleared = FdFlag::from_bits_truncate(flags) & !FdFlag::FD_CLOEXEC;
+    fcntl(borrowed, FcntlArg::F_SETFD(cleared)).map_err(std::io::Error::from)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn close_raw(fd: std::os::fd::RawFd) {
+    // Parent's own copy of a descriptor it created and no longer uses.
+    let _ = nix::unistd::close(fd);
+}
+
 // ---------------------------------------------------------------------------
 // dt extension channel modes (pmi/spec/dt.md). Each mode is exercised through
 // the real arma → dillo path: attached and detached boot, and the two clear

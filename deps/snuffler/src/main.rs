@@ -30,9 +30,9 @@ use std::path::Path;
 use rustix::fd::{AsFd, BorrowedFd};
 use rustix::fs::{Mode, OFlags};
 use snuffler::{
-    BlockDevice, ClockInfo, CpuInfo, FsResult, KernelLog, KernelLogEntry, MemoryInfo, NetBench,
-    NetIf, NetOp, NetProbe, PciDevice, REPORT_BEGIN, REPORT_END, Report, SerialPort,
-    VIRTIOFS_PROBE_CONTENT, VIRTIOFS_PROBE_FILE, VsockResult,
+    BlockDevice, ClockInfo, ConsolePortProbe, CpuInfo, FsResult, KernelLog, KernelLogEntry,
+    MemoryInfo, NetBench, NetIf, NetOp, NetProbe, PciDevice, REPORT_BEGIN, REPORT_END, Report,
+    SerialPort, VIRTIOFS_PROBE_CONTENT, VIRTIOFS_PROBE_FILE, VsockResult,
 };
 
 mod bench;
@@ -251,6 +251,7 @@ fn observe() -> Report {
     let net = walk_net();
     let net_probe = probe_net(&cmdline, &net);
     let net_bench = probe_net_io(&cmdline);
+    let console_port = probe_console_port(&cmdline);
     Report {
         arch: uname_machine(),
         uptime_secs: parse_uptime(),
@@ -272,6 +273,7 @@ fn observe() -> Report {
         virtiofs_ro,
         net_probe,
         net_bench,
+        console_port,
         cmdline,
     }
 }
@@ -539,6 +541,130 @@ fn run_external_reach_probe(endpoints: &str) -> bool {
 /// a probe file); `dillo.virtiofs_ro_tag=TAG` drives a read-only probe (mount,
 /// attempt a write that must be rejected). Either is absent → `None`, so
 /// ordinary boots never touch virtio-fs. Returns `(read_write, read_only)`.
+/// Probe a named virtio-console MULTIPORT port when the cmdline requests it
+/// (`dillo.console_port=NAME`): enumerate the ports the `virtio_console`
+/// driver discovered, find the requested name, and optionally read from
+/// (`dillo.console_port_read=N`) and write to (`dillo.console_port_write=TEXT`)
+/// its `/dev/vport*` node. `None` when the token is absent, so ordinary boots
+/// never touch it.
+fn probe_console_port(cmdline: &str) -> Option<ConsolePortProbe> {
+    let token = |key: &str| {
+        cmdline
+            .split_whitespace()
+            .find_map(|tok| tok.strip_prefix(key))
+            .map(str::to_owned)
+    };
+    let requested_name = token("dillo.console_port=")?;
+    let read_len = token("dillo.console_port_read=").and_then(|v| v.parse::<usize>().ok());
+    Some(run_console_port_probe(
+        requested_name,
+        read_len,
+        token("dillo.console_port_write="),
+    ))
+}
+
+fn run_console_port_probe(
+    requested_name: String,
+    read_len: Option<usize>,
+    write: Option<String>,
+) -> ConsolePortProbe {
+    let mut res = ConsolePortProbe {
+        requested_name: requested_name.clone(),
+        names: Vec::new(),
+        found: false,
+        device: None,
+        read: None,
+        wrote: false,
+        error: None,
+    };
+
+    // Each MULTIPORT port the driver created shows up as
+    // /sys/class/virtio-ports/vportNpM/name holding the PORT_NAME the device
+    // sent. The matching character device is /dev/<that directory's name>.
+    let mut matched = None;
+    match fs::read_dir("/sys/class/virtio-ports") {
+        Ok(entries) => {
+            for e in entries.flatten() {
+                let Some(node) = e.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                let Some(name) = read_opt(&e.path().join("name")) else {
+                    continue;
+                };
+                if name == requested_name {
+                    matched = Some(node);
+                }
+                res.names.push(name);
+            }
+            res.names.sort();
+        }
+        Err(e) => {
+            res.error = Some(format!("read /sys/class/virtio-ports: {e}"));
+            return res;
+        }
+    }
+
+    let Some(node) = matched else {
+        return res;
+    };
+    res.found = true;
+    let path = format!("/dev/{node}");
+    res.device = Some(path.clone());
+
+    // One read-write handle for both directions. Closing and reopening the
+    // port between the write and the read would be wrong: the driver reports
+    // the port closed on the last close, and the device must then discard
+    // anything it had queued for a port nobody has open.
+    //
+    // Non-blocking: a port whose host side never sends must not hang PID 1
+    // until the harness's boot timeout.
+    let fd = match rustix::fs::open(
+        path.as_str(),
+        OFlags::RDWR | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(e) => {
+            res.error = Some(format!("open {path}: {e}"));
+            return res;
+        }
+    };
+
+    if let Some(text) = write {
+        match rustix::io::write(&fd, text.as_bytes()) {
+            Ok(n) if n == text.len() => res.wrote = true,
+            Ok(n) => res.error = Some(format!("write {path}: short write ({n} bytes)")),
+            Err(e) => res.error = Some(format!("write {path}: {e}")),
+        }
+    }
+
+    if let Some(len) = read_len {
+        let mut buf = vec![0u8; len];
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match rustix::io::read(&fd, &mut buf) {
+                Ok(0) | Err(rustix::io::Errno::AGAIN) => {
+                    if std::time::Instant::now() >= deadline {
+                        res.error = Some(format!("read {path}: no data within 5s"));
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Ok(n) => {
+                    res.read = Some(String::from_utf8_lossy(&buf[..n]).into_owned());
+                    break;
+                }
+                Err(e) => {
+                    res.error = Some(format!("read {path}: {e}"));
+                    break;
+                }
+            }
+        }
+    }
+
+    res
+}
+
 fn probe_virtiofs(cmdline: &str) -> (Option<FsResult>, Option<FsResult>) {
     let token = |key: &str| {
         cmdline

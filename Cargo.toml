@@ -234,6 +234,12 @@ wait-timeout = "0.2"                                # cross-platform boot timeou
 sha2 = "0.10"                                       # verify pinned kernel digests
 hex = "0.4"                                         # hex-encode digests
 
+# Named-console-port e2e: parent creates pipes and hands device-side ends to
+# dillo by inheritance. Unix uses workspace nix (pipe/fcntl); Windows uses
+# CreatePipe + inheritable HANDLEs (see tests/boot.rs).
+[target.'cfg(unix)'.dev-dependencies]
+nix = { workspace = true }
+
 # snuffler is pulled once, as both a library (the Report schema, host target)
 # and a binary artifact (the guest probe, cross-built for the guest musl
 # triple that matches dillo's host arch — dillo boots same-arch guests).
