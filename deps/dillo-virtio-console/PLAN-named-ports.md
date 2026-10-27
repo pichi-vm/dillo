@@ -27,7 +27,7 @@ This document settles divergences among the three drafts. Where drafts agree wit
 | S10 | MSI-X vector count in `build_placements` | Replace hardcoded `3` with **`num_queues + 1`** (or equivalent from the constructed device). |
 | S11 | Host cfg lint | Use **`cfg(unix)` / `cfg(windows)` only** in `dillo-virtio-console` (portable-core crate rules). |
 | S12 | RX shutdown | Unix: **`O_NONBLOCK` + existing poll cadence**. Windows: bounded/non-blocking read strategy in the Windows arm (no hang on join). |
-| S13 | First-PR e2e | **Linux guest e2e** for named-port discovery + port0 stdio still works. Windows/macOS: compile + unit; Windows process-inheritance e2e **not** required in the first PR (no new spawn crate). |
+| S13 | First-PR e2e | **Linux + Windows guest e2e** for named-port discovery, port0 stdio, and process inheritance (`pipe:N` FD/HANDLE). macOS: compile + unit (Unix inherit path covered by Linux). |
 | S14 | FD liveness check | Grammar/uniqueness in `resolve()`; **adopt/open** (and fail naming port+direction) in `build_placements` **before** raw-terminal mode. |
 | S15 | Branch / PR | `bot/dillo/feat-virtio-console-named-ports`, stacked on design tip (or main after #24 merges). One impl PR; **do not merge** until Nathaniel yes. House prefix `bot/dillo/…` (not `feat/…` alone). |
 | S16 | Control sequence (ordering floor) | Wait for guest **`DEVICE_READY`** on the control path **before** any `PORT_ADD`. Per port: `PORT_ADD` → (`PORT_NAME` if named) → `PORT_OPEN` (+ READY handling as Linux requires). Unit-test this state machine; e2e confirms. `PORT_NAME` payload = control header + name bytes + **NUL**. Bound/validate names at config time (≤255, no NUL). |
@@ -38,7 +38,7 @@ This document settles divergences among the three drafts. Where drafts agree wit
 
 ## Scope / non-goals
 
-**In:** schema+CLI/JSON parity; MULTIPORT device + control plane; inherited `pipe:N`; port-0 stdio unchanged when ports absent **and** when ports present; focused unit + Linux e2e; CI green on pinned nightly.
+**In:** schema+CLI/JSON parity; MULTIPORT device + control plane; inherited `pipe:N`; port-0 stdio unchanged when ports absent **and** when ports present; focused unit + Linux/Windows e2e; CI green on pinned nightly.
 
 **Out:** DTB/cmdline ports; second console device / new virtio ID; `--console-port` / follow-on `--console port,…` / loose `port=` / console in `devices[]`; non-`stdio` port-0 endpoints; named FIFOs; wiring host stdin into today’s inert port-0 RX (separate change).
 
@@ -71,7 +71,7 @@ This document settles divergences among the three drafts. Where drafts agree wit
 
 ### WP5 — Tests & CI
 - Config + device unit tests (features, queue count, `max_nr_ports`, control codec, closed directions, shutdown).
-- Linux `vm-tests` e2e for named port visibility + hvc0 still good (S13).
+- Linux + Windows `vm-tests` e2e for named port visibility, hvc0, and process inheritance (S13).
 - Bar: `.github/workflows` on `nightly-2026-07-06` (fmt, clippy `-D warnings`, workspace tests, matrix exclusions as today).
 
 ### WP6 — PR hygiene
@@ -84,7 +84,7 @@ This document settles divergences among the three drafts. Where drafts agree wit
 ## Risks (accepted)
 
 1. Control-plane ordering vs Linux — mitigate with S16 + unit/e2e.  
-2. Windows HANDLE inheritance e2e hardness — accept S13.  
+2. Windows HANDLE inheritance e2e — covered by `boots_with_named_console_ports` on windows-2025 (S13).  
 3. Blocking pipe read vs run-token — mitigate with S12.  
 4. Large `ports=` — mitigate with S9.  
 5. Reviewer confusion that named-port RX “fixes” port-0 stdin — call out in PR; leave port-0 RX inert.
@@ -93,7 +93,7 @@ This document settles divergences among the three drafts. Where drafts agree wit
 
 ## Explicitly deferred (not blockers)
 
-- Windows/macOS guest or process-inheritance e2e.  
+- macOS-specific named-port inheritance e2e (Unix path covered by Linux).  
 - Non-stdio port-0 endpoints.  
 - Host-stdin → hvc0 RX wiring.  
 - Reserving or special-casing the name `dev.pichi.build` (free-form; consumer convention only).

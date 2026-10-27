@@ -240,6 +240,13 @@ hex = "0.4"                                         # hex-encode digests
 [target.'cfg(unix)'.dev-dependencies]
 nix = { workspace = true }
 
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Pipes",
+] }
+
 # snuffler is pulled once, as both a library (the Report schema, host target)
 # and a binary artifact (the guest probe, cross-built for the guest musl
 # triple that matches dillo's host arch — dillo boots same-arch guests).
