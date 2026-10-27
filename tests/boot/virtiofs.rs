@@ -9,21 +9,19 @@ use snuffler::{VIRTIOFS_CHECKS, VIRTIOFS_PROBE_CONTENT, VIRTIOFS_PROBE_FILE};
 
 /// Cloud Hypervisor's release workflow builds these images with the tagged
 /// arch/*/configs/ch_defconfig. Keep the image, config and digest together.
-fn kernel() -> PathBuf {
+fn kernel() -> (PathBuf, &'static str) {
     const RELEASE: &str =
         "https://github.com/cloud-hypervisor/linux/releases/download/ch-release-v6.12.8-20250613";
-    const SOURCE: &str =
-        "https://raw.githubusercontent.com/cloud-hypervisor/linux/ch-release-v6.12.8-20250613";
     #[cfg(target_arch = "x86_64")]
-    let (image, arch, digest) = (
+    let (image, config, digest) = (
         "bzImage-x86_64",
-        "x86",
+        include_str!("virtiofs-x86_64.config"),
         "d4af401aa859e4659d4b08a153ac608eb6a315c6918e567daa46981af5d2e5ef",
     );
     #[cfg(target_arch = "aarch64")]
-    let (image, arch, digest) = (
+    let (image, config, digest) = (
         "Image-arm64",
-        "arm64",
+        include_str!("virtiofs-aarch64.config"),
         "bec084018bfdea2ccf619166ea4af3fdfecb00a801ae578da14e6cbdba172109",
     );
     let path = burrow::fetch(&format!("{RELEASE}/{image}")).expect(
@@ -34,9 +32,6 @@ fn kernel() -> PathBuf {
         digest,
         "virtiofs kernel digest mismatch; verify the pinned release before updating it"
     );
-    let config_path = burrow::fetch(&format!("{SOURCE}/arch/{arch}/configs/ch_defconfig"))
-        .expect("download pinned virtiofs kernel config (see tests/VIRTIOFS.md)");
-    let config = std::fs::read_to_string(config_path).unwrap();
     for symbol in [
         "FUSE_FS",
         "VIRTIO_FS",
@@ -45,11 +40,11 @@ fn kernel() -> PathBuf {
         "VIRTIO_CONSOLE",
     ] {
         assert!(
-            config_is_y(&config, symbol),
+            config_is_y(config, symbol),
             "virtiofs suite requires CONFIG_{symbol}=y; see tests/VIRTIOFS.md"
         );
     }
-    path
+    (path, config)
 }
 
 #[test]
@@ -73,7 +68,8 @@ fn virtiofs_filesystem_ops() {
         "console=hvc0 dillo.virtiofs_suite=ctx dillo.virtiofs_ro_tag=roctx \
          dillo.virtiofs_host={platform}"
     );
-    let pmi = build_pmi_from_path(tmp.path(), &kernel(), host::CONFIG, &cmdline, false);
+    let (kernel, config) = kernel();
+    let pmi = build_pmi_from_path(tmp.path(), &kernel, config, &cmdline, false);
     let rw = format!("tag=ctx,source={}", share.display());
     let ro = format!("tag=roctx,source={},readonly", ro_share.display());
     let output = boot_with_env(
