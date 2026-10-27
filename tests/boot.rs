@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end boot tests (feature `vm-tests`; KVM on Linux, WHP on Windows).
+//! End-to-end boot tests (feature `vm-tests`; KVM on Linux, HVF on macOS, WHP on Windows).
 //!
 //! For each config: build a PMI with arma (Alpine host-arch kernel +
 //! the `snuffler` guest probe as initrd), boot it under dillo, capture the
@@ -12,7 +12,7 @@
 //! is a clean skip so a plain local `cargo test` doesn't fail — but once the
 //! suite actually runs a boot, a guest that does not report back is a hard
 //! failure, never a silent skip. CI runs this on the platforms it claims to
-//! support (Linux/KVM, Windows/WHP), so there it must genuinely boot.
+//! support (Linux/KVM, macOS/HVF, Windows/WHP), so there it must genuinely boot.
 #![cfg(feature = "vm-tests")]
 // Windows named-port e2e needs CommandExt::inherit_handles so CreatePipe
 // HANDLEs reach the child (stdio redirects alone leave inherit_handles false).
@@ -1330,11 +1330,13 @@ fn boots_with_net_user() {
 ///   4. the `tx=pipe:N` data path works guest → host — the guest writes to the
 ///      named port and the host reads it back off its own pipe end.
 ///
-/// Linux path: pass device-side pipe ends to dillo by inheritance, clearing
-/// `FD_CLOEXEC` in `pre_exec`. Windows has a parallel test below that uses
+/// Unix path (Linux/KVM and macOS/HVF): pass device-side pipe ends to dillo
+/// by inheritance, clearing `FD_CLOEXEC` in `pre_exec`. This is a real e2e
+/// on both hosts — macOS is not "covered by Linux"; the macos-arm64 CI lane
+/// runs this under HVF. Windows has a parallel test below that uses
 /// `CreatePipe` + inheritable handles. The schema, device, and control plane
 /// are host-agnostic and covered by unit tests everywhere.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn boots_with_named_console_ports() {
     use std::io::{Read, Write};
@@ -1347,7 +1349,13 @@ fn boots_with_named_console_ports() {
     const FROM_GUEST: &str = "dillo-console-port-tx";
 
     if !hypervisor_available() {
+        // Linux probes /dev/kvm; macOS/HVF has no file gate (see
+        // `hypervisor_available`) so this branch is local-dev only and must
+        // never soft-skip a missing HVF in CI — absence surfaces as boot fail.
+        #[cfg(target_os = "linux")]
         eprintln!("skip: no usable /dev/kvm on this host (local dev only)");
+        #[cfg(target_os = "macos")]
+        eprintln!("skip: no usable hypervisor on this host (local dev only)");
         return;
     }
     let Some(kernel) = require(&["VIRTIO_PCI", "VIRTIO_CONSOLE"], &[]) else {
@@ -1389,6 +1397,8 @@ fn boots_with_named_console_ports() {
 
     let out_path = tmp.path().join("console.out");
     let err_path = tmp.path().join("console.err");
+    // Required on macOS/HVF (codesign entitlements); no-op on Linux.
+    sign_dillo_for_hvf();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dillo"));
     cmd.arg("--pmi")
         .arg(&pmi)
@@ -1500,7 +1510,7 @@ fn boots_with_named_console_ports() {
 
 /// An anonymous pipe as `(read_end, write_end)`, the way a parent process
 /// creates one before handing a device-side end to dillo.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn pipe_pair() -> (std::fs::File, std::fs::File) {
     let (read_end, write_end) = nix::unistd::pipe().expect("pipe");
     (
@@ -1510,7 +1520,7 @@ fn pipe_pair() -> (std::fs::File, std::fs::File) {
 }
 
 /// Clear `FD_CLOEXEC` so `fd` survives into the child under the same number.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn clear_cloexec(fd: std::os::fd::RawFd) -> std::io::Result<()> {
     use nix::fcntl::{FcntlArg, FdFlag, fcntl};
     use std::os::fd::BorrowedFd;
@@ -1525,7 +1535,7 @@ fn clear_cloexec(fd: std::os::fd::RawFd) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn close_raw(fd: std::os::fd::RawFd) {
     // Parent's own copy of a descriptor it created and no longer uses.
     let _ = nix::unistd::close(fd);
