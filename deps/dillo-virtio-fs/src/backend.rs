@@ -34,7 +34,7 @@ pub(crate) const DT_LNK: u32 = 10;
 /// Stat-like attributes for one filesystem node, in the subset virtio-fs needs.
 #[derive(Debug, Clone, Copy)]
 pub struct Attr {
-    /// Inode number reported to the guest (cosmetic; the guest keys on nodeid).
+    /// Backend inode number. FUSE retains its initial value for each cached node.
     pub ino: u64,
     /// Size in bytes.
     pub size: u64,
@@ -78,8 +78,8 @@ pub struct DirEntry {
 }
 
 /// Attributes to change in [`FsBackend::setattr`]. Each `Some` field is applied;
-/// `None` is left untouched. `uid`/`gid` are accepted but not applied (there is
-/// no portable `chown` in `std`); everything else is best-effort cross-platform.
+/// `None` is left untouched. Ownership is not exposed here; FUSE rejects
+/// ownership changes explicitly. Time updates are best-effort cross-platform.
 #[derive(Debug, Clone, Default)]
 pub struct SetAttr {
     /// Truncate/extend the regular file to this size.
@@ -96,9 +96,7 @@ pub struct SetAttr {
 /// methods so a read-only backing fails closed if the device ever reaches it
 /// (the device also rejects writes up front when configured read-only).
 fn read_only_error() -> io::Error {
-    // 30 = EROFS; stored verbatim and surfaced via `raw_os_error` on every
-    // platform, so the FUSE layer maps it back to EROFS.
-    io::Error::from_raw_os_error(30)
+    io::Error::from(io::ErrorKind::ReadOnlyFilesystem)
 }
 
 /// Filesystem backing for a virtio-fs share. Paths are relative to the share

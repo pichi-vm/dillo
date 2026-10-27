@@ -223,6 +223,8 @@ fn write_attr_out(w: &mut Writer, a: &Attr) {
 struct Node {
     rel: PathBuf,
     lookups: u64,
+    // Preserve the first reported inode even if backend identity is path-based.
+    ino: u64,
 }
 
 enum Handle {
@@ -255,6 +257,7 @@ impl FsState {
             Node {
                 rel: PathBuf::new(),
                 lookups: 1,
+                ino: FUSE_ROOT_ID,
             },
         );
         let mut by_path = HashMap::new();
@@ -275,7 +278,7 @@ impl FsState {
 
     /// Return the nodeid for `rel`, allocating one on first lookup. Each call
     /// bumps the kernel-visible lookup count (balanced by FORGET).
-    fn intern(&mut self, rel: PathBuf) -> u64 {
+    fn intern(&mut self, rel: PathBuf, ino: u64) -> u64 {
         if let Some(&id) = self.by_path.get(&rel) {
             if let Some(node) = self.nodes.get_mut(&id) {
                 node.lookups += 1;
@@ -285,8 +288,25 @@ impl FsState {
         let id = self.next_node;
         self.next_node += 1;
         self.by_path.insert(rel.clone(), id);
-        self.nodes.insert(id, Node { rel, lookups: 1 });
+        self.nodes.insert(
+            id,
+            Node {
+                rel,
+                lookups: 1,
+                ino,
+            },
+        );
         id
+    }
+
+    /// Keep stat/entry replies consistent with the identity first observed by
+    /// Linux. Some backends synthesize inode numbers from paths, which change
+    /// across rename even though the cached FUSE node remains the same.
+    fn stable_attr(&self, nodeid: u64, mut attr: Attr) -> Attr {
+        if let Some(node) = self.nodes.get(&nodeid) {
+            attr.ino = node.ino;
+        }
+        attr
     }
 
     fn forget(&mut self, nodeid: u64, nlookup: u64) {
@@ -478,7 +498,7 @@ fn handle_getattr(
     match backend.stat(&rel) {
         Ok(attr) => {
             let mut w = Writer::with_header();
-            write_attr_out(&mut w, &attr);
+            write_attr_out(&mut w, &state.stable_attr(nodeid, attr));
             w.finish(unique)
         }
         Err(e) => error_reply(unique, errno_of(&e)),
@@ -509,9 +529,9 @@ fn handle_lookup(
     let rel = parent.join(name);
     match backend.stat(&rel) {
         Ok(attr) => {
-            let child = state.intern(rel);
+            let child = state.intern(rel, attr.ino);
             let mut w = Writer::with_header();
-            write_entry_out(&mut w, child, &attr);
+            write_entry_out(&mut w, child, &state.stable_attr(child, attr));
             w.finish(unique)
         }
         Err(e) => error_reply(unique, errno_of(&e)),
@@ -589,7 +609,7 @@ fn handle_opendir(
     let Some(rel) = state.rel_of(nodeid) else {
         return error_reply(unique, ENOENT);
     };
-    let self_ino = backend.stat(&rel).map_or(nodeid, |a| a.ino);
+    let self_ino = state.nodes.get(&nodeid).map_or(nodeid, |n| n.ino);
     let entries = match backend.readdir(&rel) {
         Ok(entries) => entries,
         Err(e) => return error_reply(unique, errno_of(&e)),
@@ -610,7 +630,11 @@ fn handle_opendir(
     ];
     for e in entries {
         recs.push(DirentRec {
-            ino: e.attr.ino,
+            ino: state
+                .by_path
+                .get(&rel.join(&e.name))
+                .and_then(|id| state.nodes.get(id))
+                .map_or(e.attr.ino, |n| n.ino),
             name: e.name,
             dt: e.attr.dirent_type(),
         });
@@ -762,10 +786,10 @@ fn handle_create(
     let rel = parent.join(name);
     match backend.create(&rel, mode) {
         Ok(attr) => {
-            let child = state.intern(rel.clone());
+            let child = state.intern(rel.clone(), attr.ino);
             let fh = state.add_handle(Handle::File(rel));
             let mut w = Writer::with_header();
-            write_entry_out(&mut w, child, &attr);
+            write_entry_out(&mut w, child, &state.stable_attr(child, attr));
             // fuse_open_out { fh u64, open_flags u32, padding u32 }.
             w.u64(fh);
             w.u32(0);
@@ -794,9 +818,9 @@ fn handle_mkdir(
     let rel = parent.join(name);
     match backend.mkdir(&rel, mode) {
         Ok(attr) => {
-            let child = state.intern(rel);
+            let child = state.intern(rel, attr.ino);
             let mut w = Writer::with_header();
-            write_entry_out(&mut w, child, &attr);
+            write_entry_out(&mut w, child, &state.stable_attr(child, attr));
             w.finish(unique)
         }
         Err(e) => error_reply(unique, errno_of(&e)),
@@ -911,9 +935,9 @@ fn handle_symlink(
     let rel = parent.join(name);
     match backend.symlink(&rel, target) {
         Ok(attr) => {
-            let child = state.intern(rel);
+            let child = state.intern(rel, attr.ino);
             let mut w = Writer::with_header();
-            write_entry_out(&mut w, child, &attr);
+            write_entry_out(&mut w, child, &state.stable_attr(child, attr));
             w.finish(unique)
         }
         Err(e) => error_reply(unique, errno_of(&e)),
@@ -970,7 +994,7 @@ fn handle_setattr(
     match backend.setattr(&rel, &set) {
         Ok(attr) => {
             let mut w = Writer::with_header();
-            write_attr_out(&mut w, &attr);
+            write_attr_out(&mut w, &state.stable_attr(nodeid, attr));
             w.finish(unique)
         }
         Err(e) => error_reply(unique, errno_of(&e)),
@@ -1643,6 +1667,94 @@ mod tests {
         open_in.extend_from_slice(&0u32.to_le_bytes());
         let reply = dispatch(&mut state, &fs, &request(FUSE_OPEN, 3, node, &open_in)).unwrap();
         assert_eq!(out_error(&reply), -EROFS);
+    }
+
+    #[test]
+    fn readonly_backend_errno_is_portable() {
+        let mut state = FsState::new(false);
+        let fs = MapFs::new();
+        let reply = dispatch(
+            &mut state,
+            &fs,
+            &request(FUSE_CREATE, 1, FUSE_ROOT_ID, &create_in(2, 0o644, "file")),
+        )
+        .unwrap();
+        assert_eq!(out_error(&reply), -EROFS);
+    }
+
+    #[test]
+    fn rename_preserves_path_derived_inode_attributes() {
+        // Model the Windows backend on every test host so its identity
+        // regression does not depend on having a Windows runner available.
+        struct PathInodes(Passthrough);
+        impl FsBackend for PathInodes {
+            fn stat(&self, rel: &Path) -> io::Result<Attr> {
+                use std::hash::{Hash, Hasher};
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                rel.hash(&mut hash);
+                let mut attr = self.0.stat(rel)?;
+                attr.ino = hash.finish();
+                Ok(attr)
+            }
+            fn readdir(&self, rel: &Path) -> io::Result<Vec<crate::backend::DirEntry>> {
+                let mut entries = self.0.readdir(rel)?;
+                for entry in &mut entries {
+                    entry.attr = self.stat(&rel.join(&entry.name))?;
+                }
+                Ok(entries)
+            }
+            fn read(&self, rel: &Path, offset: u64, size: u32) -> io::Result<Vec<u8>> {
+                self.0.read(rel, offset, size)
+            }
+            fn readlink(&self, rel: &Path) -> io::Result<Vec<u8>> {
+                self.0.readlink(rel)
+            }
+            fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+                self.0.rename(from, to)
+            }
+            fn setattr(&self, rel: &Path, set: &SetAttr) -> io::Result<Attr> {
+                self.0.setattr(rel, set)?;
+                self.stat(rel)
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("tree")).unwrap();
+        std::fs::write(tmp.path().join("tree/file"), b"data").unwrap();
+        let fs = PathInodes(Passthrough::new(tmp.path()).unwrap());
+        let mut state = FsState::new(false);
+        let parent = lookup_node(&mut state, &fs, FUSE_ROOT_ID, "tree");
+        let child = lookup_node(&mut state, &fs, parent, "file");
+        let ino = fs.stat(Path::new("tree/file")).unwrap().ino;
+        let reply = dispatch(
+            &mut state,
+            &fs,
+            &request(
+                FUSE_RENAME,
+                1,
+                FUSE_ROOT_ID,
+                &rename_in(FUSE_RENAME, FUSE_ROOT_ID, "tree", "moved"),
+            ),
+        )
+        .unwrap();
+        assert_eq!(out_error(&reply), 0);
+        assert_ne!(fs.stat(Path::new("moved/file")).unwrap().ino, ino);
+        let reply = dispatch(&mut state, &fs, &request(FUSE_GETATTR, 2, child, &[])).unwrap();
+        assert_eq!(rd_u64(&reply, FUSE_OUT_HEADER_LEN + 16), Some(ino));
+        let reply = dispatch(&mut state, &fs, &request(FUSE_LOOKUP, 3, parent, b"file\0")).unwrap();
+        assert_eq!(rd_u64(&reply, FUSE_OUT_HEADER_LEN), Some(child));
+        assert_eq!(rd_u64(&reply, FUSE_OUT_HEADER_LEN + 40), Some(ino));
+        let mut args = vec![0; 88];
+        args[..4].copy_from_slice(&FATTR_SIZE.to_le_bytes());
+        args[16..24].copy_from_slice(&2u64.to_le_bytes());
+        let reply = dispatch(&mut state, &fs, &request(FUSE_SETATTR, 4, child, &args)).unwrap();
+        assert_eq!(rd_u64(&reply, FUSE_OUT_HEADER_LEN + 16), Some(ino));
+        assert_eq!(std::fs::read(tmp.path().join("moved/file")).unwrap(), b"da");
+        let reply = dispatch(&mut state, &fs, &request(FUSE_OPENDIR, 5, parent, &[])).unwrap();
+        let fh = rd_u64(&reply, FUSE_OUT_HEADER_LEN).unwrap();
+        let Some(Handle::Dir(entries)) = state.handles.get(&fh) else {
+            panic!("no directory handle")
+        };
+        assert_eq!(entries.iter().find(|e| e.name == "file").unwrap().ino, ino);
     }
 
     // Linux virtiofs enforces ACCESS locally and sends individual FORGETs.
