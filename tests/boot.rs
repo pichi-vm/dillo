@@ -14,6 +14,9 @@
 //! failure, never a silent skip. CI runs this on the platforms it claims to
 //! support (Linux/KVM, Windows/WHP), so there it must genuinely boot.
 #![cfg(feature = "vm-tests")]
+// Windows named-port e2e needs CommandExt::inherit_handles so CreatePipe
+// HANDLEs reach the child (stdio redirects alone leave inherit_handles false).
+#![cfg_attr(windows, feature(windows_process_extensions_inherit_handles))]
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -1327,9 +1330,10 @@ fn boots_with_net_user() {
 ///   4. the `tx=pipe:N` data path works guest → host — the guest writes to the
 ///      named port and the host reads it back off its own pipe end.
 ///
-/// Linux-only: it passes the device-side pipe ends to dillo by inheritance,
-/// which needs `pre_exec` to clear `FD_CLOEXEC`. The schema, the device, and
-/// the control plane are host-agnostic and covered by unit tests everywhere.
+/// Linux path: pass device-side pipe ends to dillo by inheritance, clearing
+/// `FD_CLOEXEC` in `pre_exec`. Windows has a parallel test below that uses
+/// `CreatePipe` + inheritable handles. The schema, device, and control plane
+/// are host-agnostic and covered by unit tests everywhere.
 #[cfg(target_os = "linux")]
 #[test]
 fn boots_with_named_console_ports() {
@@ -1525,6 +1529,233 @@ fn clear_cloexec(fd: std::os::fd::RawFd) -> std::io::Result<()> {
 fn close_raw(fd: std::os::fd::RawFd) {
     // Parent's own copy of a descriptor it created and no longer uses.
     let _ = nix::unistd::close(fd);
+}
+
+/// Windows process-inheritance e2e for named console ports (Nathaniel lock:
+/// multi-platform features must exercise every supported host path).
+///
+/// Mirrors the Linux coverage intent with WHP plumbing: the parent creates
+/// anonymous pipes via `CreatePipe`, marks only the device-side ends
+/// inheritable, spawns dillo with `inherit_handles(true)`, and names each end
+/// as `pipe:N` using the HANDLE value the child receives unchanged. Proves
+/// adopt + boot + named-port traffic on the Windows HANDLE path.
+#[cfg(target_os = "windows")]
+#[test]
+fn boots_with_named_console_ports() {
+    use std::io::{Read, Write};
+    use std::os::windows::io::{AsRawHandle, IntoRawHandle};
+    use std::os::windows::process::CommandExt as _;
+
+    /// Host → guest payload, written before boot so it is already queued.
+    const TO_GUEST: &str = "dillo-console-port-rx";
+    /// Guest → host payload the probe writes to the named port.
+    const FROM_GUEST: &str = "dillo-console-port-tx";
+
+    if !hypervisor_available() {
+        eprintln!("skip: no usable hypervisor on this host (local dev only)");
+        return;
+    }
+    let Some(kernel) = require(&["VIRTIO_PCI", "VIRTIO_CONSOLE"], &[]) else {
+        eprintln!("skip: kernel DB has no downloadable virtio-console kernel");
+        return;
+    };
+
+    let tmp = TempDir::new().unwrap();
+
+    // Parent creates every pipe; dillo only adopts an inherited HANDLE.
+    // `build` is bi-directional; `log` is uni-directional (guest → host).
+    let (device_rx, host_tx) = pipe_pair();
+    let (host_rx, device_tx) = pipe_pair();
+    let (log_host_rx, log_device_tx) = pipe_pair();
+
+    // Only device-side ends may cross into the child. Clear inherit on the
+    // ends this parent keeps, or CreateProcess would hand those over too.
+    clear_inherit(host_tx.as_raw_handle());
+    clear_inherit(host_rx.as_raw_handle());
+    clear_inherit(log_host_rx.as_raw_handle());
+
+    (&host_tx)
+        .write_all(TO_GUEST.as_bytes())
+        .expect("host write to the rx pipe");
+
+    let cmdline = format!(
+        "console=hvc0 dillo.console_port=build dillo.console_port_read={} \
+         dillo.console_port_write={FROM_GUEST}",
+        TO_GUEST.len()
+    );
+    let pmi = build_pmi_from_path(tmp.path(), &kernel, host::CONFIG, &cmdline, false);
+
+    // On Windows an inherited HANDLE keeps the same numeric value in the
+    // child, so `pipe:N` is just that value as u64.
+    let device_rx = device_rx.into_raw_handle();
+    let device_tx = device_tx.into_raw_handle();
+    let log_device_tx = log_device_tx.into_raw_handle();
+    let console = format!(
+        "endpoint=stdio,ports=[[name=build,rx=pipe:{},tx=pipe:{}],\
+         [name=log,tx=pipe:{}]]",
+        handle_number(device_rx),
+        handle_number(device_tx),
+        handle_number(log_device_tx),
+    );
+
+    let out_path = tmp.path().join("console.out");
+    let err_path = tmp.path().join("console.err");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dillo"));
+    cmd.arg("--pmi")
+        .arg(&pmi)
+        .args(["--memory", "256", "--cpus", "1"])
+        .args(["--console", &console])
+        .stdout(File::create(&out_path).unwrap())
+        .stderr(File::create(&err_path).unwrap())
+        // Required: with redirected stdio, Rust may otherwise skip inheriting
+        // the extra pipe handles we prepared for `pipe:N`.
+        .inherit_handles(true);
+    let mut child = cmd.spawn().expect("spawn dillo");
+
+    // Parent copies of the device-side ends are now the child's: close them
+    // so the guest sees a real EOF if dillo ever drops its own.
+    close_handle(device_rx);
+    close_handle(device_tx);
+    close_handle(log_device_tx);
+    // Keep `log_host_rx` alive so the log pipe stays open for dillo.
+    let _keep_log_host_rx = log_host_rx;
+
+    let tx_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 256];
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while buf.len() < FROM_GUEST.len() && std::time::Instant::now() < deadline {
+            match (&host_rx).read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(e) => panic!("host read from the tx pipe: {e}"),
+            }
+        }
+        buf
+    });
+
+    if child
+        .wait_timeout(Duration::from_secs(120))
+        .expect("wait dillo")
+        .is_none()
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("dillo boot timed out");
+    }
+    drop(host_tx);
+
+    let mut output = std::fs::read_to_string(&out_path).unwrap_or_default();
+    output.push_str(&std::fs::read_to_string(&err_path).unwrap_or_default());
+
+    let r = parse_report(&output).unwrap_or_else(|| {
+        panic!("boot produced no snuffler report (MULTIPORT broke port 0?):\n{output}")
+    });
+    assert!(
+        r.consoles.iter().any(|c| c.starts_with("hvc0")),
+        "hvc0 not among consoles under MULTIPORT: {:?}",
+        r.consoles
+    );
+
+    let probe = r
+        .console_port
+        .expect("console-port probe absent (cmdline requested dillo.console_port)");
+
+    assert!(
+        !probe.names.is_empty(),
+        "guest enumerated no virtio-ports — MULTIPORT control plane failed \
+         (expected named ports when VIRTIO_CONSOLE_F_MULTIPORT is on): {probe:?}\n{output}"
+    );
+    for name in ["build", "log"] {
+        assert!(
+            probe.names.iter().any(|n| n == name),
+            "named port {name:?} missing from the guest's ports {:?}",
+            probe.names
+        );
+    }
+    assert!(
+        probe.found,
+        "the guest did not find the `build` port: {probe:?}"
+    );
+
+    assert_eq!(
+        probe.read.as_deref(),
+        Some(TO_GUEST),
+        "guest did not read the host's bytes off the named port: {probe:?}\n{output}"
+    );
+
+    assert!(
+        probe.wrote,
+        "guest write to the named port failed: {probe:?}"
+    );
+    let from_guest = tx_reader.join().expect("tx reader thread");
+    assert_eq!(
+        String::from_utf8_lossy(&from_guest),
+        FROM_GUEST,
+        "host did not receive the guest's bytes on the tx pipe"
+    );
+}
+
+/// Anonymous pipe `(read_end, write_end)` with both ends inheritable. The
+/// caller clears inherit on the ends it keeps before spawning dillo.
+#[cfg(target_os = "windows")]
+fn pipe_pair() -> (std::fs::File, std::fs::File) {
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 1,
+    };
+    let mut read_end: HANDLE = std::ptr::null_mut();
+    let mut write_end: HANDLE = std::ptr::null_mut();
+    // SAFETY: out-params are live locals; `sa` is a valid attributes block.
+    #[allow(unsafe_code)]
+    let ok = unsafe { CreatePipe(&raw mut read_end, &raw mut write_end, &raw const sa, 0) };
+    assert_ne!(ok, 0, "CreatePipe: {}", std::io::Error::last_os_error());
+    // SAFETY: CreatePipe succeeded; both HANDLEs are owned by this process.
+    #[allow(unsafe_code)]
+    unsafe {
+        (
+            std::fs::File::from_raw_handle(read_end as RawHandle),
+            std::fs::File::from_raw_handle(write_end as RawHandle),
+        )
+    }
+}
+
+/// Clear `HANDLE_FLAG_INHERIT` so this end stays in the parent only.
+#[cfg(target_os = "windows")]
+fn clear_inherit(handle: std::os::windows::io::RawHandle) {
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+
+    // SAFETY: `handle` is an owned pipe end from `pipe_pair`.
+    #[allow(unsafe_code)]
+    let ok = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+    assert_ne!(
+        ok,
+        0,
+        "SetHandleInformation: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn close_handle(handle: std::os::windows::io::RawHandle) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+
+    // SAFETY: parent's own copy of a handle it created and no longer uses.
+    #[allow(unsafe_code)]
+    unsafe {
+        CloseHandle(handle);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn handle_number(handle: std::os::windows::io::RawHandle) -> u64 {
+    handle as usize as u64
 }
 
 // ---------------------------------------------------------------------------
