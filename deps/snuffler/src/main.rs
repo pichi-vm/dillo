@@ -6,9 +6,9 @@
 //! Runs as PID 1 inside a guest booted from a PMI. Mounts /proc + /sys + /dev,
 //! snuffles out the system the kernel sees (CPU/memory/cmdline/consoles/
 //! PCI/block/net), benchmarks each block device, emits a [`Report`] JSON
-//! bracketed by sentinels, then poweroffs. The probe contains no test logic —
-//! host harnesses assert whatever they want against the [`Report`] (the crate's
-//! library half).
+//! bracketed by sentinels, then poweroffs. Requested filesystem checks record
+//! their outcomes in the [`Report`]; host harnesses gate those results and
+//! the observed machine configuration (the crate's library half).
 //!
 //! Output: bracketed JSON on stdout (which is /dev/console / hvc0 for PID 1
 //! given `console=hvc0`). Free-form debug lines go to stderr.
@@ -30,12 +30,13 @@ use std::path::Path;
 use rustix::fd::{AsFd, BorrowedFd};
 use rustix::fs::{Mode, OFlags};
 use snuffler::{
-    BlockDevice, ClockInfo, ConsolePortProbe, CpuInfo, FsResult, KernelLog, KernelLogEntry,
-    MemoryInfo, NetBench, NetIf, NetOp, NetProbe, PciDevice, REPORT_BEGIN, REPORT_END, Report,
-    SerialPort, VIRTIOFS_PROBE_CONTENT, VIRTIOFS_PROBE_FILE, VsockResult,
+    BlockDevice, ClockInfo, ConsolePortProbe, CpuInfo, KernelLog, KernelLogEntry, MemoryInfo,
+    NetBench, NetIf, NetOp, NetProbe, PciDevice, REPORT_BEGIN, REPORT_END, Report, SerialPort,
+    VsockResult,
 };
 
 mod bench;
+mod virtiofs;
 
 #[cfg(not(test))]
 fn main() {
@@ -247,7 +248,7 @@ fn write_all_fd(fd: BorrowedFd<'_>, mut bytes: &[u8]) {
 fn observe() -> Report {
     let cmdline = read_trim("/proc/cmdline");
     let vsock = probe_vsock(&cmdline);
-    let (virtiofs, virtiofs_ro) = probe_virtiofs(&cmdline);
+    let virtiofs = virtiofs::probe(&cmdline);
     let net = walk_net();
     let net_probe = probe_net(&cmdline, &net);
     let net_bench = probe_net_io(&cmdline);
@@ -270,7 +271,6 @@ fn observe() -> Report {
         kaslr_seed: read_kaslr_seed(),
         vsock,
         virtiofs,
-        virtiofs_ro,
         net_probe,
         net_bench,
         console_port,
@@ -536,11 +536,6 @@ fn run_external_reach_probe(endpoints: &str) -> bool {
     false
 }
 
-/// Probe virtio-fs when the cmdline requests it. `dillo.virtiofs_tag=TAG` drives
-/// the read-write probe (mount, list, read `dillo.virtiofs_file=NAME`, then write
-/// a probe file); `dillo.virtiofs_ro_tag=TAG` drives a read-only probe (mount,
-/// attempt a write that must be rejected). Either is absent → `None`, so
-/// ordinary boots never touch virtio-fs. Returns `(read_write, read_only)`.
 /// Probe a named virtio-console MULTIPORT port when the cmdline requests it
 /// (`dillo.console_port=NAME`): enumerate the ports the `virtio_console`
 /// driver discovered, find the requested name, and optionally read from
@@ -660,80 +655,6 @@ fn run_console_port_probe(
                 }
             }
         }
-    }
-
-    res
-}
-
-fn probe_virtiofs(cmdline: &str) -> (Option<FsResult>, Option<FsResult>) {
-    let token = |key: &str| {
-        cmdline
-            .split_whitespace()
-            .find_map(|tok| tok.strip_prefix(key))
-            .map(str::to_owned)
-    };
-    let file = token("dillo.virtiofs_file=");
-    let rw = token("dillo.virtiofs_tag=")
-        .map(|tag| run_virtiofs_probe("/mnt-virtiofs", tag, file.clone()));
-    let ro = token("dillo.virtiofs_ro_tag=")
-        .map(|tag| run_virtiofs_probe("/mnt-virtiofs-ro", tag, None));
-    (rw, ro)
-}
-
-fn run_virtiofs_probe(mountpoint: &str, tag: String, file: Option<String>) -> FsResult {
-    use rustix::mount::{MountFlags, mount as do_mount};
-
-    let mut res = FsResult {
-        tag: tag.clone(),
-        mounted: false,
-        entries: Vec::new(),
-        file: file.clone(),
-        content: None,
-        wrote: false,
-        write_error: None,
-        error: None,
-    };
-
-    let _ = fs::create_dir(mountpoint);
-    // Mount read-write (no MountFlags::RDONLY): write rejection is enforced by
-    // the *device* on a read-only share, which is what we want to exercise — not
-    // the guest kernel's own mount flag.
-    if let Err(e) = do_mount(
-        tag.as_str(),
-        mountpoint,
-        "virtiofs",
-        MountFlags::empty(),
-        None,
-    ) {
-        res.error = Some(format!("mount: {e}"));
-        return res;
-    }
-    res.mounted = true;
-
-    if let Ok(rd) = fs::read_dir(mountpoint) {
-        let mut entries: Vec<String> = rd
-            .flatten()
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect();
-        entries.sort();
-        res.entries = entries;
-    }
-
-    if let Some(name) = file {
-        match fs::read_to_string(format!("{mountpoint}/{name}")) {
-            Ok(s) => res.content = Some(s),
-            Err(e) => res.error = Some(format!("read {name}: {e}")),
-        }
-    }
-
-    // Exercise the guest→host write path (create + write a probe file). On a
-    // read-only share this is expected to fail with EROFS.
-    match fs::write(
-        format!("{mountpoint}/{VIRTIOFS_PROBE_FILE}"),
-        VIRTIOFS_PROBE_CONTENT,
-    ) {
-        Ok(()) => res.wrote = true,
-        Err(e) => res.write_error = Some(format!("write: {e}")),
     }
 
     res

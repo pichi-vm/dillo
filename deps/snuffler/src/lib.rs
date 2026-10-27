@@ -7,8 +7,8 @@
 //! test harness. The fixture observes the system it boots into (mounts
 //! /proc + /sys, walks /sys/{block,bus/pci,class/net} and /proc) and emits
 //! a [`Report`] as JSON. The harness deserialises the same [`Report`] and
-//! asserts whatever the test cares about — the fixture itself contains no
-//! test logic; it only describes what it sees.
+//! asserts the observed machine configuration and any explicitly requested
+//! guest filesystem checks.
 
 use serde::{Deserialize, Serialize};
 
@@ -65,18 +65,10 @@ pub struct Report {
     /// `AF_VSOCK` stream to host CID 2 on that port and round-trips a message.
     #[serde(default)]
     pub vsock: Option<VsockResult>,
-    /// Result of the guest-side virtio-fs probe on the read-write share. `None`
-    /// unless the kernel cmdline carries `dillo.virtiofs_tag=TAG`, in which case
-    /// the probe mounts that tag with `-t virtiofs`, lists the share root, reads
-    /// `dillo.virtiofs_file=NAME` back, and writes a probe file to verify the
-    /// guest→host write path.
+    /// Results of the required-mount guest filesystem suite. Requested by
+    /// `dillo.virtiofs_suite=TAG` together with `dillo.virtiofs_ro_tag=TAG`.
     #[serde(default)]
-    pub virtiofs: Option<FsResult>,
-    /// Result of the guest-side virtio-fs probe on a *read-only* share. `None`
-    /// unless `dillo.virtiofs_ro_tag=TAG` is present. The probe mounts it and
-    /// attempts a write, which must be rejected (`wrote == false`).
-    #[serde(default)]
-    pub virtiofs_ro: Option<FsResult>,
+    pub virtiofs: Option<FsSuite>,
     /// Result of the guest-side virtio-net probe. `None` unless the kernel
     /// cmdline carries `dillo.net_mac=MAC`, in which case the probe looks for a
     /// network interface whose MAC matches the host-assigned one — proving the
@@ -207,32 +199,51 @@ pub const VIRTIOFS_PROBE_CONTENT: &str = "dillo-virtiofs-guest-write";
 /// The file name the probe creates in the share root.
 pub const VIRTIOFS_PROBE_FILE: &str = "dillo-probe.txt";
 
-/// Outcome of the guest-side virtio-fs probe.
+/// One named guest filesystem check. An absent error means it passed, including
+/// any explicit assertion of an unsupported-operation errno.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FsResult {
-    /// Mount tag the guest mounted.
-    pub tag: String,
-    /// The `mount -t virtiofs` succeeded.
-    pub mounted: bool,
-    /// Names in the share root, sorted (proves the READDIR path works).
-    #[serde(default)]
-    pub entries: Vec<String>,
-    /// File the probe was asked to read (`dillo.virtiofs_file=NAME`).
-    #[serde(default)]
-    pub file: Option<String>,
-    /// Contents read back from `file`, when the read succeeded.
-    #[serde(default)]
-    pub content: Option<String>,
-    /// Whether the probe's create+write of [`VIRTIOFS_PROBE_FILE`] succeeded.
-    #[serde(default)]
-    pub wrote: bool,
-    /// Error from the write attempt (expected/present on a read-only share).
-    #[serde(default)]
-    pub write_error: Option<String>,
-    /// Failure detail, if any earlier stage errored.
-    #[serde(default)]
+pub struct FsCheck {
+    pub name: String,
     pub error: Option<String>,
 }
+
+/// Results of POSIX operations on two actual virtiofs mounts. The host checks
+/// the complete case list as well as each outcome; missing checks cannot pass.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FsSuite {
+    pub checks: Vec<FsCheck>,
+}
+
+/// Required checks, in execution order. See `tests/VIRTIOFS.md` for the mapping
+/// to the server's FUSE opcodes and the expected unsupported operations.
+pub const VIRTIOFS_CHECKS: &[&str] = &[
+    "mount_rw",
+    "host_read_readdir",
+    "create_read_write_close",
+    "mkdir_rmdir_unlink",
+    "rename_immediate_open",
+    "rename_cross_directory",
+    "rename_replace_existing",
+    "rename_directory_cached_descendants",
+    "rename_same_path_and_failure",
+    "rename2_flags_unsupported",
+    "symlink_readlink",
+    "getattr_setattr",
+    "chown_unsupported",
+    "fsync_flush_syncfs",
+    "statfs_access_lseek",
+    "xattr_get_unsupported",
+    "xattr_set_unsupported",
+    "xattr_list_unsupported",
+    "xattr_remove_unsupported",
+    "link_mknod_fallocate_unsupported",
+    "copy_file_range_fallback",
+    "unmount_rw",
+    "mount_ro",
+    "readonly_read",
+    "readonly_mutations",
+    "unmount_ro",
+];
 
 /// Outcome of the guest-side virtio-vsock connectivity probe.
 #[derive(Debug, Clone, Serialize, Deserialize)]

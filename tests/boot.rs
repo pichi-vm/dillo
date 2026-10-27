@@ -3,7 +3,7 @@
 
 //! End-to-end boot tests (feature `vm-tests`; KVM on Linux, HVF on macOS, WHP on Windows).
 //!
-//! For each config: build a PMI with arma (Alpine host-arch kernel +
+//! For each config: build a PMI with arma (selected same-arch Linux kernel +
 //! the `snuffler` guest probe as initrd), boot it under dillo, capture the
 //! console, extract `snuffler`'s `Report` from between its sentinels, and
 //! assert what the guest actually saw matches what we asked dillo for.
@@ -11,7 +11,8 @@
 //! Gated on the `vm-tests` feature. On Linux a missing/inaccessible `/dev/kvm`
 //! is a clean skip so a plain local `cargo test` doesn't fail — but once the
 //! suite actually runs a boot, a guest that does not report back is a hard
-//! failure, never a silent skip. CI runs this on the platforms it claims to
+//! failure, never a silent skip. The virtiofs correctness suite also requires
+//! an available hypervisor (see `tests/VIRTIOFS.md`). CI runs on the platforms it claims to
 //! support (Linux/KVM, macOS/HVF, Windows/WHP), so there it must genuinely boot.
 #![cfg(feature = "vm-tests")]
 // Windows named-port e2e needs CommandExt::inherit_handles so CreatePipe
@@ -27,6 +28,9 @@ use rstest::rstest;
 use snuffler::{REPORT_BEGIN, REPORT_END, Report};
 use tempfile::TempDir;
 use wait_timeout::ChildExt;
+
+#[path = "boot/virtiofs.rs"]
+mod virtiofs;
 
 // dillo boots a same-arch guest, so the host arch picks the kernel.
 #[cfg(target_arch = "x86_64")]
@@ -397,6 +401,18 @@ fn boot(pmi: &Path, mem_mib: u32, cpus: u32, dir: &Path) -> String {
 /// As [`boot`], but appends `extra` to dillo's argv (e.g. `--disk`,
 /// `--partition`). Used by the block-device tests.
 fn boot_with(pmi: &Path, mem_mib: u32, cpus: u32, dir: &Path, extra: &[&str]) -> String {
+    boot_with_env(pmi, mem_mib, cpus, dir, extra, &[])
+}
+
+/// Like [`boot_with`], with process-local environment overrides for diagnostics.
+fn boot_with_env(
+    pmi: &Path,
+    mem_mib: u32,
+    cpus: u32,
+    dir: &Path,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> String {
     sign_dillo_for_hvf();
 
     let out_path = dir.join("console.out");
@@ -407,6 +423,7 @@ fn boot_with(pmi: &Path, mem_mib: u32, cpus: u32, dir: &Path, extra: &[&str]) ->
         .args(["--memory", &mem_mib.to_string()])
         .args(["--cpus", &cpus.to_string()])
         .args(extra)
+        .envs(env.iter().copied())
         .stdout(File::create(&out_path).unwrap())
         .stderr(File::create(&err_path).unwrap())
         .spawn()
@@ -894,117 +911,6 @@ fn boots_with_vsock() {
     );
 
     let _ = echo.join();
-}
-
-/// A `--fs` device shares a host directory into the guest over virtio-fs. The
-/// device(s) always enumerate on the PCI bus (proves dillo attached the
-/// transport + the config tag). When the guest kernel has `CONFIG_VIRTIO_FS=y`
-/// built in, the probe also mounts both shares and exercises the full FUSE path:
-/// on the read-write share it lists the root, reads a file back, and writes a
-/// probe file (verified host-side — guest→host write); on the read-only share it
-/// confirms a write is rejected. A kernel without the built-in driver (the
-/// catalogued kernels ship it as a module, and snuffler loads none) is a clean
-/// skip *after* the attach assertion — never before.
-///
-/// Cross-platform: virtio-fs runs in-process and reads/writes the host directory
-/// via `std::fs`, so this runs on every host lane including Windows/WHP.
-#[test]
-fn boots_with_virtiofs() {
-    use snuffler::{VIRTIOFS_PROBE_CONTENT, VIRTIOFS_PROBE_FILE};
-
-    // Read-write share: a known file to read back plus a sibling for readdir.
-    const CONTENT: &str = "virtiofs round-trip ok";
-
-    if !hypervisor_available() {
-        eprintln!("skip: no usable /dev/kvm on this host (local dev only)");
-        return;
-    }
-    let tmp = TempDir::new().unwrap();
-    let share = tmp.path().join("share");
-    std::fs::create_dir(&share).unwrap();
-    std::fs::write(share.join("hello.txt"), CONTENT).unwrap();
-    std::fs::write(share.join("readme.md"), "# hi").unwrap();
-
-    // Read-only share: writes from the guest must be rejected by the device.
-    let ro_share = tmp.path().join("ro");
-    std::fs::create_dir(&ro_share).unwrap();
-    std::fs::write(ro_share.join("locked.txt"), "do not touch").unwrap();
-
-    let cmdline = "console=hvc0 dillo.virtiofs_tag=ctx dillo.virtiofs_file=hello.txt \
-                   dillo.virtiofs_ro_tag=roctx";
-    let pmi = build_pmi(tmp.path(), cmdline, false);
-    let rw = format!("tag=ctx,source={}", share.display());
-    let ro = format!("tag=roctx,source={},readonly", ro_share.display());
-    let output = boot_with(&pmi, 256, 1, tmp.path(), &["--fs", &rw, "--fs", &ro]);
-    let r = parse_report(&output).unwrap_or_else(|| {
-        panic!("boot produced no snuffler report (guest did not boot):\n{output}")
-    });
-
-    // Attach proof: virtio-fs PCI functions (1af4:105a = 0x1040 + type 26) must
-    // enumerate even if the guest binds no driver. Two `--fs` devices → two.
-    let fs_funcs = r
-        .pci
-        .iter()
-        .filter(|p| p.vendor == 0x1af4 && p.device == 0x105a)
-        .count();
-    assert!(
-        fs_funcs >= 2,
-        "expected 2 virtio-fs PCI functions (1af4:105a), found {fs_funcs}: {:?}",
-        r.pci
-    );
-
-    let v = r
-        .virtiofs
-        .expect("virtiofs probe result absent (cmdline requested dillo.virtiofs_tag)");
-    assert_eq!(v.tag, "ctx", "probed unexpected tag");
-    if !v.mounted {
-        eprintln!(
-            "skip: virtio-fs attached on PCI but the guest could not mount it — this kernel \
-             lacks CONFIG_VIRTIO_FS=y built-in (mount error: {:?})",
-            v.error
-        );
-        return;
-    }
-
-    // Read path.
-    assert!(
-        v.entries.iter().any(|e| e == "hello.txt") && v.entries.iter().any(|e| e == "readme.md"),
-        "share root listing incomplete: {:?}",
-        v.entries
-    );
-    assert_eq!(
-        v.content.as_deref(),
-        Some(CONTENT),
-        "virtio-fs file content mismatch: {v:?}"
-    );
-
-    // Write path: the guest's write succeeded and landed on the host byte-exact.
-    assert!(
-        v.wrote,
-        "guest write to rw share failed: {:?}",
-        v.write_error
-    );
-    let written = std::fs::read_to_string(share.join(VIRTIOFS_PROBE_FILE))
-        .expect("probe file not created on host by guest write");
-    assert_eq!(
-        written, VIRTIOFS_PROBE_CONTENT,
-        "guest→host write content mismatch"
-    );
-
-    // Read-only share: the write must have been rejected, and nothing written.
-    let ro_res = r
-        .virtiofs_ro
-        .expect("read-only virtiofs probe absent (cmdline requested dillo.virtiofs_ro_tag)");
-    if ro_res.mounted {
-        assert!(
-            !ro_res.wrote && ro_res.write_error.is_some(),
-            "read-only share accepted a write: {ro_res:?}"
-        );
-        assert!(
-            !ro_share.join(VIRTIOFS_PROBE_FILE).exists(),
-            "read-only share was modified on the host"
-        );
-    }
 }
 
 /// A `--net` device gives the guest a virtio-net NIC. With the default `user`
