@@ -12,10 +12,9 @@
 //! [`dispatch`] consumes a flattened input buffer and returns the full reply
 //! bytes (`None` for the few replyless ops: FORGET / BATCH_FORGET / INTERRUPT).
 //!
-//! Scope: a **read-only** server. Every mutating opcode is answered `EROFS`
-//! before the backend is consulted; only the read path (INIT/LOOKUP/GETATTR/
-//! OPEN/READ/READDIR/READLINK/STATFS and bookkeeping) is implemented. Unknown
-//! opcodes return `ENOSYS`, which the guest kernel caches as "unsupported".
+//! Read-write operations are delegated to the backend. Read-only shares reject
+//! mutations with `EROFS`. Unsupported opcodes return `ENOSYS`, which the guest
+//! kernel may cache as "unsupported". See tests/VIRTIOFS.md for guest coverage.
 
 use std::collections::HashMap;
 use std::io;
@@ -74,6 +73,7 @@ const EEXIST: i32 = 17;
 const ENOTDIR: i32 = 20;
 const EISDIR: i32 = 21;
 const ENOTEMPTY: i32 = 39;
+const EOPNOTSUPP: i32 = 95;
 
 const FUSE_IN_HEADER_LEN: usize = 40;
 const FUSE_OUT_HEADER_LEN: usize = 16;
@@ -87,6 +87,8 @@ const O_TRUNC: u32 = 0o1000;
 
 // --- fuse_setattr_in `valid` bits -----------------------------------------
 const FATTR_MODE: u32 = 1 << 0;
+const FATTR_UID: u32 = 1 << 1;
+const FATTR_GID: u32 = 1 << 2;
 const FATTR_SIZE: u32 = 1 << 3;
 const FATTR_ATIME: u32 = 1 << 4;
 const FATTR_MTIME: u32 = 1 << 5;
@@ -156,10 +158,12 @@ fn error_reply(unique: u64, errno: i32) -> Vec<u8> {
 }
 
 fn errno_of(e: &io::Error) -> i32 {
+    #[cfg(target_os = "linux")]
     if let Some(raw) = e.raw_os_error() {
         return raw;
     }
-    // No OS errno (e.g. a synthesized error on a non-Unix host); map the kind.
+    // Only Linux raw errnos belong on the FUSE wire. Map other host OS
+    // errors (including BSD/macOS errnos) and synthesized errors by kind.
     match e.kind() {
         io::ErrorKind::NotFound => ENOENT,
         io::ErrorKind::PermissionDenied => EACCES,
@@ -169,6 +173,7 @@ fn errno_of(e: &io::Error) -> i32 {
         io::ErrorKind::IsADirectory => EISDIR,
         io::ErrorKind::DirectoryNotEmpty => ENOTEMPTY,
         io::ErrorKind::ReadOnlyFilesystem => EROFS,
+        io::ErrorKind::Unsupported => EOPNOTSUPP,
         _ => EIO,
     }
 }
@@ -360,6 +365,7 @@ pub(crate) fn dispatch(
     let unique = rd_u64(input, 8)?;
     let nodeid = rd_u64(input, 16)?;
     let args = &input[FUSE_IN_HEADER_LEN..];
+    log::trace!("FUSE opcode={opcode} nodeid={nodeid} unique={unique}");
 
     match opcode {
         FUSE_INIT => Some(handle_init(unique, args)),
@@ -856,6 +862,11 @@ fn handle_rename(
     let Some(newdir) = rd_u64(args, 0) else {
         return error_reply(unique, EINVAL);
     };
+    // The backend supports ordinary rename only. Reject flags rather than
+    // silently replacing a destination requested with NOREPLACE/EXCHANGE.
+    if extra != 0 && rd_u32(args, 8) != Some(0) {
+        return error_reply(unique, EINVAL);
+    }
     let name_off = 8 + extra;
     let Some((oldname, next)) = read_name(args, name_off) else {
         return error_reply(unique, EINVAL);
@@ -919,6 +930,11 @@ fn handle_setattr(
     // fuse_setattr_in: valid@0, fh@8, size@16, atime@32, mtime@40,
     // atimensec@56, mtimensec@60, mode@68.
     let valid = rd_u32(args, 0).unwrap_or(0);
+    // Host ownership is intentionally not delegated to the guest. Never
+    // acknowledge chown without applying it.
+    if valid & (FATTR_UID | FATTR_GID) != 0 {
+        return error_reply(unique, EOPNOTSUPP);
+    }
     let Some(rel) = state.rel_of(nodeid) else {
         return error_reply(unique, ENOENT);
     };
@@ -1629,11 +1645,94 @@ mod tests {
         assert_eq!(out_error(&reply), -EROFS);
     }
 
+    // Linux virtiofs enforces ACCESS locally and sends individual FORGETs.
+    // INTERRUPT needs an outstanding request, which this synchronous server
+    // never retains. Keep their wire contracts covered here.
+    #[test]
+    fn kernel_controlled_bookkeeping() {
+        let mut state = FsState::new(true);
+        let fs = MapFs::new().with_file("file", "data");
+        let node = lookup_node(&mut state, &fs, FUSE_ROOT_ID, "file");
+        let reply = dispatch(
+            &mut state,
+            &fs,
+            &request(FUSE_ACCESS, 1, node, &[4, 0, 0, 0]),
+        )
+        .unwrap();
+        assert_eq!(out_error(&reply), 0);
+        assert!(dispatch(&mut state, &fs, &request(FUSE_INTERRUPT, 2, node, &[0; 8])).is_none());
+        let mut batch = vec![0u8; 24];
+        batch[..4].copy_from_slice(&1u32.to_le_bytes());
+        batch[8..16].copy_from_slice(&node.to_le_bytes());
+        batch[16..24].copy_from_slice(&1u64.to_le_bytes());
+        assert!(dispatch(&mut state, &fs, &request(FUSE_BATCH_FORGET, 3, 0, &batch)).is_none());
+        assert!(state.rel_of(node).is_none());
+        assert!(state.rel_of(FUSE_ROOT_ID).is_some());
+    }
+
+    #[test]
+    fn ownership_setattr_is_explicitly_unsupported() {
+        let (mut state, fs, tmp) = writable();
+        std::fs::write(tmp.path().join("file"), b"keep").unwrap();
+        let node = lookup_node(&mut state, &fs, FUSE_ROOT_ID, "file");
+        for ownership in [FATTR_UID, FATTR_GID, FATTR_UID | FATTR_GID] {
+            let mut args = vec![0u8; 88];
+            args[..4].copy_from_slice(&(ownership | FATTR_SIZE).to_le_bytes());
+            // A rejected mixed request must not partially truncate the file.
+            let reply = dispatch(&mut state, &fs, &request(FUSE_SETATTR, 1, node, &args)).unwrap();
+            assert_eq!(out_error(&reply), -EOPNOTSUPP);
+            assert_eq!(std::fs::read(tmp.path().join("file")).unwrap(), b"keep");
+        }
+    }
+
+    #[test]
+    fn rename2_rejects_unimplemented_flags() {
+        let (mut state, fs, tmp) = writable();
+        std::fs::write(tmp.path().join("a"), b"source").unwrap();
+        std::fs::write(tmp.path().join("b"), b"destination").unwrap();
+        for flags in [1u32, 2, 4] {
+            let mut args = rename_in(FUSE_RENAME2, FUSE_ROOT_ID, "a", "b");
+            args[8..12].copy_from_slice(&flags.to_le_bytes());
+            let reply = dispatch(
+                &mut state,
+                &fs,
+                &request(FUSE_RENAME2, 1, FUSE_ROOT_ID, &args),
+            )
+            .unwrap();
+            assert_eq!(out_error(&reply), -EINVAL);
+            assert_eq!(std::fs::read(tmp.path().join("a")).unwrap(), b"source");
+            assert_eq!(std::fs::read(tmp.path().join("b")).unwrap(), b"destination");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_errors_map_to_linux_errno() {
+        assert_eq!(errno_of(&io::Error::from_raw_os_error(5)), EACCES);
+        assert_eq!(errno_of(&io::Error::from_raw_os_error(183)), EEXIST);
+        assert_eq!(errno_of(&io::Error::from_raw_os_error(2)), ENOENT);
+        assert_eq!(
+            errno_of(&io::Error::from(io::ErrorKind::Unsupported)),
+            EOPNOTSUPP
+        );
+    }
+
     #[test]
     fn unsupported_mutating_opcode_is_enosys_when_writable() {
         let (mut state, fs, _dir) = writable();
-        // FUSE_MKNOD = 8 (not implemented) on a writable share -> ENOSYS.
-        let reply = dispatch(&mut state, &fs, &request(8, 1, FUSE_ROOT_ID, &[0u8; 16])).unwrap();
-        assert_eq!(out_error(&reply), -ENOSYS);
+        // All explicitly unsupported mutations, including copy and DAX.
+        for op in [8, 13, 21, 24, 43, 47, 48, 49] {
+            let reply =
+                dispatch(&mut state, &fs, &request(op, 1, FUSE_ROOT_ID, &[0u8; 16])).unwrap();
+            assert_eq!(out_error(&reply), -ENOSYS, "opcode {op}");
+            let mut readonly = FsState::new(true);
+            let reply = dispatch(
+                &mut readonly,
+                &fs,
+                &request(op, 1, FUSE_ROOT_ID, &[0u8; 16]),
+            )
+            .unwrap();
+            assert_eq!(out_error(&reply), -EROFS, "readonly opcode {op}");
+        }
     }
 }
