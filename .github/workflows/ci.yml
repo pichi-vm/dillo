@@ -67,8 +67,18 @@ jobs:
   # Alpine guest; the boot suite asserts the guest's self-report. The plain
   # workspace test run precedes it (Windows/macOS exclude the Unix/Linux-only
   # crates, matching dillo's own cfg gating).
+  #
+  # Tier 2 of the fail-fast DAG. The cheap checks above run in parallel on
+  # every push and pull request. This matrix starts only after all of them
+  # succeed, so a red license, deny, gitlint, or lint job does not spend
+  # KVM, WHP, or HVF minutes.
   ci:
     name: ${{ matrix.name }}
+    needs:
+      - license-headers
+      - cargo-deny
+      - commit-messages
+      - lint
     strategy:
       fail-fast: false
       matrix:
