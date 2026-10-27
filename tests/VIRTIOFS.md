@@ -29,14 +29,19 @@ The release workflow builds `ch_defconfig` from the same tag on both architectur
 | x86_64 | `bzImage-x86_64` | `d4af401aa859e4659d4b08a153ac608eb6a315c6918e567daa46981af5d2e5ef` |
 | aarch64 | `Image-arm64` | `bec084018bfdea2ccf619166ea4af3fdfecb00a801ae578da14e6cbdba172109` |
 
-The test verifies the image digest and the tagged
+The test verifies the image digest. The checked-in required builtin fragments
+(`tests/boot/virtiofs-{x86_64,aarch64}.config`) were verified against the tagged
 [`arch/x86/configs/ch_defconfig`](https://github.com/cloud-hypervisor/linux/blob/ch-release-v6.12.8-20250613/arch/x86/configs/ch_defconfig)
 or [`arch/arm64/configs/ch_defconfig`](https://github.com/cloud-hypervisor/linux/blob/ch-release-v6.12.8-20250613/arch/arm64/configs/ch_defconfig)
-for built-in FUSE_FS, VIRTIO_FS, PCI, VIRTIO_PCI and VIRTIO_CONSOLE. Downloads use
-the existing burrow cache. Nothing is built or published outside this repository.
+for built-in FUSE_FS, VIRTIO_FS, PCI, VIRTIO_PCI and VIRTIO_CONSOLE. The fragments
+are paired with the image digest pins and passed to arma for slot/poweroff
+inference. Actual guest mounts assert the driver is present in the pinned image.
+Only image downloads are needed at runtime, using the existing burrow cache;
+config verification requires no extra network request. Nothing is built or
+published outside this repository.
 
-If blocked: restore access to the release assets and raw tagged config URLs, or
-update the asset/config/digest pins together to another verified published
+If blocked: restore access to the release assets, or update the
+asset/config-fragment/digest pins together to another verified published
 kernel with those builtins. An `ENODEV` mount error is a failure, never a reason
 to skip. Local Linux runs require read/write `/dev/kvm` and sufficient reserved
 2 MiB hugepages (512 MiB for this guest). CI provisions these before the boot
