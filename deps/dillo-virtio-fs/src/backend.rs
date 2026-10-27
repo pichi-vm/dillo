@@ -522,8 +522,8 @@ mod passthrough {
         #[cfg(not(unix))]
         {
             let _ = (path, target);
-            // 95 = EOPNOTSUPP; no portable symlink creation off Unix.
-            Err(io::Error::from_raw_os_error(95))
+            // No portable symlink creation off Unix.
+            Err(io::Error::from(io::ErrorKind::Unsupported))
         }
     }
 }
