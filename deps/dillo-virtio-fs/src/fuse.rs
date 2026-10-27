@@ -1288,6 +1288,96 @@ mod tests {
     }
 
     #[test]
+    fn rename_then_immediate_open() {
+        for opcode in [FUSE_RENAME, FUSE_RENAME2] {
+            let (mut state, fs, dir) = writable();
+            std::fs::create_dir(dir.path().join("blobs")).unwrap();
+            let destination = lookup_node(&mut state, &fs, FUSE_ROOT_ID, "blobs");
+
+            // Stage bytes under a temporary name, as with NamedTempFile::persist.
+            let reply = dispatch(
+                &mut state,
+                &fs,
+                &request(FUSE_CREATE, 1, FUSE_ROOT_ID, &create_in(2, 0o644, ".tmp")),
+            )
+            .unwrap();
+            assert_eq!(out_error(&reply), 0);
+            let node = rd_u64(&reply, FUSE_OUT_HEADER_LEN).unwrap();
+            let fh = rd_u64(&reply, FUSE_OUT_HEADER_LEN + 128).unwrap();
+            let reply = dispatch(
+                &mut state,
+                &fs,
+                &request(FUSE_WRITE, 2, node, &write_in(fh, 0, b"staged blob")),
+            )
+            .unwrap();
+            assert_eq!(out_error(&reply), 0);
+            let reply = dispatch(
+                &mut state,
+                &fs,
+                &request(
+                    opcode,
+                    3,
+                    FUSE_ROOT_ID,
+                    &rename_in(opcode, destination, ".tmp", "sha256"),
+                ),
+            )
+            .unwrap();
+            assert_eq!(out_error(&reply), 0);
+            assert!(!dir.path().join(".tmp").exists());
+            assert_eq!(
+                std::fs::read(dir.path().join("blobs/sha256")).unwrap(),
+                b"staged blob"
+            );
+
+            // The kernel can reuse CREATE's nodeid without another LOOKUP.
+            let reopened = open_node(&mut state, &fs, node);
+            assert_read(&mut state, &fs, node, reopened, b"staged blob");
+            assert_eq!(lookup_node(&mut state, &fs, destination, "sha256"), node);
+            let reopened = open_node(&mut state, &fs, node);
+            assert_read(&mut state, &fs, node, reopened, b"staged blob");
+            // The handle returned by CREATE must follow the rename too.
+            assert_read(&mut state, &fs, node, fh, b"staged blob");
+        }
+    }
+
+    fn lookup_node(state: &mut FsState, fs: &dyn FsBackend, parent: u64, name: &str) -> u64 {
+        let mut name = name.as_bytes().to_vec();
+        name.push(0);
+        let reply = dispatch(state, fs, &request(FUSE_LOOKUP, 1, parent, &name)).unwrap();
+        assert_eq!(out_error(&reply), 0);
+        rd_u64(&reply, FUSE_OUT_HEADER_LEN).unwrap()
+    }
+
+    fn open_node(state: &mut FsState, fs: &dyn FsBackend, node: u64) -> u64 {
+        let reply = dispatch(state, fs, &request(FUSE_OPEN, 1, node, &[0; 8])).unwrap();
+        assert_eq!(out_error(&reply), 0);
+        rd_u64(&reply, FUSE_OUT_HEADER_LEN).unwrap()
+    }
+
+    fn assert_read(state: &mut FsState, fs: &dyn FsBackend, node: u64, fh: u64, bytes: &[u8]) {
+        let mut args = Vec::new();
+        args.extend_from_slice(&fh.to_le_bytes());
+        args.extend_from_slice(&0u64.to_le_bytes());
+        args.extend_from_slice(&64u32.to_le_bytes());
+        args.extend_from_slice(&[0; 20]);
+        let reply = dispatch(state, fs, &request(FUSE_READ, 1, node, &args)).unwrap();
+        assert_eq!(out_error(&reply), 0);
+        assert_eq!(&reply[FUSE_OUT_HEADER_LEN..], bytes);
+    }
+
+    fn rename_in(opcode: u32, newdir: u64, from: &str, to: &str) -> Vec<u8> {
+        let mut args = newdir.to_le_bytes().to_vec();
+        if opcode == FUSE_RENAME2 {
+            args.extend_from_slice(&[0; 8]); // flags + padding
+        }
+        args.extend_from_slice(from.as_bytes());
+        args.push(0);
+        args.extend_from_slice(to.as_bytes());
+        args.push(0);
+        args
+    }
+
+    #[test]
     fn rename_unlink_rmdir() {
         let (mut state, fs, dir) = writable();
         std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
