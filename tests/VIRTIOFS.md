@@ -65,18 +65,21 @@ kernel-controlled cases. It enables tracing only in its child Dillo process.
 | `rename_replace_existing` | Cache destination, replace it, assert new bytes and source inode | RENAME (12), GETATTR (3), OPEN (14), READ (15) |
 | `rename_directory_cached_descendants` | Cache child file and directory fds; rename ancestor; read/write through cached file, create relative to cached directory fd, verify new paths/inodes, remove descendants | RENAME (12), READ (15), WRITE (16), CREATE (35), FSYNCDIR (30), UNLINK (10), RMDIR (11) |
 | `rename_same_path_and_failure` | Same-path success; missing-source ENOENT preserves destination | RENAME (12) |
-| `rename2_flags_unsupported` | NOREPLACE rejected with EINVAL, neither path modified; backend supports only zero flags | RENAME2 (45) |
+| `rename2_noreplace_exchange` | NOREPLACE of an existing name is EEXIST and leaves both files; NOREPLACE of a new name moves the file. Unix EXCHANGE swaps the two names and is swapped back. Windows EXCHANGE is EOPNOTSUPP. WHITEOUT is EOPNOTSUPP on every host. Witness `noreplace-dst` stays `noreplace` | RENAME2 (45) |
 | `symlink_readlink` | Unix: create relative symlink, lstat/readlink, follow and read, unlink. Windows: explicit EOPNOTSUPP (server does not create symlinks there) | SYMLINK (6), READLINK (5, Unix only), GETATTR (3), UNLINK (10) |
 | `getattr_setattr` | ftruncate, O_TRUNC, chmod, utimensat; verify size/mode/mtime and host metadata | GETATTR (3), SETATTR (4), OPEN (14) |
-| `chown_unsupported` | Explicit EOPNOTSUPP; host ownership is not delegated | SETATTR (4) |
+| `chown_unsupported` | Explicit EOPNOTSUPP. The share runs as the launching user and there is no idmap, so guest uid/gid is not applied (and no other field in that request is applied either) | SETATTR (4) |
 | `fsync_flush_syncfs` | fsync, fdatasync, close (Linux flush/release), syncfs, directory fsync | FSYNC (20), FLUSH (25), RELEASE (18), SYNCFS (50), FSYNCDIR (30) |
-| `statfs_access_lseek` | FUSE magic, bsize=4096, namelen=255; access readable file; SEEK_DATA=0, SEEK_HOLE=length via Linux ENOSYS fallback | STATFS (17), LSEEK (46); ACCESS (34) handled locally by Linux |
-| `xattr_get_unsupported` | getxattr explicitly returns EOPNOTSUPP | GETXATTR (22): server ENOSYS, translated by Linux |
-| `xattr_set_unsupported` | setxattr explicitly returns EOPNOTSUPP | SETXATTR (21): ENOSYS translated by Linux |
-| `xattr_list_unsupported` | listxattr explicitly returns EOPNOTSUPP | LISTXATTR (23): ENOSYS translated by Linux |
-| `xattr_remove_unsupported` | removexattr explicitly returns EOPNOTSUPP | REMOVEXATTR (24): ENOSYS translated by Linux |
-| `link_mknod_fallocate_unsupported` | hard link and FIFO creation return ENOSYS; fallocate returns EOPNOTSUPP | LINK (13), MKNOD (8), FALLOCATE (43) |
-| `copy_file_range_fallback` | copy_file_range copies exactly 3 bytes via Linux generic fallback | COPY_FILE_RANGE (47): ENOSYS triggers Linux generic copy |
+| `statfs_access_lseek` | FUSE magic, bsize=4096, namelen=255; access readable file. Unix punches a hole and requires SEEK_HOLE(0)=4096 and SEEK_DATA(4096)=8192, which the kernel's ENOSYS fallback cannot return. Windows reports a dense file (SEEK_HOLE is the length) because the host has no portable hole query. SEEK_DATA at EOF is ENXIO | STATFS (17), LSEEK (46); ACCESS (34) handled locally by Linux |
+| `xattr_get` | Unix: missing `user.dillo` is ENODATA. Windows: EOPNOTSUPP | GETXATTR (22) |
+| `xattr_set` | Unix: set and read back `user.dillo=virtiofs-xattr`. Windows: EOPNOTSUPP | SETXATTR (21), GETXATTR (22) |
+| `xattr_list` | Unix: the name list contains `user.dillo` (other names may be present). Windows: EOPNOTSUPP | LISTXATTR (23) |
+| `xattr_remove` | Unix: remove, observe ENODATA, then set the attribute again for the host witness. Windows: EOPNOTSUPP | REMOVEXATTR (24), SETXATTR (21) |
+| `hard_link` | Hard link of `hello.txt` to `hello-link`. Both names share one inode and `nlink >= 2`. The link is left in the share | LINK (13), LOOKUP (1), GETATTR (3) |
+| `mknod_fifo` | Unix: create a FIFO, check the type, unlink it. Windows: EOPNOTSUPP | MKNOD (8) |
+| `fallocate` | `alloc.bin` holds `xyz`. Unix `FALLOC_FL_KEEP_SIZE` of 1 MiB leaves the length at 3 and the host sees at least 1 MiB of blocks. Windows cannot reserve past EOF without growing the file, so KEEP_SIZE is EOPNOTSUPP and the length stays 3 | FALLOCATE (43) |
+| `copy_file_range` | Server copies exactly 3 bytes of `attrs.txt`. The host requires a zero error on opcode 47, so a Linux generic fallback after ENOSYS does not pass | COPY_FILE_RANGE (47) |
+| `large_object_read` | Read the host-seeded 2 MiB + 137 byte object, including a window at offset 1000003, and write the same bytes back. A short read must not truncate the object | READ (15), WRITE (16) |
 | `readonly_read` | Existing host file readable and unchanged | LOOKUP (1), OPEN (14), READ (15) |
 | `readonly_mutations` | Write-open, create, mkdir, unlink, rmdir, rename, symlink, chmod, setxattr all explicitly fail EROFS; host verifies contents and directory entries unchanged | OPEN (14), CREATE (35), MKDIR (9), UNLINK (10), RMDIR (11), RENAME (12), SYMLINK (6), SETATTR (4), SETXATTR (21) |
 | `unmount_rw`, `unmount_ro` | Normal unmount succeeds with no open handles left | RELEASE (18), RELEASEDIR (29), FORGET (2), DESTROY (38) |
@@ -88,6 +91,34 @@ read-only attribute mapping (0444 then 0644). utimensat submits both timestamps;
 only mtime is exposed in the current wire attributes (atime/ctime are zero), so
 mtime is asserted in guest and host with a Windows-representable nanosecond value.
 Ownership changes return EOPNOTSUPP before any other fields can be applied.
+That is a product decision: the share runs as the launching user, with no idmap,
+so delegating guest uid/gid would fail unprivileged or rewrite host ownership.
+
+The server loops `pread`/`pwrite` until a request is full or the host returns a
+real end-of-file. Linux FUSE treats a short `READ` as EOF and shrinks `i_size`,
+which truncates a large loose object when one `pread` returns early. If the
+returned buffer still ends before the file size, the server replies `EIO`
+instead of a short success. `large_object_read` is the guest/host witness.
+
+Linux caches `ENOSYS` per opcode and then stops calling the server. Implemented
+operations that the host OS cannot perform return `EOPNOTSUPP` (or the real
+errno), never `ENOSYS`. The trace line `FUSE result opcode=N error=E` is the
+reply the server sent. The harness requires a zero error for link, read,
+rename2, lseek and copy_file_range, and a zero error on Unix (EOPNOTSUPP on
+Windows) for mknod, xattr and fallocate. A kernel fallback after `ENOSYS` would
+show error `-38` and fail that check.
+
+`RENAME_WHITEOUT` is an overlayfs device node, not a directory-share operation,
+so it is `EOPNOTSUPP` on every host. Windows has no `renameat2` exchange and no
+extended attributes. Windows inode and link count come from
+`GetFileInformationByHandle` (`nFileIndex`, `nNumberOfLinks`), so hard links
+share one inode. A path hash is used only when that query reports no index.
+Renaming one hard link onto the other leaves both names in place: Win32
+`MoveFile` would drop the source name, so the server skips that call when the
+file index matches. Windows `FILE_ALLOCATION_INFO` grows the logical size, so
+`FALLOC_FL_KEEP_SIZE` past EOF and punch-hole are `EOPNOTSUPP` there. macOS
+`F_PREALLOCATE` with `F_PEOFPOSMODE` reserves bytes without extending the file;
+punch-hole uses `F_PUNCHHOLE`.
 
 Linux virtiofs always enables `default_permissions`, so `access(2)` is checked
 by Linux and does not issue ACCESS (34). Its transport sends individual FORGET
@@ -97,7 +128,7 @@ by POSIX calls. `kernel_controlled_bookkeeping` tests those three wire contracts
 explicitly in the existing FUSE unit suite. It also verifies batch forget really
 removes the inode while retaining the root. Existing rename FUSE tests remain.
 Zero-flag RENAME2 is likewise retained in the existing protocol rename regression;
-Linux emits RENAME for ordinary rename and RENAME2 for the flags rejection case.
-SETUPMAPPING (48) / REMOVEMAPPING (49) require DAX negotiation, which the server
-does not advertise, so Linux does not expose a guest POSIX path to them. They
-remain explicitly unsupported in the dispatcher.
+Linux emits RENAME for ordinary rename and RENAME2 when flags are requested.
+SETUPMAPPING (48) / REMOVEMAPPING (49) need a DAX window, which INIT does not
+advertise, so Linux does not expose a guest POSIX path to them. They stay
+`ENOSYS` when the share is writable and `EROFS` when it is read-only.

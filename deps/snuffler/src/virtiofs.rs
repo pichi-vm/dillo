@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! POSIX checks on real virtiofs mounts. Every error is reported to the host,
-//! including mount/umount failures; unsupported operations have exact errnos.
+//! including mount/umount failures. Operations the host OS cannot perform
+//! assert that errno; everything else must succeed.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -12,7 +13,10 @@ use std::path::Path;
 use rustix::fs::{self as sys, AtFlags, Mode, OFlags};
 use rustix::io::Errno;
 use rustix::mount::{MountFlags, UnmountFlags, mount, unmount};
-use snuffler::{FsCheck, FsSuite, VIRTIOFS_PROBE_CONTENT, VIRTIOFS_PROBE_FILE};
+use snuffler::{
+    FsCheck, FsSuite, VIRTIOFS_LARGE_FILE, VIRTIOFS_LARGE_GUEST_FILE, VIRTIOFS_LARGE_LEN,
+    VIRTIOFS_PROBE_CONTENT, VIRTIOFS_PROBE_FILE, virtiofs_large_byte,
+};
 
 pub(super) fn probe(cmdline: &str) -> Option<FsSuite> {
     let token = |key: &str| cmdline.split_whitespace().find_map(|t| t.strip_prefix(key));
@@ -265,23 +269,7 @@ fn writable(s: &mut Recorder, root: &Path, windows: bool) {
         )?;
         fs::remove_file(a)
     });
-    s.check("rename2_flags_unsupported", || {
-        let a = root.join("flags-source");
-        let b = root.join("flags-destination");
-        fs::write(&a, b"flags")?;
-        // Nonzero flags have no backend implementation; never silently apply
-        // ordinary rename semantics for NOREPLACE/EXCHANGE.
-        errno(
-            sys::renameat_with(sys::CWD, &a, sys::CWD, &b, sys::RenameFlags::NOREPLACE),
-            Errno::INVAL,
-        )?;
-        ensure(
-            fs::read(&a)? == b"flags",
-            "unsupported rename2 changed source",
-        )?;
-        errno(fs::metadata(&b), Errno::NOENT)?;
-        fs::remove_file(a)
-    });
+    s.check("rename2_noreplace_exchange", || rename_flags(root, windows));
     s.check("symlink_readlink", || {
         let link = root.join("link");
         if windows {
@@ -335,70 +323,289 @@ fn writable(s: &mut Recorder, root: &Path, windows: bool) {
         )?;
         let path = root.join(VIRTIOFS_PROBE_FILE);
         sys::access(&path, sys::Access::READ_OK)?;
-        let file = File::open(path)?;
-        // ENOSYS from FUSE_LSEEK triggers Linux's all-data fallback.
-        ensure(
-            sys::seek(&file, sys::SeekFrom::Data(0))? == 0,
-            "SEEK_DATA fallback",
+        let file = File::open(&path)?;
+        if windows {
+            let len = file.metadata()?.len();
+            ensure(sys::seek(&file, sys::SeekFrom::Data(0))? == 0, "SEEK_DATA")?;
+            ensure(
+                sys::seek(&file, sys::SeekFrom::Hole(0))? == len,
+                "dense SEEK_HOLE",
+            )?;
+            return errno(sys::seek(&file, sys::SeekFrom::Data(len)), Errno::NXIO);
+        }
+        // A hole in the middle cannot be the kernel's ENOSYS fallback, which
+        // reports the whole file as data and the only hole at EOF.
+        drop(file);
+        let sparse = root.join("sparse.bin");
+        let mut created = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&sparse)?;
+        created.set_len(12288)?;
+        created.write_all(&[1u8; 4096])?;
+        created.seek(SeekFrom::Start(8192))?;
+        created.write_all(&[2u8; 4096])?;
+        sys::fallocate(
+            &created,
+            sys::FallocateFlags::PUNCH_HOLE | sys::FallocateFlags::KEEP_SIZE,
+            4096,
+            4096,
         )?;
         ensure(
-            sys::seek(&file, sys::SeekFrom::Hole(0))? == VIRTIOFS_PROBE_CONTENT.len() as u64,
-            "SEEK_HOLE fallback",
-        )
+            sys::seek(&created, sys::SeekFrom::Hole(0))? == 4096,
+            "SEEK_HOLE inside the file",
+        )?;
+        ensure(
+            sys::seek(&created, sys::SeekFrom::Data(4096))? == 8192,
+            "SEEK_DATA after the hole",
+        )?;
+        errno(sys::seek(&created, sys::SeekFrom::Data(12288)), Errno::NXIO)?;
+        drop(created);
+        fs::remove_file(sparse)
     });
     let path = root.join("attrs.txt");
-    s.check("xattr_get_unsupported", || {
+    s.check("xattr_get", || xattr_get(&path, windows));
+    s.check("xattr_set", || xattr_set(&path, windows));
+    s.check("xattr_list", || xattr_list(&path, windows));
+    s.check("xattr_remove", || xattr_remove(&path, windows));
+    s.check("hard_link", || hard_link(root));
+    s.check("mknod_fifo", || mknod_fifo(root, windows));
+    s.check("fallocate", || allocate(root, windows));
+    s.check("copy_file_range", || copy_range(&path, root));
+    s.check("large_object_read", || large_object(root));
+}
+
+fn rename_flags(root: &Path, windows: bool) -> io::Result<()> {
+    let src = root.join("noreplace-src");
+    let dst = root.join("noreplace-dst");
+    fs::write(&src, b"moved")?;
+    fs::write(&dst, b"noreplace")?;
+    errno(
+        sys::renameat_with(sys::CWD, &src, sys::CWD, &dst, sys::RenameFlags::NOREPLACE),
+        Errno::EXIST,
+    )?;
+    ensure(
+        fs::read(&src)? == b"moved" && fs::read(&dst)? == b"noreplace",
+        "noreplace changed an existing file",
+    )?;
+    let created = root.join("noreplace-created");
+    sys::renameat_with(
+        sys::CWD,
+        &src,
+        sys::CWD,
+        &created,
+        sys::RenameFlags::NOREPLACE,
+    )?;
+    ensure(fs::read(&created)? == b"moved", "noreplace of a new name")?;
+    errno(fs::metadata(&src), Errno::NOENT)?;
+    if windows {
         errno(
-            sys::getxattr(&path, "user.dillo", &mut [0u8; 32]),
-            Errno::OPNOTSUPP,
-        )
-    });
-    s.check("xattr_set_unsupported", || {
-        errno(
-            sys::setxattr(&path, "user.dillo", b"value", sys::XattrFlags::empty()),
-            Errno::OPNOTSUPP,
-        )
-    });
-    s.check("xattr_list_unsupported", || {
-        errno(sys::listxattr(&path, &mut [0u8; 128]), Errno::OPNOTSUPP)
-    });
-    s.check("xattr_remove_unsupported", || {
-        errno(sys::removexattr(&path, "user.dillo"), Errno::OPNOTSUPP)
-    });
-    s.check("link_mknod_fallocate_unsupported", || {
-        errno(fs::hard_link(&path, root.join("hardlink")), Errno::NOSYS)?;
-        errno(
-            sys::mknodat(
+            sys::renameat_with(
                 sys::CWD,
-                root.join("fifo"),
-                sys::FileType::Fifo,
-                Mode::RUSR | Mode::WUSR,
-                0,
+                &created,
+                sys::CWD,
+                &dst,
+                sys::RenameFlags::EXCHANGE,
             ),
-            Errno::NOSYS,
-        )?;
-        let fd = OpenOptions::new().write(true).open(&path)?;
-        errno(
-            sys::fallocate(&fd, sys::FallocateFlags::KEEP_SIZE, 0, 4096),
             Errno::OPNOTSUPP,
-        )
-    });
-    s.check("copy_file_range_fallback", || {
-        let source = File::open(&path)?;
-        let to = root.join("copy-target");
-        let dest = File::create(&to)?;
-        // FUSE returns ENOSYS; Linux 6.12 copies through its generic fallback.
-        ensure(
-            sys::copy_file_range(&source, None, &dest, None, 3)? == 3,
-            "copy_file_range fallback length",
         )?;
-        drop(dest);
-        ensure(
-            fs::read(&to)? == b"abc",
-            "copy_file_range fallback contents",
+    } else {
+        sys::renameat_with(
+            sys::CWD,
+            &created,
+            sys::CWD,
+            &dst,
+            sys::RenameFlags::EXCHANGE,
         )?;
-        fs::remove_file(to)
-    });
+        ensure(
+            fs::read(&created)? == b"noreplace" && fs::read(&dst)? == b"moved",
+            "exchange",
+        )?;
+        sys::renameat_with(
+            sys::CWD,
+            &created,
+            sys::CWD,
+            &dst,
+            sys::RenameFlags::EXCHANGE,
+        )?;
+    }
+    ensure(fs::read(&dst)? == b"noreplace", "exchange witness")?;
+    ensure(fs::read(&created)? == b"moved", "exchange source")?;
+    errno(
+        sys::renameat_with(
+            sys::CWD,
+            &created,
+            sys::CWD,
+            &dst,
+            sys::RenameFlags::WHITEOUT,
+        ),
+        Errno::OPNOTSUPP,
+    )?;
+    fs::remove_file(created)
+}
+
+fn xattr_get(path: &Path, windows: bool) -> io::Result<()> {
+    let got = sys::getxattr(path, "user.dillo", &mut [0u8; 64]);
+    if windows {
+        errno(got, Errno::OPNOTSUPP)
+    } else {
+        errno(got, Errno::NODATA)
+    }
+}
+
+fn xattr_set(path: &Path, windows: bool) -> io::Result<()> {
+    let set = sys::setxattr(
+        path,
+        "user.dillo",
+        b"virtiofs-xattr",
+        sys::XattrFlags::empty(),
+    );
+    if windows {
+        return errno(set, Errno::OPNOTSUPP);
+    }
+    set?;
+    let mut buf = [0u8; 64];
+    let n = sys::getxattr(path, "user.dillo", &mut buf)?;
+    ensure(&buf[..n] == b"virtiofs-xattr", "xattr value")
+}
+
+fn xattr_list(path: &Path, windows: bool) -> io::Result<()> {
+    let mut buf = [0u8; 4096];
+    let listed = sys::listxattr(path, &mut buf);
+    if windows {
+        return errno(listed, Errno::OPNOTSUPP);
+    }
+    let n = listed?;
+    ensure(
+        buf[..n]
+            .split(|byte| *byte == 0)
+            .any(|name| name == b"user.dillo"),
+        "listxattr missing user.dillo",
+    )
+}
+
+fn xattr_remove(path: &Path, windows: bool) -> io::Result<()> {
+    let removed = sys::removexattr(path, "user.dillo");
+    if windows {
+        return errno(removed, Errno::OPNOTSUPP);
+    }
+    removed?;
+    errno(
+        sys::getxattr(path, "user.dillo", &mut [0u8; 8]),
+        Errno::NODATA,
+    )?;
+    // Put it back so the host witness still sees the attribute.
+    sys::setxattr(
+        path,
+        "user.dillo",
+        b"virtiofs-xattr",
+        sys::XattrFlags::empty(),
+    )?;
+    Ok(())
+}
+
+fn hard_link(root: &Path) -> io::Result<()> {
+    let from = root.join("hello.txt");
+    let to = root.join("hello-link");
+    fs::hard_link(&from, &to)?;
+    let a = fs::metadata(&from)?;
+    let b = fs::metadata(&to)?;
+    ensure(
+        a.ino() == b.ino() && a.nlink() >= 2 && fs::read(&to)? == b"virtiofs host fixture",
+        "hard link identity",
+    )
+}
+
+fn mknod_fifo(root: &Path, windows: bool) -> io::Result<()> {
+    let fifo = root.join("fifo");
+    let created = sys::mknodat(
+        sys::CWD,
+        &fifo,
+        sys::FileType::Fifo,
+        Mode::RUSR | Mode::WUSR,
+        0,
+    );
+    if windows {
+        return errno(created, Errno::OPNOTSUPP);
+    }
+    created?;
+    ensure(
+        fs::symlink_metadata(&fifo)?.mode() & 0o170_000 == 0o010_000,
+        "fifo type",
+    )?;
+    fs::remove_file(fifo)
+}
+
+fn allocate(root: &Path, windows: bool) -> io::Result<()> {
+    let path = root.join("alloc.bin");
+    fs::write(&path, b"xyz")?;
+    let file = OpenOptions::new().read(true).write(true).open(&path)?;
+    let allocated = sys::fallocate(&file, sys::FallocateFlags::KEEP_SIZE, 0, 1024 * 1024);
+    if windows {
+        errno(allocated, Errno::OPNOTSUPP)?;
+    } else {
+        allocated?;
+    }
+    ensure(
+        file.metadata()?.len() == 3,
+        "fallocate changed the file size",
+    )
+}
+
+fn copy_range(path: &Path, root: &Path) -> io::Result<()> {
+    let source = File::open(path)?;
+    let to = root.join("copy-target");
+    let dest = File::create(&to)?;
+    ensure(
+        sys::copy_file_range(&source, None, &dest, None, 3)? == 3,
+        "copy_file_range length",
+    )?;
+    drop(dest);
+    ensure(fs::read(&to)? == b"abc", "copy_file_range contents")?;
+    fs::remove_file(to)
+}
+
+fn large_object(root: &Path) -> io::Result<()> {
+    let host = root.join(VIRTIOFS_LARGE_FILE);
+    ensure(
+        fs::metadata(&host)?.len() == VIRTIOFS_LARGE_LEN as u64,
+        "large object size",
+    )?;
+    let bytes = fs::read(&host)?;
+    ensure(bytes.len() == VIRTIOFS_LARGE_LEN, "large object short read")?;
+    if let Some((index, _)) = bytes
+        .iter()
+        .enumerate()
+        .find(|(index, byte)| **byte != virtiofs_large_byte(*index))
+    {
+        return Err(io::Error::other(format!("large object byte {index}")));
+    }
+    let mut file = File::open(&host)?;
+    file.seek(SeekFrom::Start(1_000_003))?;
+    let mut window = [0u8; 64];
+    file.read_exact(&mut window)?;
+    ensure(
+        window
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| *byte == virtiofs_large_byte(1_000_003 + index)),
+        "large object window",
+    )?;
+    let guest_path = root.join(VIRTIOFS_LARGE_GUEST_FILE);
+    let mut guest = File::create(&guest_path)?;
+    let mut offset = 0usize;
+    let mut chunk = [0u8; 64 * 1024];
+    while offset < VIRTIOFS_LARGE_LEN {
+        let n = (VIRTIOFS_LARGE_LEN - offset).min(chunk.len());
+        for (index, slot) in chunk[..n].iter_mut().enumerate() {
+            *slot = virtiofs_large_byte(offset + index);
+        }
+        guest.write_all(&chunk[..n])?;
+        offset += n;
+    }
+    guest.sync_all()
 }
 
 fn attributes(root: &Path, windows: bool) -> io::Result<()> {

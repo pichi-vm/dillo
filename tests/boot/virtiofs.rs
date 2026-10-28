@@ -5,7 +5,10 @@
 
 use super::*;
 use sha2::{Digest, Sha256};
-use snuffler::{VIRTIOFS_CHECKS, VIRTIOFS_PROBE_CONTENT, VIRTIOFS_PROBE_FILE};
+use snuffler::{
+    VIRTIOFS_CHECKS, VIRTIOFS_LARGE_FILE, VIRTIOFS_LARGE_GUEST_FILE, VIRTIOFS_LARGE_LEN,
+    VIRTIOFS_PROBE_CONTENT, VIRTIOFS_PROBE_FILE, virtiofs_large_byte,
+};
 
 /// Cloud Hypervisor's release workflow builds these images with the tagged
 /// arch/*/configs/ch_defconfig. Keep the image, config and digest together.
@@ -58,6 +61,8 @@ fn virtiofs_filesystem_ops() {
     std::fs::create_dir(&share).unwrap();
     std::fs::write(share.join("hello.txt"), "virtiofs host fixture").unwrap();
     std::fs::write(share.join("readme.md"), "# hi").unwrap();
+    let large: Vec<u8> = (0..VIRTIOFS_LARGE_LEN).map(virtiofs_large_byte).collect();
+    std::fs::write(share.join(VIRTIOFS_LARGE_FILE), &large).unwrap();
     let ro_share = tmp.path().join("ro");
     std::fs::create_dir(&ro_share).unwrap();
     std::fs::write(ro_share.join("locked.txt"), "do not touch").unwrap();
@@ -89,6 +94,16 @@ fn virtiofs_filesystem_ops() {
                 .next()?
                 .parse()
                 .ok()
+        })
+        .collect();
+    let results: std::collections::BTreeSet<(u32, i32)> = output
+        .lines()
+        .filter_map(|line| {
+            let rest = line.split_once("FUSE result opcode=")?.1;
+            let mut parts = rest.split_whitespace();
+            let opcode = parts.next()?.parse().ok()?;
+            let error = parts.next()?.strip_prefix("error=")?.parse().ok()?;
+            Some((opcode, error))
         })
         .collect();
     eprintln!("virtiofs guest FUSE opcodes: {opcodes:?}");
@@ -127,6 +142,21 @@ fn virtiofs_filesystem_ops() {
     if cfg!(unix) {
         assert!(opcodes.contains(&5), "guest did not issue FUSE_READLINK");
     }
+    // A kernel fallback after ENOSYS still logs the opcode once. Success
+    // replies prove the server performed the operation.
+    for opcode in [13, 15, 45, 46, 47] {
+        assert!(
+            results.contains(&(opcode, 0)),
+            "FUSE opcode {opcode} had no success reply: {results:?}"
+        );
+    }
+    let host_unsupported = if cfg!(windows) { -95 } else { 0 };
+    for opcode in [8, 21, 22, 23, 24, 43] {
+        assert!(
+            results.contains(&(opcode, host_unsupported)),
+            "FUSE opcode {opcode} reply {host_unsupported} missing: {results:?}"
+        );
+    }
 
     // The guest leaves a few deliberate witnesses and removes all scratch
     // paths. These assertions prove writes, rename and cleanup reached the host.
@@ -153,9 +183,47 @@ fn virtiofs_filesystem_ops() {
     );
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         assert_eq!(attrs.permissions().mode() & 0o777, 0o644);
+        let alloc = std::fs::metadata(share.join("alloc.bin")).unwrap();
+        assert_eq!(alloc.len(), 3);
+        assert!(
+            alloc.blocks() * 512 >= 1024 * 1024,
+            "fallocate did not reserve a megabyte: {} blocks",
+            alloc.blocks()
+        );
+        let mut value = [0u8; 64];
+        let n = rustix::fs::lgetxattr(share.join("attrs.txt"), "user.dillo", &mut value).unwrap();
+        assert_eq!(&value[..n], b"virtiofs-xattr");
+        let hello = std::fs::metadata(share.join("hello.txt")).unwrap();
+        let link = std::fs::metadata(share.join("hello-link")).unwrap();
+        assert_eq!(hello.ino(), link.ino());
+        assert!(hello.nlink() >= 2);
     }
+    #[cfg(windows)]
+    {
+        assert_eq!(std::fs::metadata(share.join("alloc.bin")).unwrap().len(), 3);
+        let hello = windows_file_id(&share.join("hello.txt"));
+        let link = windows_file_id(&share.join("hello-link"));
+        assert_eq!(hello.0, link.0, "hard links do not share a file index");
+        assert!(hello.1 >= 2, "nNumberOfLinks {}", hello.1);
+    }
+    assert_eq!(
+        std::fs::read(share.join("hello-link")).unwrap(),
+        b"virtiofs host fixture"
+    );
+    assert_eq!(
+        std::fs::read(share.join("noreplace-dst")).unwrap(),
+        b"noreplace"
+    );
+    assert_eq!(
+        std::fs::read(share.join(VIRTIOFS_LARGE_FILE)).unwrap(),
+        large
+    );
+    assert_eq!(
+        std::fs::read(share.join(VIRTIOFS_LARGE_GUEST_FILE)).unwrap(),
+        large
+    );
     let mut entries: Vec<_> = std::fs::read_dir(&share)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -164,12 +232,17 @@ fn virtiofs_filesystem_ops() {
     assert_eq!(
         entries,
         [
+            "alloc.bin",
             "attrs.txt",
             VIRTIOFS_PROBE_FILE,
+            "hello-link",
             "hello.txt",
+            VIRTIOFS_LARGE_GUEST_FILE,
+            VIRTIOFS_LARGE_FILE,
+            "noreplace-dst",
             "readme.md",
             "renamed.txt",
-            "replace.txt"
+            "replace.txt",
         ]
     );
     assert_eq!(
@@ -178,4 +251,37 @@ fn virtiofs_filesystem_ops() {
     );
     assert_eq!(std::fs::read_dir(&ro_share).unwrap().count(), 2);
     assert!(ro_share.join("directory").is_dir());
+}
+
+/// Host file index and link count. Same Win32 query the server uses, so the
+/// witness does not depend on the unstable `windows_by_handle` std feature.
+#[cfg(windows)]
+fn windows_file_id(path: &Path) -> (u64, u32) {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        GetFileInformationByHandle,
+    };
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .unwrap_or_else(|err| panic!("open {}: {err}", path.display()));
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `file` owns a live handle, and `info` is a valid out-buffer
+    // that outlives the call.
+    #[allow(unsafe_code)]
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+    assert_ne!(
+        ok,
+        0,
+        "GetFileInformationByHandle {}: {}",
+        path.display(),
+        std::io::Error::last_os_error()
+    );
+    let ino = u64::from(info.nFileIndexLow) | (u64::from(info.nFileIndexHigh) << 32);
+    assert_ne!(ino, 0, "no file index for {}", path.display());
+    (ino, info.nNumberOfLinks)
 }

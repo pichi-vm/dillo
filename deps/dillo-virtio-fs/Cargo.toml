@@ -14,6 +14,22 @@ vm-memory.workspace = true
 log.workspace = true
 thiserror.workspace = true
 
+# Safe host-syscall wrappers for the Unix passthrough (xattr, fallocate,
+# SEEK_DATA/HOLE, renameat2, mkfifo). Windows uses std plus a few Win32 calls.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "fs"] }
+
+# macOS has no rustix `mknodat`, and its `fallocate` extends the file. FIFO
+# creation and KEEP_SIZE/punch go through libc.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
 [dev-dependencies]
 tempfile.workspace = true
 

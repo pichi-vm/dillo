@@ -13,14 +13,16 @@
 //! bytes (`None` for the few replyless ops: FORGET / BATCH_FORGET / INTERRUPT).
 //!
 //! Read-write operations are delegated to the backend. Read-only shares reject
-//! mutations with `EROFS`. Unsupported opcodes return `ENOSYS`, which the guest
-//! kernel may cache as "unsupported". See tests/VIRTIOFS.md for guest coverage.
+//! mutations with `EROFS`. An operation the host OS cannot perform returns
+//! `EOPNOTSUPP` (or the host errno), never `ENOSYS`: Linux caches `ENOSYS` per
+//! opcode and then stops asking. `ENOSYS` remains only for DAX mapping, which
+//! this server does not advertise. See tests/VIRTIOFS.md for guest coverage.
 
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::backend::{Attr, FsBackend, SetAttr};
+use crate::backend::{Attr, FsBackend, LinuxErrno, SetAttr};
 
 // --- protocol version we present ------------------------------------------
 const FUSE_KERNEL_VERSION: u32 = 7;
@@ -33,18 +35,22 @@ const FUSE_GETATTR: u32 = 3;
 const FUSE_SETATTR: u32 = 4;
 const FUSE_READLINK: u32 = 5;
 const FUSE_SYMLINK: u32 = 6;
+const FUSE_MKNOD: u32 = 8;
 const FUSE_MKDIR: u32 = 9;
 const FUSE_UNLINK: u32 = 10;
 const FUSE_RMDIR: u32 = 11;
 const FUSE_RENAME: u32 = 12;
+const FUSE_LINK: u32 = 13;
 const FUSE_OPEN: u32 = 14;
 const FUSE_READ: u32 = 15;
 const FUSE_WRITE: u32 = 16;
 const FUSE_STATFS: u32 = 17;
 const FUSE_RELEASE: u32 = 18;
 const FUSE_FSYNC: u32 = 20;
+const FUSE_SETXATTR: u32 = 21;
 const FUSE_GETXATTR: u32 = 22;
 const FUSE_LISTXATTR: u32 = 23;
+const FUSE_REMOVEXATTR: u32 = 24;
 const FUSE_FLUSH: u32 = 25;
 const FUSE_INIT: u32 = 26;
 const FUSE_OPENDIR: u32 = 27;
@@ -55,8 +61,12 @@ const FUSE_CREATE: u32 = 35;
 const FUSE_INTERRUPT: u32 = 36;
 const FUSE_DESTROY: u32 = 38;
 const FUSE_BATCH_FORGET: u32 = 42;
+const FUSE_FALLOCATE: u32 = 43;
 const FUSE_RENAME2: u32 = 45;
 const FUSE_LSEEK: u32 = 46;
+const FUSE_COPY_FILE_RANGE: u32 = 47;
+const FUSE_SETUPMAPPING: u32 = 48;
+const FUSE_REMOVEMAPPING: u32 = 49;
 const FUSE_SYNCFS: u32 = 50;
 const FUSE_ACCESS: u32 = 34;
 
@@ -68,6 +78,7 @@ const EBADF: i32 = 9;
 const EACCES: i32 = 13;
 const EINVAL: i32 = 22;
 const EROFS: i32 = 30;
+const ERANGE: i32 = 34;
 const ENOSYS: i32 = 38;
 const EEXIST: i32 = 17;
 const ENOTDIR: i32 = 20;
@@ -158,6 +169,12 @@ fn error_reply(unique: u64, errno: i32) -> Vec<u8> {
 }
 
 fn errno_of(e: &io::Error) -> i32 {
+    if let Some(linux) = e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<LinuxErrno>())
+    {
+        return linux.linux;
+    }
     #[cfg(target_os = "linux")]
     if let Some(raw) = e.raw_os_error() {
         return raw;
@@ -221,7 +238,11 @@ fn write_attr_out(w: &mut Writer, a: &Attr) {
 // ---------------------------------------------------------------------------
 
 struct Node {
+    /// Primary path. Hard links keep extra names in [`Node::aliases`].
     rel: PathBuf,
+    /// Other directory entries that share this nodeid. Guest `st_ino` follows
+    /// the nodeid, so every name of a hard link must resolve here.
+    aliases: Vec<PathBuf>,
     lookups: u64,
     // Preserve the first reported inode even if backend identity is path-based.
     ino: u64,
@@ -256,6 +277,7 @@ impl FsState {
             FUSE_ROOT_ID,
             Node {
                 rel: PathBuf::new(),
+                aliases: Vec::new(),
                 lookups: 1,
                 ino: FUSE_ROOT_ID,
             },
@@ -292,11 +314,24 @@ impl FsState {
             id,
             Node {
                 rel,
+                aliases: Vec::new(),
                 lookups: 1,
                 ino,
             },
         );
         id
+    }
+
+    /// Record another name for an existing node and count it as a lookup.
+    /// `FUSE_LINK` replies with the original nodeid; it must not allocate one.
+    fn attach_alias(&mut self, nodeid: u64, rel: PathBuf) {
+        self.by_path.insert(rel.clone(), nodeid);
+        if let Some(node) = self.nodes.get_mut(&nodeid) {
+            if node.rel != rel && !node.aliases.iter().any(|alias| alias == &rel) {
+                node.aliases.push(rel);
+            }
+            node.lookups = node.lookups.saturating_add(1);
+        }
     }
 
     /// Keep stat/entry replies consistent with the identity first observed by
@@ -317,8 +352,12 @@ impl FsState {
             node.lookups = node.lookups.saturating_sub(nlookup);
             if node.lookups == 0 {
                 let rel = node.rel.clone();
+                let aliases = node.aliases.clone();
                 self.nodes.remove(&nodeid);
                 self.by_path.remove(&rel);
+                for alias in aliases {
+                    self.by_path.remove(&alias);
+                }
             }
         }
     }
@@ -330,36 +369,116 @@ impl FsState {
         fh
     }
 
-    /// Drop any cached nodeid for `rel` (after the path is removed) so a
-    /// stale handle can't resolve to a vanished or recycled path.
-    fn invalidate(&mut self, rel: &Path) {
-        if let Some(id) = self.by_path.remove(rel) {
+    /// Drop one directory entry. A hard link keeps the nodeid alive under its
+    /// other names and file handles follow the surviving path. The last name
+    /// drops the node, matching the previous full-node invalidate: an open of
+    /// the overwritten nodeid returns `ENOENT`.
+    fn detach_path(&mut self, rel: &Path) {
+        let Some(id) = self.by_path.remove(rel) else {
+            return;
+        };
+        let promoted = {
+            let Some(node) = self.nodes.get_mut(&id) else {
+                return;
+            };
+            if node.rel == rel {
+                node.aliases.pop()
+            } else {
+                node.aliases.retain(|alias| alias != rel);
+                return;
+            }
+        };
+        if let Some(alias) = promoted {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.rel.clone_from(&alias);
+            }
+            for handle in self.handles.values_mut() {
+                if let Handle::File(path) = handle
+                    && path == rel
+                {
+                    path.clone_from(&alias);
+                }
+            }
+        } else {
             self.nodes.remove(&id);
         }
     }
 
     /// Follow a successful rename without changing guest-visible nodeids or
     /// lookup counts. Cached children of a moved directory follow it too.
+    /// Renaming a file onto its own hard link is a POSIX no-op: both names stay.
     fn remap(&mut self, from: &Path, to: &Path) {
-        if from == to {
+        if from == to
+            || (self.by_path.get(from) == self.by_path.get(to) && self.by_path.contains_key(from))
+        {
             return;
         }
         // Only the overwritten destination loses its identity. A later FORGET
         // for that nodeid must not evict the source now mapped to this path.
-        self.invalidate(to);
-        for (&id, node) in &mut self.nodes {
-            if let Ok(suffix) = node.rel.strip_prefix(from) {
-                let rel = to.join(suffix);
-                self.by_path.remove(&node.rel);
-                self.by_path.insert(rel.clone(), id);
-                node.rel = rel;
+        self.detach_path(to);
+        self.retarget(from, to);
+    }
+
+    /// Swap two paths after `RENAME_EXCHANGE`. Nested paths are rejected by
+    /// the backend before this runs; applying both rewrites from the original
+    /// paths avoids swapping a path twice.
+    fn exchange(&mut self, a: &Path, b: &Path) {
+        if a == b {
+            return;
+        }
+        let rewrite = |path: &Path| -> Option<PathBuf> {
+            if let Ok(suffix) = path.strip_prefix(a) {
+                Some(b.join(suffix))
+            } else if let Ok(suffix) = path.strip_prefix(b) {
+                Some(a.join(suffix))
+            } else {
+                None
+            }
+        };
+        self.rewrite_paths(&rewrite);
+    }
+
+    fn retarget(&mut self, from: &Path, to: &Path) {
+        let rewrite = |path: &Path| -> Option<PathBuf> {
+            path.strip_prefix(from).ok().map(|suffix| to.join(suffix))
+        };
+        self.rewrite_paths(&rewrite);
+    }
+
+    fn rewrite_paths(&mut self, rewrite: &dyn Fn(&Path) -> Option<PathBuf>) {
+        let mut moves = Vec::new();
+        for (&id, node) in &self.nodes {
+            if let Some(new) = rewrite(&node.rel) {
+                moves.push((id, node.rel.clone(), new, false));
+            }
+            for alias in &node.aliases {
+                if let Some(new) = rewrite(alias) {
+                    moves.push((id, alias.clone(), new, true));
+                }
+            }
+        }
+        for (_, old, _, _) in &moves {
+            self.by_path.remove(old);
+        }
+        for (id, _, new, _) in &moves {
+            self.by_path.insert(new.clone(), *id);
+        }
+        for (id, old, new, is_alias) in moves {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                if is_alias {
+                    if let Some(slot) = node.aliases.iter_mut().find(|alias| *alias == &old) {
+                        *slot = new;
+                    }
+                } else {
+                    node.rel = new;
+                }
             }
         }
         for handle in self.handles.values_mut() {
             if let Handle::File(rel) = handle
-                && let Ok(suffix) = rel.strip_prefix(from)
+                && let Some(new) = rewrite(rel)
             {
-                *rel = to.join(suffix);
+                *rel = new;
             }
         }
     }
@@ -387,7 +506,7 @@ pub(crate) fn dispatch(
     let args = &input[FUSE_IN_HEADER_LEN..];
     log::trace!("FUSE opcode={opcode} nodeid={nodeid} unique={unique}");
 
-    match opcode {
+    let reply = match opcode {
         FUSE_INIT => Some(handle_init(unique, args)),
         FUSE_GETATTR => Some(handle_getattr(state, backend, unique, nodeid)),
         FUSE_LOOKUP => Some(handle_lookup(state, backend, unique, nodeid, args)),
@@ -416,8 +535,9 @@ pub(crate) fn dispatch(
             Some(Writer::with_header().finish(unique))
         }
         FUSE_INTERRUPT => None, // best-effort: we never leave a request pending
-        // xattrs unsupported → ENOSYS so the kernel stops asking.
-        FUSE_GETXATTR | FUSE_LISTXATTR | FUSE_LSEEK => Some(error_reply(unique, ENOSYS)),
+        FUSE_GETXATTR => Some(handle_getxattr(state, backend, unique, nodeid, args)),
+        FUSE_LISTXATTR => Some(handle_listxattr(state, backend, unique, nodeid, args)),
+        FUSE_LSEEK => Some(handle_lseek(state, backend, unique, args)),
 
         // --- write path: EROFS up front when the share is read-only ---------
         _ if state.readonly && is_write_opcode(opcode) => Some(error_reply(unique, EROFS)),
@@ -425,20 +545,31 @@ pub(crate) fn dispatch(
         FUSE_CREATE => Some(handle_create(state, backend, unique, nodeid, args)),
         FUSE_SETATTR => Some(handle_setattr(state, backend, unique, nodeid, args)),
         FUSE_MKDIR => Some(handle_mkdir(state, backend, unique, nodeid, args)),
+        FUSE_MKNOD => Some(handle_mknod(state, backend, unique, nodeid, args)),
         FUSE_UNLINK => Some(handle_unlink(state, backend, unique, nodeid, args)),
         FUSE_RMDIR => Some(handle_rmdir(state, backend, unique, nodeid, args)),
         FUSE_RENAME => Some(handle_rename(state, backend, unique, nodeid, args, 0)),
         FUSE_RENAME2 => Some(handle_rename(state, backend, unique, nodeid, args, 8)),
         FUSE_SYMLINK => Some(handle_symlink(state, backend, unique, nodeid, args)),
+        FUSE_LINK => Some(handle_link(state, backend, unique, nodeid, args)),
+        FUSE_SETXATTR => Some(handle_setxattr(state, backend, unique, nodeid, args)),
+        FUSE_REMOVEXATTR => Some(handle_removexattr(state, backend, unique, nodeid, args)),
+        FUSE_FALLOCATE => Some(handle_fallocate(state, backend, unique, args)),
+        FUSE_COPY_FILE_RANGE => Some(handle_copy_file_range(state, backend, unique, args)),
 
-        // Mutating opcodes we don't implement (MKNOD/LINK/SETXATTR/FALLOCATE/…):
-        // EROFS on a read-only share, otherwise ENOSYS (unsupported).
-        op if is_other_mutating(op) => Some(error_reply(
+        // DAX window was not negotiated in INIT, so these stay unsupported.
+        // EROFS on a read-only share, otherwise ENOSYS.
+        FUSE_SETUPMAPPING | FUSE_REMOVEMAPPING => Some(error_reply(
             unique,
             if state.readonly { EROFS } else { ENOSYS },
         )),
         _ => Some(error_reply(unique, ENOSYS)),
+    };
+    if let Some(raw) = reply.as_ref().and_then(|buf| buf.get(4..8)) {
+        let err = i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+        log::trace!("FUSE result opcode={opcode} error={err}");
     }
+    reply
 }
 
 /// Write opcodes this server implements (used for the read-only gate).
@@ -449,19 +580,20 @@ fn is_write_opcode(op: u32) -> bool {
             | FUSE_CREATE
             | FUSE_SETATTR
             | FUSE_MKDIR
+            | FUSE_MKNOD
             | FUSE_UNLINK
             | FUSE_RMDIR
             | FUSE_RENAME
             | FUSE_RENAME2
             | FUSE_SYMLINK
+            | FUSE_LINK
+            | FUSE_SETXATTR
+            | FUSE_REMOVEXATTR
+            | FUSE_FALLOCATE
+            | FUSE_COPY_FILE_RANGE
+            | FUSE_SETUPMAPPING
+            | FUSE_REMOVEMAPPING
     )
-}
-
-/// Mutating opcodes we do NOT implement: MKNOD=8, LINK=13, SETXATTR=21,
-/// REMOVEXATTR=24, FALLOCATE=43, COPY_FILE_RANGE=47, SETUPMAPPING=48,
-/// REMOVEMAPPING=49.
-fn is_other_mutating(op: u32) -> bool {
-    matches!(op, 8 | 13 | 21 | 24 | 43 | 47 | 48 | 49)
 }
 
 fn handle_init(unique: u64, args: &[u8]) -> Vec<u8> {
@@ -657,6 +789,7 @@ fn handle_read(state: &mut FsState, backend: &dyn FsBackend, unique: u64, args: 
     else {
         return error_reply(unique, EINVAL);
     };
+    let asked = size;
     let size = size.min(MAX_PAYLOAD);
     let rel = match state.handles.get(&fh) {
         Some(Handle::File(rel)) => rel.clone(),
@@ -664,6 +797,17 @@ fn handle_read(state: &mut FsState, backend: &dyn FsBackend, unique: u64, args: 
     };
     match backend.read(&rel, offset, size) {
         Ok(data) => {
+            // A short READ is EOF to Linux and shrinks `i_size`. That truncates
+            // a large loose object when the host returned a short `pread`
+            // before the real end of the file. Fail the request instead.
+            let got = u64::try_from(data.len()).unwrap_or(0);
+            if got < u64::from(asked)
+                && backend
+                    .stat(&rel)
+                    .is_ok_and(|attr| offset.saturating_add(got) < attr.size)
+            {
+                return error_reply(unique, EIO);
+            }
             let mut w = Writer::with_header();
             w.bytes(&data);
             w.finish(unique)
@@ -843,7 +987,7 @@ fn handle_unlink(
     let rel = parent.join(name);
     match backend.unlink(&rel) {
         Ok(()) => {
-            state.invalidate(&rel);
+            state.detach_path(&rel);
             Writer::with_header().finish(unique)
         }
         Err(e) => error_reply(unique, errno_of(&e)),
@@ -866,7 +1010,7 @@ fn handle_rmdir(
     let rel = parent.join(name);
     match backend.rmdir(&rel) {
         Ok(()) => {
-            state.invalidate(&rel);
+            state.detach_path(&rel);
             Writer::with_header().finish(unique)
         }
         Err(e) => error_reply(unique, errno_of(&e)),
@@ -886,11 +1030,11 @@ fn handle_rename(
     let Some(newdir) = rd_u64(args, 0) else {
         return error_reply(unique, EINVAL);
     };
-    // The backend supports ordinary rename only. Reject flags rather than
-    // silently replacing a destination requested with NOREPLACE/EXCHANGE.
-    if extra != 0 && rd_u32(args, 8) != Some(0) {
-        return error_reply(unique, EINVAL);
-    }
+    let flags = if extra == 0 {
+        0
+    } else {
+        rd_u32(args, 8).unwrap_or(0)
+    };
     let name_off = 8 + extra;
     let Some((oldname, next)) = read_name(args, name_off) else {
         return error_reply(unique, EINVAL);
@@ -903,9 +1047,14 @@ fn handle_rename(
     };
     let from = old_parent.join(oldname);
     let to = new_parent.join(newname);
-    match backend.rename(&from, &to) {
+    match backend.rename(&from, &to, flags) {
         Ok(()) => {
-            state.remap(&from, &to);
+            // `RENAME_EXCHANGE` is bit 2, matching Linux `renameat2`.
+            if flags & 2 == 0 {
+                state.remap(&from, &to);
+            } else {
+                state.exchange(&from, &to);
+            }
             Writer::with_header().finish(unique)
         }
         Err(e) => error_reply(unique, errno_of(&e)),
@@ -954,8 +1103,10 @@ fn handle_setattr(
     // fuse_setattr_in: valid@0, fh@8, size@16, atime@32, mtime@40,
     // atimensec@56, mtimensec@60, mode@68.
     let valid = rd_u32(args, 0).unwrap_or(0);
-    // Host ownership is intentionally not delegated to the guest. Never
-    // acknowledge chown without applying it.
+    // The share runs as the launching user. Applying guest uid/gid would
+    // either fail unprivileged or, as root, rewrite host ownership. There is
+    // no idmap, so chown stays unsupported and no other field in the same
+    // request is applied.
     if valid & (FATTR_UID | FATTR_GID) != 0 {
         return error_reply(unique, EOPNOTSUPP);
     }
@@ -999,6 +1150,258 @@ fn handle_setattr(
         }
         Err(e) => error_reply(unique, errno_of(&e)),
     }
+}
+
+fn handle_mknod(
+    state: &mut FsState,
+    backend: &dyn FsBackend,
+    unique: u64,
+    nodeid: u64,
+    args: &[u8],
+) -> Vec<u8> {
+    // fuse_mknod_in { mode, rdev, umask, padding } at protocol minor >= 12.
+    let mode = rd_u32(args, 0).unwrap_or(0);
+    let rdev = rd_u32(args, 4).unwrap_or(0);
+    let Some((name, _)) = read_name(args, 16) else {
+        return error_reply(unique, EINVAL);
+    };
+    let Some(parent) = state.rel_of(nodeid) else {
+        return error_reply(unique, ENOENT);
+    };
+    let rel = parent.join(name);
+    match backend.mknod(&rel, mode, rdev) {
+        Ok(attr) => entry_reply(state, unique, rel, attr),
+        Err(e) => error_reply(unique, errno_of(&e)),
+    }
+}
+
+fn handle_link(
+    state: &mut FsState,
+    backend: &dyn FsBackend,
+    unique: u64,
+    nodeid: u64,
+    args: &[u8],
+) -> Vec<u8> {
+    // fuse_link_in { oldnodeid u64 } + name. The reply reuses oldnodeid.
+    let Some(oldnodeid) = rd_u64(args, 0) else {
+        return error_reply(unique, EINVAL);
+    };
+    let Some((name, _)) = read_name(args, 8) else {
+        return error_reply(unique, EINVAL);
+    };
+    let (Some(parent), Some(from)) = (state.rel_of(nodeid), state.rel_of(oldnodeid)) else {
+        return error_reply(unique, ENOENT);
+    };
+    let to = parent.join(name);
+    match backend.link(&from, &to) {
+        Ok(attr) => {
+            state.attach_alias(oldnodeid, to);
+            let mut w = Writer::with_header();
+            write_entry_out(&mut w, oldnodeid, &state.stable_attr(oldnodeid, attr));
+            w.finish(unique)
+        }
+        Err(e) => error_reply(unique, errno_of(&e)),
+    }
+}
+
+fn handle_setxattr(
+    state: &mut FsState,
+    backend: &dyn FsBackend,
+    unique: u64,
+    nodeid: u64,
+    args: &[u8],
+) -> Vec<u8> {
+    // fuse_setxattr_in is 8 bytes below minor 33: size, flags. Name, then value.
+    let Some(size) = rd_u32(args, 0) else {
+        return error_reply(unique, EINVAL);
+    };
+    let flags = rd_u32(args, 4).unwrap_or(0);
+    let Some((name, next)) = read_name(args, 8) else {
+        return error_reply(unique, EINVAL);
+    };
+    let Some(value) = args.get(next..next + size as usize) else {
+        return error_reply(unique, EINVAL);
+    };
+    let Some(rel) = state.rel_of(nodeid) else {
+        return error_reply(unique, ENOENT);
+    };
+    match backend.set_xattr(&rel, &name, value, flags) {
+        Ok(()) => Writer::with_header().finish(unique),
+        Err(e) => error_reply(unique, errno_of(&e)),
+    }
+}
+
+fn handle_getxattr(
+    state: &mut FsState,
+    backend: &dyn FsBackend,
+    unique: u64,
+    nodeid: u64,
+    args: &[u8],
+) -> Vec<u8> {
+    let Some((name, _)) = read_name(args, 8) else {
+        return error_reply(unique, EINVAL);
+    };
+    let Some(rel) = state.rel_of(nodeid) else {
+        return error_reply(unique, ENOENT);
+    };
+    xattr_reply(
+        unique,
+        rd_u32(args, 0).unwrap_or(0),
+        backend.get_xattr(&rel, &name),
+    )
+}
+
+fn handle_listxattr(
+    state: &mut FsState,
+    backend: &dyn FsBackend,
+    unique: u64,
+    nodeid: u64,
+    args: &[u8],
+) -> Vec<u8> {
+    // fuse_getxattr_in only; LISTXATTR has no name.
+    let Some(rel) = state.rel_of(nodeid) else {
+        return error_reply(unique, ENOENT);
+    };
+    xattr_reply(
+        unique,
+        rd_u32(args, 0).unwrap_or(0),
+        backend.list_xattr(&rel),
+    )
+}
+
+/// `size == 0` replies with `fuse_getxattr_out`. A short buffer is `ERANGE`.
+fn xattr_reply(unique: u64, size: u32, loaded: io::Result<Vec<u8>>) -> Vec<u8> {
+    match loaded {
+        Ok(value) => {
+            if size == 0 {
+                let mut w = Writer::with_header();
+                w.u32(u32::try_from(value.len()).unwrap_or(u32::MAX));
+                w.u32(0);
+                return w.finish(unique);
+            }
+            if value.len() > size as usize {
+                return error_reply(unique, ERANGE);
+            }
+            let mut w = Writer::with_header();
+            w.bytes(&value);
+            w.finish(unique)
+        }
+        Err(e) => error_reply(unique, errno_of(&e)),
+    }
+}
+
+fn handle_removexattr(
+    state: &mut FsState,
+    backend: &dyn FsBackend,
+    unique: u64,
+    nodeid: u64,
+    args: &[u8],
+) -> Vec<u8> {
+    let Some((name, _)) = read_name(args, 0) else {
+        return error_reply(unique, EINVAL);
+    };
+    let Some(rel) = state.rel_of(nodeid) else {
+        return error_reply(unique, ENOENT);
+    };
+    match backend.remove_xattr(&rel, &name) {
+        Ok(()) => Writer::with_header().finish(unique),
+        Err(e) => error_reply(unique, errno_of(&e)),
+    }
+}
+
+fn handle_fallocate(
+    state: &mut FsState,
+    backend: &dyn FsBackend,
+    unique: u64,
+    args: &[u8],
+) -> Vec<u8> {
+    // fuse_fallocate_in { fh, offset, length, mode, padding }.
+    let (Some(fh), Some(offset), Some(length), Some(mode)) = (
+        rd_u64(args, 0),
+        rd_u64(args, 8),
+        rd_u64(args, 16),
+        rd_u32(args, 24),
+    ) else {
+        return error_reply(unique, EINVAL);
+    };
+    let rel = match state.handles.get(&fh) {
+        Some(Handle::File(rel)) => rel.clone(),
+        _ => return error_reply(unique, EBADF),
+    };
+    match backend.fallocate(&rel, offset, length, mode) {
+        Ok(()) => Writer::with_header().finish(unique),
+        Err(e) => error_reply(unique, errno_of(&e)),
+    }
+}
+
+fn handle_lseek(state: &mut FsState, backend: &dyn FsBackend, unique: u64, args: &[u8]) -> Vec<u8> {
+    // fuse_lseek_in { fh, offset, whence, padding }; out { offset }.
+    let (Some(fh), Some(offset), Some(whence)) =
+        (rd_u64(args, 0), rd_u64(args, 8), rd_u32(args, 16))
+    else {
+        return error_reply(unique, EINVAL);
+    };
+    let rel = match state.handles.get(&fh) {
+        Some(Handle::File(rel)) => rel.clone(),
+        _ => return error_reply(unique, EBADF),
+    };
+    match backend.lseek(&rel, offset, whence) {
+        Ok(pos) => {
+            let mut w = Writer::with_header();
+            w.u64(pos);
+            w.finish(unique)
+        }
+        Err(e) => error_reply(unique, errno_of(&e)),
+    }
+}
+
+fn handle_copy_file_range(
+    state: &mut FsState,
+    backend: &dyn FsBackend,
+    unique: u64,
+    args: &[u8],
+) -> Vec<u8> {
+    // fuse_copy_file_range_in { fh_in, off_in, nodeid_out, fh_out, off_out, len, flags }.
+    let (Some(fh_in), Some(off_in), Some(fh_out), Some(off_out), Some(len), Some(flags)) = (
+        rd_u64(args, 0),
+        rd_u64(args, 8),
+        rd_u64(args, 24),
+        rd_u64(args, 32),
+        rd_u64(args, 40),
+        rd_u64(args, 48),
+    ) else {
+        return error_reply(unique, EINVAL);
+    };
+    if flags != 0 {
+        return error_reply(unique, EINVAL);
+    }
+    let Some(Handle::File(src)) = state.handles.get(&fh_in) else {
+        return error_reply(unique, EBADF);
+    };
+    let src = src.clone();
+    let Some(Handle::File(dst)) = state.handles.get(&fh_out) else {
+        return error_reply(unique, EBADF);
+    };
+    let dst = dst.clone();
+    // A short count is resumable. Cap one reply so a huge request cannot
+    // allocate an unbounded userspace buffer in the fallback path.
+    let len = len.min(u64::from(MAX_PAYLOAD));
+    match backend.copy_file_range(&src, off_in, &dst, off_out, len, 0) {
+        Ok(copied) => {
+            let mut w = Writer::with_header();
+            w.u32(copied);
+            w.u32(0);
+            w.finish(unique)
+        }
+        Err(e) => error_reply(unique, errno_of(&e)),
+    }
+}
+
+fn entry_reply(state: &mut FsState, unique: u64, rel: PathBuf, attr: Attr) -> Vec<u8> {
+    let child = state.intern(rel, attr.ino);
+    let mut w = Writer::with_header();
+    write_entry_out(&mut w, child, &state.stable_attr(child, attr));
+    w.finish(unique)
 }
 
 fn handle_statfs(unique: u64) -> Vec<u8> {
@@ -1709,8 +2112,8 @@ mod tests {
             fn readlink(&self, rel: &Path) -> io::Result<Vec<u8>> {
                 self.0.readlink(rel)
             }
-            fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-                self.0.rename(from, to)
+            fn rename(&self, from: &Path, to: &Path, flags: u32) -> io::Result<()> {
+                self.0.rename(from, to, flags)
             }
             fn setattr(&self, rel: &Path, set: &SetAttr) -> io::Result<Attr> {
                 self.0.setattr(rel, set)?;
@@ -1798,11 +2201,11 @@ mod tests {
     }
 
     #[test]
-    fn rename2_rejects_unimplemented_flags() {
+    fn rename2_noreplace_exchange_and_rejected_flags() {
         let (mut state, fs, tmp) = writable();
         std::fs::write(tmp.path().join("a"), b"source").unwrap();
         std::fs::write(tmp.path().join("b"), b"destination").unwrap();
-        for flags in [1u32, 2, 4] {
+        for (flags, errno) in [(8u32, EINVAL), (4, EOPNOTSUPP), (1, EEXIST)] {
             let mut args = rename_in(FUSE_RENAME2, FUSE_ROOT_ID, "a", "b");
             args[8..12].copy_from_slice(&flags.to_le_bytes());
             let reply = dispatch(
@@ -1811,9 +2214,42 @@ mod tests {
                 &request(FUSE_RENAME2, 1, FUSE_ROOT_ID, &args),
             )
             .unwrap();
-            assert_eq!(out_error(&reply), -EINVAL);
+            assert_eq!(out_error(&reply), -errno, "flags {flags}");
             assert_eq!(std::fs::read(tmp.path().join("a")).unwrap(), b"source");
             assert_eq!(std::fs::read(tmp.path().join("b")).unwrap(), b"destination");
+        }
+
+        let mut created = rename_in(FUSE_RENAME2, FUSE_ROOT_ID, "a", "c");
+        created[8..12].copy_from_slice(&1u32.to_le_bytes());
+        let reply = dispatch(
+            &mut state,
+            &fs,
+            &request(FUSE_RENAME2, 2, FUSE_ROOT_ID, &created),
+        )
+        .unwrap();
+        assert_eq!(out_error(&reply), 0);
+        assert_eq!(std::fs::read(tmp.path().join("c")).unwrap(), b"source");
+
+        let mut exchange = rename_in(FUSE_RENAME2, FUSE_ROOT_ID, "c", "b");
+        exchange[8..12].copy_from_slice(&2u32.to_le_bytes());
+        let reply = dispatch(
+            &mut state,
+            &fs,
+            &request(FUSE_RENAME2, 3, FUSE_ROOT_ID, &exchange),
+        )
+        .unwrap();
+        // Win32 has no rename exchange. Both names stay where NOREPLACE left them.
+        #[cfg(windows)]
+        {
+            assert_eq!(out_error(&reply), -EOPNOTSUPP);
+            assert_eq!(std::fs::read(tmp.path().join("c")).unwrap(), b"source");
+            assert_eq!(std::fs::read(tmp.path().join("b")).unwrap(), b"destination");
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(out_error(&reply), 0);
+            assert_eq!(std::fs::read(tmp.path().join("c")).unwrap(), b"destination");
+            assert_eq!(std::fs::read(tmp.path().join("b")).unwrap(), b"source");
         }
     }
 
@@ -1830,10 +2266,10 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_mutating_opcode_is_enosys_when_writable() {
+    fn dax_mapping_is_enosys_without_a_window() {
         let (mut state, fs, _dir) = writable();
-        // All explicitly unsupported mutations, including copy and DAX.
-        for op in [8, 13, 21, 24, 43, 47, 48, 49] {
+        // INIT does not advertise a DAX cache window, so these stay ENOSYS.
+        for op in [FUSE_SETUPMAPPING, FUSE_REMOVEMAPPING] {
             let reply =
                 dispatch(&mut state, &fs, &request(op, 1, FUSE_ROOT_ID, &[0u8; 16])).unwrap();
             assert_eq!(out_error(&reply), -ENOSYS, "opcode {op}");
@@ -1846,5 +2282,216 @@ mod tests {
             .unwrap();
             assert_eq!(out_error(&reply), -EROFS, "readonly opcode {op}");
         }
+    }
+
+    #[test]
+    fn hard_link_keeps_one_nodeid_after_unlink() {
+        let (mut state, fs, dir) = writable();
+        std::fs::write(dir.path().join("a"), b"same").unwrap();
+        let node = lookup_node(&mut state, &fs, FUSE_ROOT_ID, "a");
+        let mut args = node.to_le_bytes().to_vec();
+        args.extend_from_slice(b"b\0");
+        let reply = dispatch(&mut state, &fs, &request(FUSE_LINK, 1, FUSE_ROOT_ID, &args)).unwrap();
+        assert_eq!(out_error(&reply), 0);
+        assert_eq!(rd_u64(&reply, FUSE_OUT_HEADER_LEN), Some(node));
+        let nlink = rd_u32(&reply, FUSE_OUT_HEADER_LEN + 40 + 64).unwrap();
+        assert!(nlink >= 2, "nlink {nlink}");
+        assert_eq!(lookup_node(&mut state, &fs, FUSE_ROOT_ID, "b"), node);
+
+        // Renaming a name onto its own hard link leaves both names in place.
+        let reply = dispatch(
+            &mut state,
+            &fs,
+            &request(
+                FUSE_RENAME,
+                2,
+                FUSE_ROOT_ID,
+                &rename_in(FUSE_RENAME, FUSE_ROOT_ID, "a", "b"),
+            ),
+        )
+        .unwrap();
+        assert_eq!(out_error(&reply), 0);
+        assert_eq!(std::fs::read(dir.path().join("a")).unwrap(), b"same");
+        assert_eq!(std::fs::read(dir.path().join("b")).unwrap(), b"same");
+
+        let reply = dispatch(
+            &mut state,
+            &fs,
+            &request(FUSE_UNLINK, 3, FUSE_ROOT_ID, b"a\0"),
+        )
+        .unwrap();
+        assert_eq!(out_error(&reply), 0);
+        let fh = open_node(&mut state, &fs, node);
+        assert_read(&mut state, &fs, node, fh, b"same");
+    }
+
+    #[test]
+    fn short_read_before_eof_is_eio() {
+        struct ShortRead(Passthrough);
+        impl FsBackend for ShortRead {
+            fn stat(&self, rel: &Path) -> io::Result<Attr> {
+                self.0.stat(rel)
+            }
+            fn readdir(&self, rel: &Path) -> io::Result<Vec<crate::backend::DirEntry>> {
+                self.0.readdir(rel)
+            }
+            fn read(&self, rel: &Path, offset: u64, size: u32) -> io::Result<Vec<u8>> {
+                let mut data = self.0.read(rel, offset, size.min(3))?;
+                data.truncate(3);
+                Ok(data)
+            }
+            fn readlink(&self, rel: &Path) -> io::Result<Vec<u8>> {
+                self.0.readlink(rel)
+            }
+        }
+        let (mut state, fs, dir) = writable();
+        std::fs::write(dir.path().join("big"), vec![1u8; 64]).unwrap();
+        let short = ShortRead(fs);
+        let node = lookup_node(&mut state, &short, FUSE_ROOT_ID, "big");
+        let fh = open_node(&mut state, &short, node);
+        let mut args = Vec::new();
+        args.extend_from_slice(&fh.to_le_bytes());
+        args.extend_from_slice(&0u64.to_le_bytes());
+        args.extend_from_slice(&64u32.to_le_bytes());
+        args.extend_from_slice(&[0u8; 20]);
+        let reply = dispatch(&mut state, &short, &request(FUSE_READ, 1, node, &args)).unwrap();
+        assert_eq!(out_error(&reply), -EIO);
+    }
+
+    #[test]
+    fn large_object_read_is_complete() {
+        let (mut state, fs, dir) = writable();
+        let len: usize = 2 * 1024 * 1024 + 137;
+        let bytes: Vec<u8> = (0..len)
+            .map(|i| (i.wrapping_mul(131).wrapping_add(17)) as u8)
+            .collect();
+        std::fs::write(dir.path().join("loose"), &bytes).unwrap();
+        let node = lookup_node(&mut state, &fs, FUSE_ROOT_ID, "loose");
+        let fh = open_node(&mut state, &fs, node);
+        // One reply cannot carry the whole object (MAX_PAYLOAD). A short
+        // success would be EOF to Linux, so an oversize READ is EIO.
+        let mut oversize = Vec::new();
+        oversize.extend_from_slice(&fh.to_le_bytes());
+        oversize.extend_from_slice(&0u64.to_le_bytes());
+        oversize.extend_from_slice(&(len as u32).to_le_bytes());
+        oversize.extend_from_slice(&[0u8; 20]);
+        let reply = dispatch(&mut state, &fs, &request(FUSE_READ, 1, node, &oversize)).unwrap();
+        assert_eq!(out_error(&reply), -EIO);
+
+        let mut got = Vec::new();
+        let mut offset = 0u64;
+        while offset < len as u64 {
+            let mut args = Vec::new();
+            args.extend_from_slice(&fh.to_le_bytes());
+            args.extend_from_slice(&offset.to_le_bytes());
+            args.extend_from_slice(&MAX_PAYLOAD.to_le_bytes());
+            args.extend_from_slice(&[0u8; 20]);
+            let reply = dispatch(&mut state, &fs, &request(FUSE_READ, 2, node, &args)).unwrap();
+            assert_eq!(out_error(&reply), 0);
+            let chunk = &reply[FUSE_OUT_HEADER_LEN..];
+            assert!(!chunk.is_empty() || offset as usize == len);
+            got.extend_from_slice(chunk);
+            offset += chunk.len() as u64;
+        }
+        assert_eq!(got, bytes);
+
+        let mut mid = Vec::new();
+        mid.extend_from_slice(&fh.to_le_bytes());
+        mid.extend_from_slice(&1_000_003u64.to_le_bytes());
+        mid.extend_from_slice(&64u32.to_le_bytes());
+        mid.extend_from_slice(&[0u8; 20]);
+        let reply = dispatch(&mut state, &fs, &request(FUSE_READ, 3, node, &mid)).unwrap();
+        assert_eq!(out_error(&reply), 0);
+        assert_eq!(&reply[FUSE_OUT_HEADER_LEN..], &bytes[1_000_003..1_000_067]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn xattr_fallocate_lseek_and_copy_roundtrip() {
+        let (mut state, fs, dir) = writable();
+        std::fs::write(dir.path().join("f"), b"abc").unwrap();
+        let node = lookup_node(&mut state, &fs, FUSE_ROOT_ID, "f");
+        let fh = open_node(&mut state, &fs, node);
+
+        let mut set = Vec::new();
+        set.extend_from_slice(&14u32.to_le_bytes());
+        set.extend_from_slice(&1u32.to_le_bytes()); // XATTR_CREATE
+        set.extend_from_slice(b"user.dillo\0virtiofs-xattr");
+        let reply = dispatch(&mut state, &fs, &request(FUSE_SETXATTR, 1, node, &set)).unwrap();
+        assert_eq!(out_error(&reply), 0);
+        let mut get = Vec::new();
+        get.extend_from_slice(&64u32.to_le_bytes());
+        get.extend_from_slice(&0u32.to_le_bytes());
+        get.extend_from_slice(b"user.dillo\0");
+        let reply = dispatch(&mut state, &fs, &request(FUSE_GETXATTR, 2, node, &get)).unwrap();
+        assert_eq!(&reply[FUSE_OUT_HEADER_LEN..], b"virtiofs-xattr");
+        let reply = dispatch(
+            &mut state,
+            &fs,
+            &request(FUSE_LISTXATTR, 3, node, &[0u8; 8]),
+        )
+        .unwrap();
+        assert_eq!(out_error(&reply), 0);
+        let listed = u32::from_le_bytes(
+            reply[FUSE_OUT_HEADER_LEN..FUSE_OUT_HEADER_LEN + 4]
+                .try_into()
+                .unwrap(),
+        );
+        assert!(listed >= b"user.dillo\0".len() as u32);
+
+        let mut falloc = Vec::new();
+        falloc.extend_from_slice(&fh.to_le_bytes());
+        falloc.extend_from_slice(&0u64.to_le_bytes());
+        falloc.extend_from_slice(&(1024u64 * 1024).to_le_bytes());
+        falloc.extend_from_slice(&1u32.to_le_bytes()); // KEEP_SIZE
+        falloc.extend_from_slice(&0u32.to_le_bytes());
+        let reply = dispatch(&mut state, &fs, &request(FUSE_FALLOCATE, 4, node, &falloc)).unwrap();
+        assert_eq!(out_error(&reply), 0);
+        assert_eq!(std::fs::metadata(dir.path().join("f")).unwrap().len(), 3);
+
+        std::fs::write(dir.path().join("sparse"), vec![0u8; 12288]).unwrap();
+        let sparse = lookup_node(&mut state, &fs, FUSE_ROOT_ID, "sparse");
+        let sparse_fh = open_node(&mut state, &fs, sparse);
+        let mut punch = Vec::new();
+        punch.extend_from_slice(&sparse_fh.to_le_bytes());
+        punch.extend_from_slice(&4096u64.to_le_bytes());
+        punch.extend_from_slice(&4096u64.to_le_bytes());
+        punch.extend_from_slice(&0x03u32.to_le_bytes()); // PUNCH_HOLE | KEEP_SIZE
+        punch.extend_from_slice(&0u32.to_le_bytes());
+        let reply = dispatch(&mut state, &fs, &request(FUSE_FALLOCATE, 5, sparse, &punch)).unwrap();
+        assert_eq!(out_error(&reply), 0, "punch hole");
+        let mut seek = Vec::new();
+        seek.extend_from_slice(&sparse_fh.to_le_bytes());
+        seek.extend_from_slice(&0u64.to_le_bytes());
+        seek.extend_from_slice(&4u32.to_le_bytes()); // SEEK_HOLE
+        seek.extend_from_slice(&0u32.to_le_bytes());
+        let reply = dispatch(&mut state, &fs, &request(FUSE_LSEEK, 6, sparse, &seek)).unwrap();
+        assert_eq!(out_error(&reply), 0);
+        assert_eq!(rd_u64(&reply, FUSE_OUT_HEADER_LEN), Some(4096));
+
+        let reply = dispatch(
+            &mut state,
+            &fs,
+            &request(FUSE_CREATE, 7, FUSE_ROOT_ID, &create_in(2, 0o644, "dst")),
+        )
+        .unwrap();
+        let dst_fh = rd_u64(&reply, FUSE_OUT_HEADER_LEN + 128).unwrap();
+        let mut copy = Vec::new();
+        copy.extend_from_slice(&fh.to_le_bytes());
+        copy.extend_from_slice(&0u64.to_le_bytes());
+        copy.extend_from_slice(&0u64.to_le_bytes()); // nodeid_out
+        copy.extend_from_slice(&dst_fh.to_le_bytes());
+        copy.extend_from_slice(&0u64.to_le_bytes());
+        copy.extend_from_slice(&3u64.to_le_bytes());
+        copy.extend_from_slice(&0u64.to_le_bytes());
+        let reply = dispatch(
+            &mut state,
+            &fs,
+            &request(FUSE_COPY_FILE_RANGE, 8, node, &copy),
+        )
+        .unwrap();
+        assert_eq!(out_error(&reply), 0);
+        assert_eq!(rd_u32(&reply, FUSE_OUT_HEADER_LEN), Some(3));
+        assert_eq!(std::fs::read(dir.path().join("dst")).unwrap(), b"abc");
     }
 }
