@@ -76,6 +76,7 @@ pub struct MmioRegion {
 #[derive(Debug, Clone, Copy)]
 pub struct Syscon {
     pub base: u64,
+    pub size: u64,
     pub offset: u64,
     pub value: u32,
     pub mask: u32,
@@ -1115,11 +1116,19 @@ fn syscon_action(
         prop: "reg",
         reason: "missing reg pair",
     })?;
+    if size < 4 || base.checked_add(size).is_none() {
+        return Err(SurveyError::BadProperty {
+            node: path,
+            prop: "reg",
+            reason: "syscon extent must hold a 32-bit register without address overflow",
+        });
+    }
     plan.declare_from(&reg, path, base, size, RegionKind::Mmio);
     let value = node.require_u32("value", path)?;
     node.ensure_drained()?;
     Ok(Some(Syscon {
         base,
+        size,
         offset: 0,
         value,
         mask: 0xFF,
@@ -1897,8 +1906,10 @@ mod tests {
 
         let po = m.poweroff.expect("poweroff");
         assert_eq!((po.base, po.value, po.mask), (POWEROFF_BASE, 0x34, 0xFF));
+        assert_eq!(po.size, 4);
         let rb = m.reboot.expect("reboot");
         assert_eq!((rb.base, rb.value), (REBOOT_BASE, 0x1));
+        assert_eq!(rb.size, 4);
         // Serial is the shared MMIO ns16550a; on x86 the IRQ is the IO-APIC pin.
         let s = m.uart.expect("serial");
         assert_eq!((s.base, s.irq), (X86_SERIAL_BASE, 4));
@@ -1907,6 +1918,25 @@ mod tests {
         assert_eq!(m.pcie.mmio_base, X86_PCI_MMIO_BASE);
         // LAPIC, IOAPIC, poweroff, reboot, serial, ECAM, PCI MMIO.
         assert_eq!(m.plan.regions().len(), 7);
+    }
+
+    #[test]
+    fn x86_syscon_refuses_short_or_overflowing_extents() {
+        for (name, path) in [
+            ("poweroff@9010000", "/poweroff"),
+            ("reboot@9020000", "/reboot"),
+        ] {
+            for (base, size) in [(POWEROFF_BASE, 0), (POWEROFF_BASE, 3), (u64::MAX - 3, 4)] {
+                let mut root = x86_base_root();
+                root.child_mut(name)
+                    .unwrap()
+                    .set_property(OwnedProperty::new("reg").with_u32s(&reg2(base, size)));
+                assert!(matches!(
+                    Machine::survey(&dtb(root), Arch::X86_64),
+                    Err(SurveyError::BadProperty { node, prop: "reg", .. }) if node == path
+                ));
+            }
+        }
     }
 
     #[test]
