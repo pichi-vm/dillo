@@ -455,6 +455,7 @@ dependencies = [
  "object",
  "pmi",
  "rstest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -631,10 +632,13 @@ version = "0.1.0"
 dependencies = [
  "dillo-mmio",
  "dillo-virtio",
+ "libc",
  "log",
+ "rustix",
  "tempfile",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

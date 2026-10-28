@@ -239,11 +239,14 @@ hex = "0.4"                                         # hex-encode digests
 # CreatePipe + inheritable HANDLEs (see tests/boot.rs).
 [target.'cfg(unix)'.dev-dependencies]
 nix = { workspace = true }
+# Host witness for the virtiofs xattr round-trip.
+rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
 ] }
 

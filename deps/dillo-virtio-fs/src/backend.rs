@@ -6,30 +6,49 @@
 //! Filesystem backing behind a virtio-fs device.
 //!
 //! The FUSE protocol logic in [`crate::fuse`] is backend-agnostic: it manages
-//! the nodeid/handle tables and the wire format, and delegates the actual
-//! filesystem reads to a [`FsBackend`]. [`Passthrough`] (Unix only) serves a
-//! host directory read-only; [`MapFs`] is an in-memory tree used by the unit
-//! tests so the protocol can be exercised on any platform without touching the
-//! real filesystem.
+//! the nodeid/handle tables and the wire format, and delegates filesystem
+//! operations to a [`FsBackend`]. [`Passthrough`] serves a host directory.
+//! [`MapFs`] is an in-memory tree used by the unit tests so the protocol can
+//! be exercised on any platform without touching the real filesystem.
 //!
-//! Backends are **read-only by construction** — there is no write method, so a
-//! confused-deputy write can never reach the host. The device rejects every
-//! mutating FUSE opcode with `EROFS` before a backend is ever consulted.
+//! Read methods are required. Mutating methods default to `EROFS`, so a
+//! read-only backing fails closed. A device configured read-only also rejects
+//! mutating FUSE opcodes before any of those methods are called. Host
+//! operations the OS cannot perform return an explicit errno (`EOPNOTSUPP` /
+//! the host's error); they are not reported as success.
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
 /// `S_IFMT` mask and the type bits we care about (mirrors `libc`/`stat.h`).
 pub(crate) const S_IFMT: u32 = 0o170_000;
+pub(crate) const S_IFIFO: u32 = 0o010_000;
+pub(crate) const S_IFCHR: u32 = 0o020_000;
 pub(crate) const S_IFDIR: u32 = 0o040_000;
+pub(crate) const S_IFBLK: u32 = 0o060_000;
 pub(crate) const S_IFREG: u32 = 0o100_000;
 pub(crate) const S_IFLNK: u32 = 0o120_000;
+pub(crate) const S_IFSOCK: u32 = 0o140_000;
 
 /// `getdents`/`fuse_dirent` `d_type` values.
 pub(crate) const DT_UNKNOWN: u32 = 0;
+pub(crate) const DT_FIFO: u32 = 1;
+pub(crate) const DT_CHR: u32 = 2;
 pub(crate) const DT_DIR: u32 = 4;
+pub(crate) const DT_BLK: u32 = 6;
 pub(crate) const DT_REG: u32 = 8;
 pub(crate) const DT_LNK: u32 = 10;
+pub(crate) const DT_SOCK: u32 = 12;
+
+/// Linux `ENXIO`. The wire value when a non-Linux host's raw errno differs.
+#[cfg(not(target_os = "linux"))]
+pub(crate) const LINUX_ENXIO: i32 = 6;
+/// Linux `ERANGE`. Used by the Unix xattr grow path. Windows xattr is
+/// `EOPNOTSUPP` and never reports this number.
+#[cfg(unix)]
+pub(crate) const LINUX_ERANGE: i32 = 34;
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(crate) const LINUX_ENODATA: i32 = 61;
 
 /// Stat-like attributes for one filesystem node, in the subset virtio-fs needs.
 #[derive(Debug, Clone, Copy)]
@@ -57,9 +76,13 @@ impl Attr {
     /// `d_type` for readdir, derived from the mode's type bits.
     pub fn dirent_type(&self) -> u32 {
         match self.mode & S_IFMT {
+            S_IFIFO => DT_FIFO,
+            S_IFCHR => DT_CHR,
             S_IFDIR => DT_DIR,
+            S_IFBLK => DT_BLK,
             S_IFREG => DT_REG,
             S_IFLNK => DT_LNK,
+            S_IFSOCK => DT_SOCK,
             _ => DT_UNKNOWN,
         }
     }
@@ -97,6 +120,29 @@ pub struct SetAttr {
 /// (the device also rejects writes up front when configured read-only).
 fn read_only_error() -> io::Error {
     io::Error::from(io::ErrorKind::ReadOnlyFilesystem)
+}
+
+fn unsupported_error() -> io::Error {
+    io::Error::from(io::ErrorKind::Unsupported)
+}
+
+/// A Linux errno carried explicitly so non-Linux hosts do not put their native
+/// numbers on the FUSE wire. The FUSE dispatcher checks this before `ErrorKind`.
+#[derive(Debug)]
+pub(crate) struct LinuxErrno {
+    pub linux: i32,
+}
+
+impl std::fmt::Display for LinuxErrno {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "linux errno {}", self.linux)
+    }
+}
+
+impl std::error::Error for LinuxErrno {}
+
+pub(crate) fn linux_errno(linux: i32, kind: io::ErrorKind) -> io::Error {
+    io::Error::new(kind, LinuxErrno { linux })
 }
 
 /// Filesystem backing for a virtio-fs share. Paths are relative to the share
@@ -151,9 +197,75 @@ pub trait FsBackend: Send + Sync {
         Err(read_only_error())
     }
 
-    /// Rename `from` to `to` (both relative to the share root).
-    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+    /// Rename `from` to `to`. `flags` uses Linux `RENAME_*` bits: `1` noreplace,
+    /// `2` exchange, `4` whiteout. Whiteout is rejected; noreplace and exchange
+    /// are performed when the host OS can do them.
+    fn rename(&self, from: &Path, to: &Path, flags: u32) -> io::Result<()> {
+        let _ = (from, to, flags);
+        Err(read_only_error())
+    }
+
+    /// Create a hard link `to` referring to `from`.
+    fn link(&self, from: &Path, to: &Path) -> io::Result<Attr> {
         let _ = (from, to);
+        Err(read_only_error())
+    }
+
+    /// Create a special file. `mode` includes the `S_IF*` type bits.
+    fn mknod(&self, rel: &Path, mode: u32, rdev: u32) -> io::Result<Attr> {
+        let _ = (rel, mode, rdev);
+        Err(read_only_error())
+    }
+
+    /// `fallocate`. `mode` uses Linux `FALLOC_FL_*` bits.
+    fn fallocate(&self, rel: &Path, offset: u64, length: u64, mode: u32) -> io::Result<()> {
+        let _ = (rel, offset, length, mode);
+        Err(read_only_error())
+    }
+
+    /// Read one extended attribute. Missing attributes are `ENODATA`.
+    fn get_xattr(&self, rel: &Path, name: &str) -> io::Result<Vec<u8>> {
+        let _ = (rel, name);
+        Err(unsupported_error())
+    }
+
+    /// Set one extended attribute. `flags` uses Linux `XATTR_CREATE` (1) and
+    /// `XATTR_REPLACE` (2).
+    fn set_xattr(&self, rel: &Path, name: &str, value: &[u8], flags: u32) -> io::Result<()> {
+        let _ = (rel, name, value, flags);
+        Err(read_only_error())
+    }
+
+    /// List extended attribute names as a concatenation of NUL-terminated strings.
+    fn list_xattr(&self, rel: &Path) -> io::Result<Vec<u8>> {
+        let _ = rel;
+        Err(unsupported_error())
+    }
+
+    /// Remove one extended attribute. A missing attribute is `ENODATA`.
+    fn remove_xattr(&self, rel: &Path, name: &str) -> io::Result<()> {
+        let _ = (rel, name);
+        Err(read_only_error())
+    }
+
+    /// `SEEK_DATA` (3) / `SEEK_HOLE` (4). Other `whence` values are `EINVAL`.
+    fn lseek(&self, rel: &Path, offset: u64, whence: u32) -> io::Result<u64> {
+        let _ = (rel, offset, whence);
+        Err(unsupported_error())
+    }
+
+    /// Copy up to `len` bytes. `flags` must be zero. A short copy is a real
+    /// byte count, not an error, so the guest can resume.
+    fn copy_file_range(
+        &self,
+        src: &Path,
+        src_off: u64,
+        dst: &Path,
+        dst_off: u64,
+        len: u64,
+        flags: u32,
+    ) -> io::Result<u32> {
+        let _ = (src, src_off, dst, dst_off, len, flags);
         Err(read_only_error())
     }
 
@@ -188,10 +300,10 @@ pub(crate) fn sanitize_rel(rel: &Path) -> io::Result<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// Passthrough — serves a host directory read-only. Cross-platform: the FUSE
+// Passthrough — serves a host directory. Cross-platform: the FUSE
 // attributes virtio-fs reports to the (always-Linux) guest are read from real
-// Unix metadata on Unix hosts and synthesized from portable `std::fs` metadata
-// on others (e.g. a Windows/WHP host sharing a directory into its Linux guest).
+// Unix metadata on Unix hosts. On Windows the file index and link count come
+// from `GetFileInformationByHandle`, so hard links share one inode.
 // ---------------------------------------------------------------------------
 
 mod passthrough {
@@ -205,7 +317,7 @@ mod passthrough {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, UNIX_EPOCH};
 
-    /// Read-only passthrough of a host directory subtree.
+    /// Passthrough of a host directory subtree.
     #[derive(Debug)]
     pub struct Passthrough {
         root: PathBuf,
@@ -258,8 +370,8 @@ mod passthrough {
         }
     }
 
-    /// Cross-platform positional read (`pread`/`seek_read`), mirroring
-    /// `dillo-virtio-blk`'s helper.
+    /// One positional read. Callers must loop: a short count is not EOF unless
+    /// it is zero, and Linux FUSE treats a short `READ` as end-of-file.
     fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         #[cfg(unix)]
         {
@@ -271,7 +383,7 @@ mod passthrough {
         }
     }
 
-    /// Cross-platform positional write (`pwrite`/`seek_write`).
+    /// One positional write. Callers must loop until the buffer is stored.
     fn write_at(file: &File, buf: &[u8], offset: u64) -> io::Result<usize> {
         #[cfg(unix)]
         {
@@ -281,6 +393,55 @@ mod passthrough {
         {
             std::os::windows::fs::FileExt::seek_write(file, buf, offset)
         }
+    }
+
+    /// Fill `buf` from `offset`, retrying short reads. `Ok(n)` with `n < buf.len()`
+    /// means real EOF after `n` bytes. A nonzero short read is continued so a
+    /// large object is not truncated. Linux FUSE treats a short `READ` as EOF
+    /// and shrinks `i_size`, which corrupts loose objects.
+    fn read_full(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        read_until_full(|dst, off| read_at(file, dst, off), buf, offset)
+    }
+
+    pub(super) fn read_until_full(
+        mut read_at: impl FnMut(&mut [u8], u64) -> io::Result<usize>,
+        buf: &mut [u8],
+        mut offset: u64,
+    ) -> io::Result<usize> {
+        let mut filled = 0;
+        while filled < buf.len() {
+            match read_at(&mut buf[filled..], offset) {
+                Ok(0) => break,
+                Ok(n) => {
+                    filled += n;
+                    offset += u64::try_from(n).unwrap_or(0);
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(filled)
+    }
+
+    /// Store all of `buf` at `offset`, retrying short writes.
+    fn write_full(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> {
+        while !buf.is_empty() {
+            match write_at(file, buf, offset) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "short write made no progress",
+                    ));
+                }
+                Ok(n) => {
+                    buf = &buf[n..];
+                    offset += u64::try_from(n).unwrap_or(0);
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
 
     /// Build a `FileTimes` from optional (secs, nsec) access/modify stamps.
@@ -332,21 +493,80 @@ mod passthrough {
                 .ok()
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map_or((0, 0), |d| (d.as_secs(), d.subsec_nanos()));
+            // NTFS file index is shared by hard links. A path hash stands in
+            // only when the host does not report one.
+            let (ino, nlink) =
+                file_id(full).unwrap_or((synth_ino(full), if ft.is_dir() { 2 } else { 1 }));
             Attr {
-                // No host inode number is available; synthesize a stable,
-                // nonzero cosmetic value from the path (the guest keys on
-                // nodeid, not this).
-                ino: synth_ino(full),
+                ino,
                 size: meta.len(),
                 blocks: meta.len().div_ceil(512),
                 mode: type_bits | perm,
-                nlink: if ft.is_dir() { 2 } else { 1 },
+                nlink,
                 uid: 0,
                 gid: 0,
                 rdev: 0,
                 mtime,
                 mtime_nsec,
             }
+        }
+    }
+
+    /// Volume, file index, and link count from `BY_HANDLE_FILE_INFORMATION`.
+    #[cfg(windows)]
+    struct HostId {
+        volume: u32,
+        index: u64,
+        nlink: u32,
+    }
+
+    /// `std::os::windows::fs::MetadataExt::{file_index, number_of_links}` need
+    /// the unstable `windows_by_handle` feature. This is the same Win32 query
+    /// those methods wrap, and it stays available on the pinned nightly.
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn host_id(path: &Path) -> Option<HostId> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            GetFileInformationByHandle,
+        };
+        // Access 0 would be enough, but `OpenOptions` has no public way to ask
+        // for it. Read access plus backup semantics opens files and directories.
+        // `FILE_FLAG_OPEN_REPARSE_POINT` matches `symlink_metadata` (do not follow).
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .ok()?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: `file` owns a live handle, and `info` is a valid out-buffer
+        // that outlives the call.
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+        if ok == 0 {
+            return None;
+        }
+        let index = u64::from(info.nFileIndexLow) | (u64::from(info.nFileIndexHigh) << 32);
+        (index != 0).then_some(HostId {
+            volume: info.dwVolumeSerialNumber,
+            index,
+            nlink: info.nNumberOfLinks,
+        })
+    }
+
+    /// File index and link count. The index is shared by every hard link.
+    #[cfg(windows)]
+    fn file_id(path: &Path) -> Option<(u64, u32)> {
+        host_id(path).map(|id| (id.index, id.nlink))
+    }
+
+    /// True when both paths name the same file on the same volume.
+    #[cfg(windows)]
+    fn same_file(a: &Path, b: &Path) -> bool {
+        match (host_id(a), host_id(b)) {
+            (Some(a), Some(b)) => a.volume == b.volume && a.index == b.index,
+            _ => false,
         }
     }
 
@@ -394,7 +614,7 @@ mod passthrough {
             let path = self.resolve(rel)?;
             let file = File::open(&path)?;
             let mut buf = vec![0u8; size as usize];
-            let n = read_at(&file, &mut buf, offset)?;
+            let n = read_full(&file, &mut buf, offset)?;
             buf.truncate(n);
             Ok(buf)
         }
@@ -408,8 +628,8 @@ mod passthrough {
         fn write(&self, rel: &Path, offset: u64, data: &[u8]) -> io::Result<u32> {
             let path = self.resolve(rel)?;
             let file = OpenOptions::new().write(true).open(&path)?;
-            let n = write_at(&file, data, offset)?;
-            Ok(n as u32)
+            write_full(&file, data, offset)?;
+            Ok(data.len() as u32)
         }
 
         fn create(&self, rel: &Path, mode: u32) -> io::Result<Attr> {
@@ -454,10 +674,76 @@ mod passthrough {
             fs::remove_dir(&path)
         }
 
-        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        fn rename(&self, from: &Path, to: &Path, flags: u32) -> io::Result<()> {
             let from = self.resolve(from)?;
             let to = self.resolve(to)?;
-            fs::rename(&from, &to)
+            rename_with(&from, &to, flags)
+        }
+
+        fn link(&self, from: &Path, to: &Path) -> io::Result<Attr> {
+            let from = self.resolve(from)?;
+            let to = self.resolve(to)?;
+            fs::hard_link(&from, &to)?;
+            let meta = fs::symlink_metadata(&to)?;
+            Ok(meta_to_attr(&meta, &to))
+        }
+
+        fn mknod(&self, rel: &Path, mode: u32, rdev: u32) -> io::Result<Attr> {
+            let path = self.resolve(rel)?;
+            make_node(&path, mode, rdev)?;
+            let meta = fs::symlink_metadata(&path)?;
+            Ok(meta_to_attr(&meta, &path))
+        }
+
+        fn fallocate(&self, rel: &Path, offset: u64, length: u64, mode: u32) -> io::Result<()> {
+            let path = self.resolve(rel)?;
+            let file = OpenOptions::new().read(true).write(true).open(&path)?;
+            allocate(&file, offset, length, mode)
+        }
+
+        fn get_xattr(&self, rel: &Path, name: &str) -> io::Result<Vec<u8>> {
+            let path = self.resolve(rel)?;
+            read_xattr(&path, name)
+        }
+
+        fn set_xattr(&self, rel: &Path, name: &str, value: &[u8], flags: u32) -> io::Result<()> {
+            let path = self.resolve(rel)?;
+            write_xattr(&path, name, value, flags)
+        }
+
+        fn list_xattr(&self, rel: &Path) -> io::Result<Vec<u8>> {
+            let path = self.resolve(rel)?;
+            list_xattrs(&path)
+        }
+
+        fn remove_xattr(&self, rel: &Path, name: &str) -> io::Result<()> {
+            let path = self.resolve(rel)?;
+            delete_xattr(&path, name)
+        }
+
+        fn lseek(&self, rel: &Path, offset: u64, whence: u32) -> io::Result<u64> {
+            let path = self.resolve(rel)?;
+            let file = File::open(&path)?;
+            seek_data_hole(&file, offset, whence)
+        }
+
+        fn copy_file_range(
+            &self,
+            src: &Path,
+            src_off: u64,
+            dst: &Path,
+            dst_off: u64,
+            len: u64,
+            flags: u32,
+        ) -> io::Result<u32> {
+            if flags != 0 {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
+            let src = self.resolve(src)?;
+            let dst = self.resolve(dst)?;
+            let src_file = File::open(&src)?;
+            let dst_file = OpenOptions::new().write(true).open(&dst)?;
+            copy_range(&src_file, src_off, &dst_file, dst_off, len)
         }
 
         fn setattr(&self, rel: &Path, set: &SetAttr) -> io::Result<Attr> {
@@ -522,6 +808,485 @@ mod passthrough {
             let _ = (path, target);
             // No portable symlink creation off Unix.
             Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+    }
+
+    /// Linux `renameat2` / FUSE `RENAME_*` bits. Host flag values differ
+    /// (macOS `RENAME_EXCL` is not bit 1), so map these explicitly.
+    const RENAME_NOREPLACE: u32 = 1;
+    const RENAME_EXCHANGE: u32 = 2;
+    const RENAME_WHITEOUT: u32 = 4;
+    const FALLOC_FL_KEEP_SIZE: u32 = 0x01;
+    const FALLOC_FL_PUNCH_HOLE: u32 = 0x02;
+    const SEEK_DATA: u32 = 3;
+    const SEEK_HOLE: u32 = 4;
+    /// Cap one extended attribute. A larger value is `ERANGE`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const XATTR_MAX: usize = 1 << 20;
+
+    fn rename_with(from: &Path, to: &Path, flags: u32) -> io::Result<()> {
+        let known = RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT;
+        if flags & !known != 0 || (flags & RENAME_NOREPLACE != 0 && flags & RENAME_EXCHANGE != 0) {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        if flags & RENAME_WHITEOUT != 0 {
+            // Whiteout is an overlayfs device node, not a directory share.
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        if flags & RENAME_EXCHANGE != 0
+            && (from.starts_with(to) || to.starts_with(from))
+            && from != to
+        {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        if flags == 0 {
+            // Two names of one file stay in place. Win32 MoveFile would drop
+            // the source name when the destination is another hard link.
+            #[cfg(windows)]
+            if same_file(from, to) {
+                return Ok(());
+            }
+            return fs::rename(from, to);
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let mut host = rustix::fs::RenameFlags::empty();
+            if flags & RENAME_NOREPLACE != 0 {
+                host |= rustix::fs::RenameFlags::NOREPLACE;
+            }
+            if flags & RENAME_EXCHANGE != 0 {
+                host |= rustix::fs::RenameFlags::EXCHANGE;
+            }
+            rustix::fs::renameat_with(rustix::fs::CWD, from, rustix::fs::CWD, to, host)
+                .map_err(from_rustix)
+        }
+        #[cfg(windows)]
+        {
+            if flags & RENAME_EXCHANGE != 0 {
+                return Err(io::Error::from(io::ErrorKind::Unsupported));
+            }
+            move_file(from, to, false)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        {
+            let _ = (from, to);
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+    }
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn move_file(from: &Path, to: &Path, replace: bool) -> io::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MoveFileExW};
+        let from_w: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to_w: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+        let move_flags = if replace {
+            MOVEFILE_REPLACE_EXISTING
+        } else {
+            0
+        };
+        // SAFETY: both paths are NUL-terminated UTF-16 and live for the call.
+        let ok = unsafe { MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), move_flags) };
+        if ok == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn make_node(path: &Path, mode: u32, rdev: u32) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let kind = rustix::fs::FileType::from_raw_mode(mode);
+            let perm = rustix::fs::Mode::from_raw_mode(mode);
+            if !matches!(
+                kind,
+                rustix::fs::FileType::Fifo
+                    | rustix::fs::FileType::Socket
+                    | rustix::fs::FileType::CharacterDevice
+                    | rustix::fs::FileType::BlockDevice
+            ) {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
+            rustix::fs::mknodat(rustix::fs::CWD, path, kind, perm, u64::from(rdev))
+                .map_err(from_rustix)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            make_node_macos(path, mode, rdev)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (path, mode, rdev);
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[allow(unsafe_code)]
+    fn make_node_macos(path: &Path, mode: u32, rdev: u32) -> io::Result<()> {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = path.as_os_str().as_bytes();
+        let c_path = std::ffi::CString::new(bytes)
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // SAFETY: `c_path` is a NUL-terminated path that outlives the call.
+        let rc = unsafe { libc::mknod(c_path.as_ptr(), mode as libc::mode_t, rdev as libc::dev_t) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    fn allocate(file: &File, offset: u64, length: u64, mode: u32) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            const KNOWN: u32 =
+                FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE | 0x04 | 0x08 | 0x10 | 0x20 | 0x40;
+            if mode & !KNOWN != 0 {
+                return Err(io::Error::from(io::ErrorKind::Unsupported));
+            }
+            let flags = rustix::fs::FallocateFlags::from_bits_truncate(mode);
+            rustix::fs::fallocate(file, flags, offset, length).map_err(from_rustix)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            allocate_macos(file, offset, length, mode)
+        }
+        #[cfg(windows)]
+        {
+            allocate_windows(file, offset, length, mode)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        {
+            let _ = (file, offset, length, mode);
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[allow(unsafe_code)]
+    fn allocate_macos(file: &File, offset: u64, length: u64, mode: u32) -> io::Result<()> {
+        use std::os::unix::io::AsRawFd;
+        if mode == FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE {
+            let hole = libc::fpunchhole_t {
+                fp_flags: 0,
+                reserved: 0,
+                fp_offset: offset as libc::off_t,
+                fp_length: length as libc::off_t,
+            };
+            // SAFETY: `hole` is a valid `fpunchhole_t` for this fd.
+            let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_PUNCHHOLE, &hole) };
+            return if rc == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            };
+        }
+        if mode == 0 {
+            return rustix::fs::fallocate(
+                file,
+                rustix::fs::FallocateFlags::empty(),
+                offset,
+                length,
+            )
+            .map_err(from_rustix);
+        }
+        if mode != FALLOC_FL_KEEP_SIZE {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        // `F_PREALLOCATE` rejects `SEEK_SET` with EINVAL. `F_PEOFPOSMODE`
+        // reserves from the physical end of the file. Skip `ftruncate` so the
+        // logical size stays put; rustix's Apple `fallocate` extends the file.
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let current = file.metadata()?.len();
+        if end <= current {
+            return Ok(());
+        }
+        let alloc_len =
+            libc::off_t::try_from(end).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let mut store = libc::fstore_t {
+            fst_flags: libc::F_ALLOCATECONTIG,
+            fst_posmode: libc::F_PEOFPOSMODE,
+            fst_offset: 0,
+            fst_length: alloc_len,
+            fst_bytesalloc: 0,
+        };
+        let fd = file.as_raw_fd();
+        // SAFETY: `store` is a valid `fstore_t` for this fd.
+        let rc = unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &store) };
+        if rc != 0 {
+            store.fst_flags = libc::F_ALLOCATEALL;
+            let rc = unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &store) };
+            if rc != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn allocate_windows(file: &File, offset: u64, length: u64, mode: u32) -> io::Result<()> {
+        // `FileAllocationInfo` grows the logical size, so KEEP_SIZE past EOF
+        // and punch-hole have no honest Win32 equivalent.
+        if mode == FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE
+            || (mode != 0 && mode != FALLOC_FL_KEEP_SIZE)
+        {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        let end = offset.saturating_add(length);
+        let len = file.metadata()?.len();
+        if mode == FALLOC_FL_KEEP_SIZE {
+            return if end > len {
+                Err(io::Error::from(io::ErrorKind::Unsupported))
+            } else {
+                Ok(())
+            };
+        }
+        if end > len {
+            file.set_len(end)?;
+        }
+        Ok(())
+    }
+
+    fn read_xattr(path: &Path, name: &str) -> io::Result<Vec<u8>> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            grow_xattr(|buf| rustix::fs::lgetxattr(path, name, rustix::buffer::spare_capacity(buf)))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (path, name);
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+    }
+
+    fn write_xattr(path: &Path, name: &str, value: &[u8], flags: u32) -> io::Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let host = match flags {
+                0 => rustix::fs::XattrFlags::empty(),
+                1 => rustix::fs::XattrFlags::CREATE,
+                2 => rustix::fs::XattrFlags::REPLACE,
+                _ => return Err(io::Error::from(io::ErrorKind::InvalidInput)),
+            };
+            rustix::fs::lsetxattr(path, name, value, host).map_err(from_rustix)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (path, name, value, flags);
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+    }
+
+    fn list_xattrs(path: &Path) -> io::Result<Vec<u8>> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            grow_xattr(|buf| rustix::fs::llistxattr(path, rustix::buffer::spare_capacity(buf)))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = path;
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+    }
+
+    fn delete_xattr(path: &Path, name: &str) -> io::Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            rustix::fs::lremovexattr(path, name).map_err(from_rustix)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (path, name);
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn grow_xattr(
+        mut call: impl FnMut(&mut Vec<u8>) -> Result<usize, rustix::io::Errno>,
+    ) -> io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        loop {
+            if buf.capacity() == buf.len() {
+                grow_xattr_buf(&mut buf)?;
+            }
+            match call(&mut buf) {
+                Ok(_) => return Ok(buf),
+                Err(rustix::io::Errno::RANGE) => {
+                    buf.clear();
+                    grow_xattr_buf(&mut buf)?;
+                }
+                Err(err) => return Err(from_rustix(err)),
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn grow_xattr_buf(buf: &mut Vec<u8>) -> io::Result<()> {
+        if buf.capacity() >= XATTR_MAX {
+            return Err(super::linux_errno(
+                super::LINUX_ERANGE,
+                io::ErrorKind::InvalidInput,
+            ));
+        }
+        let next = buf.capacity().saturating_mul(2).clamp(64, XATTR_MAX);
+        buf.reserve(next - buf.capacity());
+        Ok(())
+    }
+
+    fn seek_data_hole(file: &File, offset: u64, whence: u32) -> io::Result<u64> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let pos = match whence {
+                SEEK_DATA => rustix::fs::SeekFrom::Data(offset),
+                SEEK_HOLE => rustix::fs::SeekFrom::Hole(offset),
+                _ => return Err(io::Error::from(io::ErrorKind::InvalidInput)),
+            };
+            rustix::fs::seek(file, pos).map_err(from_rustix)
+        }
+        #[cfg(windows)]
+        {
+            // NTFS sparse ranges are not a portable `SEEK_HOLE`. Report the
+            // dense layout: the whole file is data and the only hole is EOF.
+            if !matches!(whence, SEEK_DATA | SEEK_HOLE) {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
+            let len = file.metadata()?.len();
+            match whence {
+                SEEK_DATA if offset >= len => Err(super::linux_errno(
+                    super::LINUX_ENXIO,
+                    io::ErrorKind::NotFound,
+                )),
+                SEEK_HOLE if offset > len => Err(super::linux_errno(
+                    super::LINUX_ENXIO,
+                    io::ErrorKind::NotFound,
+                )),
+                SEEK_DATA => Ok(offset),
+                _ => Ok(len),
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        {
+            let _ = (file, offset, whence);
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+    }
+
+    fn copy_range(src: &File, src_off: u64, dst: &File, dst_off: u64, len: u64) -> io::Result<u32> {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(copied) = copy_range_linux(src, src_off, dst, dst_off, len)? {
+                return Ok(copied);
+            }
+        }
+        copy_range_userspace(src, src_off, dst, dst_off, len)
+    }
+
+    /// `Some` is a finished copy (including a short count after a later error).
+    /// `None` means the syscall cannot perform this copy and the caller should
+    /// use a userspace read/write loop. That keeps `ENOSYS` off the FUSE wire:
+    /// Linux caches it and stops asking.
+    #[cfg(target_os = "linux")]
+    fn copy_range_linux(
+        src: &File,
+        mut src_off: u64,
+        dst: &File,
+        mut dst_off: u64,
+        mut len: u64,
+    ) -> io::Result<Option<u32>> {
+        let mut copied = 0u64;
+        while len > 0 {
+            let chunk = usize::try_from(len.min(1 << 20)).unwrap_or(1 << 20);
+            match rustix::fs::copy_file_range(
+                src,
+                Some(&mut src_off),
+                dst,
+                Some(&mut dst_off),
+                chunk,
+            ) {
+                Ok(0) => break,
+                Ok(n) => {
+                    copied += u64::try_from(n).unwrap_or(0);
+                    len -= u64::try_from(n).unwrap_or(0);
+                }
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(
+                    rustix::io::Errno::NOSYS
+                    | rustix::io::Errno::OPNOTSUPP
+                    | rustix::io::Errno::INVAL
+                    | rustix::io::Errno::XDEV,
+                ) if copied == 0 => return Ok(None),
+                Err(_) if copied > 0 => break,
+                Err(err) => return Err(from_rustix(err)),
+            }
+        }
+        Ok(Some(u32::try_from(copied).unwrap_or(u32::MAX)))
+    }
+
+    fn copy_range_userspace(
+        src: &File,
+        mut src_off: u64,
+        dst: &File,
+        mut dst_off: u64,
+        mut len: u64,
+    ) -> io::Result<u32> {
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut copied = 0u64;
+        while len > 0 {
+            let chunk = usize::try_from(len.min(buf.len() as u64)).unwrap_or(buf.len());
+            let n = read_full(src, &mut buf[..chunk], src_off)?;
+            if n == 0 {
+                break;
+            }
+            write_full(dst, &buf[..n], dst_off)?;
+            let n = u64::try_from(n).unwrap_or(0);
+            src_off += n;
+            dst_off += n;
+            copied += n;
+            len -= n;
+        }
+        Ok(u32::try_from(copied).unwrap_or(u32::MAX))
+    }
+
+    #[cfg(unix)]
+    fn from_rustix(err: rustix::io::Errno) -> io::Error {
+        #[cfg(not(target_os = "linux"))]
+        if host_errno_needs_linux_number(err) {
+            return linux_number(err);
+        }
+        io::Error::from(err)
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn host_errno_needs_linux_number(err: rustix::io::Errno) -> bool {
+        missing_xattr(err) || err == rustix::io::Errno::RANGE || err == rustix::io::Errno::NXIO
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn missing_xattr(err: rustix::io::Errno) -> bool {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            err == rustix::io::Errno::NODATA || err == rustix::io::Errno::NOATTR
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        {
+            err == rustix::io::Errno::NODATA
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn linux_number(err: rustix::io::Errno) -> io::Error {
+        if missing_xattr(err) {
+            super::linux_errno(super::LINUX_ENODATA, io::ErrorKind::NotFound)
+        } else if err == rustix::io::Errno::RANGE {
+            super::linux_errno(super::LINUX_ERANGE, io::ErrorKind::InvalidInput)
+        } else {
+            super::linux_errno(super::LINUX_ENXIO, io::ErrorKind::NotFound)
         }
     }
 }
@@ -714,6 +1479,26 @@ mod tests {
     }
 
     #[test]
+    fn read_until_full_retries_short_reads() {
+        let mut calls = 0;
+        let mut buf = [0u8; 10];
+        let n = super::passthrough::read_until_full(
+            |dst, _offset| {
+                calls += 1;
+                let n = dst.len().min(3);
+                dst[..n].fill(7);
+                Ok(n)
+            },
+            &mut buf,
+            0,
+        )
+        .unwrap();
+        assert_eq!(n, 10);
+        assert!(calls >= 4);
+        assert_eq!(buf, [7u8; 10]);
+    }
+
+    #[test]
     fn passthrough_serves_host_dir_cross_platform() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f.txt"), b"hello").unwrap();
@@ -797,7 +1582,7 @@ mod tests {
         assert_eq!(pt.read(Path::new("new.txt"), 0, 64).unwrap(), b"hello");
 
         // rename
-        pt.rename(Path::new("new.txt"), Path::new("renamed.txt"))
+        pt.rename(Path::new("new.txt"), Path::new("renamed.txt"), 0)
             .unwrap();
         assert!(!dir.path().join("new.txt").exists());
         assert_eq!(pt.read(Path::new("renamed.txt"), 0, 64).unwrap(), b"hello");

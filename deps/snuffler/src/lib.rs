@@ -199,6 +199,19 @@ pub const VIRTIOFS_PROBE_CONTENT: &str = "dillo-virtiofs-guest-write";
 /// The file name the probe creates in the share root.
 pub const VIRTIOFS_PROBE_FILE: &str = "dillo-probe.txt";
 
+/// Host-seeded object large enough to cross several FUSE read requests.
+pub const VIRTIOFS_LARGE_FILE: &str = "large-host.bin";
+/// Guest-written twin of [`VIRTIOFS_LARGE_FILE`].
+pub const VIRTIOFS_LARGE_GUEST_FILE: &str = "large-guest.bin";
+/// Byte length of the large-object fixture (`2 MiB + 137`).
+pub const VIRTIOFS_LARGE_LEN: usize = 2 * 1024 * 1024 + 137;
+
+/// Deterministic payload byte for [`VIRTIOFS_LARGE_FILE`].
+#[must_use]
+pub fn virtiofs_large_byte(index: usize) -> u8 {
+    (index.wrapping_mul(131).wrapping_add(17) & 0xff) as u8
+}
+
 /// One named guest filesystem check. An absent error means it passed, including
 /// any explicit assertion of an unsupported-operation errno.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,8 +227,7 @@ pub struct FsSuite {
     pub checks: Vec<FsCheck>,
 }
 
-/// Required checks, in execution order. See `tests/VIRTIOFS.md` for the mapping
-/// to the server's FUSE opcodes and the expected unsupported operations.
+/// Required checks, in execution order. See `tests/VIRTIOFS.md`.
 pub const VIRTIOFS_CHECKS: &[&str] = &[
     "mount_rw",
     "host_read_readdir",
@@ -226,18 +238,21 @@ pub const VIRTIOFS_CHECKS: &[&str] = &[
     "rename_replace_existing",
     "rename_directory_cached_descendants",
     "rename_same_path_and_failure",
-    "rename2_flags_unsupported",
+    "rename2_noreplace_exchange",
     "symlink_readlink",
     "getattr_setattr",
     "chown_unsupported",
     "fsync_flush_syncfs",
     "statfs_access_lseek",
-    "xattr_get_unsupported",
-    "xattr_set_unsupported",
-    "xattr_list_unsupported",
-    "xattr_remove_unsupported",
-    "link_mknod_fallocate_unsupported",
-    "copy_file_range_fallback",
+    "xattr_get",
+    "xattr_set",
+    "xattr_list",
+    "xattr_remove",
+    "hard_link",
+    "mknod_fifo",
+    "fallocate",
+    "copy_file_range",
+    "large_object_read",
     "unmount_rw",
     "mount_ro",
     "readonly_read",
