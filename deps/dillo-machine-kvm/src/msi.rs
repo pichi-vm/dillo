@@ -120,8 +120,10 @@ impl KvmMessageInterruptDomain {
         }
     }
 
-    fn set_enabled(enabled: bool) {
-        log::info!("KvmMessageInterruptDomain: enabled={enabled}");
+    // KVM currently only logs enable changes; irqfd gating is not implemented.
+    // Unlike HVF/WHP, there is no shared enable flag suppressing sibling vectors.
+    fn set_enabled(vector: u16, enabled: bool) {
+        log::info!("KvmMessageInterruptDomain: vector={vector} enabled={enabled}");
     }
 }
 
@@ -131,8 +133,8 @@ impl MessageInterruptDomain for KvmMessageInterruptDomain {
         Ok(())
     }
 
-    fn enabled(&self, enabled: bool) -> Result<(), InterruptError> {
-        Self::set_enabled(enabled);
+    fn enabled(&self, vector: u16, enabled: bool) -> Result<(), InterruptError> {
+        Self::set_enabled(vector, enabled);
         Ok(())
     }
 

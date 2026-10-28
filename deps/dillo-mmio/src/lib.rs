@@ -512,7 +512,9 @@ pub struct MessageInterrupt {
 pub trait MessageInterruptDomain: Send + Sync {
     fn update(&self, vector: u16, msg: MessageInterrupt) -> Result<(), InterruptError>;
 
-    fn enabled(&self, enabled: bool) -> Result<(), InterruptError>;
+    /// Set the effective enable state for one vector independently of its mask.
+    /// Changes must not affect other vectors in the domain.
+    fn enabled(&self, vector: u16, enabled: bool) -> Result<(), InterruptError>;
 
     fn interrupt(&self, vector: u16) -> Option<Interrupt>;
 }
