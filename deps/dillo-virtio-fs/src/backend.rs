@@ -145,6 +145,106 @@ pub(crate) fn linux_errno(linux: i32, kind: io::ErrorKind) -> io::Error {
     io::Error::new(kind, LinuxErrno { linux })
 }
 
+/// A backend path with an optional retained host object. Logical names remain
+/// available for directory bookkeeping; host operations use the reference.
+#[derive(Debug, Clone)]
+pub struct NodePath {
+    pub(crate) rel: PathBuf,
+    pub(crate) file: Option<std::sync::Arc<std::fs::File>>,
+    pub(crate) parent: Option<std::sync::Arc<std::fs::File>>,
+    pub(crate) name: PathBuf,
+    /// Windows only: the volume serial number and file index seen at lookup.
+    /// A later reopen by path must find the same pair.
+    #[cfg(windows)]
+    pub(crate) id: Option<(u32, u64)>,
+    /// Windows only: the same pair for the folder this name was joined to.
+    #[cfg(windows)]
+    pub(crate) parent_id: Option<(u32, u64)>,
+}
+
+impl NodePath {
+    pub fn new(rel: impl Into<PathBuf>) -> Self {
+        let rel = rel.into();
+        Self {
+            name: rel.clone(),
+            rel,
+            file: None,
+            parent: None,
+            #[cfg(windows)]
+            id: None,
+            #[cfg(windows)]
+            parent_id: None,
+        }
+    }
+
+    pub(crate) fn same_object(&self, other: &Self) -> bool {
+        #[cfg(windows)]
+        if let (Some(a), Some(b)) = (self.id, other.id) {
+            return a == b;
+        }
+        match (&self.file, &other.file) {
+            (Some(a), Some(b)) => passthrough::same_object(a, b).unwrap_or(false),
+            _ => true,
+        }
+    }
+
+    pub(crate) fn retarget(&mut self, rel: PathBuf) {
+        self.name.clone_from(&rel);
+        self.parent = None;
+        #[cfg(windows)]
+        {
+            self.parent_id = None;
+        }
+        self.rel = rel;
+    }
+
+    /// The copy kept for later use, in the lookup cache and in open files.
+    /// Windows cannot rename a folder while anything inside it is held
+    /// open, so there it keeps only the path and the identity, and drops
+    /// the host handles.
+    pub(crate) fn for_cache(&self) -> Self {
+        #[cfg(windows)]
+        {
+            Self {
+                rel: self.rel.clone(),
+                file: None,
+                parent: None,
+                name: self.rel.clone(),
+                id: self.id,
+                parent_id: None,
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            self.clone()
+        }
+    }
+
+    pub(crate) fn join(&self, name: impl AsRef<Path>) -> Self {
+        Self {
+            rel: self.rel.join(name.as_ref()),
+            file: None,
+            parent: self.file.clone(),
+            name: if self.file.is_some() {
+                PathBuf::from(name.as_ref())
+            } else {
+                self.name.join(name.as_ref())
+            },
+            #[cfg(windows)]
+            id: None,
+            #[cfg(windows)]
+            parent_id: self.id,
+        }
+    }
+}
+
+impl std::ops::Deref for NodePath {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.rel
+    }
+}
+
 /// Filesystem backing for a virtio-fs share. Paths are relative to the share
 /// root; the empty path is the root itself.
 ///
@@ -152,47 +252,58 @@ pub(crate) fn linux_errno(linux: i32, kind: io::ErrorKind) -> io::Error {
 /// read-only backing needs to implement nothing. A device configured read-only
 /// rejects mutating FUSE opcodes before any of these are called.
 pub trait FsBackend: Send + Sync {
+    /// Look up a node and retain its host reference when this backend has one.
+    fn lookup(&self, rel: &NodePath) -> io::Result<(Attr, NodePath)> {
+        Ok((self.stat(rel)?, rel.clone()))
+    }
+
     /// `lstat` the node at `rel` (does not follow a trailing symlink).
-    fn stat(&self, rel: &Path) -> io::Result<Attr>;
+    fn stat(&self, rel: &NodePath) -> io::Result<Attr>;
 
     /// List the directory at `rel`. `.`/`..` are synthesized by the caller.
-    fn readdir(&self, rel: &Path) -> io::Result<Vec<DirEntry>>;
+    fn readdir(&self, rel: &NodePath) -> io::Result<Vec<DirEntry>>;
 
     /// Read up to `size` bytes at `offset` from the regular file at `rel`.
-    fn read(&self, rel: &Path, offset: u64, size: u32) -> io::Result<Vec<u8>>;
+    fn read(&self, rel: &NodePath, offset: u64, size: u32) -> io::Result<Vec<u8>>;
 
     /// Read the target of the symlink at `rel`.
-    fn readlink(&self, rel: &Path) -> io::Result<Vec<u8>>;
+    fn readlink(&self, rel: &NodePath) -> io::Result<Vec<u8>>;
 
     // --- write path (default: read-only) -----------------------------------
 
     /// Write `data` at `offset` to the regular file at `rel`; returns the number
     /// of bytes written.
-    fn write(&self, rel: &Path, offset: u64, data: &[u8]) -> io::Result<u32> {
+    fn write(&self, rel: &NodePath, offset: u64, data: &[u8]) -> io::Result<u32> {
         let _ = (rel, offset, data);
         Err(read_only_error())
     }
 
     /// Create (or open) a regular file at `rel` with `mode`, returning its attr.
-    fn create(&self, rel: &Path, mode: u32) -> io::Result<Attr> {
+    fn create(&self, rel: &NodePath, mode: u32) -> io::Result<Attr> {
         let _ = (rel, mode);
         Err(read_only_error())
     }
 
+    /// Create a regular file and retain the object returned by the host open.
+    fn create_open(&self, rel: &NodePath, mode: u32) -> io::Result<(Attr, NodePath)> {
+        self.create(rel, mode)?;
+        self.lookup(rel)
+    }
+
     /// Create a directory at `rel` with `mode`, returning its attr.
-    fn mkdir(&self, rel: &Path, mode: u32) -> io::Result<Attr> {
+    fn mkdir(&self, rel: &NodePath, mode: u32) -> io::Result<Attr> {
         let _ = (rel, mode);
         Err(read_only_error())
     }
 
     /// Remove the regular file (or symlink) at `rel`.
-    fn unlink(&self, rel: &Path) -> io::Result<()> {
+    fn unlink(&self, rel: &NodePath) -> io::Result<()> {
         let _ = rel;
         Err(read_only_error())
     }
 
     /// Remove the (empty) directory at `rel`.
-    fn rmdir(&self, rel: &Path) -> io::Result<()> {
+    fn rmdir(&self, rel: &NodePath) -> io::Result<()> {
         let _ = rel;
         Err(read_only_error())
     }
@@ -200,56 +311,56 @@ pub trait FsBackend: Send + Sync {
     /// Rename `from` to `to`. `flags` uses Linux `RENAME_*` bits: `1` noreplace,
     /// `2` exchange, `4` whiteout. Whiteout is rejected; noreplace and exchange
     /// are performed when the host OS can do them.
-    fn rename(&self, from: &Path, to: &Path, flags: u32) -> io::Result<()> {
+    fn rename(&self, from: &NodePath, to: &NodePath, flags: u32) -> io::Result<()> {
         let _ = (from, to, flags);
         Err(read_only_error())
     }
 
     /// Create a hard link `to` referring to `from`.
-    fn link(&self, from: &Path, to: &Path) -> io::Result<Attr> {
+    fn link(&self, from: &NodePath, to: &NodePath) -> io::Result<Attr> {
         let _ = (from, to);
         Err(read_only_error())
     }
 
     /// Create a special file. `mode` includes the `S_IF*` type bits.
-    fn mknod(&self, rel: &Path, mode: u32, rdev: u32) -> io::Result<Attr> {
+    fn mknod(&self, rel: &NodePath, mode: u32, rdev: u32) -> io::Result<Attr> {
         let _ = (rel, mode, rdev);
         Err(read_only_error())
     }
 
     /// `fallocate`. `mode` uses Linux `FALLOC_FL_*` bits.
-    fn fallocate(&self, rel: &Path, offset: u64, length: u64, mode: u32) -> io::Result<()> {
+    fn fallocate(&self, rel: &NodePath, offset: u64, length: u64, mode: u32) -> io::Result<()> {
         let _ = (rel, offset, length, mode);
         Err(read_only_error())
     }
 
     /// Read one `user.*` extended attribute. Missing attributes are `ENODATA`.
-    fn get_xattr(&self, rel: &Path, name: &str) -> io::Result<Vec<u8>> {
+    fn get_xattr(&self, rel: &NodePath, name: &str) -> io::Result<Vec<u8>> {
         let _ = (rel, name);
         Err(unsupported_error())
     }
 
     /// Set one `user.*` extended attribute. `flags` uses Linux `XATTR_CREATE` (1) and
     /// `XATTR_REPLACE` (2).
-    fn set_xattr(&self, rel: &Path, name: &str, value: &[u8], flags: u32) -> io::Result<()> {
+    fn set_xattr(&self, rel: &NodePath, name: &str, value: &[u8], flags: u32) -> io::Result<()> {
         let _ = (rel, name, value, flags);
         Err(read_only_error())
     }
 
     /// List `user.*` extended attribute names as NUL-terminated strings.
-    fn list_xattr(&self, rel: &Path) -> io::Result<Vec<u8>> {
+    fn list_xattr(&self, rel: &NodePath) -> io::Result<Vec<u8>> {
         let _ = rel;
         Err(unsupported_error())
     }
 
     /// Remove one `user.*` extended attribute. A missing attribute is `ENODATA`.
-    fn remove_xattr(&self, rel: &Path, name: &str) -> io::Result<()> {
+    fn remove_xattr(&self, rel: &NodePath, name: &str) -> io::Result<()> {
         let _ = (rel, name);
         Err(read_only_error())
     }
 
     /// `SEEK_DATA` (3) / `SEEK_HOLE` (4). Other `whence` values are `EINVAL`.
-    fn lseek(&self, rel: &Path, offset: u64, whence: u32) -> io::Result<u64> {
+    fn lseek(&self, rel: &NodePath, offset: u64, whence: u32) -> io::Result<u64> {
         let _ = (rel, offset, whence);
         Err(unsupported_error())
     }
@@ -258,9 +369,9 @@ pub trait FsBackend: Send + Sync {
     /// byte count, not an error, so the guest can resume.
     fn copy_file_range(
         &self,
-        src: &Path,
+        src: &NodePath,
         src_off: u64,
-        dst: &Path,
+        dst: &NodePath,
         dst_off: u64,
         len: u64,
         flags: u32,
@@ -270,13 +381,13 @@ pub trait FsBackend: Send + Sync {
     }
 
     /// Apply [`SetAttr`] to `rel`, returning the resulting attr.
-    fn setattr(&self, rel: &Path, set: &SetAttr) -> io::Result<Attr> {
+    fn setattr(&self, rel: &NodePath, set: &SetAttr) -> io::Result<Attr> {
         let _ = (rel, set);
         Err(read_only_error())
     }
 
     /// Create a symlink at `rel` pointing at `target`, returning its attr.
-    fn symlink(&self, rel: &Path, target: &[u8]) -> io::Result<Attr> {
+    fn symlink(&self, rel: &NodePath, target: &[u8]) -> io::Result<Attr> {
         let _ = (rel, target);
         Err(read_only_error())
     }
@@ -307,12 +418,16 @@ pub(crate) fn sanitize_rel(rel: &Path) -> io::Result<PathBuf> {
 // ---------------------------------------------------------------------------
 
 mod passthrough {
-    use super::{Attr, DirEntry, FsBackend, SetAttr, sanitize_rel};
+    use super::{Attr, DirEntry, FsBackend, NodePath, SetAttr, sanitize_rel};
     // The synthesized-attr path (non-Unix hosts) needs the type-bit constants;
     // on Unix the real mode is read straight from `MetadataExt`.
     #[cfg(not(unix))]
     use super::{S_IFDIR, S_IFLNK, S_IFREG};
-    use std::fs::{self, File, FileTimes, Metadata, OpenOptions};
+    #[cfg(unix)]
+    use std::fs;
+    #[cfg(target_os = "linux")]
+    use std::fs::OpenOptions;
+    use std::fs::{File, FileTimes, Metadata};
     use std::io;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, UNIX_EPOCH};
@@ -320,53 +435,310 @@ mod passthrough {
     /// Passthrough of a host directory subtree.
     #[derive(Debug)]
     pub struct Passthrough {
-        root: PathBuf,
+        root: std::sync::Arc<File>,
+    }
+
+    #[derive(Debug)]
+    struct Parent {
+        file: std::sync::Arc<File>,
+        name: PathBuf,
+        #[cfg(windows)]
+        guard: File,
+    }
+
+    impl Parent {
+        fn new(file: std::sync::Arc<File>, name: PathBuf) -> io::Result<Self> {
+            check_directory(&file)?;
+            #[cfg(windows)]
+            let guard = cap_primitives::fs::open_dir(&file, Path::new("."))?;
+            Ok(Self {
+                file,
+                name,
+                #[cfg(windows)]
+                guard,
+            })
+        }
+    }
+
+    fn check_directory(file: &File) -> io::Result<()> {
+        let metadata = file.metadata()?;
+        if !metadata.is_dir() {
+            return Err(io::Error::from(io::ErrorKind::NotADirectory));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(io::Error::from(io::ErrorKind::NotADirectory));
+            }
+        }
+        Ok(())
     }
 
     impl Passthrough {
-        /// Create a passthrough rooted at `root`. The directory must exist.
+        /// Create a passthrough rooted at an open reference to `root`.
         pub fn new(root: impl Into<PathBuf>) -> io::Result<Self> {
-            let root = root.into();
-            let meta = fs::metadata(&root)?;
-            if !meta.is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotADirectory,
-                    format!("virtio-fs source {} is not a directory", root.display()),
-                ));
-            }
-            // Canonicalize so the per-request containment check compares against
-            // a stable absolute root.
-            let root = fs::canonicalize(&root)?;
-            Ok(Self { root })
+            let root = cap_primitives::fs::open_ambient_dir(
+                &root.into(),
+                cap_primitives::ambient_authority(),
+            )?;
+            Ok(Self {
+                root: std::sync::Arc::new(root),
+            })
         }
 
-        /// Resolve `rel` under the root with a symlink-escape guard. `sanitize_rel`
-        /// already blocks lexical escapes (`..`, absolute/prefix). We then
-        /// canonicalize the **deepest existing ancestor** of the target and
-        /// confirm it stays within the root — this catches a symlink in any
-        /// existing component for both reads and writes-to-not-yet-existing
-        /// targets (e.g. CREATE inside a symlinked-out directory). A genuinely
-        /// missing leaf surfaces later as `NotFound` from the stat/open.
-        fn resolve(&self, rel: &Path) -> io::Result<PathBuf> {
-            let clean = sanitize_rel(rel)?;
-            let full = self.root.join(&clean);
-            let mut probe = full.as_path();
-            loop {
-                match fs::canonicalize(probe) {
-                    Ok(canon) => {
-                        if !canon.starts_with(&self.root) {
-                            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
-                        }
-                        break;
-                    }
-                    // `probe` doesn't exist yet; check its parent instead.
-                    Err(_) => match probe.parent() {
-                        Some(parent) => probe = parent,
-                        None => break,
-                    },
+        fn parent(&self, rel: &NodePath) -> io::Result<Parent> {
+            sanitize_rel(rel)?;
+            let clean = sanitize_rel(&rel.name)?;
+            let mut file = rel.parent.clone().unwrap_or_else(|| self.root.clone());
+            let mut parts = clean.components().peekable();
+            while let Some(part) = parts.next() {
+                if parts.peek().is_none() {
+                    #[cfg(windows)]
+                    check_id(rel.parent_id, &file)?;
+                    return Parent::new(file, PathBuf::from(part.as_os_str()));
                 }
+                file = std::sync::Arc::new(open_directory(&file, Path::new(part.as_os_str()))?);
             }
-            Ok(full)
+            Parent::new(file, PathBuf::from("."))
+        }
+
+        fn pin(&self, rel: &NodePath) -> io::Result<NodePath> {
+            if rel.file.is_some() {
+                return Ok(rel.clone());
+            }
+            let parent = self.parent(rel)?;
+            let file = pin_child(&parent.file, &parent.name)?;
+            #[cfg(windows)]
+            check_id(rel.id, &file)?;
+            Ok(NodePath {
+                rel: rel.rel.clone(),
+                #[cfg(windows)]
+                id: Some(windows_id(&file)?),
+                #[cfg(windows)]
+                parent_id: None,
+                file: Some(std::sync::Arc::new(file)),
+                parent: Some(parent.file),
+                name: parent.name,
+            })
+        }
+
+        fn open(&self, rel: &NodePath, write: bool, create: Option<u32>) -> io::Result<File> {
+            #[cfg(target_os = "linux")]
+            if let Some(file) = &rel.file {
+                use std::os::fd::AsRawFd;
+                use std::os::unix::fs::OpenOptionsExt;
+                if file.metadata()?.file_type().is_symlink() {
+                    return Err(io::Error::from(io::ErrorKind::InvalidInput));
+                }
+                // This is an owned descriptor, never a guest pathname. Keep
+                // it alive until the kernel has opened the same object.
+                let path = format!("/proc/self/fd/{}", file.as_raw_fd());
+                return OpenOptions::new()
+                    .read(!write)
+                    .write(write)
+                    .custom_flags(rustix::fs::OFlags::NONBLOCK.bits().cast_signed())
+                    .open(path);
+            }
+            #[cfg(windows)]
+            if let Some(file) = &rel.file {
+                return reopen_file(file, write);
+            }
+            self.open_checked(rel, write, create)
+        }
+
+        fn open_checked(
+            &self,
+            rel: &NodePath,
+            write: bool,
+            create: Option<u32>,
+        ) -> io::Result<File> {
+            let parent = self.parent(rel)?;
+            #[cfg(windows)]
+            let create = if rel.id.is_some() { None } else { create };
+            let create = if rel.file.is_some() { None } else { create };
+            let file = open_child(&parent.file, &parent.name, write, create)?;
+            #[cfg(windows)]
+            check_id(rel.id, &file)?;
+            if let Some(expected) = &rel.file
+                && !same_object(expected, &file)?
+            {
+                return Err(super::linux_errno(116, io::ErrorKind::NotFound));
+            }
+            Ok(file)
+        }
+    }
+
+    #[cfg(unix)]
+    fn open_child(
+        parent: &File,
+        name: &Path,
+        write: bool,
+        create: Option<u32>,
+    ) -> io::Result<File> {
+        use rustix::fs::{Mode, OFlags};
+        let mut flags = OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+        flags |= if write {
+            OFlags::WRONLY
+        } else {
+            OFlags::RDONLY
+        };
+        let mode = if let Some(mode) = create {
+            flags |= OFlags::CREATE;
+            Mode::from_raw_mode((mode & 0o777) as _)
+        } else {
+            Mode::empty()
+        };
+        open_relative(parent, name, flags, mode).map(File::from)
+    }
+
+    #[cfg(windows)]
+    fn open_child(
+        parent: &File,
+        name: &Path,
+        write: bool,
+        create: Option<u32>,
+    ) -> io::Result<File> {
+        use cap_primitives::fs::{OpenOptions, OpenOptionsExt};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+        let mut options = OpenOptions::new();
+        options
+            .read(!write)
+            .write(write)
+            .create(create.is_some())
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = cap_primitives::fs::open(parent, name, &options)?;
+        if file.metadata()?.file_type().is_symlink() {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        }
+        Ok(file)
+    }
+
+    #[cfg(unix)]
+    fn open_directory(parent: &File, name: &Path) -> io::Result<File> {
+        use rustix::fs::{Mode, OFlags};
+        open_relative(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+    }
+
+    #[cfg(windows)]
+    fn open_directory(parent: &File, name: &Path) -> io::Result<File> {
+        let file = pin_child(parent, name)?;
+        check_directory(&file)?;
+        Ok(file)
+    }
+
+    #[cfg(unix)]
+    fn pin_child(parent: &File, name: &Path) -> io::Result<File> {
+        use rustix::fs::{Mode, OFlags};
+        #[cfg(target_os = "linux")]
+        let flags = OFlags::PATH;
+        #[cfg(target_os = "macos")]
+        // A FIFO opened for reading waits for a writer unless O_NONBLOCK is set;
+        // Linux O_PATH never waits.
+        let flags =
+            OFlags::from_bits_retain((libc::O_EVTONLY | libc::O_SYMLINK | libc::O_NONBLOCK) as _);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let flags = OFlags::RDONLY | OFlags::NONBLOCK;
+        open_relative(parent, name, flags | OFlags::CLOEXEC, Mode::empty()).map(File::from)
+    }
+
+    /// Never follow a final symlink. macOS `O_SYMLINK` already opens the link
+    /// itself, and adding `O_NOFOLLOW` to it makes that open fail with `ELOOP`.
+    #[cfg(unix)]
+    fn no_follow(flags: rustix::fs::OFlags) -> rustix::fs::OFlags {
+        #[cfg(target_os = "macos")]
+        if flags.contains(rustix::fs::OFlags::from_bits_retain(libc::O_SYMLINK as _)) {
+            return flags;
+        }
+        flags | rustix::fs::OFlags::NOFOLLOW
+    }
+
+    #[cfg(windows)]
+    fn pin_child(parent: &File, name: &Path) -> io::Result<File> {
+        use cap_primitives::fs::{OpenOptions, OpenOptionsExt};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        };
+        let mut options = OpenOptions::new();
+        options
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        cap_primitives::fs::open(parent, name, &options)
+    }
+
+    #[cfg(unix)]
+    fn open_relative(
+        parent: &File,
+        name: &Path,
+        flags: rustix::fs::OFlags,
+        mode: rustix::fs::Mode,
+    ) -> io::Result<rustix::fd::OwnedFd> {
+        let flags = no_follow(flags);
+        open_with_fallback(parent, name, flags, mode, || {
+            #[cfg(target_os = "linux")]
+            {
+                use rustix::fs::ResolveFlags;
+                rustix::fs::openat2(
+                    parent,
+                    name,
+                    flags,
+                    mode,
+                    ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS,
+                )
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Err(rustix::io::Errno::NOSYS)
+            }
+        })
+    }
+
+    #[cfg(unix)]
+    fn open_with_fallback(
+        parent: &File,
+        name: &Path,
+        flags: rustix::fs::OFlags,
+        mode: rustix::fs::Mode,
+        stronger: impl FnOnce() -> Result<rustix::fd::OwnedFd, rustix::io::Errno>,
+    ) -> io::Result<rustix::fd::OwnedFd> {
+        // The fallback has the same no-follow contract, one component at a
+        // time. Errors from an available stronger helper are never weakened.
+        if name != Path::new(".")
+            && (sanitize_rel(name)?.components().count() != 1 || name.components().count() != 1)
+        {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        let flags = no_follow(flags);
+        match stronger() {
+            Err(rustix::io::Errno::NOSYS) => {
+                rustix::fs::openat(parent, name, flags, mode).map_err(from_rustix)
+            }
+            result => result.map_err(from_rustix),
+        }
+    }
+
+    pub(super) fn same_object(a: &File, b: &File) -> io::Result<bool> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let a = a.metadata()?;
+            let b = b.metadata()?;
+            Ok(a.dev() == b.dev() && a.ino() == b.ino())
+        }
+        #[cfg(windows)]
+        {
+            let (a_volume, a_index, _) = host_file_id(a)?;
+            let (b_volume, b_index, _) = host_file_id(b)?;
+            Ok(a_volume == b_volume && a_index == b_index)
         }
     }
 
@@ -493,10 +865,8 @@ mod passthrough {
                 .ok()
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map_or((0, 0), |d| (d.as_secs(), d.subsec_nanos()));
-            // NTFS file index is shared by hard links. A path hash stands in
-            // only when the host does not report one.
-            let (ino, nlink) =
-                file_id(full).unwrap_or((synth_ino(full), if ft.is_dir() { 2 } else { 1 }));
+            // file_attr replaces these defaults with handle identity.
+            let (ino, nlink) = (synth_ino(full), if ft.is_dir() { 2 } else { 1 });
             Attr {
                 ino,
                 size: meta.len(),
@@ -512,64 +882,6 @@ mod passthrough {
         }
     }
 
-    /// Volume, file index, and link count from `BY_HANDLE_FILE_INFORMATION`.
-    #[cfg(windows)]
-    struct HostId {
-        volume: u32,
-        index: u64,
-        nlink: u32,
-    }
-
-    /// `std::os::windows::fs::MetadataExt::{file_index, number_of_links}` need
-    /// the unstable `windows_by_handle` feature. This is the same Win32 query
-    /// those methods wrap, and it stays available on the pinned nightly.
-    #[cfg(windows)]
-    #[allow(unsafe_code)]
-    fn host_id(path: &Path) -> Option<HostId> {
-        use std::os::windows::fs::OpenOptionsExt;
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            GetFileInformationByHandle,
-        };
-        // Access 0 would be enough, but `OpenOptions` has no public way to ask
-        // for it. Read access plus backup semantics opens files and directories.
-        // `FILE_FLAG_OPEN_REPARSE_POINT` matches `symlink_metadata` (do not follow).
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-            .ok()?;
-        let mut info = BY_HANDLE_FILE_INFORMATION::default();
-        // SAFETY: `file` owns a live handle, and `info` is a valid out-buffer
-        // that outlives the call.
-        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
-        if ok == 0 {
-            return None;
-        }
-        let index = u64::from(info.nFileIndexLow) | (u64::from(info.nFileIndexHigh) << 32);
-        (index != 0).then_some(HostId {
-            volume: info.dwVolumeSerialNumber,
-            index,
-            nlink: info.nNumberOfLinks,
-        })
-    }
-
-    /// File index and link count. The index is shared by every hard link.
-    #[cfg(windows)]
-    fn file_id(path: &Path) -> Option<(u64, u32)> {
-        host_id(path).map(|id| (id.index, id.nlink))
-    }
-
-    /// True when both paths name the same file on the same volume.
-    #[cfg(windows)]
-    fn same_file(a: &Path, b: &Path) -> bool {
-        match (host_id(a), host_id(b)) {
-            (Some(a), Some(b)) => a.volume == b.volume && a.index == b.index,
-            _ => false,
-        }
-    }
-
     /// Stable, nonzero cosmetic inode number derived from the full host path.
     #[cfg(not(unix))]
     fn synth_ino(path: &Path) -> u64 {
@@ -580,161 +892,179 @@ mod passthrough {
     }
 
     impl FsBackend for Passthrough {
-        fn stat(&self, rel: &Path) -> io::Result<Attr> {
-            let path = self.resolve(rel)?;
-            // lstat: do not follow a trailing symlink.
-            let meta = fs::symlink_metadata(&path)?;
-            Ok(meta_to_attr(&meta, &path))
+        fn lookup(&self, rel: &NodePath) -> io::Result<(Attr, NodePath)> {
+            let pinned = self.pin(rel)?;
+            let attr = file_attr(pinned.file.as_ref().expect("pinned"))?;
+            Ok((attr, pinned.for_cache()))
+        }
+        fn stat(&self, rel: &NodePath) -> io::Result<Attr> {
+            self.lookup(rel).map(|(attr, _)| attr)
         }
 
-        fn readdir(&self, rel: &Path) -> io::Result<Vec<DirEntry>> {
-            let path = self.resolve(rel)?;
+        fn readdir(&self, rel: &NodePath) -> io::Result<Vec<DirEntry>> {
+            let pinned = self.pin(rel)?;
+            let dir = pinned.file.as_ref().expect("pinned");
+            check_directory(dir)?;
+            #[cfg(windows)]
+            let guard = cap_primitives::fs::open_dir(dir, Path::new("."))?;
+            #[cfg(windows)]
+            let dir = &guard;
             let mut out = Vec::new();
-            for entry in fs::read_dir(&path)? {
+            for entry in cap_primitives::fs::read_base_dir(dir)? {
                 let entry = entry?;
                 let Ok(name) = entry.file_name().into_string() else {
-                    // Skip non-UTF-8 names — the guest probe and our wire format
-                    // work in UTF-8; such names are rare in a build context.
                     continue;
                 };
-                let entry_path = entry.path();
-                let meta = entry.metadata().or_else(|_| {
-                    // Fall back to lstat-style metadata for dangling symlinks.
-                    fs::symlink_metadata(&entry_path)
-                })?;
+                let file = pin_child(dir, Path::new(&name))?;
                 out.push(DirEntry {
                     name,
-                    attr: meta_to_attr(&meta, &entry_path),
+                    attr: file_attr(&file)?,
                 });
             }
             Ok(out)
         }
 
-        fn read(&self, rel: &Path, offset: u64, size: u32) -> io::Result<Vec<u8>> {
-            let path = self.resolve(rel)?;
-            let file = File::open(&path)?;
+        fn read(&self, rel: &NodePath, offset: u64, size: u32) -> io::Result<Vec<u8>> {
+            let file = self.open(rel, false, None)?;
             let mut buf = vec![0u8; size as usize];
             let n = read_full(&file, &mut buf, offset)?;
             buf.truncate(n);
             Ok(buf)
         }
 
-        fn readlink(&self, rel: &Path) -> io::Result<Vec<u8>> {
-            let path = self.resolve(rel)?;
-            let target = fs::read_link(&path)?;
-            Ok(target.into_os_string().into_encoded_bytes())
+        fn readlink(&self, rel: &NodePath) -> io::Result<Vec<u8>> {
+            #[cfg(target_os = "linux")]
+            {
+                let pinned = self.pin(rel)?;
+                let target =
+                    rustix::fs::readlinkat(pinned.file.as_ref().expect("pinned"), "", Vec::new())
+                        .map_err(from_rustix)?;
+                Ok(target.into_bytes())
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let parent = self.parent(rel)?;
+                let target = cap_primitives::fs::read_link_contents(&parent.file, &parent.name)?;
+                Ok(target.into_os_string().into_encoded_bytes())
+            }
         }
 
-        fn write(&self, rel: &Path, offset: u64, data: &[u8]) -> io::Result<u32> {
-            let path = self.resolve(rel)?;
-            let file = OpenOptions::new().write(true).open(&path)?;
+        fn write(&self, rel: &NodePath, offset: u64, data: &[u8]) -> io::Result<u32> {
+            let file = self.open(rel, true, None)?;
             write_full(&file, data, offset)?;
             Ok(data.len() as u32)
         }
 
-        fn create(&self, rel: &Path, mode: u32) -> io::Result<Attr> {
-            let path = self.resolve(rel)?;
-            let mut opts = OpenOptions::new();
-            opts.write(true).create(true).truncate(false);
+        fn create(&self, rel: &NodePath, mode: u32) -> io::Result<Attr> {
+            file_attr(&self.open(rel, true, Some(mode))?)
+        }
+
+        fn create_open(&self, rel: &NodePath, mode: u32) -> io::Result<(Attr, NodePath)> {
+            let parent = self.parent(rel)?;
+            let file = open_child(&parent.file, &parent.name, true, Some(mode))?;
+            let attr = file_attr(&file)?;
+            let node = NodePath {
+                rel: rel.rel.clone(),
+                #[cfg(windows)]
+                id: Some(windows_id(&file)?),
+                #[cfg(windows)]
+                parent_id: None,
+                file: Some(std::sync::Arc::new(file)),
+                parent: Some(parent.file),
+                name: parent.name,
+            };
+            Ok((attr, node))
+        }
+
+        fn mkdir(&self, rel: &NodePath, mode: u32) -> io::Result<Attr> {
+            let parent = self.parent(rel)?;
             #[cfg(unix)]
+            rustix::fs::mkdirat(
+                &parent.file,
+                &parent.name,
+                rustix::fs::Mode::from_raw_mode((mode & 0o777) as _),
+            )
+            .map_err(from_rustix)?;
+            #[cfg(windows)]
             {
-                use std::os::unix::fs::OpenOptionsExt;
-                opts.mode(mode & 0o777);
+                let _ = mode;
+                cap_primitives::fs::create_dir(
+                    &parent.file,
+                    &parent.name,
+                    &cap_primitives::fs::DirOptions::new(),
+                )?;
             }
-            let _file = opts.open(&path)?;
-            // On non-Unix the mode can't be honored beyond the read-only bit,
-            // which `create` never sets; the file is created writable.
-            #[cfg(not(unix))]
-            let _ = mode;
-            let meta = fs::symlink_metadata(&path)?;
-            Ok(meta_to_attr(&meta, &path))
+            self.stat(rel)
         }
 
-        fn mkdir(&self, rel: &Path, mode: u32) -> io::Result<Attr> {
-            let path = self.resolve(rel)?;
-            fs::create_dir(&path)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&path, fs::Permissions::from_mode(mode & 0o777))?;
-            }
-            #[cfg(not(unix))]
-            let _ = mode;
-            let meta = fs::symlink_metadata(&path)?;
-            Ok(meta_to_attr(&meta, &path))
+        fn unlink(&self, rel: &NodePath) -> io::Result<()> {
+            let parent = self.parent(rel)?;
+            cap_primitives::fs::remove_file(&parent.file, &parent.name)
         }
 
-        fn unlink(&self, rel: &Path) -> io::Result<()> {
-            let path = self.resolve(rel)?;
-            fs::remove_file(&path)
+        fn rmdir(&self, rel: &NodePath) -> io::Result<()> {
+            let parent = self.parent(rel)?;
+            cap_primitives::fs::remove_dir(&parent.file, &parent.name)
         }
 
-        fn rmdir(&self, rel: &Path) -> io::Result<()> {
-            let path = self.resolve(rel)?;
-            fs::remove_dir(&path)
+        fn rename(&self, from: &NodePath, to: &NodePath, flags: u32) -> io::Result<()> {
+            let src = self.parent(from)?;
+            let dst = self.parent(to)?;
+            rename_with(&src, &dst, flags)
         }
 
-        fn rename(&self, from: &Path, to: &Path, flags: u32) -> io::Result<()> {
-            let from = self.resolve(from)?;
-            let to = self.resolve(to)?;
-            rename_with(&from, &to, flags)
+        fn link(&self, from: &NodePath, to: &NodePath) -> io::Result<Attr> {
+            let src = self.parent(from)?;
+            let dst = self.parent(to)?;
+            cap_primitives::fs::hard_link(&src.file, &src.name, &dst.file, &dst.name)?;
+            self.stat(to)
         }
 
-        fn link(&self, from: &Path, to: &Path) -> io::Result<Attr> {
-            let from = self.resolve(from)?;
-            let to = self.resolve(to)?;
-            fs::hard_link(&from, &to)?;
-            let meta = fs::symlink_metadata(&to)?;
-            Ok(meta_to_attr(&meta, &to))
+        fn mknod(&self, rel: &NodePath, mode: u32, rdev: u32) -> io::Result<Attr> {
+            refuse_device_node(mode)?;
+            let parent = self.parent(rel)?;
+            make_node(&parent, mode, rdev)?;
+            self.stat(rel)
         }
 
-        fn mknod(&self, rel: &Path, mode: u32, rdev: u32) -> io::Result<Attr> {
-            let path = self.resolve(rel)?;
-            make_node(&path, mode, rdev)?;
-            let meta = fs::symlink_metadata(&path)?;
-            Ok(meta_to_attr(&meta, &path))
+        fn fallocate(&self, rel: &NodePath, offset: u64, length: u64, mode: u32) -> io::Result<()> {
+            allocate(&self.open(rel, true, None)?, offset, length, mode)
         }
 
-        fn fallocate(&self, rel: &Path, offset: u64, length: u64, mode: u32) -> io::Result<()> {
-            let path = self.resolve(rel)?;
-            let file = OpenOptions::new().read(true).write(true).open(&path)?;
-            allocate(&file, offset, length, mode)
-        }
-
-        fn get_xattr(&self, rel: &Path, name: &str) -> io::Result<Vec<u8>> {
+        fn get_xattr(&self, rel: &NodePath, name: &str) -> io::Result<Vec<u8>> {
             check_xattr_name(name)?;
-            let path = self.resolve(rel)?;
-            read_xattr(&path, name)
+            read_xattr(&self.open(rel, false, None)?, name)
         }
 
-        fn set_xattr(&self, rel: &Path, name: &str, value: &[u8], flags: u32) -> io::Result<()> {
+        fn set_xattr(
+            &self,
+            rel: &NodePath,
+            name: &str,
+            value: &[u8],
+            flags: u32,
+        ) -> io::Result<()> {
             check_xattr_name(name)?;
-            let path = self.resolve(rel)?;
-            write_xattr(&path, name, value, flags)
+            write_xattr(&self.open(rel, false, None)?, name, value, flags)
         }
 
-        fn list_xattr(&self, rel: &Path) -> io::Result<Vec<u8>> {
-            let path = self.resolve(rel)?;
-            list_xattrs(&path)
+        fn list_xattr(&self, rel: &NodePath) -> io::Result<Vec<u8>> {
+            list_xattrs(&self.open(rel, false, None)?)
         }
 
-        fn remove_xattr(&self, rel: &Path, name: &str) -> io::Result<()> {
+        fn remove_xattr(&self, rel: &NodePath, name: &str) -> io::Result<()> {
             check_xattr_name(name)?;
-            let path = self.resolve(rel)?;
-            delete_xattr(&path, name)
+            delete_xattr(&self.open(rel, false, None)?, name)
         }
 
-        fn lseek(&self, rel: &Path, offset: u64, whence: u32) -> io::Result<u64> {
-            let path = self.resolve(rel)?;
-            let file = File::open(&path)?;
-            seek_data_hole(&file, offset, whence)
+        fn lseek(&self, rel: &NodePath, offset: u64, whence: u32) -> io::Result<u64> {
+            seek_data_hole(&self.open(rel, false, None)?, offset, whence)
         }
 
         fn copy_file_range(
             &self,
-            src: &Path,
+            src: &NodePath,
             src_off: u64,
-            dst: &Path,
+            dst: &NodePath,
             dst_off: u64,
             len: u64,
             flags: u32,
@@ -742,73 +1072,125 @@ mod passthrough {
             if flags != 0 {
                 return Err(io::Error::from(io::ErrorKind::InvalidInput));
             }
-            let src = self.resolve(src)?;
-            let dst = self.resolve(dst)?;
-            let src_file = File::open(&src)?;
-            let dst_file = OpenOptions::new().write(true).open(&dst)?;
-            copy_range(&src_file, src_off, &dst_file, dst_off, len)
+            let src = self.open(src, false, None)?;
+            let dst = self.open(dst, true, None)?;
+            copy_range(&src, src_off, &dst, dst_off, len)
         }
 
-        fn setattr(&self, rel: &Path, set: &SetAttr) -> io::Result<Attr> {
-            let path = self.resolve(rel)?;
-
+        fn setattr(&self, rel: &NodePath, set: &SetAttr) -> io::Result<Attr> {
+            #[cfg(not(windows))]
+            let file = self.open(rel, set.size.is_some(), None)?;
+            #[cfg(windows)]
+            let file = {
+                use windows_sys::Win32::Foundation::GENERIC_WRITE;
+                use windows_sys::Win32::Storage::FileSystem::{
+                    FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES,
+                };
+                let pinned = self.pin(rel)?;
+                let access = FILE_READ_ATTRIBUTES
+                    | FILE_WRITE_ATTRIBUTES
+                    | if set.size.is_some() { GENERIC_WRITE } else { 0 };
+                reopen_with_access(pinned.file.as_ref().expect("pinned"), access)?
+            };
             if let Some(size) = set.size {
-                OpenOptions::new().write(true).open(&path)?.set_len(size)?;
+                file.set_len(size)?;
             }
-
             if let Some(mode) = set.mode {
-                set_mode(&path, mode)?;
+                set_mode(&file, mode)?;
             }
-
             if set.atime.is_some() || set.mtime.is_some() {
-                // Times need an open handle; on a directory this may fail on some
-                // platforms — best-effort, don't fail the whole setattr.
-                if let Ok(file) = OpenOptions::new().write(true).open(&path) {
-                    let _ = file.set_times(file_times(set.atime, set.mtime));
-                } else if let Ok(file) = File::open(&path) {
-                    let _ = file.set_times(file_times(set.atime, set.mtime));
-                }
+                file.set_times(file_times(set.atime, set.mtime))?;
             }
-
-            let meta = fs::symlink_metadata(&path)?;
-            Ok(meta_to_attr(&meta, &path))
+            file_attr(&file)
         }
 
-        fn symlink(&self, rel: &Path, target: &[u8]) -> io::Result<Attr> {
-            let path = self.resolve(rel)?;
-            symlink_at(&path, target)?;
-            let meta = fs::symlink_metadata(&path)?;
-            Ok(meta_to_attr(&meta, &path))
+        fn symlink(&self, rel: &NodePath, target: &[u8]) -> io::Result<Attr> {
+            let parent = self.parent(rel)?;
+            symlink_at(&parent, target)?;
+            self.stat(rel)
         }
     }
 
+    fn file_attr(file: &File) -> io::Result<Attr> {
+        let attr = meta_to_attr(&file.metadata()?, Path::new(""));
+        #[cfg(windows)]
+        let attr = {
+            let (volume, index, nlink) = host_file_id(file)?;
+            let _ = volume;
+            Attr {
+                ino: index,
+                nlink,
+                ..attr
+            }
+        };
+        Ok(attr)
+    }
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn host_file_id(file: &File) -> io::Result<(u32, u64, u32)> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: `file` owns a live handle and `info` outlives the call.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((
+            info.dwVolumeSerialNumber,
+            u64::from(info.nFileIndexLow) | (u64::from(info.nFileIndexHigh) << 32),
+            info.nNumberOfLinks,
+        ))
+    }
+
+    #[cfg(windows)]
+    fn windows_id(file: &File) -> io::Result<(u32, u64)> {
+        let (volume, index, _) = host_file_id(file)?;
+        Ok((volume, index))
+    }
+
+    /// Refuse a file or folder whose identity differs from the one seen
+    /// earlier. Linux `ESTALE` tells the guest its cached entry is gone.
+    #[cfg(windows)]
+    fn check_id(expected: Option<(u32, u64)>, file: &File) -> io::Result<()> {
+        if let Some(expected) = expected
+            && windows_id(file)? != expected
+        {
+            return Err(super::linux_errno(116, io::ErrorKind::NotFound));
+        }
+        Ok(())
+    }
+
     /// Apply mode bits where the platform supports it.
-    fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    fn set_mode(file: &File, mode: u32) -> io::Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o777))
+            file.set_permissions(fs::Permissions::from_mode(mode & 0o777))
         }
         #[cfg(not(unix))]
         {
             // Map the owner-write bit to the read-only attribute.
-            let mut perms = fs::metadata(path)?.permissions();
+            let mut perms = file.metadata()?.permissions();
             perms.set_readonly(mode & 0o200 == 0);
-            fs::set_permissions(path, perms)
+            file.set_permissions(perms)
         }
     }
 
     /// Create a symlink. Supported on Unix; elsewhere reported unsupported.
-    fn symlink_at(path: &Path, target: &[u8]) -> io::Result<()> {
+    fn symlink_at(parent: &Parent, target: &[u8]) -> io::Result<()> {
         #[cfg(unix)]
         {
             use std::ffi::OsStr;
             use std::os::unix::ffi::OsStrExt;
-            std::os::unix::fs::symlink(OsStr::from_bytes(target), path)
+            rustix::fs::symlinkat(OsStr::from_bytes(target), &parent.file, &parent.name)
+                .map_err(from_rustix)
         }
         #[cfg(not(unix))]
         {
-            let _ = (path, target);
+            let _ = (parent, target);
             // No portable symlink creation off Unix.
             Err(io::Error::from(io::ErrorKind::Unsupported))
         }
@@ -827,29 +1209,24 @@ mod passthrough {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     const XATTR_MAX: usize = 1 << 20;
 
-    fn rename_with(from: &Path, to: &Path, flags: u32) -> io::Result<()> {
+    fn rename_with(from: &Parent, to: &Parent, flags: u32) -> io::Result<()> {
         let known = RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT;
         if flags & !known != 0 || (flags & RENAME_NOREPLACE != 0 && flags & RENAME_EXCHANGE != 0) {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
         if flags & RENAME_WHITEOUT != 0 {
-            // Whiteout is an overlayfs device node, not a directory share.
             return Err(io::Error::from(io::ErrorKind::Unsupported));
         }
-        if flags & RENAME_EXCHANGE != 0
-            && (from.starts_with(to) || to.starts_with(from))
-            && from != to
-        {
-            return Err(io::Error::from(io::ErrorKind::InvalidInput));
-        }
         if flags == 0 {
-            // Two names of one file stay in place. Win32 MoveFile would drop
-            // the source name when the destination is another hard link.
             #[cfg(windows)]
-            if same_file(from, to) {
+            if let (Ok(a), Ok(b)) = (
+                pin_child(&from.file, &from.name),
+                pin_child(&to.file, &to.name),
+            ) && same_object(&a, &b)?
+            {
                 return Ok(());
             }
-            return fs::rename(from, to);
+            return cap_primitives::fs::rename(&from.file, &from.name, &to.file, &to.name);
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
@@ -860,7 +1237,7 @@ mod passthrough {
             if flags & RENAME_EXCHANGE != 0 {
                 host |= rustix::fs::RenameFlags::EXCHANGE;
             }
-            rustix::fs::renameat_with(rustix::fs::CWD, from, rustix::fs::CWD, to, host)
+            rustix::fs::renameat_with(&from.file, &from.name, &to.file, &to.name, host)
                 .map_err(from_rustix)
         }
         #[cfg(windows)]
@@ -868,7 +1245,7 @@ mod passthrough {
             if flags & RENAME_EXCHANGE != 0 {
                 return Err(io::Error::from(io::ErrorKind::Unsupported));
             }
-            move_file(from, to, false)
+            rename_noreplace(from, to)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         {
@@ -879,31 +1256,103 @@ mod passthrough {
 
     #[cfg(windows)]
     #[allow(unsafe_code)]
-    fn move_file(from: &Path, to: &Path, replace: bool) -> io::Result<()> {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MoveFileExW};
-        let from_w: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
-        let to_w: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
-        let move_flags = if replace {
-            MOVEFILE_REPLACE_EXISTING
-        } else {
-            0
+    fn reopen_file(file: &File, write: bool) -> io::Result<File> {
+        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+        reopen_with_access(file, if write { GENERIC_WRITE } else { GENERIC_READ })
+    }
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn reopen_with_access(file: &File, access: u32) -> io::Result<File> {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile,
         };
-        // SAFETY: both paths are NUL-terminated UTF-16 and live for the call.
-        let ok = unsafe { MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), move_flags) };
-        if ok == 0 {
+        if file.metadata()?.file_type().is_symlink() {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        // SAFETY: the owned input handle is live. A successful result is a
+        // new owned handle to the same object, without resolving a pathname.
+        let handle = unsafe {
+            ReOpenFile(
+                file.as_raw_handle(),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: ReOpenFile returned a new owned, valid file handle.
+        Ok(unsafe { File::from_raw_handle(handle) })
+    }
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn windows_path(parent: &Parent) -> io::Result<PathBuf> {
+        use std::os::windows::ffi::OsStringExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+        let mut buffer = vec![0u16; 512];
+        loop {
+            // SAFETY: the operation guard keeps this directory alive and
+            // prevents its name from changing while the resulting path is used.
+            let len = unsafe {
+                GetFinalPathNameByHandleW(
+                    parent.guard.as_raw_handle(),
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                    0,
+                )
+            };
+            if len == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if (len as usize) < buffer.len() {
+                buffer.truncate(len as usize);
+                return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer)).join(&parent.name));
+            }
+            buffer.resize(len as usize + 1, 0);
+        }
+    }
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn rename_noreplace(from: &Parent, to: &Parent) -> io::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+        let from: Vec<u16> = windows_path(from)?
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let to: Vec<u16> = windows_path(to)?
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: both guarded paths are NUL-terminated and live for the call.
+        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
             Err(io::Error::last_os_error())
         } else {
             Ok(())
         }
     }
 
-    fn make_node(path: &Path, mode: u32, rdev: u32) -> io::Result<()> {
-        // Device nodes can expose host devices, regardless of the share root.
-        // Reject them before dispatching to any host syscall implementation.
+    /// Device nodes can expose host devices, regardless of the share root.
+    /// Reject them before resolving any host path or calling host mknod.
+    fn refuse_device_node(mode: u32) -> io::Result<()> {
         if matches!(mode & super::S_IFMT, super::S_IFCHR | super::S_IFBLK) {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied));
         }
+        Ok(())
+    }
+
+    fn make_node(parent: &Parent, mode: u32, rdev: u32) -> io::Result<()> {
+        refuse_device_node(mode)?;
         #[cfg(target_os = "linux")]
         {
             let kind = rustix::fs::FileType::from_raw_mode(mode);
@@ -914,29 +1363,39 @@ mod passthrough {
             ) {
                 return Err(io::Error::from(io::ErrorKind::InvalidInput));
             }
-            rustix::fs::mknodat(rustix::fs::CWD, path, kind, perm, u64::from(rdev))
+            rustix::fs::mknodat(&parent.file, &parent.name, kind, perm, u64::from(rdev))
                 .map_err(from_rustix)
         }
         #[cfg(target_os = "macos")]
         {
-            make_node_macos(path, mode, rdev)
+            make_node_macos(parent, mode, rdev)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (path, mode, rdev);
+            let _ = (parent, mode, rdev);
             Err(io::Error::from(io::ErrorKind::Unsupported))
         }
     }
 
     #[cfg(target_os = "macos")]
     #[allow(unsafe_code)]
-    fn make_node_macos(path: &Path, mode: u32, rdev: u32) -> io::Result<()> {
+    fn make_node_macos(parent: &Parent, mode: u32, rdev: u32) -> io::Result<()> {
         use std::os::unix::ffi::OsStrExt;
-        let bytes = path.as_os_str().as_bytes();
+        if mode & super::S_IFMT != super::S_IFIFO {
+            let _ = rdev;
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        let bytes = parent.name.as_os_str().as_bytes();
         let c_path = std::ffi::CString::new(bytes)
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
         // SAFETY: `c_path` is a NUL-terminated path that outlives the call.
-        let rc = unsafe { libc::mknod(c_path.as_ptr(), mode as libc::mode_t, rdev as libc::dev_t) };
+        let rc = unsafe {
+            libc::mkfifoat(
+                std::os::fd::AsRawFd::as_raw_fd(parent.file.as_ref()),
+                c_path.as_ptr(),
+                mode as libc::mode_t,
+            )
+        };
         if rc == 0 {
             Ok(())
         } else {
@@ -978,8 +1437,8 @@ mod passthrough {
             let hole = libc::fpunchhole_t {
                 fp_flags: 0,
                 reserved: 0,
-                fp_offset: offset as libc::off_t,
-                fp_length: length as libc::off_t,
+                fp_offset: offset.cast_signed(),
+                fp_length: length.cast_signed(),
             };
             // SAFETY: `hole` is a valid `fpunchhole_t` for this fd.
             let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_PUNCHHOLE, &hole) };
@@ -1079,20 +1538,20 @@ mod passthrough {
             .collect()
     }
 
-    fn read_xattr(path: &Path, name: &str) -> io::Result<Vec<u8>> {
+    fn read_xattr(file: &File, name: &str) -> io::Result<Vec<u8>> {
         check_xattr_name(name)?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            grow_xattr(|buf| rustix::fs::lgetxattr(path, name, rustix::buffer::spare_capacity(buf)))
+            grow_xattr(|buf| rustix::fs::fgetxattr(file, name, rustix::buffer::spare_capacity(buf)))
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (path, name);
+            let _ = (file, name);
             Err(io::Error::from(io::ErrorKind::Unsupported))
         }
     }
 
-    fn write_xattr(path: &Path, name: &str, value: &[u8], flags: u32) -> io::Result<()> {
+    fn write_xattr(file: &File, name: &str, value: &[u8], flags: u32) -> io::Result<()> {
         check_xattr_name(name)?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
@@ -1102,39 +1561,39 @@ mod passthrough {
                 2 => rustix::fs::XattrFlags::REPLACE,
                 _ => return Err(io::Error::from(io::ErrorKind::InvalidInput)),
             };
-            rustix::fs::lsetxattr(path, name, value, host).map_err(from_rustix)
+            rustix::fs::fsetxattr(file, name, value, host).map_err(from_rustix)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (path, name, value, flags);
+            let _ = (file, name, value, flags);
             Err(io::Error::from(io::ErrorKind::Unsupported))
         }
     }
 
-    fn list_xattrs(path: &Path) -> io::Result<Vec<u8>> {
+    fn list_xattrs(file: &File) -> io::Result<Vec<u8>> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let names = grow_xattr(|buf| {
-                rustix::fs::llistxattr(path, rustix::buffer::spare_capacity(buf))
+                rustix::fs::flistxattr(file, rustix::buffer::spare_capacity(buf))
             })?;
             Ok(filter_xattr_names(&names))
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = path;
+            let _ = file;
             Err(io::Error::from(io::ErrorKind::Unsupported))
         }
     }
 
-    fn delete_xattr(path: &Path, name: &str) -> io::Result<()> {
+    fn delete_xattr(file: &File, name: &str) -> io::Result<()> {
         check_xattr_name(name)?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            rustix::fs::lremovexattr(path, name).map_err(from_rustix)
+            rustix::fs::fremovexattr(file, name).map_err(from_rustix)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (path, name);
+            let _ = (file, name);
             Err(io::Error::from(io::ErrorKind::Unsupported))
         }
     }
@@ -1322,7 +1781,6 @@ mod passthrough {
             super::linux_errno(super::LINUX_ENXIO, io::ErrorKind::NotFound)
         }
     }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -1356,16 +1814,17 @@ mod passthrough {
         fn disallowed_xattrs_are_rejected_before_host_access() {
             let dir = tempfile::tempdir().unwrap();
             let backend = Passthrough::new(dir.path()).unwrap();
-            let rel = Path::new("missing");
-            let path = dir.path().join(rel);
+            let rel = NodePath::new("missing");
+            let path = dir.path().join(&*rel);
+            let host = backend.root.clone();
             for name in DISALLOWED_XATTR_NAMES {
                 for result in [
-                    read_xattr(&path, name).map(|_| ()),
-                    write_xattr(&path, name, b"value", 0),
-                    delete_xattr(&path, name),
-                    backend.get_xattr(rel, name).map(|_| ()),
-                    backend.set_xattr(rel, name, b"value", 0),
-                    backend.remove_xattr(rel, name),
+                    read_xattr(&host, name).map(|_| ()),
+                    write_xattr(&host, name, b"value", 0),
+                    delete_xattr(&host, name),
+                    backend.get_xattr(&rel, name).map(|_| ()),
+                    backend.set_xattr(&rel, name, b"value", 0),
+                    backend.remove_xattr(&rel, name),
                 ] {
                     assert_eq!(
                         result.unwrap_err().kind(),
@@ -1393,17 +1852,18 @@ mod passthrough {
         fn user_xattr_roundtrip() {
             let dir = tempfile::tempdir().unwrap();
             let backend = Passthrough::new(dir.path()).unwrap();
-            let rel = Path::new("file");
-            let path = dir.path().join(rel);
+            let rel = NodePath::new("file");
+            let path = dir.path().join(&*rel);
             fs::write(&path, b"data").unwrap();
-            backend.set_xattr(rel, "user.foo", b"first", 1).unwrap();
-            assert_eq!(backend.get_xattr(rel, "user.foo").unwrap(), b"first");
-            backend.set_xattr(rel, "user.foo", b"second", 2).unwrap();
-            assert_eq!(read_xattr(&path, "user.foo").unwrap(), b"second");
-            assert_eq!(backend.list_xattr(rel).unwrap(), b"user.foo\0");
-            backend.remove_xattr(rel, "user.foo").unwrap();
-            assert!(backend.list_xattr(rel).unwrap().is_empty());
-            assert!(backend.get_xattr(rel, "user.foo").is_err());
+            backend.set_xattr(&rel, "user.foo", b"first", 1).unwrap();
+            assert_eq!(backend.get_xattr(&rel, "user.foo").unwrap(), b"first");
+            backend.set_xattr(&rel, "user.foo", b"second", 2).unwrap();
+            let host = File::open(&path).unwrap();
+            assert_eq!(read_xattr(&host, "user.foo").unwrap(), b"second");
+            assert_eq!(backend.list_xattr(&rel).unwrap(), b"user.foo\0");
+            backend.remove_xattr(&rel, "user.foo").unwrap();
+            assert!(backend.list_xattr(&rel).unwrap().is_empty());
+            assert!(backend.get_xattr(&rel, "user.foo").is_err());
         }
 
         #[cfg(target_os = "linux")]
@@ -1411,8 +1871,8 @@ mod passthrough {
         fn host_acl_is_hidden_and_cannot_be_read_changed_or_removed() {
             let dir = tempfile::tempdir().unwrap();
             let backend = Passthrough::new(dir.path()).unwrap();
-            let rel = Path::new("file");
-            let path = dir.path().join(rel);
+            let rel = NodePath::new("file");
+            let path = dir.path().join(&*rel);
             fs::write(&path, b"data").unwrap();
             // A valid Linux ACL with one named user, installed by the host.
             let mut acl = 2u32.to_le_bytes().to_vec();
@@ -1443,13 +1903,14 @@ mod passthrough {
                 }
                 Err(err) => panic!("failed to install host ACL: {err}"),
             }
-            backend.set_xattr(rel, "user.foo", b"visible", 0).unwrap();
-            assert_eq!(list_xattrs(&path).unwrap(), b"user.foo\0");
-            assert_eq!(backend.list_xattr(rel).unwrap(), b"user.foo\0");
+            backend.set_xattr(&rel, "user.foo", b"visible", 0).unwrap();
+            let host = File::open(&path).unwrap();
+            assert_eq!(list_xattrs(&host).unwrap(), b"user.foo\0");
+            assert_eq!(backend.list_xattr(&rel).unwrap(), b"user.foo\0");
             for result in [
-                backend.get_xattr(rel, name).map(|_| ()),
-                backend.set_xattr(rel, name, b"replacement", 0),
-                backend.remove_xattr(rel, name),
+                backend.get_xattr(&rel, name).map(|_| ()),
+                backend.set_xattr(&rel, name, b"replacement", 0),
+                backend.remove_xattr(&rel, name),
             ] {
                 assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
             }
@@ -1459,6 +1920,134 @@ mod passthrough {
             .unwrap();
             assert_eq!(actual, acl);
             assert_eq!(fs::read(&path).unwrap(), b"data");
+        }
+    }
+
+    #[cfg(test)]
+    mod handle_tests {
+        use super::*;
+
+        #[test]
+        fn renamed_parent_keeps_creation_in_the_retained_directory() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join("parent")).unwrap();
+            let fs = Passthrough::new(dir.path()).unwrap();
+            let (_, parent) = fs.lookup(&NodePath::new("parent")).unwrap();
+            std::fs::rename(dir.path().join("parent"), dir.path().join("saved")).unwrap();
+            std::fs::create_dir(dir.path().join("parent")).unwrap();
+            let created = fs.create(&parent.join("child"), 0o600);
+            #[cfg(not(windows))]
+            {
+                created.unwrap();
+                assert!(dir.path().join("saved/child").is_file());
+            }
+            // Windows keeps no handle for a folder that was only looked up,
+            // so it cannot follow the move. The identity check refuses the
+            // new folder instead of creating the file there.
+            #[cfg(windows)]
+            {
+                assert_eq!(created.unwrap_err().kind(), io::ErrorKind::NotFound);
+                assert!(!dir.path().join("saved/child").exists());
+            }
+            assert!(!dir.path().join("parent/child").exists());
+        }
+
+        #[test]
+        fn retained_file_permissions_can_be_updated() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("file"), b"data").unwrap();
+            let fs = Passthrough::new(dir.path()).unwrap();
+            let (_, file) = fs.lookup(&NodePath::new("file")).unwrap();
+            fs.setattr(
+                &file,
+                &SetAttr {
+                    mode: Some(0o444),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                std::fs::metadata(dir.path().join("file"))
+                    .unwrap()
+                    .permissions()
+                    .readonly()
+            );
+            fs.setattr(
+                &file,
+                &SetAttr {
+                    mode: Some(0o644),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                !std::fs::metadata(dir.path().join("file"))
+                    .unwrap()
+                    .permissions()
+                    .readonly()
+            );
+        }
+
+        #[test]
+        fn checked_reopen_refuses_a_replaced_leaf() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("file"), b"original").unwrap();
+            let fs = Passthrough::new(dir.path()).unwrap();
+            let (_, file) = fs.lookup(&NodePath::new("file")).unwrap();
+            std::fs::rename(dir.path().join("file"), dir.path().join("saved")).unwrap();
+            std::fs::write(dir.path().join("file"), b"replacement").unwrap();
+            let error = fs.open_checked(&file, true, None).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::NotFound);
+            assert_eq!(
+                std::fs::read(dir.path().join("file")).unwrap(),
+                b"replacement"
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join("saved")).unwrap(),
+                b"original"
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn unavailable_stronger_open_uses_a_nofollow_fallback() {
+            use rustix::fs::{Mode, OFlags};
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("file"), b"data").unwrap();
+            std::os::unix::fs::symlink("file", dir.path().join("link")).unwrap();
+            let parent = File::open(dir.path()).unwrap();
+            let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+            let open = |name: &str| {
+                open_with_fallback(&parent, Path::new(name), flags, Mode::empty(), || {
+                    Err(rustix::io::Errno::NOSYS)
+                })
+            };
+            assert!(open("file").is_ok());
+            assert!(open("link").is_err());
+            assert!(open("file/child").is_err());
+            assert!(open("../file").is_err());
+            let error =
+                open_with_fallback(&parent, Path::new("file"), flags, Mode::empty(), || {
+                    Err(rustix::io::Errno::PERM)
+                })
+                .unwrap_err();
+            assert_eq!(
+                error.raw_os_error(),
+                Some(rustix::io::Errno::PERM.raw_os_error())
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn intermediate_symlinks_are_refused() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join("parent")).unwrap();
+            std::os::unix::fs::symlink("parent", dir.path().join("alias")).unwrap();
+            let fs = Passthrough::new(dir.path()).unwrap();
+            assert!(fs.create(&NodePath::new("alias/child"), 0o600).is_err());
+            let (_, alias) = fs.lookup(&NodePath::new("alias")).unwrap();
+            assert!(fs.create(&alias.join("child"), 0o600).is_err());
+            assert!(!dir.path().join("parent/child").exists());
         }
     }
 }
@@ -1581,12 +2170,12 @@ impl MapFs {
 }
 
 impl FsBackend for MapFs {
-    fn stat(&self, rel: &Path) -> io::Result<Attr> {
+    fn stat(&self, rel: &NodePath) -> io::Result<Attr> {
         let key = Self::key(rel)?;
         self.attr_for(&key)
     }
 
-    fn readdir(&self, rel: &Path) -> io::Result<Vec<DirEntry>> {
+    fn readdir(&self, rel: &NodePath) -> io::Result<Vec<DirEntry>> {
         let key = Self::key(rel)?;
         let children = self
             .dirs
@@ -1607,7 +2196,7 @@ impl FsBackend for MapFs {
         Ok(out)
     }
 
-    fn read(&self, rel: &Path, offset: u64, size: u32) -> io::Result<Vec<u8>> {
+    fn read(&self, rel: &NodePath, offset: u64, size: u32) -> io::Result<Vec<u8>> {
         let key = Self::key(rel)?;
         let data = self
             .files
@@ -1618,7 +2207,7 @@ impl FsBackend for MapFs {
         Ok(data[start..end].to_vec())
     }
 
-    fn readlink(&self, _rel: &Path) -> io::Result<Vec<u8>> {
+    fn readlink(&self, _rel: &NodePath) -> io::Result<Vec<u8>> {
         Err(io::Error::from(io::ErrorKind::InvalidInput))
     }
 }
@@ -1641,13 +2230,19 @@ mod tests {
     #[test]
     fn mapfs_stat_and_read() {
         let fs = MapFs::new().with_file("hello.txt", "hi there");
-        let root = fs.stat(Path::new("")).unwrap();
+        let root = fs.stat(&NodePath::new("")).unwrap();
         assert!(root.is_dir());
-        let f = fs.stat(Path::new("hello.txt")).unwrap();
+        let f = fs.stat(&NodePath::new("hello.txt")).unwrap();
         assert_eq!(f.size, 8);
         assert_eq!(f.dirent_type(), DT_REG);
-        assert_eq!(fs.read(Path::new("hello.txt"), 0, 64).unwrap(), b"hi there");
-        assert_eq!(fs.read(Path::new("hello.txt"), 3, 64).unwrap(), b"there");
+        assert_eq!(
+            fs.read(&NodePath::new("hello.txt"), 0, 64).unwrap(),
+            b"hi there"
+        );
+        assert_eq!(
+            fs.read(&NodePath::new("hello.txt"), 3, 64).unwrap(),
+            b"there"
+        );
     }
 
     #[test]
@@ -1678,18 +2273,18 @@ mod tests {
 
         let pt = Passthrough::new(dir.path()).unwrap();
 
-        let root = pt.stat(Path::new("")).unwrap();
+        let root = pt.stat(&NodePath::new("")).unwrap();
         assert!(root.is_dir());
 
-        let f = pt.stat(Path::new("f.txt")).unwrap();
+        let f = pt.stat(&NodePath::new("f.txt")).unwrap();
         assert_eq!(f.size, 5);
         assert_eq!(f.dirent_type(), DT_REG);
         assert_eq!(f.mode & S_IFMT, S_IFREG);
-        assert_eq!(pt.read(Path::new("f.txt"), 0, 64).unwrap(), b"hello");
-        assert_eq!(pt.read(Path::new("f.txt"), 2, 64).unwrap(), b"llo");
+        assert_eq!(pt.read(&NodePath::new("f.txt"), 0, 64).unwrap(), b"hello");
+        assert_eq!(pt.read(&NodePath::new("f.txt"), 2, 64).unwrap(), b"llo");
 
         let names: Vec<String> = pt
-            .readdir(Path::new(""))
+            .readdir(&NodePath::new(""))
             .unwrap()
             .into_iter()
             .map(|e| e.name)
@@ -1698,10 +2293,10 @@ mod tests {
         assert!(names.contains(&"sub".to_string()));
 
         // Lexical escape is rejected before touching the filesystem.
-        assert!(pt.stat(Path::new("../escape")).is_err());
+        assert!(pt.stat(&NodePath::new("../escape")).is_err());
         // A missing child is NotFound (a LOOKUP miss), not a containment error.
         assert_eq!(
-            pt.stat(Path::new("nope")).unwrap_err().kind(),
+            pt.stat(&NodePath::new("nope")).unwrap_err().kind(),
             io::ErrorKind::NotFound
         );
     }
@@ -1712,20 +2307,21 @@ mod tests {
         let pt = Passthrough::new(dir.path()).unwrap();
 
         // create + write
-        let attr = pt.create(Path::new("new.txt"), 0o644).unwrap();
+        let attr = pt.create(&NodePath::new("new.txt"), 0o644).unwrap();
         assert_eq!(attr.mode & S_IFMT, S_IFREG);
         assert_eq!(
-            pt.write(Path::new("new.txt"), 0, b"hello world").unwrap(),
+            pt.write(&NodePath::new("new.txt"), 0, b"hello world")
+                .unwrap(),
             11
         );
         assert_eq!(
-            pt.read(Path::new("new.txt"), 0, 64).unwrap(),
+            pt.read(&NodePath::new("new.txt"), 0, 64).unwrap(),
             b"hello world"
         );
         // positional write (overwrite "world" -> "rust!")
-        assert_eq!(pt.write(Path::new("new.txt"), 6, b"rust!").unwrap(), 5);
+        assert_eq!(pt.write(&NodePath::new("new.txt"), 6, b"rust!").unwrap(), 5);
         assert_eq!(
-            pt.read(Path::new("new.txt"), 0, 64).unwrap(),
+            pt.read(&NodePath::new("new.txt"), 0, 64).unwrap(),
             b"hello rust!"
         );
         assert_eq!(
@@ -1734,16 +2330,16 @@ mod tests {
         );
 
         // mkdir + nested create
-        pt.mkdir(Path::new("d"), 0o755).unwrap();
-        assert!(pt.stat(Path::new("d")).unwrap().is_dir());
-        pt.create(Path::new("d/inner.txt"), 0o644).unwrap();
-        pt.write(Path::new("d/inner.txt"), 0, b"x").unwrap();
+        pt.mkdir(&NodePath::new("d"), 0o755).unwrap();
+        assert!(pt.stat(&NodePath::new("d")).unwrap().is_dir());
+        pt.create(&NodePath::new("d/inner.txt"), 0o644).unwrap();
+        pt.write(&NodePath::new("d/inner.txt"), 0, b"x").unwrap();
         assert!(dir.path().join("d/inner.txt").exists());
 
         // setattr: truncate
         let a = pt
             .setattr(
-                Path::new("new.txt"),
+                &NodePath::new("new.txt"),
                 &SetAttr {
                     size: Some(5),
                     ..Default::default()
@@ -1751,24 +2347,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(a.size, 5);
-        assert_eq!(pt.read(Path::new("new.txt"), 0, 64).unwrap(), b"hello");
+        assert_eq!(pt.read(&NodePath::new("new.txt"), 0, 64).unwrap(), b"hello");
 
         // rename
-        pt.rename(Path::new("new.txt"), Path::new("renamed.txt"), 0)
+        pt.rename(&NodePath::new("new.txt"), &NodePath::new("renamed.txt"), 0)
             .unwrap();
         assert!(!dir.path().join("new.txt").exists());
-        assert_eq!(pt.read(Path::new("renamed.txt"), 0, 64).unwrap(), b"hello");
+        assert_eq!(
+            pt.read(&NodePath::new("renamed.txt"), 0, 64).unwrap(),
+            b"hello"
+        );
 
         // unlink + rmdir
-        pt.unlink(Path::new("renamed.txt")).unwrap();
+        pt.unlink(&NodePath::new("renamed.txt")).unwrap();
         assert!(!dir.path().join("renamed.txt").exists());
-        pt.unlink(Path::new("d/inner.txt")).unwrap();
-        pt.rmdir(Path::new("d")).unwrap();
+        pt.unlink(&NodePath::new("d/inner.txt")).unwrap();
+        pt.rmdir(&NodePath::new("d")).unwrap();
         assert!(!dir.path().join("d").exists());
 
         // write escaping the share is rejected before touching the fs
-        assert!(pt.write(Path::new("../escape"), 0, b"x").is_err());
-        assert!(pt.create(Path::new("../evil.txt"), 0o644).is_err());
+        assert!(pt.write(&NodePath::new("../escape"), 0, b"x").is_err());
+        assert!(pt.create(&NodePath::new("../evil.txt"), 0o644).is_err());
     }
 
     #[cfg(unix)]
@@ -1776,10 +2375,10 @@ mod tests {
     fn passthrough_setattr_mode_and_symlink_unix() {
         let dir = tempfile::tempdir().unwrap();
         let pt = Passthrough::new(dir.path()).unwrap();
-        pt.create(Path::new("f"), 0o644).unwrap();
+        pt.create(&NodePath::new("f"), 0o644).unwrap();
         let a = pt
             .setattr(
-                Path::new("f"),
+                &NodePath::new("f"),
                 &SetAttr {
                     mode: Some(0o600),
                     ..Default::default()
@@ -1788,9 +2387,9 @@ mod tests {
             .unwrap();
         assert_eq!(a.mode & 0o777, 0o600);
 
-        let link = pt.symlink(Path::new("l"), b"f").unwrap();
+        let link = pt.symlink(&NodePath::new("l"), b"f").unwrap();
         assert_eq!(link.mode & S_IFMT, S_IFLNK);
-        assert_eq!(pt.readlink(Path::new("l")).unwrap(), b"f");
+        assert_eq!(pt.readlink(&NodePath::new("l")).unwrap(), b"f");
     }
 
     #[test]
@@ -1799,14 +2398,14 @@ mod tests {
             .with_file("a.txt", "a")
             .with_file("sub/b.txt", "b");
         let mut names: Vec<String> = fs
-            .readdir(Path::new(""))
+            .readdir(&NodePath::new(""))
             .unwrap()
             .into_iter()
             .map(|e| e.name)
             .collect();
         names.sort();
         assert_eq!(names, vec!["a.txt".to_string(), "sub".to_string()]);
-        let sub = fs.readdir(Path::new("sub")).unwrap();
+        let sub = fs.readdir(&NodePath::new("sub")).unwrap();
         assert_eq!(sub.len(), 1);
         assert_eq!(sub[0].name, "b.txt");
     }
@@ -1822,7 +2421,9 @@ mod tests {
             for kind in [S_IFCHR, S_IFBLK] {
                 for rdev in [0, 1, 0x103, 0xdead_beef, u32::MAX] {
                     let rel = PathBuf::from(format!("node-{kind}-{rdev}"));
-                    let err = backend.mknod(&rel, kind | 0o600, rdev).unwrap_err();
+                    let err = backend
+                        .mknod(&NodePath::new(&rel), kind | 0o600, rdev)
+                        .unwrap_err();
                     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
                     assert_eq!(err.raw_os_error(), None, "policy must reject before mknod");
                     assert_eq!(
@@ -1833,7 +2434,7 @@ mod tests {
                     );
 
                     // Even an unusable host path must be rejected by policy.
-                    let missing = Path::new("missing-parent").join(&rel);
+                    let missing = NodePath::new(Path::new("missing-parent").join(&rel));
                     let err = backend.mknod(&missing, kind | 0o600, rdev).unwrap_err();
                     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
                     assert_eq!(err.raw_os_error(), None, "policy must reject before mknod");
@@ -1846,18 +2447,35 @@ mod tests {
         fn fifo_creation_still_succeeds() {
             use crate::backend::{S_IFIFO, S_IFMT};
             use std::os::unix::fs::FileTypeExt;
-            let dir = tempfile::tempdir().unwrap();
-            let backend = Passthrough::new(dir.path()).unwrap();
-            let attr = backend
-                .mknod(Path::new("fifo"), S_IFIFO | 0o600, 0)
-                .unwrap();
-            assert_eq!(attr.mode & S_IFMT, S_IFIFO);
-            assert!(
-                fs::symlink_metadata(dir.path().join("fifo"))
-                    .unwrap()
-                    .file_type()
-                    .is_fifo()
-            );
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let dir = tempfile::tempdir().unwrap();
+                let backend = Passthrough::new(dir.path()).unwrap();
+                let attr = backend
+                    .mknod(&NodePath::new("fifo"), S_IFIFO | 0o600, 0)
+                    .unwrap();
+                assert_eq!(attr.mode & S_IFMT, S_IFIFO);
+                assert!(
+                    fs::symlink_metadata(dir.path().join("fifo"))
+                        .unwrap()
+                        .file_type()
+                        .is_fifo()
+                );
+                let entries = backend.readdir(&NodePath::new("")).unwrap();
+                assert!(entries.iter().any(|entry| entry.name == "fifo"));
+                tx.send(()).unwrap();
+            });
+            // Without O_NONBLOCK a FIFO lookup waits forever for a writer.
+            // Fail after ten seconds instead of hanging the whole test run.
+            match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(()) => worker.join().unwrap(),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("FIFO lookup blocked; is O_NONBLOCK missing?")
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    std::panic::resume_unwind(worker.join().unwrap_err())
+                }
+            }
         }
 
         #[cfg(target_os = "linux")]
@@ -1868,7 +2486,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let backend = Passthrough::new(dir.path()).unwrap();
             let attr = backend
-                .mknod(Path::new("socket"), S_IFSOCK | 0o600, 0)
+                .mknod(&NodePath::new("socket"), S_IFSOCK | 0o600, 0)
                 .unwrap();
             assert_eq!(attr.mode & S_IFMT, S_IFSOCK);
             assert!(
