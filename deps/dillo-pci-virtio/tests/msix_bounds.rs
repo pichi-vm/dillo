@@ -24,7 +24,7 @@ impl MessageInterruptDomain for RecordingDomain {
         Ok(())
     }
 
-    fn enabled(&self, _enabled: bool) -> Result<(), InterruptError> {
+    fn enabled(&self, _vector: u16, _enabled: bool) -> Result<(), InterruptError> {
         Ok(())
     }
 
