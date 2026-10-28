@@ -1920,6 +1920,7 @@ mod machine_select {
         fn syscon_register(syscon: dillo_devtree::platform::Syscon) -> syscon::SysconRegister {
             syscon::SysconRegister {
                 base: syscon.base,
+                size: syscon.size,
                 offset: syscon.offset,
                 value: syscon.value,
                 mask: syscon.mask,
@@ -2110,19 +2111,25 @@ mod machine_select {
             };
             Attach::attach(
                 vm,
-                Arc::new(syscon::SysconDevice::new(
-                    syscon_register(poweroff),
-                    syscon::SysconAction::Poweroff,
-                )),
+                Arc::new(
+                    syscon::SysconDevice::new(
+                        syscon_register(poweroff),
+                        syscon::SysconAction::Poweroff,
+                    )
+                    .map_err(RunError::machine)?,
+                ),
             )
             .map_err(RunError::machine)?;
             if let Some(reboot) = platform.reboot {
                 Attach::attach(
                     vm,
-                    Arc::new(syscon::SysconDevice::new(
-                        syscon_register(reboot),
-                        syscon::SysconAction::Reboot,
-                    )),
+                    Arc::new(
+                        syscon::SysconDevice::new(
+                            syscon_register(reboot),
+                            syscon::SysconAction::Reboot,
+                        )
+                        .map_err(RunError::machine)?,
+                    ),
                 )
                 .map_err(RunError::machine)?;
             }
@@ -2371,6 +2378,100 @@ mod machine_select {
                 vcpus,
                 supervisor_shutdown,
             )
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+            use dillo_devtree::devtree::{OwnedNode, OwnedProperty, OwnedTree};
+            use dillo_devtree::platform::Arch;
+            use dillo_mmio::{MmioBus, MmioDevice, MmioWriteOutcome};
+
+            fn reg(base: u64, size: u64) -> OwnedProperty {
+                OwnedProperty::new("reg").with_u32s(&[
+                    (base >> 32) as u32,
+                    base as u32,
+                    (size >> 32) as u32,
+                    size as u32,
+                ])
+            }
+
+            #[test]
+            fn surveyed_syscon_extents_preserve_adjacent_resources() {
+                const BASE: u64 = 0x901_0000;
+                for size in [4, 0x24, 0x2000] {
+                    let mut root = OwnedNode::new("")
+                        .with_property(OwnedProperty::new("#address-cells").with_u32(2))
+                        .with_property(OwnedProperty::new("#size-cells").with_u32(2));
+                    for (base, compat, phandle) in [
+                        (0xfee0_0000, "intel,ce4100-lapic", 1),
+                        (0xfec0_0000, "intel,ce4100-ioapic", 2),
+                    ] {
+                        root.set_child(
+                            OwnedNode::new(&format!("interrupt-controller@{base:x}"))
+                                .with_property(OwnedProperty::new("compatible").with_str(compat))
+                                .with_property(reg(base, 0x1000))
+                                .with_property(OwnedProperty::new("#interrupt-cells").with_u32(2))
+                                .with_property(OwnedProperty::new("interrupt-controller"))
+                                .with_property(OwnedProperty::new("phandle").with_u32(phandle)),
+                        );
+                    }
+                    for (name, compat, base, value) in [
+                        ("poweroff", "syscon-poweroff", BASE, 0x34),
+                        ("reboot", "syscon-reboot", BASE + size, 1),
+                    ] {
+                        root.set_child(
+                            OwnedNode::new(&format!("{name}@{base:x}"))
+                                .with_property(OwnedProperty::new("compatible").with_str(compat))
+                                .with_property(reg(base, size))
+                                .with_property(OwnedProperty::new("value").with_u32(value)),
+                        );
+                    }
+                    let dtb = OwnedTree::new(root).encode().expect("encode syscon DT");
+                    let platform = PlatformMachine::survey(&dtb, Arch::X86_64).expect("survey");
+                    let mut bus = MmioBus::new();
+                    for (register, action, outcome) in [
+                        (
+                            platform.poweroff.unwrap(),
+                            syscon::SysconAction::Poweroff,
+                            MmioWriteOutcome::GuestPoweroff,
+                        ),
+                        (
+                            platform.reboot.unwrap(),
+                            syscon::SysconAction::Reboot,
+                            MmioWriteOutcome::GuestReset,
+                        ),
+                    ] {
+                        let device = Arc::new(
+                            syscon::SysconDevice::new(syscon_register(register), action)
+                                .expect("construct syscon"),
+                        );
+                        let window = device.windows()[0];
+                        assert_eq!(window.size, size);
+                        assert!(
+                            platform
+                                .plan
+                                .regions()
+                                .iter()
+                                .any(|region| region.gpa == window.base
+                                    && region.size == window.size)
+                        );
+                        bus.register_device(device);
+                        assert_eq!(
+                            bus.write(register.base, &register.value.to_le_bytes()),
+                            Some(outcome)
+                        );
+                    }
+                    let mut data = [0xff; 4];
+                    assert!(bus.read(BASE + size - 4, &mut data));
+                    assert_eq!(data, [0; 4]);
+                    assert!(!bus.read(BASE + size - 1, &mut [0; 2]));
+                    assert_eq!(bus.write(BASE + size - 1, &[0; 2]), None);
+                    assert!(!bus.read(BASE + 2 * size, &mut [0; 1]));
+                    assert_eq!(bus.write(BASE + 2 * size, &[0; 1]), None);
+                    assert!(!bus.read(BASE - 1, &mut [0; 1]));
+                }
+            }
         }
     }
 }
