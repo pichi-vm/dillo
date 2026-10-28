@@ -1143,6 +1143,9 @@ mod overlay {
 
 mod launch {
 
+    #[cfg(test)]
+    mod delegation_tests;
+
     // The PMI File (fd) is held for the VM lifetime so the mapping — and any
     // reboot re-map — is pinned to that inode, not re-resolved by path. Read/Seek
     // are only used by the non-Linux read_to_end fallback (Linux mmaps the fd).
@@ -1346,6 +1349,21 @@ mod launch {
             let platform = PlatformMachine::survey(&dtb, platform_arch(host_arch))
                 .map_err(LaunchError::Coverage)?;
 
+            // The survey supports delegated CPUs and memory only: fixed CPU
+            // declarations are rejected, and fixed memory is unclaimed. Require
+            // the channel that delivers their allocation before planning RAM.
+            if !parsed.actions.iter().any(|action| {
+                matches!(
+                    action,
+                    PmiAction::Fill {
+                        kind: FillKind::DtDtbo,
+                        ..
+                    }
+                )
+            }) {
+                return Err(LaunchError::DelegatedAllocationRequiresDtbo);
+            }
+
             let load_ranges: Vec<(String, u64, u64)> = parsed
                 .sections
                 .iter()
@@ -1443,6 +1461,9 @@ mod launch {
         #[error("base DTB coverage: {0}")]
         Coverage(SurveyError),
 
+        #[error("delegated CPU and memory allocation requires a dt:dtbo fill")]
+        DelegatedAllocationRequiresDtbo,
+
         #[error("base DTB / PE cross-validation: {0}")]
         DtbCrossValidate(SurveyError),
 
@@ -1472,6 +1493,7 @@ mod launch {
                 | Self::UnexpectedBaseOverride
                 | Self::BaseDtbTooLarge { .. }
                 | Self::Coverage(_)
+                | Self::DelegatedAllocationRequiresDtbo
                 | Self::DtbCrossValidate(_)
                 | Self::MalformedMergedDtb
                 | Self::MalformedLoadSection(_)
