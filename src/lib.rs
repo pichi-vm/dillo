@@ -371,9 +371,9 @@ pub mod pmi_parse {
         // dt extension channel resolution (pmi/spec/dt.md, VMM selection
         // table). A base DTB must be available through either the `dt:dtb`
         // attribute (bundled / optional fallback) or a `dt:dtb` fill (detached /
-        // optional); with neither, no base exists and the VMM MUST refuse. The
-        // `dt:dtbo` overlay fill is orthogonal — present only when the image
-        // delegates a resource.
+        // optional); with neither, no base exists and the VMM MUST refuse.
+        // Whether delegated CPUs or memory require a `dt:dtbo` fill is checked
+        // during launch preflight, after resolving and surveying the base.
         let has_dt_dtb_fill = fill_kinds.iter().any(|k| matches!(k, FillKind::DtDtb));
         let dt_dtb_attr = merged_dtb;
         if dt_dtb_attr.is_none() && !has_dt_dtb_fill {
