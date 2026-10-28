@@ -1,0 +1,29 @@
+# Appended after %cargo_prep -v vendor.
+#
+# %cargo_prep redirects crates.io and deletes the repo .cargo/config.toml,
+# including [unstable] bindeps. Cargo still parses dev-dependency
+# `artifact = "bin"` entries (arma, snuffler) before -Z avoid-dev-deps
+# applies, so bindeps must stay enabled. %__cargo sets RUSTC_BOOTSTRAP=1,
+# which lets the chroot's stable cargo accept this section.
+#
+# Git tables match `cargo vendor --locked`. .copr/Makefile checks that
+# before it packs Source1.
+
+[unstable]
+bindeps = true
+
+[source."git+https://github.com/pichi-vm/arma"]
+git = "https://github.com/pichi-vm/arma"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/pichi-vm/burrow"]
+git = "https://github.com/pichi-vm/burrow"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/pichi-vm/devtree"]
+git = "https://github.com/pichi-vm/devtree"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/pichi-vm/pmi"]
+git = "https://github.com/pichi-vm/pmi"
+replace-with = "vendored-sources"

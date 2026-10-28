@@ -5,6 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 includes = ["**/*.rs"]
 excludes = [
     "target/**",
+    # cargo vendor output; upstream files keep their own headers.
+    "vendor/**",
     # Firecracker-derived files carry their own dual SPDX header
     # (Apache-2.0 OR BSD-3-Clause) plus an attribution comment; hawkeye must
     # not rewrite them to the AMD-only Apache-2.0 header. See NOTICE.
