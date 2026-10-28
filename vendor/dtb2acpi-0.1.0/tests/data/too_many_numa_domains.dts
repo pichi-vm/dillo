@@ -1,0 +1,118 @@
+/dts-v1/;
+
+/* 17 cpus with distinct numa-node-ids (cap = 16) — the 17th add_domain
+ * call triggers DtbError::TooManyNumaDomains { found: 17 }.
+ */
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/too-many-numa-domains";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			numa-node-id = <0>;
+		};
+		cpu@1 {
+			device_type = "cpu";
+			reg = <1>;
+			numa-node-id = <1>;
+		};
+		cpu@2 {
+			device_type = "cpu";
+			reg = <2>;
+			numa-node-id = <2>;
+		};
+		cpu@3 {
+			device_type = "cpu";
+			reg = <3>;
+			numa-node-id = <3>;
+		};
+		cpu@4 {
+			device_type = "cpu";
+			reg = <4>;
+			numa-node-id = <4>;
+		};
+		cpu@5 {
+			device_type = "cpu";
+			reg = <5>;
+			numa-node-id = <5>;
+		};
+		cpu@6 {
+			device_type = "cpu";
+			reg = <6>;
+			numa-node-id = <6>;
+		};
+		cpu@7 {
+			device_type = "cpu";
+			reg = <7>;
+			numa-node-id = <7>;
+		};
+		cpu@8 {
+			device_type = "cpu";
+			reg = <8>;
+			numa-node-id = <8>;
+		};
+		cpu@9 {
+			device_type = "cpu";
+			reg = <9>;
+			numa-node-id = <9>;
+		};
+		cpu@10 {
+			device_type = "cpu";
+			reg = <10>;
+			numa-node-id = <10>;
+		};
+		cpu@11 {
+			device_type = "cpu";
+			reg = <11>;
+			numa-node-id = <11>;
+		};
+		cpu@12 {
+			device_type = "cpu";
+			reg = <12>;
+			numa-node-id = <12>;
+		};
+		cpu@13 {
+			device_type = "cpu";
+			reg = <13>;
+			numa-node-id = <13>;
+		};
+		cpu@14 {
+			device_type = "cpu";
+			reg = <14>;
+			numa-node-id = <14>;
+		};
+		cpu@15 {
+			device_type = "cpu";
+			reg = <15>;
+			numa-node-id = <15>;
+		};
+		cpu@16 {
+			device_type = "cpu";
+			reg = <16>;
+			numa-node-id = <16>;
+		};
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x10000000>;
+		numa-node-id = <0>;
+	};
+
+		lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+		poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+	};
+};

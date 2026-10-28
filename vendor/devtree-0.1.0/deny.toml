@@ -1,0 +1,20 @@
+# cargo-deny configuration for devtree. devtree has zero dependencies, so the
+# only license in the tree is its own.
+
+[licenses]
+allow = ["Apache-2.0"]
+confidence-threshold = 0.8
+
+[advisories]
+version = 2
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace-internal path deps carry no version; don't flag them as wildcards.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

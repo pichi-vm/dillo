@@ -1,0 +1,100 @@
+/dts-v1/;
+
+/* Exercises:
+ *   - the memory-only NUMA domain path in slit::index_of_domain
+ *     (domain 2 is tagged on memory but on no cpu, so Domains
+ *      records it after the cpu walk completes)
+ *   - the duplicate-memory-pd branch in count_numa
+ *     (two /memory@... nodes both tagged numa-node-id = <2>;
+ *      the second is a no-op insert into Domains)
+ */
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/numa_memory_only_domain";
+	compatible = "dtb2acpi,test-numa-memory-only";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "intel,x86";
+			numa-node-id = <0>;
+		};
+
+		cpu@1 {
+			device_type = "cpu";
+			reg = <1>;
+			compatible = "intel,x86";
+			numa-node-id = <1>;
+		};
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x40000000>;
+		numa-node-id = <0>;
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x40000000>;
+		/* Memory-only domain: no cpu has pd=2. */
+		numa-node-id = <2>;
+	};
+
+	memory@c0000000 {
+		device_type = "memory";
+		reg = <0x0 0xc0000000 0x0 0x40000000>;
+		/* Duplicate of the previous memory pd=2 — must NOT
+		 * grow the domain count, must NOT yield a duplicate
+		 * SLIT row. */
+		numa-node-id = <2>;
+	};
+
+	memory@100000000 {
+		device_type = "memory";
+		reg = <0x1 0x00000000 0x0 0x40000000>;
+		numa-node-id = <1>;
+	};
+
+		lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic: interrupt-controller@fec00000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+		poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+		value = <0x84>;
+	};
+
+	distance-map {
+		compatible = "numa-distance-map-v1";
+		/* 3x3: domains 0 (cpu+mem), 1 (cpu+mem), 2 (memory-only).
+		 * Index order is first-occurrence: cpus give 0,1; memory
+		 * walk adds 2.
+		 */
+		distance-matrix = <0 0 10>,
+		                  <0 1 21>,
+		                  <0 2 31>,
+		                  <1 0 21>,
+		                  <1 1 10>,
+		                  <1 2 32>,
+		                  <2 0 31>,
+		                  <2 1 32>,
+		                  <2 2 10>;
+	};
+};

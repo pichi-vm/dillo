@@ -1,0 +1,151 @@
+/dts-v1/;
+
+/* 1 LAPIC + 17 IOAPICs — multi-IOAPIC fuzz fixture exercising
+ * madt::emit's sequential id/gsi assignment over many nodes.
+ */
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/too-many-ioapics";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+		};
+	};
+
+	lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic0: interrupt-controller@fec00000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic1: interrupt-controller@fec01000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec01000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic2: interrupt-controller@fec02000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec02000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic3: interrupt-controller@fec03000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec03000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic4: interrupt-controller@fec04000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec04000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic5: interrupt-controller@fec05000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec05000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic6: interrupt-controller@fec06000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec06000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic7: interrupt-controller@fec07000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec07000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic8: interrupt-controller@fec08000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec08000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic9: interrupt-controller@fec09000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec09000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic10: interrupt-controller@fec0a000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec0a000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic11: interrupt-controller@fec0b000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec0b000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic12: interrupt-controller@fec0c000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec0c000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic13: interrupt-controller@fec0d000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec0d000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic14: interrupt-controller@fec0e000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec0e000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic15: interrupt-controller@fec0f000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec0f000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic16: interrupt-controller@fec10000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec10000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+		value = <0x34>;
+	};
+};

@@ -1,0 +1,19 @@
+/dts-v1/;
+
+/* A `memory` node with a `reg` of 3 cells (12 bytes): a multiple of
+ * 4, so it decodes as u32 cells, but ends partway through an
+ * `(addr, size)` 4-cell tuple. Exercises the partial-group path in
+ * `E820Type::entry`. Should surface as `Error::BadRegShape`. */
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2e820-test/bad_reg";
+	compatible = "dtb2e820,test-bad-reg";
+
+	memory@0 {
+		device_type = "memory";
+		/* 3 cells = 12 bytes, not a 2-addr + 2-size = 16-byte pair. */
+		reg = <0x0 0x40000000 0x10000000>;
+	};
+};

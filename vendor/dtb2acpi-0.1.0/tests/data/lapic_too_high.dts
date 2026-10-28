@@ -1,0 +1,37 @@
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/lapic-too-high";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+		};
+	};
+
+	lapic: interrupt-controller@1_fee00000 {
+		compatible = "intel,ce4100-lapic";
+		/* LAPIC base > 4 GiB — ACPI MADT u32 field can't carry it. */
+		reg = <0x1 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic: interrupt-controller@fec00000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+		value = <0x34>;
+	};
+};

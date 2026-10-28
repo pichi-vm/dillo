@@ -1,0 +1,6 @@
+dillo-vm (0.1.0) resolute; urgency=medium
+
+  * Prepare native recipe packaging with committed vendored crates and an
+    offline Cargo build.
+
+ -- Nathaniel McCallum <nathaniel@mccallum.life>  Wed, 28 Oct 2026 16:34:59 -0400

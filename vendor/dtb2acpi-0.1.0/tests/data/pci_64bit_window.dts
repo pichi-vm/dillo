@@ -1,0 +1,51 @@
+/dts-v1/;
+
+/* PCIe host bridge with a single 64-bit non-prefetchable MMIO window
+ * (phys.hi space code 0x03) — the conformant arma shape (device-model
+ * §4). Exercises pci_host's QWordMemory path in the Device(PCI0) _CRS.
+ */
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/pci-64bit-window";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+		};
+	};
+
+	lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic: interrupt-controller@fec00000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	pci@10000000 {
+		compatible = "pci-host-ecam-generic";
+		device_type = "pci";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		reg = <0x0 0x10000000 0x0 0x1000000>;
+		bus-range = <0x0 0x0f>;
+		/* 64-bit window: base 32 GiB, size 128 GiB. */
+		ranges = <0x03000000 0x8 0x00000000  0x8 0x00000000  0x20 0x00000000>;
+	};
+
+	poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+		value = <0x34>;
+	};
+};

@@ -1,0 +1,9 @@
+# arma embeds the bare-metal `tatu` firmware via a cargo artifact dependency
+# (`artifact = "bin"`, see .cargo/config.toml `-Z bindeps`), which is nightly
+# only. This is the one crate in the ecosystem that requires nightly; it is
+# pinned for reproducibility. The bare-metal targets are the firmware arches
+# tatu is cross-compiled to (selected per host arch in Cargo.toml).
+[toolchain]
+channel = "nightly-2026-07-06"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-none", "aarch64-unknown-none"]

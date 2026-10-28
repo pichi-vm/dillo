@@ -1,0 +1,29 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target = <&memory>;
+		__overlay__ {
+			reg = <0x40000000 0x10000000>;
+		};
+	};
+
+	fragment@1 {
+		target = <&cpus>;
+		__overlay__ {
+			cpu@1 {
+				device_type = "cpu";
+				reg = <1>;
+				compatible = "arm,cortex-a53";
+			};
+		};
+	};
+
+	fragment@2 {
+		target = <&chosen>;
+		__overlay__ {
+			extra-arg = "rw";
+		};
+	};
+};

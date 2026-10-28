@@ -1,0 +1,13 @@
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2e820-test/no_pci";
+	compatible = "dtb2e820,test-no-pci";
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x08000000>;
+	};
+};

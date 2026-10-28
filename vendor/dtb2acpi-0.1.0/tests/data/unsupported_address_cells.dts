@@ -1,0 +1,30 @@
+/dts-v1/;
+
+/ {
+	#address-cells = <3>;  /* Out of range (only 1 or 2 supported). */
+	#size-cells = <1>;
+	model = "dtb2acpi-test/unsupported-address-cells";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "intel,x86";
+		};
+	};
+
+	lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0x0 0xfee00000 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x0 0x9010000 0x4>;
+		value = <0x34>;
+	};
+};

@@ -1,0 +1,34 @@
+[package]
+name = "applevisor"
+version = "1.0.0"
+authors = ["lyte <contact@impalabs.com>"]
+edition = "2024"
+description = "Rust bindings for the Apple Silicon Hypervisor Framework"
+documentation = "https://docs.rs/applevisor"
+readme = "README.md"
+repository = "https://github.com/impalabs/applevisor"
+license = "MIT OR Apache-2.0"
+keywords = ["apple", "hypervisor", "macos", "virtualization", "aarch64"]
+categories = ["os::macos-apis", "hardware-support", "api-bindings", "virtualization"]
+
+[package.metadata.docs.rs]
+default-target = "aarch64-apple-darwin"
+
+[dependencies]
+applevisor-sys = { version = "1.0.0", default-features = false }
+
+[dev-dependencies]
+serial_test = "3.2.0"
+
+[features]
+default = ["macos-26-0"]
+macos-11-0 = ["applevisor-sys/macos-11-0"]
+macos-12-1 = ["applevisor-sys/macos-12-1", "macos-11-0"]
+macos-13-0 = ["applevisor-sys/macos-13-0", "macos-12-1"]
+macos-15-0 = ["applevisor-sys/macos-15-0", "macos-13-0"]
+macos-15-2 = ["applevisor-sys/macos-15-2", "macos-15-0"]
+macos-26-0 = ["applevisor-sys/macos-26-0", "macos-15-2"]
+simd-nightly = [ "applevisor-sys/simd-nightly" ]
+
+[lib]
+doctest = false

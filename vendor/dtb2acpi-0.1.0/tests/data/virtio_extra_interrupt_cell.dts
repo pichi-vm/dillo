@@ -1,0 +1,10 @@
+/include/ "basic.dts"
+
+/ {
+    virtio_mmio@a000000 {
+        compatible = "virtio,mmio";
+        reg = <0x0 0xa000000 0x0 0x1000>;
+        interrupt-parent = <&ioapic>;
+        interrupts = <16 1 17>;
+    };
+};

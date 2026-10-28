@@ -1,0 +1,3 @@
+# Cargo checksums cover vendored VCS metadata and other normally ignored files.
+# Replace dpkg-source's default exclusions, retaining only Git's checkout data.
+tar-ignore = .git

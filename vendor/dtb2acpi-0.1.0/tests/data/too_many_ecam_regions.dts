@@ -1,0 +1,95 @@
+/dts-v1/;
+
+/* 9 pci-host-ecam-generic nodes (cap = 8) — the 9th push triggers
+ * DtbError::TooManyEcamRegions { found: 9 }.
+ */
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/too-many-ecam-regions";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+		};
+	};
+
+		lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	pci@30000000 {
+		compatible = "pci-host-ecam-generic";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		reg = <0x0 0x30000000 0x0 0x10000000>;
+		bus-range = <0x0 0xf>;
+	};
+	pci@40000000 {
+		compatible = "pci-host-ecam-generic";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		reg = <0x0 0x40000000 0x0 0x10000000>;
+		bus-range = <0x10 0x1f>;
+	};
+	pci@50000000 {
+		compatible = "pci-host-ecam-generic";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		reg = <0x0 0x50000000 0x0 0x10000000>;
+		bus-range = <0x20 0x2f>;
+	};
+	pci@60000000 {
+		compatible = "pci-host-ecam-generic";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		reg = <0x0 0x60000000 0x0 0x10000000>;
+		bus-range = <0x30 0x3f>;
+	};
+	pci@70000000 {
+		compatible = "pci-host-ecam-generic";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		reg = <0x0 0x70000000 0x0 0x10000000>;
+		bus-range = <0x40 0x4f>;
+	};
+	pci@80000000 {
+		compatible = "pci-host-ecam-generic";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		reg = <0x0 0x80000000 0x0 0x10000000>;
+		bus-range = <0x50 0x5f>;
+	};
+	pci@90000000 {
+		compatible = "pci-host-ecam-generic";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		reg = <0x0 0x90000000 0x0 0x10000000>;
+		bus-range = <0x60 0x6f>;
+	};
+	pci@a0000000 {
+		compatible = "pci-host-ecam-generic";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		reg = <0x0 0xa0000000 0x0 0x10000000>;
+		bus-range = <0x70 0x7f>;
+	};
+	pci@b0000000 {
+		compatible = "pci-host-ecam-generic";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		reg = <0x0 0xb0000000 0x0 0x10000000>;
+		bus-range = <0x80 0x8f>;
+	};
+		poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+	};
+};

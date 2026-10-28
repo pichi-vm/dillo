@@ -1,0 +1,33 @@
+/dts-v1/;
+
+/* `/cpus` exists but has no `cpu@N` children. Hits
+ * `walk_cpus`'s post-loop `if w.n_vcpus == 0 { return Err(MissingNode
+ * { site: Cpu }) }` — distinct from `no_cpus.dtb`, which omits the
+ * `/cpus` node entirely (fires `MissingNode { site: Cpus }`).
+ */
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/cpus_empty";
+	compatible = "dtb2acpi,test-cpus-empty";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		/* No cpu@N children — the children() iterator yields
+		 * nothing, leaving n_vcpus == 0 after the loop. */
+	};
+
+		lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+		poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+		value = <0x84>;
+	};
+};

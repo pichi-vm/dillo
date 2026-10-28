@@ -1,0 +1,49 @@
+/dts-v1/;
+
+/* `#address-cells` exists but is malformed: 8 bytes (two cells)
+ * instead of the expected single 4-byte cell. dtb2acpi's
+ * `DtbNode::own_cells` calls `as_u32()` on the property and
+ * surfaces `MalformedProperty { site: Root, property: "#address-cells" }`
+ * the first time it has to iterate root's children to find the LAPIC.
+ *
+ * Distinct from `unsupported_address_cells.dtb`, which carries a
+ * well-formed value (3) that exceeds the supported range.
+ */
+
+/ {
+	#address-cells = <1 2>;
+	#size-cells = <1>;
+	model = "dtb2acpi-test/cells_malformed";
+	compatible = "dtb2acpi,test-cells-malformed";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "intel,x86";
+		};
+	};
+
+	lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0xfee00000 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic: interrupt-controller@fec00000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0xfec00000 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x9010000 0x4>;
+		value = <0x34>;
+	};
+};

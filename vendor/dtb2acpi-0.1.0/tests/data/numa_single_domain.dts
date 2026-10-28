@@ -1,0 +1,52 @@
+/dts-v1/;
+
+/* All cpus + memory tagged with the same single NUMA domain. SRAT
+ * is emitted (NUMA topology is present) but SLIT is skipped because
+ * `count_numa`'s `n_domains > 1` guard returns false. Hits the
+ * `false` arm of that check — distinct from `numa_no_distance_map`
+ * (which has 2 domains but omits `/distance-map`).
+ */
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/numa_single_domain";
+	compatible = "dtb2acpi,test-numa-single-domain";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "intel,x86";
+			numa-node-id = <0>;
+		};
+
+		cpu@1 {
+			device_type = "cpu";
+			reg = <1>;
+			compatible = "intel,x86";
+			numa-node-id = <0>;
+		};
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x80000000>;
+		numa-node-id = <0>;
+	};
+
+		lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+		poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+		value = <0x84>;
+	};
+};

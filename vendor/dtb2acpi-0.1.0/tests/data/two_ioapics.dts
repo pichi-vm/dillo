@@ -1,0 +1,48 @@
+/dts-v1/;
+
+/* 1 LAPIC + 2 IOAPICs — exercises madt::emit's sequential
+ * id (0, 1) and gsi_base (0, 24) assignment over the
+ * intel,ce4100-ioapic root children.
+ */
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/two-ioapics";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+		};
+	};
+
+	lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic0: interrupt-controller@fec00000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic1: interrupt-controller@fec01000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec01000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+		value = <0x34>;
+	};
+};

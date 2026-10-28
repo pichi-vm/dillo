@@ -1,0 +1,63 @@
+Dillo host packaging for Ubuntu Resolute
+=======================================
+
+The packaging/ubuntu-resolute branch is the source for the Launchpad
+recipe targeting ppa:nmccallum/pichi, resolute only. It is also pushed as
+bot/dillo/packaging-ubuntu-resolute at the same tip. It contains debian/,
+the crates pinned by Cargo.lock in vendor/, and Cargo's complete
+.cargo/config.toml, including the Arma, Burrow, Devtree and PMI Git source
+redirects. LICENSE.dependencies records the bundled crates' licenses and
+notices and is installed in /usr/share/doc/dillo-vm/.
+
+This branch uses source format 3.0 (native), with version 0.1.0 matching
+the upstream Cargo version. All sources are in one tree. Launchpad does
+not need a separate orig tarball or a networked prepare-source step.
+Build the recipe from packaging/ubuntu-resolute, with no source preparation
+command. The previous quilt proposal is superseded by this branch.
+
+After installing Build-Depends, source and binary builds need no network
+or warm Cargo cache. From a checkout of this branch, run:
+
+    dpkg-buildpackage -S -us -uc
+    dpkg-buildpackage -b -us -uc
+
+For a clean Resolute build with a locally configured sbuild chroot:
+
+    sbuild --dist=resolute ../dillo-vm_0.1.0.dsc
+
+debian/rules gives Cargo a private home and always builds with:
+
+    cargo build --offline --locked --release -p dillo --bin dillo
+
+It uses /usr/bin/cargo and /usr/bin/rustc from Build-Depends, rather than
+rustup's pinned nightly toolchain. Rust >= 1.91 is required by smoltcp.
+RUSTC_BOOTSTRAP=1 permits Cargo to parse the test-only artifact dependencies
+with [unstable] bindeps. SMOLTCP_IFACE_MAX_ADDR_COUNT=4 preserves Dillo's
+IPv4 and IPv6 gateway and DNS addresses.
+
+The clean target preserves vendor/, including Cargo.toml.orig files
+covered by Cargo's checksums. debian/source/options replaces dpkg-source's
+default exclusions so vendored files such as .gitmodules also survive
+source packaging. It installs the native host binary to
+/usr/bin/dillo. Source and binary package names are dillo-vm; Conflicts:
+dillo prevents co-installation with the unrelated Dillo browser. Builds
+are intended for native amd64 and arm64 builders. The package test runs
+only dillo --help; VM tests need KVM and cross-built firmware and guest
+binaries and remain outside the package build.
+
+To refresh dependencies, use a networked machine with the upstream pinned
+nightly toolchain and Python >= 3.11. Update Cargo.lock deliberately, then
+run from the repository root:
+
+    cargo --config net.offline=false vendor --locked --versioned-dirs vendor
+
+Replace the [source] tables in .cargo/config.toml with the generated source
+configuration, including all Git source redirects. Retain the existing
+[unstable], [target], and [env] settings and one [net] section with
+offline = true. Then regenerate the bundled notices:
+
+    python3 debian/update-vendor-licenses
+
+Commit vendor/, Cargo.lock, the configuration and notices together.
+Review upstream changes before updating this packaging branch. Archive
+setup is handled separately; this branch does not upload to Launchpad.

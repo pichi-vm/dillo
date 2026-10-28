@@ -1,0 +1,36 @@
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2e820-test/basic";
+	compatible = "dtb2e820,test-basic";
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x0 0x00000000 0x0 0x10000000>;
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x10000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		fb@30000000 {
+			reg = <0x0 0x30000000 0x0 0x01000000>;
+		};
+	};
+
+	pci@b0000000 {
+		compatible = "pci-host-ecam-generic";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		reg = <0x0 0xb0000000 0x0 0x00100000>;
+		bus-range = <0x0 0x0>;
+	};
+};

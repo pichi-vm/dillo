@@ -1,0 +1,26 @@
+Dillo
+Source: https://github.com/pichi-vm/dillo
+Copyright: Advanced Micro Devices, Inc.; the dillo authors.
+License: Apache-2.0
+
+Dillo, including its Debian packaging, is distributed under the Apache
+License, Version 2.0. The full text is shipped in LICENSE and can also be
+found on Debian systems in /usr/share/common-licenses/Apache-2.0.
+
+Some files in deps/dillo-pci and deps/dillo-virtio-vsock are derived from
+Firecracker, copyright Amazon.com, Inc. or its affiliates, and may be used
+under Apache-2.0 OR BSD-3-Clause. This package uses the Apache-2.0 option.
+See NOTICE and the source file headers for the affected files.
+
+Bundled Rust crates
+------------------
+The committed vendor directory contains the crates pinned by Cargo.lock,
+including Arma, Burrow, Devtree and PMI from their pinned Git revisions.
+These retain their upstream copyrights and licenses. LICENSE.dependencies
+records each crate's name, version, declared license and authors, together
+with the license and notice files supplied by that crate. It is generated
+from the vendor directory and installed alongside this file.
+
+The vendor tree includes runtime, build, test and other-platform
+dependencies; their license declarations and supplied notices are
+recorded there too.

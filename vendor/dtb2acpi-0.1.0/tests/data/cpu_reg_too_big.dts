@@ -1,0 +1,33 @@
+/dts-v1/;
+
+/* Targets decode_cpu_subset's `u32::try_from(apic_id_u64)` rejection
+ * branch: the APIC ID is stored in the cpu node's `reg` property's
+ * first address cell. With #address-cells = 2 on /cpus, the first cell
+ * is the high 32 bits; setting it to 1 makes the decoded u64 > u32::MAX.
+ */
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/cpu-reg-too-big";
+
+	cpus {
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		cpu@100000000 {
+			device_type = "cpu";
+			reg = <0x1 0x1>;
+		};
+	};
+
+		lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+		poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+	};
+};

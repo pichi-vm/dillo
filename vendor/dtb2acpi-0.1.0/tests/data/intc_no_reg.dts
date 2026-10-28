@@ -1,0 +1,47 @@
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/intc-no-reg";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "intel,x86";
+		};
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x10000000>;
+	};
+
+	lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		interrupt-controller;
+		#interrupt-cells = <2>;
+		/* Empty reg property — RegIter has zero pairs, triggers
+		 * MalformedProperty { site: Intc, property: "reg" }.
+		 * (A truly absent `reg` surfaces as MissingProperty
+		 * earlier, before the iterator runs.)
+		 */
+		reg = <>;
+	};
+
+	ioapic: interrupt-controller@fec00000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+		value = <0x34>;
+	};
+};

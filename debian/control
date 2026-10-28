@@ -1,0 +1,21 @@
+Source: dillo-vm
+Section: utils
+Priority: optional
+Maintainer: Nathaniel McCallum <nathaniel@mccallum.life>
+Build-Depends: debhelper-compat (= 13), cargo (>= 1.91), rustc (>= 1.91), gcc
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+Homepage: https://github.com/pichi-vm/dillo
+Vcs-Git: https://github.com/pichi-vm/dillo.git
+Vcs-Browser: https://github.com/pichi-vm/dillo
+
+Package: dillo-vm
+Architecture: amd64 arm64
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Conflicts: dillo
+Description: virtual machine monitor that boots PMI files
+ Dillo boots PMI images using KVM on Linux hosts. It supports virtio
+ devices for guest storage, networking, consoles, and shared files.
+ .
+ The command is installed as /usr/bin/dillo. This package cannot be
+ installed alongside the unrelated Dillo web browser.

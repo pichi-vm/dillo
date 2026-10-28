@@ -1,0 +1,19 @@
+/dts-v1/;
+
+/* A `memory` node with a `reg` whose byte length is not a multiple
+ * of 4 (a 3-byte raw value). `PropertyView::as_u32s` rejects it
+ * outright, exercising the `as_u32s() -> None` path. Should surface
+ * as `Error::BadRegShape`. */
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2e820-test/bad_reg_unaligned";
+	compatible = "dtb2e820,test-bad-reg-unaligned";
+
+	memory@0 {
+		device_type = "memory";
+		/* 3 raw bytes — not a whole number of u32 cells. */
+		reg = [00 11 22];
+	};
+};

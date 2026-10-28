@@ -1,0 +1,39 @@
+/dts-v1/;
+
+/* `numa-node-id = <0xFFFFFFFF>` on a cpu collides with `NUMA_TAG_NONE`,
+ * the in-cache sentinel for "property absent". Rejected by
+ * `DtbNode::decode_cpu_subset` as `ValueOutOfRange { site: Cpus,
+ * property: "numa-node-id" }` (the children-iter's parent site,
+ * matching `numa_node_id_malformed`'s attribution).
+ */
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/cpu_numa_node_id_u32_max";
+	compatible = "dtb2acpi,test-cpu-numa-node-id-u32-max";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "intel,x86";
+			numa-node-id = <0xFFFFFFFF>;
+		};
+	};
+
+		lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+		poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+		value = <0x84>;
+	};
+};

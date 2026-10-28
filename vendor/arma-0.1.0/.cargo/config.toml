@@ -1,0 +1,4 @@
+# arma embeds the bare-metal `tatu` binary via a cargo artifact dependency
+# (`artifact = "bin"`), which is still unstable, so the build needs `-Z bindeps`.
+[unstable]
+bindeps = true

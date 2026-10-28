@@ -1,0 +1,11 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target = <&nonexistent_label>;
+		__overlay__ {
+			x = "y";
+		};
+	};
+};

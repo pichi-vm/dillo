@@ -1,5 +1,12 @@
 /target
-/vendor/
-/.cargo/config.toml
 /dillo-*.tar.gz
 /dillo-*.tar.xz
+
+# Debian build products.
+/debian/cargo-home/
+/debian/dillo-vm/
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper.log

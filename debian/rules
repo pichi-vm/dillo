@@ -1,0 +1,33 @@
+#!/usr/bin/make -f
+
+export CARGO_HOME = $(CURDIR)/debian/cargo-home
+export CARGO_NET_OFFLINE = true
+export CARGO_TARGET_DIR = $(CURDIR)/target
+export SMOLTCP_IFACE_MAX_ADDR_COUNT = 4
+# Cargo parses test-only artifact dependencies even for a binary build.
+# Use the distribution's stable toolchain, as in the RPM package build.
+export RUSTC_BOOTSTRAP = 1
+export RUSTC = /usr/bin/rustc
+CARGO = /usr/bin/cargo
+
+%:
+	dh $@ --buildsystem=none
+
+override_dh_auto_build:
+	test -d vendor && test -f .cargo/config.toml
+	$(CARGO) build --offline --locked --release -p dillo --bin dillo
+
+# VM tests need KVM and cross-built firmware and guest binaries.
+# Check the packaged CLI without those requirements.
+override_dh_auto_test:
+	target/release/dillo --help >/dev/null
+
+override_dh_auto_install:
+	install -Dm755 target/release/dillo debian/dillo-vm/usr/bin/dillo
+
+override_dh_auto_clean:
+	rm -rf target debian/cargo-home
+
+# Cargo checksums include vendored Cargo.toml.orig files.
+override_dh_clean:
+	dh_clean -Xvendor/

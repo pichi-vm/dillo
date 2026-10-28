@@ -1,0 +1,19 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target = <&cpus>;
+		__overlay__ {
+			ovl_node: cpu@2 {
+				device_type = "cpu";
+				reg = <2>;
+				compatible = "arm,cortex-a53";
+				/* internal phandle reference (overlay -> overlay) */
+				next-cpu = <&ovl_node>;
+				/* cross reference (overlay -> base) */
+				clocks = <&memory 1 2>;
+			};
+		};
+	};
+};

@@ -1,0 +1,65 @@
+/dts-v1/;
+
+/* `distance-matrix` lists ONLY the self-distances. The off-diagonal
+ * cells stay at the "unwritten" sentinel (0) after the triple loop;
+ * `slit::emit`'s final-fill pass replaces them with the ACPI default
+ * of 20. This is the only fixture exercising that fallback — every
+ * other NUMA fixture provides explicit off-diagonal triples.
+ */
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/numa_slit_diagonal_only";
+	compatible = "dtb2acpi,test-numa-slit-diagonal-only";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "intel,x86";
+			numa-node-id = <0>;
+		};
+
+		cpu@1 {
+			device_type = "cpu";
+			reg = <1>;
+			compatible = "intel,x86";
+			numa-node-id = <1>;
+		};
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x80000000>;
+		numa-node-id = <0>;
+	};
+
+	memory@c0000000 {
+		device_type = "memory";
+		reg = <0x0 0xc0000000 0x0 0x80000000>;
+		numa-node-id = <1>;
+	};
+
+		lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+		poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+		value = <0x84>;
+	};
+
+	distance-map {
+		compatible = "numa-distance-map-v1";
+		/* Diagonals only — off-diagonals default to 20. */
+		distance-matrix = <0 0 10>,
+		                  <1 1 10>;
+	};
+};

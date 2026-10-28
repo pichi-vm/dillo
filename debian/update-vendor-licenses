@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""Collect bundled crate license declarations, license texts and notices."""
+
+from pathlib import Path
+import tomllib
+
+root = Path(__file__).resolve().parent.parent
+sections = ["Bundled crates from Cargo.lock; original license choices retained.\n"]
+for manifest in sorted((root / "vendor").glob("*/Cargo.toml")):
+    crate = manifest.parent
+    package = tomllib.loads(manifest.read_text())["package"]
+    sections.append("\n" + "=" * 72 + "\n")
+    sections.append(f"{package['name']} {package['version']}\n")
+    sections.append(f"License: {package.get('license', 'See supplied license file')}\n")
+    sections.append(f"Authors: {', '.join(package.get('authors', [])) or 'See supplied notices'}\n")
+    license_file = package.get("license-file")
+    for source in sorted(crate.rglob("*")):
+        if not source.is_file():
+            continue
+        relative = source.relative_to(crate)
+        legal = any(
+            part.lower().startswith(("license", "licence", "copying", "copyright", "notice"))
+            for part in relative.parts
+        )
+        if legal or str(relative) == license_file:
+            sections.append(f"\n--- {relative} ---\n")
+            sections.append(source.read_text() + "\n")
+root.joinpath("LICENSE.dependencies").write_text("".join(sections))

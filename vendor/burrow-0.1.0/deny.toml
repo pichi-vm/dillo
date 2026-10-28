@@ -1,0 +1,25 @@
+# cargo-deny configuration for burrow. Allowlist tailored to burrow's actual
+# dependency tree (cargo metadata) — ureq's rustls/webpki stack pulls these.
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",          # unicode-ident / ICU data
+    "ISC",                  # webpki / rustls bits (incl. `Apache-2.0 AND ISC`)
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",  # webpki-roots data
+]
+confidence-threshold = 0.8
+
+[advisories]
+version = 2
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

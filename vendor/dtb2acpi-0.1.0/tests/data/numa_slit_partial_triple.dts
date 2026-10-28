@@ -1,0 +1,51 @@
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/numa-slit-partial-triple";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		cpu@0 { device_type = "cpu"; reg = <0>; compatible = "intel,x86"; numa-node-id = <0>; };
+		cpu@1 { device_type = "cpu"; reg = <1>; compatible = "intel,x86"; numa-node-id = <1>; };
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x80000000>;
+		numa-node-id = <0>;
+	};
+
+	memory@c0000000 {
+		device_type = "memory";
+		reg = <0x0 0xc0000000 0x0 0x80000000>;
+		numa-node-id = <1>;
+	};
+
+		lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic: interrupt-controller@fec00000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+		poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+		value = <0x84>;
+	};
+
+	distance-map {
+		compatible = "numa-distance-map-v1";
+		/* 5 cells — not a multiple of 3. */
+		distance-matrix = <0 0 10 0 1>;
+	};
+};

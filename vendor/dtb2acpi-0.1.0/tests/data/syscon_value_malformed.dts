@@ -1,0 +1,49 @@
+/dts-v1/;
+
+/* `value` on syscon-poweroff is malformed: a 2-byte string ("x\0")
+ * instead of a u32 cell. `resolve_syscon` calls `as_u32()` on the
+ * property and surfaces `MalformedProperty { site: SysconPoweroff,
+ * property: "value" }`.
+ *
+ * Replaces the former `syscon_regmap_malformed` fixture: the deprecated
+ * `regmap` phandle indirection is gone (device-model §4), so poweroff
+ * carries its own `reg` + `value` directly.
+ */
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/syscon_value_malformed";
+	compatible = "dtb2acpi,test-syscon-value-malformed";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "intel,x86";
+		};
+	};
+
+	lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic: interrupt-controller@fec00000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+		value = "x";
+	};
+};

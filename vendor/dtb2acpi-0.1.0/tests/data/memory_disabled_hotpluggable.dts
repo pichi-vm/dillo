@@ -1,0 +1,52 @@
+/dts-v1/;
+
+/* Classic hot-add slot: `status = "disabled"` + `hotpluggable` present
+ * → SRAT flags = HOT_PLUGGABLE only (0x2), Enabled bit clear. The
+ * region isn't present at boot but the OS may hot-add it at runtime,
+ * at which point it will know the NUMA affinity from this entry.
+ */
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/memory_disabled_hotpluggable";
+	compatible = "dtb2acpi,test-memory-disabled-hotpluggable";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "intel,x86";
+			numa-node-id = <0>;
+		};
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x80000000>;
+		numa-node-id = <0>;
+	};
+
+	memory@c0000000 {
+		device_type = "memory";
+		reg = <0x0 0xc0000000 0x0 0x80000000>;
+		numa-node-id = <0>;
+		status = "disabled";
+		hotpluggable;
+	};
+
+		lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+		poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+		value = <0x84>;
+	};
+};

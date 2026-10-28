@@ -1,0 +1,82 @@
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "dtb2acpi-test/basic";
+	compatible = "dtb2acpi,test-basic";
+
+	aliases {
+		serial0 = "/serial@9000000";
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "intel,x86";
+		};
+
+		cpu@1 {
+			device_type = "cpu";
+			reg = <1>;
+			compatible = "intel,x86";
+		};
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x10000000>;
+	};
+
+		lapic: interrupt-controller@fee00000 {
+		compatible = "intel,ce4100-lapic";
+		reg = <0x0 0xfee00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	ioapic: interrupt-controller@fec00000 {
+		compatible = "intel,ce4100-ioapic";
+		reg = <0x0 0xfec00000 0x0 0x1000>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	pci@30000000 {
+		compatible = "pci-host-ecam-generic";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		reg = <0x0 0x30000000 0x0 0x10000000>;
+		bus-range = <0x0 0xff>;
+	};
+
+	serial@9000000 {
+		compatible = "ns16550a";
+		reg = <0x0 0x9000000 0x0 0x1000>;
+		reg-shift = <2>;
+		reg-io-width = <4>;
+		clock-frequency = <3686400>;
+		current-speed = <115200>;
+		interrupt-parent = <&ioapic>;
+		interrupts = <4 1>;
+	};
+	poweroff@9010000 {
+		compatible = "syscon-poweroff";
+		reg = <0x0 0x9010000 0x0 0x4>;
+		value = <0x34>;
+	};
+
+	reboot@9020000 {
+		compatible = "syscon-reboot";
+		reg = <0x0 0x9020000 0x0 0x4>;
+		value = <0x1>;
+	};
+};

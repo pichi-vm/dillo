@@ -1,0 +1,21 @@
+name: catalog freshness
+
+# Guards the kernel/config database against drift (Alpine `latest-stable` moves,
+# dead mirrors, moved Fedora configs, stale builtin beliefs). Network-dependent,
+# so it runs on a schedule rather than per-push.
+on:
+  schedule:
+    - cron: "23 7 * * 1" # Mondays 07:23 UTC
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  freshness:
+    name: catalog freshness
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test catalog_is_fresh -- --ignored --nocapture

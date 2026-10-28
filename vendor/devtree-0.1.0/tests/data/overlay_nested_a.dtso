@@ -1,0 +1,11 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target = <&chosen>;
+		__overlay__ {
+			from-overlay-a = "alpha";
+		};
+	};
+};

@@ -1,0 +1,24 @@
+/dts-v1/;
+
+/*
+ * Trusted kaslr-seed overlay (aarch64).
+ *
+ * tatu merges this onto the measured base DTB *before* the host overlay, so the
+ * kernel reads a fresh, guest-generated `/chosen/kaslr-seed` that never lived in
+ * the measured image. The 8-byte seed below is a unique ASCII sentinel
+ * ("KASLRSED" = 0x4b41534c 0x52534544): tatu finds it by a plain byte
+ * find/replace and overwrites it at boot with guest entropy (RNDR) — no DTB
+ * parsing for the patch. See `kaslr.rs` / `arch_aarch64::prepare_merge_base`.
+ *
+ * Regenerate the committed binary after editing:
+ *   dtc -I dts -O dtb -o kaslr_overlay.dtbo kaslr_overlay.dts
+ */
+
+/ {
+	fragment@0 {
+		target-path = "/chosen";
+		__overlay__ {
+			kaslr-seed = <0x4b41534c 0x52534544>;
+		};
+	};
+};
