@@ -557,7 +557,14 @@ impl VirtioPciDevice {
         let qc = &mut self.queues[qi];
         match offset {
             CC_QUEUE_SIZE => qc.queue.size = val as u16,
-            CC_QUEUE_MSIX_VECTOR => qc.msix_vector = val as u16,
+            CC_QUEUE_MSIX_VECTOR => {
+                let vector = val as u16;
+                qc.msix_vector = if vector < self.msix_table.num_vectors() {
+                    vector
+                } else {
+                    0xFFFF // VIRTIO_MSI_NO_VECTOR
+                };
+            }
             CC_QUEUE_ENABLE if val != 0 => {
                 qc.enabled = true;
                 qc.queue.ready = true;
