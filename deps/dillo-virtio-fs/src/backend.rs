@@ -899,16 +899,18 @@ mod passthrough {
     }
 
     fn make_node(path: &Path, mode: u32, rdev: u32) -> io::Result<()> {
+        // Device nodes can expose host devices, regardless of the share root.
+        // Reject them before dispatching to any host syscall implementation.
+        if matches!(mode & super::S_IFMT, super::S_IFCHR | super::S_IFBLK) {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        }
         #[cfg(target_os = "linux")]
         {
             let kind = rustix::fs::FileType::from_raw_mode(mode);
             let perm = rustix::fs::Mode::from_raw_mode(mode);
             if !matches!(
                 kind,
-                rustix::fs::FileType::Fifo
-                    | rustix::fs::FileType::Socket
-                    | rustix::fs::FileType::CharacterDevice
-                    | rustix::fs::FileType::BlockDevice
+                rustix::fs::FileType::Fifo | rustix::fs::FileType::Socket
             ) {
                 return Err(io::Error::from(io::ErrorKind::InvalidInput));
             }
@@ -1807,5 +1809,74 @@ mod tests {
         let sub = fs.readdir(Path::new("sub")).unwrap();
         assert_eq!(sub.len(), 1);
         assert_eq!(sub[0].name, "b.txt");
+    }
+
+    mod node_tests {
+        use super::*;
+        use std::fs;
+
+        #[test]
+        fn device_nodes_are_rejected_for_every_device_number() {
+            let dir = tempfile::tempdir().unwrap();
+            let backend = Passthrough::new(dir.path()).unwrap();
+            for kind in [S_IFCHR, S_IFBLK] {
+                for rdev in [0, 1, 0x103, 0xdead_beef, u32::MAX] {
+                    let rel = PathBuf::from(format!("node-{kind}-{rdev}"));
+                    let err = backend.mknod(&rel, kind | 0o600, rdev).unwrap_err();
+                    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+                    assert_eq!(err.raw_os_error(), None, "policy must reject before mknod");
+                    assert_eq!(
+                        fs::symlink_metadata(dir.path().join(&rel))
+                            .unwrap_err()
+                            .kind(),
+                        io::ErrorKind::NotFound
+                    );
+
+                    // Even an unusable host path must be rejected by policy.
+                    let missing = Path::new("missing-parent").join(&rel);
+                    let err = backend.mknod(&missing, kind | 0o600, rdev).unwrap_err();
+                    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+                    assert_eq!(err.raw_os_error(), None, "policy must reject before mknod");
+                }
+            }
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[test]
+        fn fifo_creation_still_succeeds() {
+            use crate::backend::{S_IFIFO, S_IFMT};
+            use std::os::unix::fs::FileTypeExt;
+            let dir = tempfile::tempdir().unwrap();
+            let backend = Passthrough::new(dir.path()).unwrap();
+            let attr = backend
+                .mknod(Path::new("fifo"), S_IFIFO | 0o600, 0)
+                .unwrap();
+            assert_eq!(attr.mode & S_IFMT, S_IFIFO);
+            assert!(
+                fs::symlink_metadata(dir.path().join("fifo"))
+                    .unwrap()
+                    .file_type()
+                    .is_fifo()
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn socket_creation_still_succeeds() {
+            use crate::backend::{S_IFMT, S_IFSOCK};
+            use std::os::unix::fs::FileTypeExt;
+            let dir = tempfile::tempdir().unwrap();
+            let backend = Passthrough::new(dir.path()).unwrap();
+            let attr = backend
+                .mknod(Path::new("socket"), S_IFSOCK | 0o600, 0)
+                .unwrap();
+            assert_eq!(attr.mode & S_IFMT, S_IFSOCK);
+            assert!(
+                fs::symlink_metadata(dir.path().join("socket"))
+                    .unwrap()
+                    .file_type()
+                    .is_socket()
+            );
+        }
     }
 }

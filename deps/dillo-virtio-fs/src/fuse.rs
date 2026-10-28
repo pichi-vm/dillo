@@ -2039,6 +2039,27 @@ mod tests {
     }
 
     #[test]
+    fn readonly_share_rejects_special_files() {
+        use crate::backend::{S_IFBLK, S_IFCHR, S_IFIFO, S_IFSOCK};
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Passthrough::new(dir.path()).unwrap();
+        let mut state = FsState::new(true);
+        for kind in [S_IFCHR, S_IFBLK, S_IFIFO, S_IFSOCK] {
+            let mut args = (kind | 0o600).to_le_bytes().to_vec();
+            args.extend_from_slice(&[0u8; 12]);
+            args.extend_from_slice(b"node\0");
+            let reply = dispatch(
+                &mut state,
+                &fs,
+                &request(FUSE_MKNOD, 1, FUSE_ROOT_ID, &args),
+            )
+            .unwrap();
+            assert_eq!(out_error(&reply), -EROFS);
+            assert!(!dir.path().join("node").exists());
+        }
+    }
+
+    #[test]
     fn readonly_share_rejects_create_and_open_write() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f"), b"x").unwrap();
