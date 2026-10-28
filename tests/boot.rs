@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use burrow::{Entry, KERNELS, config_is_y, resolve};
 use rstest::rstest;
 use snuffler::{REPORT_BEGIN, REPORT_END, Report};
 use tempfile::TempDir;
@@ -51,192 +52,10 @@ mod host {
     pub(crate) const CONFIG_NOPCI: &str = "CONFIG_VIRTIO_MMIO=y\nCONFIG_VIRTIO_BLK=y\n";
 }
 
-// ---------------------------------------------------------------------------
-// Kernel database.
-//
-// Each entry is a plain kernel image download paired with its plain-text kconfig
-// download (the uniform shape every catalogued kernel uses — no per-kernel
-// unpacking). A test asks for the kconfig symbols it needs (and any it must NOT
-// have); [`require`] finds matching entries for the host arch, downloads the
-// first that fetches (skipping any that 404), then VERIFIES the real config
-// against the believed builtins. A mismatch is a LOUD panic so the cached belief
-// gets fixed rather than silently picking a kernel that doesn't meet the test's
-// needs. We only ever use kernels other projects built — never one we built.
-// ---------------------------------------------------------------------------
-
-/// One catalogued kernel: a plain image URL, the kconfig symbols it is believed
-/// to set to `=y` (named without `CONFIG_`), and a config source. `config` is
-/// `Some(url)` when the project publishes the kconfig as a plain file; the URL
-/// may contain a single `*` wildcard for a version-stamped filename (e.g.
-/// Alpine's `config-<ver>-virt`), resolved by listing the parent directory.
-/// `config` is `None` *only* when the kernel embeds its own config (IKCONFIG),
-/// which arma extracts directly — no catalogued kernel currently does, so every
-/// entry carries a `Some` config today. [`require`] always verifies the believed
-/// builtins against the resolved config (loud panic on a stale belief).
-struct Entry {
-    arch: &'static str,
-    url: &'static str,
-    config: Option<&'static str>,
-    builtins: &'static [&'static str],
-}
-
-// Catalogued kernels, all published by their projects as plain downloads arma
-// accepts directly (raw `vmlinux`/`Image`, gzip/zstd EFI-zboot, or bzImage — no
-// unpacking), each paired with a published kconfig:
-//   * firecracker CI — raw image + a plain `.config`. All virtio built in;
-//     `RANDOMIZE_BASE` is on for x86 (relocation-based KASLR), off on arm64.
-//   * Alpine `vmlinuz-virt` — gzip EFI-zboot arma unwraps; `ACPI_SPCR_TABLE=y`
-//     for the SPCR earlycon test. Config is the version-stamped `config-*-virt`
-//     in the same netboot dir (wildcard-resolved).
-//   * Fedora pxeboot `vmlinuz` — zstd EFI-zboot arma unwraps; `RANDOMIZE_BASE=y`:
-//     the arm64 KASLR consumption kernel. Config is Fedora's published dist-git
-//     `kernel-aarch64-fedora.config`.
-const KERNELS: &[Entry] = &[
-    // ---- x86_64 ----
-    Entry {
-        arch: "x86_64",
-        url: "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155",
-        config: Some(
-            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155.config",
-        ),
-        builtins: &[
-            "PCI",
-            "VIRTIO_PCI",
-            "VIRTIO_MMIO",
-            "VIRTIO_BLK",
-            "VIRTIO_NET",
-            "VIRTIO_CONSOLE",
-            "VIRTIO_VSOCKETS",
-            "RANDOMIZE_BASE",
-            // Kernel IP autoconfig (`ip=` cmdline) + the IPv4 stack: the
-            // user-mode net datapath test relies on the guest self-configuring
-            // 10.0.2.15 with no in-guest tooling.
-            "INET",
-            "IP_PNP",
-        ],
-    },
-    Entry {
-        arch: "x86_64",
-        url: "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.12/x86_64/vmlinux-6.1.128",
-        config: Some(
-            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.12/x86_64/vmlinux-6.1.128.config",
-        ),
-        builtins: &[
-            "VIRTIO_MMIO",
-            "VIRTIO_BLK",
-            "VIRTIO_CONSOLE",
-            "VIRTIO_VSOCKETS",
-            "RANDOMIZE_BASE",
-        ],
-    },
-    Entry {
-        arch: "x86_64",
-        url: "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/netboot/vmlinuz-virt",
-        config: Some(
-            "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/netboot/config-*-virt",
-        ),
-        builtins: &["ACPI_SPCR_TABLE", "VIRTIO_CONSOLE"],
-    },
-    // ---- aarch64 ----
-    Entry {
-        arch: "aarch64",
-        url: "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/aarch64/vmlinux-6.1.155",
-        config: Some(
-            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/aarch64/vmlinux-6.1.155.config",
-        ),
-        builtins: &[
-            "PCI",
-            "VIRTIO_PCI",
-            "VIRTIO_MMIO",
-            "VIRTIO_BLK",
-            "VIRTIO_NET",
-            "VIRTIO_CONSOLE",
-            "VIRTIO_VSOCKETS",
-            "ACPI_SPCR_TABLE",
-            // Kernel IP autoconfig (`ip=` cmdline) + the IPv4 stack (see x86_64).
-            "INET",
-            "IP_PNP",
-        ],
-    },
-    Entry {
-        arch: "aarch64",
-        url: "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.12/aarch64/vmlinux-6.1.128",
-        config: Some(
-            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.12/aarch64/vmlinux-6.1.128.config",
-        ),
-        builtins: &[
-            "VIRTIO_MMIO",
-            "VIRTIO_BLK",
-            "VIRTIO_CONSOLE",
-            "VIRTIO_VSOCKETS",
-            "ACPI_SPCR_TABLE",
-        ],
-    },
-    Entry {
-        arch: "aarch64",
-        url: "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/netboot/vmlinuz-virt",
-        config: Some(
-            "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/netboot/config-*-virt",
-        ),
-        builtins: &["ACPI_SPCR_TABLE", "VIRTIO_CONSOLE"],
-    },
-    // Fedora pxeboot kernel: zstd EFI-zboot arma unwraps to a raw arm64 Image,
-    // RANDOMIZE_BASE=y — the only catalogued arm64 kernel that consumes the KASLR
-    // seed. virtio-console is built in (for the snuffler report). Fedora ships no
-    // IKCONFIG and doesn't tag dist-git, so the config is pinned to the exact
-    // dist-git commit that built this kernel (`kernel-6.19.10-300.fc44`, the GA
-    // build in releases/44), found via Koji's recorded source: the kernel's
-    // embedded version → `koji getBuild` → its source git commit. Both the
-    // releases/44 kernel and a git commit are immutable, so the pair never skews.
-    Entry {
-        arch: "aarch64",
-        url: "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Everything/aarch64/os/images/pxeboot/vmlinuz",
-        config: Some(
-            "https://src.fedoraproject.org/rpms/kernel/raw/e44c3f75126e5490b097372b199562776b3872f6/f/kernel-aarch64-fedora.config",
-        ),
-        builtins: &["RANDOMIZE_BASE", "VIRTIO_CONSOLE"],
-    },
-];
-
-/// True if `text` (a kconfig) sets `CONFIG_<sym>=y`.
-fn config_is_y(text: &str, sym: &str) -> bool {
-    let needle = format!("CONFIG_{sym}=y");
-    text.lines().any(|l| l == needle)
-}
-
-/// Fetch a kconfig given a `config` spec. A plain URL is fetched directly; a URL
-/// containing a single `*` is a version-stamped filename (e.g. Alpine's
-/// `config-<ver>-virt`) — the parent directory is listed and the first entry
-/// matching the `prefix*suffix` pattern is fetched.
-fn fetch_config_text(spec: &str) -> Option<String> {
-    let url = match spec.split_once('*') {
-        None => spec.to_string(),
-        Some((pre, suf)) => {
-            let slash = pre.rfind('/')?;
-            let dir = &pre[..=slash];
-            let name_prefix = &pre[slash + 1..];
-            let listing = std::fs::read_to_string(burrow::fetch(dir).ok()?).ok()?;
-            let file = listing
-                .split('"')
-                .find(|t| t.starts_with(name_prefix) && t.ends_with(suf) && !t.contains('/'))?;
-            format!("{dir}{file}")
-        }
-    };
-    std::fs::read_to_string(burrow::fetch(&url).ok()?).ok()
-}
-
-/// Download an entry's image and (when published) its kconfig, returning
-/// `(image path, Some(kconfig))` or `(image path, None)`; `None` overall if the
-/// image or a published config fails to fetch (caller falls through to the next
-/// entry).
-fn resolve(e: &Entry) -> Option<(PathBuf, Option<String>)> {
-    let image = burrow::fetch(e.url).ok()?;
-    let config = match e.config {
-        Some(spec) => Some(fetch_config_text(spec)?),
-        None => None,
-    };
-    Some((image, config))
-}
+// The kernel catalog (image URLs, published kconfigs, believed builtins) lives
+// in burrow. [`require`] is this suite's host-arch selection policy: match
+// `needs` / `forbids`, skip a candidate whose download fails, and panic when a
+// published config disagrees with those beliefs.
 
 /// Find a catalogued kernel for the host arch whose believed builtins include
 /// every symbol in `needs` and none in `forbids`, download it, verify its real
@@ -249,7 +68,8 @@ fn resolve(e: &Entry) -> Option<(PathBuf, Option<String>)> {
 /// gets corrected. Entries with no published config are taken on trust; the
 /// selecting test's behavioral assertion is the check for those.
 fn require(needs: &[&str], forbids: &[&str]) -> Option<PathBuf> {
-    for e in KERNELS {
+    let kernels: &[Entry] = KERNELS;
+    for e in kernels {
         if e.arch != host::ARCH {
             continue;
         }
