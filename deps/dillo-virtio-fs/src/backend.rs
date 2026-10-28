@@ -223,26 +223,26 @@ pub trait FsBackend: Send + Sync {
         Err(read_only_error())
     }
 
-    /// Read one extended attribute. Missing attributes are `ENODATA`.
+    /// Read one `user.*` extended attribute. Missing attributes are `ENODATA`.
     fn get_xattr(&self, rel: &Path, name: &str) -> io::Result<Vec<u8>> {
         let _ = (rel, name);
         Err(unsupported_error())
     }
 
-    /// Set one extended attribute. `flags` uses Linux `XATTR_CREATE` (1) and
+    /// Set one `user.*` extended attribute. `flags` uses Linux `XATTR_CREATE` (1) and
     /// `XATTR_REPLACE` (2).
     fn set_xattr(&self, rel: &Path, name: &str, value: &[u8], flags: u32) -> io::Result<()> {
         let _ = (rel, name, value, flags);
         Err(read_only_error())
     }
 
-    /// List extended attribute names as a concatenation of NUL-terminated strings.
+    /// List `user.*` extended attribute names as NUL-terminated strings.
     fn list_xattr(&self, rel: &Path) -> io::Result<Vec<u8>> {
         let _ = rel;
         Err(unsupported_error())
     }
 
-    /// Remove one extended attribute. A missing attribute is `ENODATA`.
+    /// Remove one `user.*` extended attribute. A missing attribute is `ENODATA`.
     fn remove_xattr(&self, rel: &Path, name: &str) -> io::Result<()> {
         let _ = (rel, name);
         Err(read_only_error())
@@ -702,11 +702,13 @@ mod passthrough {
         }
 
         fn get_xattr(&self, rel: &Path, name: &str) -> io::Result<Vec<u8>> {
+            check_xattr_name(name)?;
             let path = self.resolve(rel)?;
             read_xattr(&path, name)
         }
 
         fn set_xattr(&self, rel: &Path, name: &str, value: &[u8], flags: u32) -> io::Result<()> {
+            check_xattr_name(name)?;
             let path = self.resolve(rel)?;
             write_xattr(&path, name, value, flags)
         }
@@ -717,6 +719,7 @@ mod passthrough {
         }
 
         fn remove_xattr(&self, rel: &Path, name: &str) -> io::Result<()> {
+            check_xattr_name(name)?;
             let path = self.resolve(rel)?;
             delete_xattr(&path, name)
         }
@@ -1052,7 +1055,30 @@ mod passthrough {
         Ok(())
     }
 
+    fn is_allowed_xattr_name(name: &[u8]) -> bool {
+        name.strip_prefix(b"user.")
+            .is_some_and(|suffix| !suffix.is_empty() && !suffix.contains(&0))
+    }
+
+    fn check_xattr_name(name: &str) -> io::Result<()> {
+        if is_allowed_xattr_name(name.as_bytes()) {
+            Ok(())
+        } else {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    fn filter_xattr_names(names: &[u8]) -> Vec<u8> {
+        names
+            .split(|&byte| byte == 0)
+            .filter(|name| is_allowed_xattr_name(name))
+            .flat_map(|name| name.iter().copied().chain(Some(0)))
+            .collect()
+    }
+
     fn read_xattr(path: &Path, name: &str) -> io::Result<Vec<u8>> {
+        check_xattr_name(name)?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             grow_xattr(|buf| rustix::fs::lgetxattr(path, name, rustix::buffer::spare_capacity(buf)))
@@ -1065,6 +1091,7 @@ mod passthrough {
     }
 
     fn write_xattr(path: &Path, name: &str, value: &[u8], flags: u32) -> io::Result<()> {
+        check_xattr_name(name)?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let host = match flags {
@@ -1085,7 +1112,10 @@ mod passthrough {
     fn list_xattrs(path: &Path) -> io::Result<Vec<u8>> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            grow_xattr(|buf| rustix::fs::llistxattr(path, rustix::buffer::spare_capacity(buf)))
+            let names = grow_xattr(|buf| {
+                rustix::fs::llistxattr(path, rustix::buffer::spare_capacity(buf))
+            })?;
+            Ok(filter_xattr_names(&names))
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -1095,6 +1125,7 @@ mod passthrough {
     }
 
     fn delete_xattr(path: &Path, name: &str) -> io::Result<()> {
+        check_xattr_name(name)?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             rustix::fs::lremovexattr(path, name).map_err(from_rustix)
@@ -1287,6 +1318,145 @@ mod passthrough {
             super::linux_errno(super::LINUX_ERANGE, io::ErrorKind::InvalidInput)
         } else {
             super::linux_errno(super::LINUX_ENXIO, io::ErrorKind::NotFound)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const DISALLOWED_XATTR_NAMES: &[&str] = &[
+            "security.capability",
+            "security.selinux",
+            "trusted.foo",
+            "system.posix_acl_access",
+            "",
+            "user",
+            "user.",
+            "userx.foo",
+            "User.foo",
+            "user.foo\0",
+            "user.\0foo",
+            "\0user.foo",
+        ];
+
+        #[test]
+        fn xattr_names_require_user_prefix_and_nonempty_suffix() {
+            for name in DISALLOWED_XATTR_NAMES {
+                assert!(!is_allowed_xattr_name(name.as_bytes()), "{name:?}");
+            }
+            for name in ["user.foo", "user.a", "user..", "user.user.foo", "user.é"] {
+                assert!(is_allowed_xattr_name(name.as_bytes()), "{name:?}");
+            }
+        }
+
+        #[test]
+        fn disallowed_xattrs_are_rejected_before_host_access() {
+            let dir = tempfile::tempdir().unwrap();
+            let backend = Passthrough::new(dir.path()).unwrap();
+            let rel = Path::new("missing");
+            let path = dir.path().join(rel);
+            for name in DISALLOWED_XATTR_NAMES {
+                for result in [
+                    read_xattr(&path, name).map(|_| ()),
+                    write_xattr(&path, name, b"value", 0),
+                    delete_xattr(&path, name),
+                    backend.get_xattr(rel, name).map(|_| ()),
+                    backend.set_xattr(rel, name, b"value", 0),
+                    backend.remove_xattr(rel, name),
+                ] {
+                    assert_eq!(
+                        result.unwrap_err().kind(),
+                        io::ErrorKind::PermissionDenied,
+                        "{name:?}"
+                    );
+                }
+            }
+            assert!(!path.exists());
+        }
+
+        #[test]
+        fn xattr_list_buffer_contains_only_allowed_names() {
+            let names = b"security.capability\0user.foo\0trusted.foo\0user\0user.\0\0system.posix_acl_access\0userx.foo\0security.selinux\0user.bar\0user.\xff\0";
+            assert_eq!(
+                filter_xattr_names(names),
+                b"user.foo\0user.bar\0user.\xff\0"
+            );
+            assert!(filter_xattr_names(b"security.selinux\0trusted.foo\0").is_empty());
+            assert!(filter_xattr_names(b"").is_empty());
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[test]
+        fn user_xattr_roundtrip() {
+            let dir = tempfile::tempdir().unwrap();
+            let backend = Passthrough::new(dir.path()).unwrap();
+            let rel = Path::new("file");
+            let path = dir.path().join(rel);
+            fs::write(&path, b"data").unwrap();
+            backend.set_xattr(rel, "user.foo", b"first", 1).unwrap();
+            assert_eq!(backend.get_xattr(rel, "user.foo").unwrap(), b"first");
+            backend.set_xattr(rel, "user.foo", b"second", 2).unwrap();
+            assert_eq!(read_xattr(&path, "user.foo").unwrap(), b"second");
+            assert_eq!(backend.list_xattr(rel).unwrap(), b"user.foo\0");
+            backend.remove_xattr(rel, "user.foo").unwrap();
+            assert!(backend.list_xattr(rel).unwrap().is_empty());
+            assert!(backend.get_xattr(rel, "user.foo").is_err());
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn host_acl_is_hidden_and_cannot_be_read_changed_or_removed() {
+            let dir = tempfile::tempdir().unwrap();
+            let backend = Passthrough::new(dir.path()).unwrap();
+            let rel = Path::new("file");
+            let path = dir.path().join(rel);
+            fs::write(&path, b"data").unwrap();
+            // A valid Linux ACL with one named user, installed by the host.
+            let mut acl = 2u32.to_le_bytes().to_vec();
+            for (tag, perm, id) in [
+                (1u16, 7u16, u32::MAX),
+                (2, 4, 1000),
+                (4, 5, u32::MAX),
+                (16, 5, u32::MAX),
+                (32, 5, u32::MAX),
+            ] {
+                acl.extend_from_slice(&tag.to_le_bytes());
+                acl.extend_from_slice(&perm.to_le_bytes());
+                acl.extend_from_slice(&id.to_le_bytes());
+            }
+            let name = "system.posix_acl_access";
+            match rustix::fs::lsetxattr(&path, name, &acl, rustix::fs::XattrFlags::empty()) {
+                Ok(()) => {}
+                Err(err)
+                    if matches!(
+                        err,
+                        rustix::io::Errno::INVAL
+                            | rustix::io::Errno::OPNOTSUPP
+                            | rustix::io::Errno::PERM
+                    ) =>
+                {
+                    eprintln!("skipping host ACL preservation: cannot install {name}: {err}");
+                    return;
+                }
+                Err(err) => panic!("failed to install host ACL: {err}"),
+            }
+            backend.set_xattr(rel, "user.foo", b"visible", 0).unwrap();
+            assert_eq!(list_xattrs(&path).unwrap(), b"user.foo\0");
+            assert_eq!(backend.list_xattr(rel).unwrap(), b"user.foo\0");
+            for result in [
+                backend.get_xattr(rel, name).map(|_| ()),
+                backend.set_xattr(rel, name, b"replacement", 0),
+                backend.remove_xattr(rel, name),
+            ] {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+            }
+            let actual = grow_xattr(|buf| {
+                rustix::fs::lgetxattr(&path, name, rustix::buffer::spare_capacity(buf))
+            })
+            .unwrap();
+            assert_eq!(actual, acl);
+            assert_eq!(fs::read(&path).unwrap(), b"data");
         }
     }
 }
