@@ -1,0 +1,40 @@
+#!/usr/bin/make -f
+
+export CARGO_HOME = $(CURDIR)/debian/.cargo-home
+export CARGO_TARGET_DIR = $(CURDIR)/target
+export CARGO_NET_OFFLINE = true
+export SMOLTCP_IFACE_MAX_ADDR_COUNT = 4
+# Cargo must parse test-only artifact dependencies, even for a binary build.
+# Match the Copr build's use of the distribution's stable Rust toolchain.
+export RUSTC_BOOTSTRAP = 1
+export RUSTC = /usr/bin/rustc
+CARGO = /usr/bin/cargo
+
+.PHONY: override_dh_auto_configure override_dh_auto_build override_dh_auto_test \
+        override_dh_auto_install override_dh_auto_clean override_dh_clean
+
+%:
+	dh $@ --buildsystem=none
+
+override_dh_auto_configure:
+	test -f vendor/config.toml
+	mkdir -p $(CARGO_HOME)
+
+override_dh_auto_build:
+	$(CARGO) --config vendor/config.toml build --frozen --release -p dillo --bin dillo
+
+# VM tests require KVM and test-only cross-built firmware and guest binaries.
+# Check the packaged CLI without those requirements.
+override_dh_auto_test:
+	target/release/dillo --help >/dev/null
+
+override_dh_auto_install:
+	install -D -m 0755 target/release/dillo debian/dillo-vm/usr/bin/dillo
+	python3 debian/install-vendor-licenses
+
+override_dh_auto_clean:
+	rm -rf target debian/.cargo-home
+
+# Cargo.toml.orig files are covered by the vendored crate checksums.
+override_dh_clean:
+	dh_clean -Xvendor/

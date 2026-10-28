@@ -1,0 +1,19 @@
+Upstream: https://github.com/pichi-vm/dillo
+Copyright: Advanced Micro Devices, Inc.; the dillo authors.
+License: Apache License, Version 2.0.
+ The complete license is installed in /usr/share/doc/dillo-vm/LICENSE
+ and on Debian systems in /usr/share/common-licenses/Apache-2.0.
+
+Some files in deps/dillo-pci and deps/dillo-virtio-vsock are derived from
+Firecracker, copyright Amazon.com, Inc. or its affiliates, and may be used
+under Apache-2.0 OR BSD-3-Clause. This package uses the Apache-2.0 option.
+See NOTICE and the source file headers for the affected files.
+
+The vendor source component contains dependencies pinned by Cargo.lock.
+Each crate retains its own copyright notices and license terms. Their
+Cargo.toml manifests and license, copyright, and notice files are installed
+under /usr/share/doc/dillo-vm/vendor/<crate-version>/. This includes crates
+used only during development, which are not linked into /usr/bin/dillo.
+
+The Debian packaging is copyright 2026 Nathaniel McCallum and is distributed
+under the Apache License, Version 2.0.

@@ -1,0 +1,75 @@
+dillo-vm for Ubuntu Resolute
+===========================
+
+The source and binary package names are dillo-vm. The executable remains
+/usr/bin/dillo, matching upstream and the Copr package. Conflicts: dillo
+prevents co-installation with the unrelated Dillo browser using that path.
+The supported native build architectures are amd64 and arm64.
+
+Source preparation (network allowed)
+------------------------------------
+
+From the packaging checkout, with Git, Python 3, GNU tar, xz, and Cargo
+available, run:
+
+    debian/prepare-source /path/to/build-area
+
+This snapshots HEAD without debian/, then runs cargo vendor --locked
+--versioned-dirs against that snapshot. It writes:
+
+    dillo-vm_0.1.0.orig.tar.xz
+    dillo-vm_0.1.0.orig-vendor.tar.xz
+    dillo-vm-0.1.0/             (both sources plus this debian/ directory)
+
+Commit upstream changes before preparing sources. The current debian/
+directory is copied into the build tree, so packaging changes may be tested
+before committing. Use a fresh build area; existing build trees are refused.
+Keep both original archives together with the .dsc and .debian.tar.xz.
+The 3.0 (quilt) format extracts the second archive into vendor/. No vendor
+files or generated archives are committed to the packaging branch.
+
+The vendor component includes the generated Cargo source replacements in
+vendor/config.toml. These cover both crates.io and all Git dependencies,
+including development dependencies needed to resolve the locked workspace.
+Regenerate both original archives together if HEAD or Cargo.lock changes.
+Archive member order, owner, modes, and timestamps are normalized using
+HEAD's commit time. Retain the resulting archives for subsequent package
+revisions. The helper refuses to overwrite either archive or the build tree.
+
+Offline package build
+---------------------
+
+On a native Resolute builder, install the Build-Depends from debian/control
+(for example, apt-get build-dep .), then in the prepared build tree run:
+
+    dpkg-buildpackage -us -uc
+
+For an isolated build with an existing Resolute sbuild chroot, first run:
+
+    dpkg-buildpackage -S -sa -us -uc
+    sbuild --dist=resolute --arch=amd64 ../dillo-vm_0.1.0-1~resolute1.dsc
+
+Use --arch=arm64 on a native arm64 builder. Source preparation is the only
+networked Cargo operation. debian/rules uses a private CARGO_HOME, the
+distribution's /usr/bin/cargo and /usr/bin/rustc, generated vendor config,
+and --frozen (locked and offline). The upstream rustup toolchain pin does
+not apply to those absolute tool paths. SMOLTCP_IFACE_MAX_ADDR_COUNT=4 is
+required for the network backend's four interface addresses.
+The -sa option includes both original archives in the source changes file.
+
+Rust and Cargo >= 1.91 are required by the linked smoltcp dependency.
+RUSTC_BOOTSTRAP=1 permits Cargo to parse the workspace's test-only artifact
+dependencies, matching the Copr approach. Only the host dillo binary is
+built; firmware and musl guest artifacts are not built. Generic debhelper
+with explicit Cargo commands is used instead of dh-cargo, whose default
+Debian crate registry does not represent this vendored application workspace.
+The build checks dillo --help. VM tests need KVM and separate cross-built
+test artifacts and are outside the package build.
+The clean target preserves vendor/, including checksummed Cargo.toml.orig
+files that debhelper would otherwise remove.
+
+The package includes LICENSE, NOTICE, and the vendored crates' manifests
+and accompanying license notices under /usr/share/doc/dillo-vm/.
+
+Do not upload to Launchpad as part of this workflow. Infrastructure owns
+publication to ppa:nmccallum/pichi after review.

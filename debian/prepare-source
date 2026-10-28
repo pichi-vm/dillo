@@ -1,0 +1,59 @@
+#!/usr/bin/python3
+"""Prepare quilt orig archives and a build tree; only this step uses network."""
+
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+root = Path(__file__).resolve().parent.parent
+output = Path(sys.argv[1] if len(sys.argv) > 1 else root.parent).resolve()
+output.mkdir(parents=True, exist_ok=True)
+header = (root / "debian/changelog").read_text().splitlines()[0]
+name, version = re.match(r"(\S+) \(([^)]+)\)", header).groups()
+upstream = version.rsplit("-", 1)[0]
+tree = output / f"{name}-{upstream}"
+archives = [output / f"{name}_{upstream}.orig{component}.tar.xz"
+            for component in ("", "-vendor")]
+for existing in [tree, *archives]:
+    if existing.exists():
+        sys.exit(f"Refusing to overwrite {existing}")
+env = dict(os.environ, RUSTC_BOOTSTRAP="1")
+epoch = subprocess.check_output(
+    ["git", "show", "-s", "--format=%ct", "HEAD"], cwd=root, text=True
+).strip()
+
+with tempfile.TemporaryDirectory(prefix="dillo-source-", dir=output) as temporary:
+    temporary = Path(temporary)
+    archive = temporary / "source.tar"
+    with archive.open("wb") as stream:
+        subprocess.run(["git", "archive", "HEAD"], cwd=root, stdout=stream, check=True)
+    source = temporary / f"{name}-{upstream}"
+    source.mkdir()
+    subprocess.run(["tar", "-xf", str(archive), "-C", str(source)], check=True)
+    shutil.rmtree(source / "debian", ignore_errors=True)
+
+    def pack(filename, directory, entry):
+        subprocess.run(
+            ["tar", "--sort=name", f"--mtime=@{epoch}", "--owner=0", "--group=0",
+             "--numeric-owner", "--mode=u+rwX,go+rX,go-w",
+             "-cJf", str(output / filename), "-C", str(directory), entry],
+            check=True,
+        )
+
+    pack(f"{name}_{upstream}.orig.tar.xz", temporary, source.name)
+    # Run from the snapshot so generated source paths are relative to its root.
+    config = subprocess.check_output(
+        [os.environ.get("CARGO", "cargo"), "vendor", "--locked", "--versioned-dirs", "vendor"],
+        cwd=source, env=env, text=True,
+    )
+    (source / "vendor/config.toml").write_text(config)
+    pack(f"{name}_{upstream}.orig-vendor.tar.xz", source, "vendor")
+    shutil.copytree(root / "debian", source / "debian")
+    shutil.move(source, tree)
+
+print(f"Prepared {tree}")
+print("Build with: dpkg-buildpackage -us -uc")

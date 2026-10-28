@@ -1,0 +1,23 @@
+#!/usr/bin/python3
+"""Retain vendored crate license declarations and accompanying notices."""
+
+from pathlib import Path
+import shutil
+
+vendor = Path("vendor")
+destination = Path("debian/dillo-vm/usr/share/doc/dillo-vm/vendor")
+for manifest in sorted(vendor.glob("*/Cargo.toml")):
+    crate = manifest.parent
+    for source in sorted(crate.rglob("*")):
+        if not source.is_file():
+            continue
+        relative = source.relative_to(crate)
+        legal = any(
+            part.lower().startswith(("license", "licence", "copying", "copyright", "notice"))
+            for part in relative.parts
+        )
+        if source != manifest and not legal:
+            continue
+        target = destination / crate.name / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
