@@ -2073,6 +2073,40 @@ mod tests {
     }
 
     #[test]
+    fn readonly_share_rejects_special_files_and_xattr_changes() {
+        use crate::backend::{S_IFBLK, S_IFCHR, S_IFIFO, S_IFSOCK};
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Passthrough::new(dir.path()).unwrap();
+        let mut state = FsState::new(true);
+        for kind in [S_IFCHR, S_IFBLK, S_IFIFO, S_IFSOCK] {
+            let mut args = (kind | 0o600).to_le_bytes().to_vec();
+            args.extend_from_slice(&[0u8; 12]);
+            args.extend_from_slice(b"node\0");
+            let reply = dispatch(
+                &mut state,
+                &fs,
+                &request(FUSE_MKNOD, 1, FUSE_ROOT_ID, &args),
+            )
+            .unwrap();
+            assert_eq!(out_error(&reply), -EROFS);
+            assert!(!dir.path().join("node").exists());
+        }
+
+        std::fs::write(dir.path().join("file"), b"data").unwrap();
+        let node = lookup_node(&mut state, &fs, FUSE_ROOT_ID, "file");
+        let mut set = 5u32.to_le_bytes().to_vec();
+        set.extend_from_slice(&0u32.to_le_bytes());
+        set.extend_from_slice(b"user.foo\0value");
+        for (opcode, args) in [
+            (FUSE_SETXATTR, set.as_slice()),
+            (FUSE_REMOVEXATTR, b"user.foo\0".as_slice()),
+        ] {
+            let reply = dispatch(&mut state, &fs, &request(opcode, 2, node, args)).unwrap();
+            assert_eq!(out_error(&reply), -EROFS);
+        }
+    }
+
+    #[test]
     fn readonly_backend_errno_is_portable() {
         let mut state = FsState::new(false);
         let fs = MapFs::new();
