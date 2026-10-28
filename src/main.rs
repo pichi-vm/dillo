@@ -744,6 +744,16 @@ mod placement {
              after carving out islands and device regions"
         )]
         NoSpaceForBigChunk { remaining_mib: u64 },
+        #[error(
+            "RAM region [{ram_start:#x}..{ram_end:#x}) overlaps declared device region \
+             [{device_start:#x}..{device_end:#x}) after 2 MiB rounding"
+        )]
+        RamOverlapsDevice {
+            ram_start: u64,
+            ram_end: u64,
+            device_start: u64,
+            device_end: u64,
+        },
     }
 
     /// Identity-map ceiling on x86: 4 GiB. Big chunk must end at or below this
@@ -797,7 +807,8 @@ mod placement {
         let remaining = budget - islands_total;
 
         // ── 2. Big chunk ─────────────────────────────────────────────
-        let mut holes: Vec<Interval> = device_holes(device_regions);
+        let device_regions: Vec<_> = device_regions.into_iter().collect();
+        let mut holes: Vec<Interval> = device_holes(device_regions.iter().copied());
         holes.extend(islands.iter().copied());
         merge_intervals(&mut holes);
 
@@ -831,6 +842,24 @@ mod placement {
             regions.push(to_region(&c));
         }
         regions.sort_by_key(|r| r.gpa);
+
+        // Section-byte validation cannot see devices in the padding added by
+        // hugepage rounding. Check every final RAM extent before publishing
+        // either backend memslots or overlay memory nodes.
+        for ram in &regions {
+            let ram_end = ram.gpa + ram.size;
+            for &(device_start, device_size) in &device_regions {
+                let device_end = device_start.saturating_add(device_size);
+                if device_size > 0 && ram.gpa < device_end && device_start < ram_end {
+                    return Err(PlanError::RamOverlapsDevice {
+                        ram_start: ram.gpa,
+                        ram_end,
+                        device_start,
+                        device_end,
+                    });
+                }
+            }
+        }
 
         Ok(MemoryPlan {
             memslots: regions.clone(),
@@ -972,6 +1001,86 @@ mod placement {
             assert_eq!(plan.memslots[0].size, 0x20_0000);
             assert_eq!(plan.memslots[1].gpa, 0x40_0000);
             assert_eq!(plan.memslots[1].size, 0x60_0000);
+        }
+
+        #[test]
+        fn plan_around_regions_rejects_ram_overlapping_devices() {
+            for (must_cover, device) in [
+                // Byte-disjoint section and device in the same hugepage.
+                ((0x10_0000, 0x1000), (0x10_1000, 0x1000)),
+                // Device in the padding before a section.
+                ((0x10_1000, 0x1000), (0x10_0000, 0x1000)),
+                // A section spans multiple hugepages; device in its final page.
+                ((0x10_0000, 0x20_0001), (0x30_1000, 0x1000)),
+                // Direct byte overlap remains invalid.
+                ((0x10_0000, 0x1000), (0x10_0000, 4)),
+            ] {
+                // Exercise both an island-only plan and one with a big chunk.
+                let island_mib = if must_cover.1 > HUGE_PAGE { 4 } else { 2 };
+                for memory_mib in [island_mib, 8] {
+                    let err = plan_around_regions(&[must_cover], memory_mib, [device])
+                        .expect_err("RAM must not cover a device");
+                    assert!(
+                        matches!(err, PlanError::RamOverlapsDevice {
+                            device_start, device_end, ..
+                        } if device_start == device.0 && device_end == device.0 + device.1),
+                        "unexpected error for section {must_cover:x?}, device {device:x?}: {err}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn plan_around_regions_rejects_device_in_load_and_fill_island() {
+            // The issue #5 layout: the DTB load and DTBO fill share a page;
+            // neither section's bytes touch the poweroff register.
+            let err =
+                plan_around_regions(&[(0, 0x8_0000), (0x8_0000, 0x1000)], 2, [(0x10_0000, 4)])
+                    .unwrap_err();
+            assert!(matches!(
+                err,
+                PlanError::RamOverlapsDevice {
+                    ram_start: 0,
+                    ram_end: 0x20_0000,
+                    device_start: 0x10_0000,
+                    device_end: 0x10_0004,
+                }
+            ));
+        }
+
+        #[test]
+        fn plan_around_regions_accepts_adjacent_device_pages() {
+            let devices = [(0x1f_f000, 0x1000), (0x40_0000, 4)];
+            for memory_mib in [2, 8] {
+                let plan = plan_around_regions(&[(0x20_1000, 0x1000)], memory_mib, devices)
+                    .expect("devices outside the rounded section");
+                assert_eq!(plan.memslots[0].gpa, 0x20_0000);
+                assert_eq!(plan.memslots[0].size, 0x20_0000);
+                assert_eq!(
+                    plan.memslots.iter().map(|r| r.size).sum::<u64>(),
+                    u64::from(memory_mib) << 20
+                );
+                assert_eq!(plan.memslots.len(), plan.memory_nodes.len());
+                for (ram, node) in plan.memslots.iter().zip(&plan.memory_nodes) {
+                    assert_eq!((ram.gpa, ram.size), (node.gpa, node.size));
+                    for (base, size) in devices {
+                        assert!(ram.gpa + ram.size <= base || base + size <= ram.gpa);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn plan_around_regions_ignores_zero_sized_regions() {
+            let plan = plan_around_regions(
+                &[(0x10_0000, 0), (0x20_1000, 0x1000)],
+                2,
+                [(0x10_0000, 4), (0x20_1000, 0)],
+            )
+            .expect("empty sections and device regions do not overlap RAM");
+            assert_eq!(plan.memslots.len(), 1);
+            assert_eq!(plan.memslots[0].gpa, 0x20_0000);
+            assert_eq!(plan.memslots[0].size, 0x20_0000);
         }
     }
 }
