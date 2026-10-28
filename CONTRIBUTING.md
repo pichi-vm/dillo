@@ -1,5 +1,19 @@
 # Contributing
 
+## Cargo config
+
+`.cargo/config.toml` is not committed. Copy the developer config before
+building or testing:
+
+```
+mkdir -p .cargo
+cp packaging/cargo-config.toml .cargo/config.toml
+```
+
+That file enables artifact dependencies (`-Z bindeps`), sets the musl
+rustflags used to cross-build the snuffler guest probe, and raises
+smoltcp's interface address cap.
+
 ## Commit messages
 
 Commits follow Conventional Commits and standard git formatting, enforced by
