@@ -425,10 +425,15 @@ mod imp {
         inner: Arc<GicMessageInterruptDomainInner>,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct GicMessage {
+        message: MessageInterrupt,
+        enabled: bool,
+    }
+
     #[derive(Debug)]
     struct GicMessageInterruptDomainInner {
-        vectors: Mutex<Vec<MessageInterrupt>>,
-        enabled: AtomicBool,
+        vectors: Mutex<Vec<GicMessage>>,
     }
 
     impl GicMessageInterruptDomain {
@@ -436,14 +441,16 @@ mod imp {
             Self {
                 inner: Arc::new(GicMessageInterruptDomainInner {
                     vectors: Mutex::new(vec![
-                        MessageInterrupt {
-                            address: 0,
-                            data: 0,
-                            masked: true,
+                        GicMessage {
+                            message: MessageInterrupt {
+                                address: 0,
+                                data: 0,
+                                masked: true,
+                            },
+                            enabled: false,
                         };
                         count as usize
                     ]),
-                    enabled: AtomicBool::new(false),
                 }),
             }
         }
@@ -451,15 +458,12 @@ mod imp {
 
     impl GicMessageInterruptDomainInner {
         fn message_for(&self, vector: u16) -> Option<MessageInterrupt> {
-            if !self.enabled.load(Ordering::SeqCst) {
-                return None;
-            }
-            let message = *self
+            let slot = *self
                 .vectors
                 .lock()
                 .expect("message interrupt domain poisoned")
                 .get(vector as usize)?;
-            (!message.masked).then_some(message)
+            (slot.enabled && !slot.message.masked).then_some(slot.message)
         }
     }
 
@@ -471,13 +475,20 @@ mod imp {
                 .lock()
                 .expect("message interrupt domain poisoned");
             if let Some(slot) = vectors.get_mut(vector as usize) {
-                *slot = msg;
+                slot.message = msg;
             }
             Ok(())
         }
 
-        fn enabled(&self, enabled: bool) -> Result<(), InterruptError> {
-            self.inner.enabled.store(enabled, Ordering::SeqCst);
+        fn enabled(&self, vector: u16, enabled: bool) -> Result<(), InterruptError> {
+            let mut vectors = self
+                .inner
+                .vectors
+                .lock()
+                .expect("message interrupt domain poisoned");
+            if let Some(slot) = vectors.get_mut(vector as usize) {
+                slot.enabled = enabled;
+            }
             Ok(())
         }
 
@@ -1145,6 +1156,48 @@ mod imp {
         use std::thread;
 
         use super::*;
+
+        #[test]
+        fn message_vectors_keep_enable_and_mask_independent() {
+            let domain = GicMessageInterruptDomain::new(2);
+            let message = MessageInterrupt {
+                address: 0x0808_0040,
+                data: 48,
+                masked: false,
+            };
+            domain.update(0, message).unwrap();
+            domain.update(1, message).unwrap();
+            assert_eq!(domain.inner.message_for(0), None);
+            domain.enabled(0, true).unwrap();
+            domain.enabled(1, true).unwrap();
+            domain.enabled(0, false).unwrap();
+            assert_eq!(domain.inner.message_for(0), None);
+            assert_eq!(domain.inner.message_for(1), Some(message));
+            domain.enabled(1, false).unwrap();
+            domain.enabled(0, true).unwrap();
+            assert_eq!(domain.inner.message_for(0), Some(message));
+            assert_eq!(domain.inner.message_for(1), None);
+
+            // Table programming must preserve a disabled vector's enable state.
+            domain.update(1, message).unwrap();
+            assert_eq!(domain.inner.message_for(1), None);
+            domain
+                .update(
+                    0,
+                    MessageInterrupt {
+                        masked: true,
+                        ..message
+                    },
+                )
+                .unwrap();
+            domain.enabled(0, false).unwrap();
+            domain.enabled(0, true).unwrap();
+            domain.enabled(1, true).unwrap();
+            assert_eq!(domain.inner.message_for(0), None);
+            assert_eq!(domain.inner.message_for(1), Some(message));
+            domain.update(0, message).unwrap();
+            assert_eq!(domain.inner.message_for(0), Some(message));
+        }
 
         #[test]
         fn cpu_slot_deposit_wakes_waiter() {

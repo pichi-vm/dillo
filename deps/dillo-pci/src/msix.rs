@@ -100,10 +100,10 @@ pub trait MsixNotifier: Send + Sync {
     /// Called when a vector's address/data/mask is updated by the guest.
     fn vector_updated(&self, vector: u16, entry: &MsixTableEntry);
 
-    /// Called when MSI-X effective enable state changes.
+    /// Called for each vector when its function's effective enable state changes.
     ///
     /// `enabled` is true when MSI-X is enabled AND function mask is clear.
-    fn msix_enabled(&self, enabled: bool);
+    fn msix_enabled(&self, vector: u16, enabled: bool);
 
     /// Interrupt handle for a device completion on `vector`, when the backend
     /// can currently deliver that MSI-X vector.
@@ -118,7 +118,7 @@ pub struct NoopNotifier;
 
 impl MsixNotifier for NoopNotifier {
     fn vector_updated(&self, _vector: u16, _entry: &MsixTableEntry) {}
-    fn msix_enabled(&self, _enabled: bool) {}
+    fn msix_enabled(&self, _vector: u16, _enabled: bool) {}
 }
 
 /// MSI-X table emulation layer.
@@ -236,7 +236,9 @@ impl MsixTable {
         self.enabled = enabled;
         // Effective enable = enabled && !function_masked
         let effective = enabled && !self.function_masked;
-        notifier.msix_enabled(effective);
+        for vector in 0..self.num_vectors() {
+            notifier.msix_enabled(vector, effective);
+        }
     }
 
     /// Set the function mask state and notify.
@@ -244,7 +246,9 @@ impl MsixTable {
         self.function_masked = masked;
         // Effective enable = enabled && !function_masked
         let effective = self.enabled && !masked;
-        notifier.msix_enabled(effective);
+        for vector in 0..self.num_vectors() {
+            notifier.msix_enabled(vector, effective);
+        }
     }
 
     /// Handle guest writes to the MSI-X Message Control register.
@@ -469,7 +473,7 @@ mod tests {
 
     struct RecordingNotifier {
         vector_updates: Mutex<Vec<(u16, MsixTableEntry)>>,
-        enable_calls: Mutex<Vec<bool>>,
+        enable_calls: Mutex<Vec<(u16, bool)>>,
     }
 
     impl RecordingNotifier {
@@ -486,8 +490,8 @@ mod tests {
             self.vector_updates.lock().unwrap().push((vector, *entry));
         }
 
-        fn msix_enabled(&self, enabled: bool) {
-            self.enable_calls.lock().unwrap().push(enabled);
+        fn msix_enabled(&self, vector: u16, enabled: bool) {
+            self.enable_calls.lock().unwrap().push((vector, enabled));
         }
     }
 
@@ -623,7 +627,7 @@ mod tests {
         assert!(table.enabled());
         let calls = notifier.enable_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert!(calls[0]);
+        assert_eq!(calls[0], (0, true));
     }
 
     #[test]
@@ -636,8 +640,8 @@ mod tests {
         // set_enabled(true) -> msix_enabled(true)
         // set_function_masked(true) -> msix_enabled(false)
         assert_eq!(calls.len(), 2);
-        assert!(calls[0]);
-        assert!(!calls[1]);
+        assert_eq!(calls[0], (0, true));
+        assert_eq!(calls[1], (0, false));
     }
 
     #[test]
@@ -659,8 +663,7 @@ mod tests {
         table.write_msg_ctl(0x8003, &notifier); // 0x8000 = enable, 0x0003 = table_size field (ignored)
         assert!(table.enabled());
         let calls = notifier.enable_calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert!(calls[0]);
+        assert_eq!(*calls, vec![(0, true), (1, true), (2, true), (3, true)]);
     }
 
     #[test]
@@ -671,11 +674,20 @@ mod tests {
         table.write_msg_ctl(0xC003, &notifier);
         assert!(table.enabled());
         let calls = notifier.enable_calls.lock().unwrap();
-        // Enable changed (false -> true) -> msix_enabled(true)
-        // Then function_masked changed (false -> true) -> msix_enabled(false) (effectively disabled)
-        assert_eq!(calls.len(), 2);
-        assert!(calls[0]); // enabled
-        assert!(!calls[1]); // function masked -> effectively disabled
+        // Every vector follows its function's enable and mask changes.
+        assert_eq!(
+            *calls,
+            vec![
+                (0, true),
+                (1, true),
+                (2, true),
+                (3, true),
+                (0, false),
+                (1, false),
+                (2, false),
+                (3, false),
+            ]
+        );
     }
 
     #[test]
@@ -708,7 +720,7 @@ mod tests {
         let notifier = NoopNotifier;
         let entry = MsixTableEntry::default();
         notifier.vector_updated(0, &entry);
-        notifier.msix_enabled(true);
+        notifier.msix_enabled(0, true);
     }
 
     #[test]

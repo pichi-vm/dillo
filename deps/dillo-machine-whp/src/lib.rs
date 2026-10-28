@@ -463,6 +463,7 @@ mod imp {
         address: u64,
         data: u32,
         masked: bool,
+        enabled: bool,
     }
 
     #[derive(Debug)]
@@ -473,60 +474,71 @@ mod imp {
     #[derive(Debug)]
     struct FixedMessageInterruptDomainInner {
         fixed_interrupts: FixedInterruptRequester,
-        vectors: Mutex<Vec<FixedMessage>>,
-        enabled: AtomicBool,
+        vectors: FixedMessageTable,
     }
+
+    #[derive(Debug)]
+    struct FixedMessageTable(Mutex<Vec<FixedMessage>>);
 
     impl FixedMessageInterruptDomain {
         fn new(fixed_interrupts: FixedInterruptRequester, count: u16) -> Self {
             Self {
                 inner: Arc::new(FixedMessageInterruptDomainInner {
                     fixed_interrupts,
-                    vectors: Mutex::new(vec![FixedMessage::default(); count as usize]),
-                    enabled: AtomicBool::new(false),
+                    vectors: FixedMessageTable(Mutex::new(vec![
+                        FixedMessage::default();
+                        count as usize
+                    ])),
                 }),
             }
         }
     }
 
-    impl FixedMessageInterruptDomainInner {
+    impl FixedMessageTable {
         fn message_for(&self, vector: u16) -> Option<FixedMsi> {
-            if !self.enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return None;
-            }
-            let vectors = self.vectors.lock().expect("message table poisoned");
+            let vectors = self.0.lock().expect("message table poisoned");
             let message = *vectors.get(vector as usize)?;
-            if message.masked {
+            if !message.enabled || message.masked {
                 return None;
             }
             decode_fixed_msi(message)
         }
-    }
 
-    impl MessageInterruptDomain for FixedMessageInterruptDomain {
-        fn update(&self, vector: u16, msg: MessageInterrupt) -> Result<(), InterruptError> {
-            let mut vectors = self.inner.vectors.lock().expect("message table poisoned");
+        fn update(&self, vector: u16, msg: MessageInterrupt) {
+            let mut vectors = self.0.lock().expect("message table poisoned");
             if let Some(slot) = vectors.get_mut(vector as usize) {
                 *slot = FixedMessage {
                     address: msg.address,
                     data: msg.data,
                     masked: msg.masked,
+                    enabled: slot.enabled,
                 };
             }
+        }
+
+        fn enabled(&self, vector: u16, enabled: bool) {
+            let mut vectors = self.0.lock().expect("message table poisoned");
+            if let Some(slot) = vectors.get_mut(vector as usize) {
+                slot.enabled = enabled;
+            }
+        }
+    }
+
+    impl MessageInterruptDomain for FixedMessageInterruptDomain {
+        fn update(&self, vector: u16, msg: MessageInterrupt) -> Result<(), InterruptError> {
+            self.inner.vectors.update(vector, msg);
             Ok(())
         }
 
-        fn enabled(&self, enabled: bool) -> Result<(), InterruptError> {
-            self.inner
-                .enabled
-                .store(enabled, std::sync::atomic::Ordering::SeqCst);
+        fn enabled(&self, vector: u16, enabled: bool) -> Result<(), InterruptError> {
+            self.inner.vectors.enabled(vector, enabled);
             Ok(())
         }
 
         fn interrupt(&self, vector: u16) -> Option<Interrupt> {
             let domain = Arc::clone(&self.inner);
             Some(Interrupt::from_fn(move || {
-                let Some(msi) = domain.message_for(vector) else {
+                let Some(msi) = domain.vectors.message_for(vector) else {
                     return;
                 };
                 if let Err(e) = domain
@@ -803,7 +815,51 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::{FixedMessage, FixedMsi, decode_fixed_msi};
+        use super::{FixedMessage, FixedMessageTable, FixedMsi, decode_fixed_msi};
+        use dillo_mmio::MessageInterrupt;
+        use std::sync::Mutex;
+
+        #[test]
+        fn message_vectors_keep_enable_and_mask_independent() {
+            let domain = FixedMessageTable(Mutex::new(vec![FixedMessage::default(); 2]));
+            let message = MessageInterrupt {
+                address: 0xFEE0_3000,
+                data: 0x45,
+                masked: false,
+            };
+            let expected = Some(FixedMsi {
+                destination: 3,
+                vector: 0x45,
+            });
+            domain.update(0, message);
+            domain.update(1, message);
+            assert_eq!(domain.message_for(0), None);
+            domain.enabled(0, true);
+            domain.enabled(1, true);
+            domain.enabled(0, false);
+            assert_eq!(domain.message_for(0), None);
+            assert_eq!(domain.message_for(1), expected);
+            domain.enabled(1, false);
+            domain.enabled(0, true);
+            assert_eq!(domain.message_for(0), expected);
+            assert_eq!(domain.message_for(1), None);
+            domain.update(1, message);
+            assert_eq!(domain.message_for(1), None);
+            domain.update(
+                0,
+                MessageInterrupt {
+                    masked: true,
+                    ..message
+                },
+            );
+            domain.enabled(0, false);
+            domain.enabled(0, true);
+            domain.enabled(1, true);
+            assert_eq!(domain.message_for(0), None);
+            assert_eq!(domain.message_for(1), expected);
+            domain.update(0, message);
+            assert_eq!(domain.message_for(0), expected);
+        }
 
         #[test]
         fn decodes_fixed_physical_msi() {
@@ -812,6 +868,7 @@ mod imp {
                     address: 0xFEE0_3000,
                     data: 0x45,
                     masked: false,
+                    enabled: true,
                 }),
                 Some(FixedMsi {
                     destination: 3,
@@ -827,6 +884,7 @@ mod imp {
                     address: 0xDEAD_0000,
                     data: 0x45,
                     masked: false,
+                    enabled: true,
                 })
                 .is_none()
             );

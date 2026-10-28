@@ -151,9 +151,9 @@ impl MsixNotifier for MsixInterruptAdapter {
         }
     }
 
-    fn msix_enabled(&self, enabled: bool) {
-        if let Err(e) = self.domain.enabled(enabled) {
-            log::warn!("PCI MSI-X enable={enabled} failed: {e}");
+    fn msix_enabled(&self, vector: u16, enabled: bool) {
+        if let Err(e) = self.domain.enabled(vector, enabled) {
+            log::warn!("PCI MSI-X vector {vector} enable={enabled} failed: {e}");
         }
     }
 
@@ -536,8 +536,9 @@ impl MsixNotifier for OffsetMsixNotifier {
             .vector_updated(vector.saturating_add(self.vector_base), entry);
     }
 
-    fn msix_enabled(&self, enabled: bool) {
-        self.inner.msix_enabled(enabled);
+    fn msix_enabled(&self, vector: u16, enabled: bool) {
+        self.inner
+            .msix_enabled(vector.saturating_add(self.vector_base), enabled);
     }
 
     fn interrupt_for(&self, vector: u16) -> Option<dillo_mmio::Interrupt> {
@@ -911,7 +912,7 @@ mod tests {
                 self.updates.lock().unwrap().push(vector);
                 Ok(())
             }
-            fn enabled(&self, _enabled: bool) -> Result<(), InterruptError> {
+            fn enabled(&self, _vector: u16, _enabled: bool) -> Result<(), InterruptError> {
                 Ok(())
             }
             fn interrupt(&self, _vector: u16) -> Option<Interrupt> {
@@ -1062,7 +1063,12 @@ mod tests {
                 Ok(())
             }
 
-            fn enabled(&self, enabled: bool) -> Result<(), dillo_mmio::InterruptError> {
+            fn enabled(
+                &self,
+                vector: u16,
+                enabled: bool,
+            ) -> Result<(), dillo_mmio::InterruptError> {
+                assert_eq!(vector, 2);
                 self.enabled.store(enabled, Ordering::Release);
                 Ok(())
             }
@@ -1087,7 +1093,7 @@ mod tests {
                 vector_ctl: 1,
             },
         );
-        adapter.msix_enabled(true);
+        adapter.msix_enabled(2, true);
 
         assert_eq!(
             domain
@@ -1107,3 +1113,6 @@ mod tests {
         assert!(domain.enabled.load(Ordering::Acquire));
     }
 }
+
+#[cfg(test)]
+mod msix_tests;
