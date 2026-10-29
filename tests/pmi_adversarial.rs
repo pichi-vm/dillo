@@ -173,8 +173,11 @@ fn pathologically_spread_layout_rejected() {
 
 #[test]
 fn section_raw_data_past_file_size_rejected() {
-    // Take a valid PMI, scan PE section headers, edit the first
-    // section's PointerToRawData to point past EOF → SectionDataPastEof.
+    // Take a valid PMI, scan PE section headers, edit the
+    // PointerToRawData of the first section that has bytes in the file
+    // to point past EOF → SectionDataPastEof. Sections with no bytes in
+    // the file (such as the guard page) are skipped, because the parser
+    // rightly ignores where they point.
     let Ok(mut bytes) = std::fs::read("/tmp/real.pmi") else {
         eprintln!("skipping: /tmp/real.pmi not present");
         return;
@@ -187,8 +190,13 @@ fn section_raw_data_past_file_size_rejected() {
     let opt_size = u16::from_le_bytes(bytes[pe_off + 20..pe_off + 22].try_into().unwrap()) as usize;
     let sect_off = pe_off + 24 + opt_size;
     assert!(num_sections > 0);
-    // Each section header is 40 bytes. PointerToRawData is at offset 20.
-    let ptr_to_raw_off = sect_off + 20;
+    // Each section header is 40 bytes. SizeOfRawData is at offset 16 and
+    // PointerToRawData is at offset 20.
+    let header = (0..usize::from(num_sections))
+        .map(|i| sect_off + i * 40)
+        .find(|&h| u32::from_le_bytes(bytes[h + 16..h + 20].try_into().unwrap()) > 0)
+        .expect("a PMI has at least one section with bytes in the file");
+    let ptr_to_raw_off = header + 20;
     // Overwrite with a value larger than file size.
     let huge = (bytes.len() as u32).saturating_add(0x1000);
     bytes[ptr_to_raw_off..ptr_to_raw_off + 4].copy_from_slice(&huge.to_le_bytes());
