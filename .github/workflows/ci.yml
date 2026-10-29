@@ -18,14 +18,14 @@ jobs:
     name: license headers
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: korandoru/hawkeye@v6
 
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Install cargo config
         shell: bash
         run: mkdir -p .cargo && cp packaging/cargo-config.toml .cargo/config.toml
@@ -40,7 +40,7 @@ jobs:
     name: commit messages
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
       - run: pipx run gitlint --commits "origin/${{ github.base_ref || 'main' }}..HEAD"
@@ -51,7 +51,7 @@ jobs:
     env:
       RUSTFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Install cargo config
         shell: bash
         run: mkdir -p .cargo && cp packaging/cargo-config.toml .cargo/config.toml
@@ -76,7 +76,7 @@ jobs:
     name: copr srpm
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Install rpmbuild tools
         run: |
           sudo apt-get update
@@ -140,7 +140,7 @@ jobs:
             guest_musl: aarch64-unknown-linux-musl
     runs-on: ${{ fromJSON(matrix.runs_on) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - name: Install cargo config
         shell: bash
