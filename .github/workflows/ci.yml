@@ -2,8 +2,15 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+
+# A newer push to the same pull request (or branch) cancels the older run,
+# so stale commits do not hold runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -139,6 +146,9 @@ jobs:
             runs_on: '["self-hosted","macOS","ARM64","bare-metal","m1"]'
             guest_musl: aarch64-unknown-linux-musl
     runs-on: ${{ fromJSON(matrix.runs_on) }}
+    # There is only one macOS runner, so a stuck macOS test must not hold it
+    # for hours. A normal macOS job takes 2 to 7 minutes.
+    timeout-minutes: ${{ matrix.os == 'macos-arm64' && 15 || 60 }}
     steps:
       - uses: actions/checkout@v4
 
