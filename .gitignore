@@ -1,5 +1,4 @@
 /target
 /vendor/
-/.cargo/config.toml
 /dillo-*.tar.gz
 /dillo-*.tar.xz
