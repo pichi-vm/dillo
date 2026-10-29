@@ -5,9 +5,9 @@
 `.cargo/config.toml` is committed, so a plain `cargo build` or `cargo test`
 works from a fresh clone with no extra setup. It is the settings file that
 Cargo, the Rust build tool, reads. It lets the tests build helper programs
-such as the snuffler guest probe, sets how that probe is linked, and raises
-smoltcp's interface address cap. `rust-toolchain.toml` names the exact Rust
-version to use, and rustup, the usual Rust installer, picks it up on its own.
+such as the snuffler guest probe, and sets how that probe is linked.
+`rust-toolchain.toml` names the exact Rust version to use, and rustup, the
+usual Rust installer, picks it up on its own.
 
 ## Commit messages
 
