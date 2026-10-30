@@ -140,6 +140,9 @@ pub mod pmi_parse {
         #[error("manifest references PE section `{section}` which is not present")]
         ManifestReferencesMissingSection { section: String },
 
+        #[error("invalid lbc:bootconfig fill: {0}")]
+        BootconfigFill(&'static str),
+
         #[error("CBOR decode failed: {0}")]
         CborDecode(String),
 
@@ -250,7 +253,7 @@ pub mod pmi_parse {
         Fill { section: String, kind: FillKind },
     }
 
-    /// Fill kinds dillo recognizes (the `dt` extension, `pmi/spec/dt.md`).
+    /// Fill kinds dillo recognizes (the PMI `dt` and `lbc` extensions).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum FillKind {
         /// `dt:dtb` — the measured base DTB, delivered into a reserved Zero
@@ -259,6 +262,9 @@ pub mod pmi_parse {
 
         /// `dt:dtbo` — host-supplied, unmeasured DTB overlay.
         DtDtbo,
+
+        /// `lbc:bootconfig` — native Linux bootconfig in a Zero reservation.
+        LbcBootconfig,
     }
 
     /// Successfully-parsed PMI.
@@ -730,6 +736,16 @@ pub mod pmi_parse {
                 ),
                 ManifestActionOwned::Fill { section, kind, .. } => {
                     let translated = translate_fill_kind(*kind);
+                    if translated == FillKind::LbcBootconfig {
+                        if fills.contains(&translated) {
+                            return Err(Error::BootconfigFill("duplicate fill"));
+                        }
+                        if let Some(s) = sections.get(section)
+                            && (s.file_size != 0 || s.virtual_size == 0 || s.is_discardable)
+                        {
+                            return Err(Error::BootconfigFill("requires a Zero section"));
+                        }
+                    }
                     fills.push(translated);
                     (
                         section.clone(),
@@ -753,6 +769,7 @@ pub mod pmi_parse {
         match k {
             PmiFillKind::DtDtb => FillKind::DtDtb,
             PmiFillKind::DtDtbo => FillKind::DtDtbo,
+            PmiFillKind::LbcBootconfig => FillKind::LbcBootconfig,
         }
     }
 

@@ -255,6 +255,7 @@ fn observe() -> Report {
     let console_port = probe_console_port(&cmdline);
     Report {
         arch: uname_machine(),
+        bootconfig: std::fs::read_to_string("/proc/bootconfig").ok(),
         uptime_secs: parse_uptime(),
         // Set later in run() when the cmdline requests it; None keeps the
         // report byte-identical by default.

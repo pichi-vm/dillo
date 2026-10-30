@@ -61,7 +61,7 @@ uninlined_format_args = "allow"
 
 [workspace.dependencies]
 # Cross-product shared crates (git deps)
-pmi = { git = "https://github.com/pichi-vm/pmi" }
+pmi = { git = "https://github.com/pichi-vm/pmi", rev = "2b922270cd81bba763ea781f3eb5ff238f037c97" }
 devtree = { git = "https://github.com/pichi-vm/devtree" }
 # Dev-only caching URL downloader (shared by arma/dillo tests).
 burrow = { git = "https://github.com/pichi-vm/burrow" }
@@ -225,7 +225,7 @@ dillo-virtio-vsock.workspace = true
 [dev-dependencies]
 # Boot/e2e tests build a PMI with arma and assert on the Report that snuffler
 # emits from inside the guest.
-arma = { git = "https://github.com/pichi-vm/arma", artifact = "bin" } # image builder, host target
+arma = { git = "https://github.com/pichi-vm/arma", rev = "b792e9a3463f65c821cfa4f15c3d2b6a6b5e2a94", artifact = "bin" } # image builder, host target
 serde_json = "1"                                   # decode the Report on the host
 rstest = "0.23"                                    # parameterized boot matrix
 burrow = { workspace = true }               # cached kernel download
