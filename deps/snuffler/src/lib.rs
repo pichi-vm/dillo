@@ -23,6 +23,9 @@ pub const REPORT_END: &str = "<<<END>>>";
 pub struct Report {
     pub arch: String,
     pub cmdline: String,
+    /// Linux bootconfig as exposed by the running guest kernel.
+    #[serde(default)]
+    pub bootconfig: Option<String>,
     pub uptime_secs: f64,
     /// High-resolution nanoseconds from kernel start (CLOCK_MONOTONIC) captured
     /// at snuffler entry, *before* any probing — the kernel+initramfs boot time

@@ -29,6 +29,8 @@ use snuffler::{REPORT_BEGIN, REPORT_END, Report};
 use tempfile::TempDir;
 use wait_timeout::ChildExt;
 
+#[path = "boot/bootconfig.rs"]
+mod bootconfig;
 #[path = "boot/virtiofs.rs"]
 mod virtiofs;
 
@@ -137,6 +139,21 @@ const KERNELS: &[Entry] = &[
         ),
         builtins: &["ACPI_SPCR_TABLE", "VIRTIO_CONSOLE"],
     },
+    Entry {
+        arch: "x86_64",
+        url: "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Everything/x86_64/os/images/pxeboot/vmlinuz",
+        config: Some(
+            "https://src.fedoraproject.org/rpms/kernel/raw/e44c3f75126e5490b097372b199562776b3872f6/f/kernel-x86_64-fedora.config",
+        ),
+        builtins: &[
+            "BOOT_CONFIG",
+            "BLK_DEV_INITRD",
+            "PROC_FS",
+            "VIRTIO_CONSOLE",
+            "VIRTIO_PCI",
+            "PCI",
+        ],
+    },
     // ---- aarch64 ----
     Entry {
         arch: "aarch64",
@@ -194,7 +211,16 @@ const KERNELS: &[Entry] = &[
         config: Some(
             "https://src.fedoraproject.org/rpms/kernel/raw/e44c3f75126e5490b097372b199562776b3872f6/f/kernel-aarch64-fedora.config",
         ),
-        builtins: &["RANDOMIZE_BASE", "VIRTIO_CONSOLE"],
+        builtins: &[
+            "RANDOMIZE_BASE",
+            "VIRTIO_CONSOLE",
+            "BOOT_CONFIG",
+            "BLK_DEV_INITRD",
+            "PROC_FS",
+            "VIRTIO_PCI",
+            "PCI",
+            "PCI_HOST_GENERIC",
+        ],
     },
 ];
 

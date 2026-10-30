@@ -193,8 +193,136 @@ fn launch(
         4,
         vcpus,
         matches!(channel, BaseChannel::Detached).then_some(dtb_path.as_path()),
+        None,
     )
     .map(|plan| (dir, plan))
+}
+
+// Use a non-arma section name and a 4 KiB capacity. Action GPAs remain the
+// authority even though the PE section's VirtualAddress is deliberately zero.
+fn with_bootconfig(mut bytes: Vec<u8>, gpas: &[u64], capacity: u32, raw_size: u32) -> Vec<u8> {
+    let mut manifest: serde_json::Value = ciborium::from_reader(&bytes[0x1000..0x2000]).unwrap();
+    for gpa in gpas {
+        manifest["actions"].as_array_mut().unwrap().push(json!({
+            "type": "fill", "section": ".config", "gpa": gpa, "kind": "lbc:bootconfig"
+        }));
+    }
+    let mut cbor = Vec::new();
+    ciborium::ser::into_writer(&manifest, &mut cbor).unwrap();
+    bytes[0x1000..0x2000].fill(0);
+    bytes[0x1000..0x1000 + cbor.len()].copy_from_slice(&cbor);
+    bytes[0x188 + 16..0x188 + 20].copy_from_slice(&(cbor.len() as u32).to_le_bytes());
+    bytes[0x86..0x88].copy_from_slice(&6u16.to_le_bytes());
+    let header = 0x188 + 5 * 40;
+    bytes[header..header + 7].copy_from_slice(b".config");
+    for (field, value) in [
+        (8, capacity),
+        (16, raw_size),
+        (20, if raw_size == 0 { 0 } else { 0x2000 }),
+        (36, 0x80),
+    ] {
+        bytes[header + field..header + field + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+#[test]
+fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.pmi");
+    let input = dir.path().join("input.bconf");
+    for arch in ARCHES {
+        let base = base(arch, false, false);
+        let bytes = with_bootconfig(
+            image(arch, BaseChannel::Bundled, &base, Some(4096)),
+            &[0x20_2000],
+            4096,
+            0,
+        );
+        std::fs::write(&path, &bytes).unwrap();
+        for text in [None, Some(b"".as_slice()), Some(b"carapace.tip = abc;")] {
+            let file = text.map(|text| {
+                std::fs::write(&input, text).unwrap();
+                input.as_path()
+            });
+            let plan = LaunchPlan::read(&path, arch, None, 4, 1, None, file).unwrap();
+            let write = plan.guest_writes.last().unwrap();
+            assert_eq!(write.section, ".config");
+            assert_eq!(write.gpa, 0x20_2000);
+            let WriteSrc::Owned(data) = &write.data else {
+                panic!("bootconfig must be retained for reboot")
+            };
+            assert_eq!(data.len(), 4096);
+            if text.is_none_or(<[u8]>::is_empty) {
+                assert!(data.iter().all(|b| *b == 0));
+            } else {
+                assert!(
+                    data.windows(text.unwrap().len())
+                        .any(|window| Some(window) == text)
+                );
+                assert!(data.ends_with(b"#BOOTCONFIG\n"));
+            }
+            let snapshot = data.clone();
+            std::fs::write(&input, b"changed after preflight").unwrap();
+            std::fs::remove_file(&input).unwrap();
+            assert_eq!(
+                data, &snapshot,
+                "reboot uses owned launch bytes, not the file"
+            );
+            assert_eq!(plan.merged_dtb, base);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        std::fs::write(&path, image(arch, BaseChannel::Bundled, &base, Some(4096))).unwrap();
+        std::fs::write(&input, b"").unwrap();
+        let err = LaunchPlan::read(&path, arch, None, 4, 1, None, Some(&input)).unwrap_err();
+        assert!(matches!(
+            err,
+            LaunchError::Bootconfig(bootconfig::Error::Undeclared)
+        ));
+    }
+}
+
+#[test]
+fn bootconfig_invalid_reservations_fail_preflight() {
+    use dillo::pmi_parse::Error;
+    for arch in ARCHES {
+        let base = image(
+            arch,
+            BaseChannel::Bundled,
+            &base(arch, false, false),
+            Some(4096),
+        );
+        let opts = ParseOptions {
+            host_arch: pmi_arch(arch),
+            memory_mib: 4,
+        };
+        for (gpas, capacity, raw_size) in [
+            (vec![0x20_2000, 0x20_2000], 4096, 0),
+            (vec![0x20_2000], 4096, 4),
+            (vec![0x20_2000], 0, 0),
+        ] {
+            let bytes = with_bootconfig(base.clone(), &gpas, capacity, raw_size);
+            assert!(matches!(
+                dillo::pmi_parse::parse(&bytes, &opts),
+                Err(Error::BootconfigFill(_))
+            ));
+        }
+        let bytes = with_bootconfig(base.clone(), &[0x20_2001], 4096, 0);
+        assert!(matches!(
+            dillo::pmi_parse::parse(&bytes, &opts),
+            Err(Error::AlignmentViolation { .. })
+        ));
+        let bytes = with_bootconfig(base.clone(), &[0x20_1000], 4096, 0);
+        assert!(matches!(
+            dillo::pmi_parse::parse(&bytes, &opts),
+            Err(Error::SectionsOverlap { .. })
+        ));
+        let bytes = with_bootconfig(base, &[0x40_0000], 4 * 1024 * 1024, 0);
+        assert!(
+            dillo::pmi_parse::parse(&bytes, &opts).is_err(),
+            "reservation exceeds guest memory budget"
+        );
+    }
 }
 
 #[test]

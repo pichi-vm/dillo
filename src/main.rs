@@ -100,6 +100,11 @@ struct Args {
     /// measured and cannot be substituted.
     #[argh(option)]
     dtb: Option<std::path::PathBuf>,
+
+    /// bootconfig text for the image's lbc:bootconfig fill. Omitted or empty
+    /// input leaves the reservation zero-filled. Linux parses the text.
+    #[argh(option)]
+    bootconfig: Option<std::path::PathBuf>,
 }
 
 /// Boot-time tracer for decomposing VMM setup latency (PMI parse, placement,
@@ -154,6 +159,7 @@ fn main() {
         memory,
         cpus,
         args.dtb.as_deref(),
+        args.bootconfig.as_deref(),
     ) {
         Ok(plan) => plan,
         Err(e) => {
@@ -1251,6 +1257,7 @@ mod overlay {
 }
 
 mod launch {
+    mod bootconfig;
 
     #[cfg(test)]
     mod delegation_tests;
@@ -1419,6 +1426,7 @@ mod launch {
             memory_mib: u32,
             vcpus: u32,
             base_dtb_path: Option<&Path>,
+            bootconfig_path: Option<&Path>,
         ) -> Result<Self, LaunchError> {
             // Map the PMI read-only rather than reading it whole. The PMI
             // granularity spec places sections at aligned offsets precisely so a
@@ -1442,6 +1450,19 @@ mod launch {
                 },
             )?;
             validate_cpu_profile(parsed.cpu_profile.as_str(), pmi_arch)?;
+            if bootconfig_path.is_some()
+                && !parsed.actions.iter().any(|action| {
+                    matches!(
+                        action,
+                        PmiAction::Fill {
+                            kind: FillKind::LbcBootconfig,
+                            ..
+                        }
+                    )
+                })
+            {
+                return Err(bootconfig::Error::Undeclared.into());
+            }
             crate::boot_trace::mark("pmi_parsed");
 
             // Resolve the launch base DTB per channel mode: an out-of-band
@@ -1500,7 +1521,10 @@ mod launch {
                 platform.arch,
                 cpu_compatible,
                 vcpus,
-                &dtb,
+                FillInputs {
+                    base_dtb: &dtb,
+                    bootconfig: bootconfig_path,
+                },
             )?;
             crate::boot_trace::mark("guest_writes_built");
 
@@ -1590,6 +1614,9 @@ mod launch {
 
         #[error("synthesize host DTBO: {0}")]
         DtboSynth(#[source] anyhow::Error),
+
+        #[error("bootconfig: {0}")]
+        Bootconfig(#[from] bootconfig::Error),
     }
 
     impl LaunchError {
@@ -1606,11 +1633,17 @@ mod launch {
                 | Self::DtbCrossValidate(_)
                 | Self::MalformedMergedDtb
                 | Self::MalformedLoadSection(_)
-                | Self::DtboSynth(_) => 11,
+                | Self::DtboSynth(_)
+                | Self::Bootconfig(_) => 11,
                 Self::Placement(_) => 13,
                 Self::UnknownCpuProfile(_, _) => 12,
             }
         }
+    }
+
+    struct FillInputs<'a> {
+        base_dtb: &'a [u8],
+        bootconfig: Option<&'a Path>,
     }
 
     fn guest_writes(
@@ -1620,11 +1653,25 @@ mod launch {
         arch: Arch,
         cpu_compatible: Option<&str>,
         vcpus: u32,
-        base_dtb: &[u8],
+        inputs: FillInputs<'_>,
     ) -> Result<Vec<GuestWrite>, LaunchError> {
+        let base_dtb = inputs.base_dtb;
         let mut writes = Vec::new();
         for action in &parsed.actions {
             match action {
+                PmiAction::Fill {
+                    section,
+                    kind: FillKind::LbcBootconfig,
+                } => {
+                    let target = &parsed.sections[section];
+                    let reservation =
+                        bootconfig::Reservation::read(target.virtual_size, inputs.bootconfig)?;
+                    writes.push(GuestWrite {
+                        section: section.clone(),
+                        gpa: target.gpa,
+                        data: WriteSrc::Owned(reservation.bytes),
+                    });
+                }
                 PmiAction::Load { section } => {
                     let s = &parsed.sections[section];
                     if s.file_size == 0 {
