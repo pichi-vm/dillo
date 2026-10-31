@@ -44,6 +44,7 @@ BuildRequires:  rust >= 1.91
 BuildRequires:  cargo >= 1.91
 # rustc invokes the system compiler to link.
 BuildRequires:  gcc
+BuildRequires:  python3
 
 %description
 Dillo is a virtual machine monitor that boots PMI files. This package
@@ -68,10 +69,31 @@ export SMOLTCP_IFACE_MAX_ADDR_COUNT=4
 %cargo_build -- --locked
 %{cargo_license_summary}
 %{cargo_license} > LICENSE.dependencies
-%{cargo_vendor_manifest}
+# %%cargo_vendor_manifest uses cargo tree --target=all, which panics on
+# the test-only artifact dependencies. Read the same locked source inventory
+# as cargo vendor --locked instead, including optional, build and dev crates.
+# Keep the cargo2rpm manifest format (and Git revisions) so Fedora's automatic
+# bundled(crate(...)) Provides generator still handles cargo-vendor.txt.
+python3 - <<'PY' > cargo-vendor.txt
+import tomllib
+
+with open("Cargo.lock", "rb") as lockfile:
+    packages = tomllib.load(lockfile)["package"]
+for package in sorted(packages, key=lambda p: (p["name"], p["version"])):
+    source = package.get("source")
+    if source is None:
+        continue
+    line = f'{package["name"]} v{package["version"]}'
+    if source.startswith("git+"):
+        line += f' ({source.removeprefix("git+")})'
+    print(line)
+PY
 
 %install
 export SMOLTCP_IFACE_MAX_ADDR_COUNT=4
+# %%cargo_install also probes targets via cargo2rpm outside %%__cargo.
+# Its cargo metadata call must accept the artifact dependency syntax too.
+export RUSTC_BOOTSTRAP=1
 %cargo_install -- --locked
 
 %files
