@@ -34,7 +34,7 @@ use vm_memory::GuestAddress;
 
 use crate::fuse::FsState;
 
-pub use crate::backend::{Attr, DirEntry, FsBackend, MapFs, Passthrough, SetAttr};
+pub use crate::backend::{Attr, DirEntry, FsBackend, MapFs, NodePath, Passthrough, SetAttr};
 
 /// VIRTIO_F_VERSION_1 from the virtio 1.x spec.
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;

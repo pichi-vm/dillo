@@ -26,3 +26,9 @@ unknown-registry = "deny"
 unknown-git = "deny"
 [sources.allow-org]
 github = ["pichi-vm"]   # pmi / devtree / burrow git deps
+
+# Native Windows handle support pulled in by cap-primitives.
+[[licenses.exceptions]]
+name = "winx"
+version = "0.36.4"
+allow = ["Apache-2.0 WITH LLVM-exception"]
