@@ -26,9 +26,6 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install cargo config
-        shell: bash
-        run: mkdir -p .cargo && cp packaging/cargo-config.toml .cargo/config.toml
       # artifact deps make `cargo metadata` nightly-only, so install the pinned
       # toolchain (from rust-toolchain.toml) before cargo-deny reads the tree.
       - run: rustup show
@@ -52,9 +49,6 @@ jobs:
       RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
-      - name: Install cargo config
-        shell: bash
-        run: mkdir -p .cargo && cp packaging/cargo-config.toml .cargo/config.toml
       - name: Install toolchain
         shell: bash
         run: |
@@ -141,10 +135,6 @@ jobs:
     runs-on: ${{ fromJSON(matrix.runs_on) }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install cargo config
-        shell: bash
-        run: mkdir -p .cargo && cp packaging/cargo-config.toml .cargo/config.toml
 
       - name: Install toolchain
         shell: bash

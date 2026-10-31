@@ -62,16 +62,12 @@ cat packaging/cargo-vendor-git.toml >> .cargo/config.toml
 
 %build
 # Use -- to pass Cargo flags through the RPM macros.
-# smoltcp reads SMOLTCP_IFACE_MAX_ADDR_COUNT in its build script (default 2).
-# The virtio-net backend needs 4. %%cargo_prep replaces [env], so export it.
-export SMOLTCP_IFACE_MAX_ADDR_COUNT=4
 %cargo_build -- --locked
 %{cargo_license_summary}
 %{cargo_license} > LICENSE.dependencies
 %{cargo_vendor_manifest}
 
 %install
-export SMOLTCP_IFACE_MAX_ADDR_COUNT=4
 %cargo_install -- --locked
 
 %files

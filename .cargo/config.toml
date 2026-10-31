@@ -20,10 +20,3 @@ rustflags = ["-C", "relocation-model=static", "-C", "linker=rust-lld"]
 
 [target.aarch64-unknown-linux-musl]
 rustflags = ["-C", "relocation-model=static", "-C", "linker=rust-lld"]
-
-# smoltcp sizes the interface's address list at build time (default 2). The
-# user-mode virtio-net backend (dillo-virtio-net) owns four interface addresses
-# — IPv4 gateway + DNS aliases and their IPv6 equivalents — so raise the cap.
-# Without this, the extra addresses silently fail to register and IPv6 breaks.
-[env]
-SMOLTCP_IFACE_MAX_ADDR_COUNT = "4"
