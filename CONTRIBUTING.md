@@ -2,17 +2,15 @@
 
 ## Cargo config
 
-`.cargo/config.toml` is not committed. Copy the developer config before
-building or testing:
+The checked-in `.cargo/config.toml` enables artifact dependencies, so a
+fresh checkout builds with `cargo build`.
 
-```
-mkdir -p .cargo
-cp .copr/cargo-config.toml .cargo/config.toml
-```
+Tests cross-build a Linux guest probe and use the existing linker settings
+in the packaging configuration:
 
-That file enables artifact dependencies (`-Z bindeps`), sets the musl
-rustflags used to cross-build the snuffler guest probe, and raises
-smoltcp's interface address cap.
+```sh
+cargo --config .copr/cargo-config.toml test --workspace
+```
 
 ## Commit messages
 
