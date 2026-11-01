@@ -117,8 +117,11 @@ vm-superio = "0.8"
 nix = { version = "0.30", features = ["fs", "process", "signal", "ioctl", "mman", "socket", "term"] }
 
 # virtio-net user-mode backend: in-process TCP/IP stack (smoltcp) plus a
-# cross-platform host-socket event loop (mio).
-smoltcp = { version = "0.13", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp", "auto-icmp-echo-reply"] }
+# cross-platform host-socket event loop (mio). smoltcp fixes the length of an
+# interface's address list when it is compiled (2 by default). The backend's
+# interface owns four addresses (IPv4 and IPv6 gateway and DNS), so
+# `iface-max-addr-count-4` raises that length to 4 for every build.
+smoltcp = { version = "0.13", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp", "auto-icmp-echo-reply", "iface-max-addr-count-4"] }
 mio = { version = "1", features = ["os-poll", "net"] }
 
 # Logging

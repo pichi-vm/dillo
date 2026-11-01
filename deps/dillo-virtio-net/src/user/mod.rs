@@ -94,6 +94,24 @@ pub(crate) const MTU: usize = 1500;
 /// smoltcp's `max_transmission_unit` means for an Ethernet medium.
 pub(crate) const ETH_FRAME_MTU: usize = MTU + 14;
 
+/// The addresses the smoltcp interface owns: the IPv4 and IPv6 gateway and DNS
+/// aliases.
+const INTERFACE_ADDRS: [IpCidr; 4] = [
+    IpCidr::new(GATEWAY_IP, SUBNET_PREFIX),
+    IpCidr::new(DNS_IP, SUBNET_PREFIX),
+    IpCidr::new(GATEWAY_IP6, SUBNET_PREFIX6),
+    IpCidr::new(DNS_IP6, SUBNET_PREFIX6),
+];
+
+// smoltcp fixes the length of an interface's address list when it is compiled
+// (2 by default). The workspace `Cargo.toml` turns on smoltcp's
+// `iface-max-addr-count-4` feature to make room. Check that here, so a list
+// that is too short fails the build instead of crashing when the device starts.
+const _: () = assert!(
+    INTERFACE_ADDRS.len() <= smoltcp::config::IFACE_MAX_ADDR_COUNT,
+    "smoltcp interface address list is too short; enable a larger iface-max-addr-count feature"
+);
+
 /// The MAC the smoltcp interface (the gateway side) presents. Locally
 /// administered and distinct from any guest MAC; the guest learns it via ARP
 /// (v4) or the Router Advertisement's source link-layer option (v6).
@@ -227,28 +245,18 @@ impl Drop for UserNetBackend {
 /// gateway/DNS aliases, accepts packets to any destination (so it can terminate
 /// the guest's outbound flows), and routes everything via itself.
 ///
-/// The interface holds four addresses (v4 gateway + DNS, v6 gateway + DNS); the
-/// smoltcp build-time `SMOLTCP_IFACE_MAX_ADDR_COUNT` is raised to 4 in the
-/// workspace `.cargo/config.toml` to fit them. The `push` results are asserted
-/// (not ignored) so a future address that overflows the cap fails loudly here
-/// rather than silently dropping and breaking routing.
+/// The interface holds the four [`INTERFACE_ADDRS`]. The check next to that
+/// list stops the build if smoltcp does not have room for all of them.
 fn build_interface(device: &mut device::ProxyDevice) -> Interface {
     let mut config = Config::new(EthernetAddress(GATEWAY_MAC).into());
     config.random_seed = random_seed();
     let mut iface = Interface::new(config, device, Instant::now());
     iface.update_ip_addrs(|addrs| {
-        addrs
-            .push(IpCidr::new(GATEWAY_IP, SUBNET_PREFIX))
-            .expect("iface addr cap too small for IPv4 gateway");
-        addrs
-            .push(IpCidr::new(DNS_IP, SUBNET_PREFIX))
-            .expect("iface addr cap too small for IPv4 DNS");
-        addrs
-            .push(IpCidr::new(GATEWAY_IP6, SUBNET_PREFIX6))
-            .expect("iface addr cap too small for IPv6 gateway");
-        addrs
-            .push(IpCidr::new(DNS_IP6, SUBNET_PREFIX6))
-            .expect("iface addr cap too small for IPv6 DNS");
+        for addr in INTERFACE_ADDRS {
+            addrs
+                .push(addr)
+                .expect("INTERFACE_ADDRS fits; checked at compile time");
+        }
     });
     // Default routes via the interface's own gateway addresses, paired with
     // `set_any_ip`, let smoltcp locally terminate connections to arbitrary
