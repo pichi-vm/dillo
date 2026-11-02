@@ -596,7 +596,7 @@ fn large_object(root: &Path) -> io::Result<()> {
     let guest_path = root.join(VIRTIOFS_LARGE_GUEST_FILE);
     let mut guest = File::create(&guest_path)?;
     let mut offset = 0usize;
-    let mut chunk = [0u8; 64 * 1024];
+    let mut chunk = vec![0u8; 64 * 1024];
     while offset < VIRTIOFS_LARGE_LEN {
         let n = (VIRTIOFS_LARGE_LEN - offset).min(chunk.len());
         for (index, slot) in chunk[..n].iter_mut().enumerate() {

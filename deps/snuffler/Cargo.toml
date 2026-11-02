@@ -54,3 +54,6 @@ rustix = { version = "1", default-features = false, features = [
 # on the host lib instance, not the cross-built bin (see the rustix note above).
 [target.'cfg(unix)'.dependencies]
 vsock = "0.5"
+
+[lints]
+workspace = true

@@ -129,16 +129,13 @@ fn read_kernel_log() -> KernelLog {
     let mut buf = [0u8; 8192];
     loop {
         match rustix::io::read(&fd, &mut buf) {
-            Ok(0) => break,
+            Err(rustix::io::Errno::INTR) => continue,
+            // EOF, AGAIN (drained), or another error ends the snapshot.
+            Ok(0) | Err(_) => break,
             Ok(n) => {
                 let line = String::from_utf8_lossy(&buf[..n]);
                 entries.push(parse_kmsg_record(line.trim_end_matches('\n')));
             }
-            // AGAIN: ring buffer drained. EPIPE: records were overwritten while
-            // reading — stop either way.
-            Err(rustix::io::Errno::AGAIN) => break,
-            Err(rustix::io::Errno::INTR) => continue,
-            Err(_) => break,
         }
     }
     KernelLog {
@@ -338,6 +335,8 @@ fn cmdline_token(cmdline: &str, prefix: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+// Throughput is approximate telemetry; exact integer precision is unnecessary.
+#[allow(clippy::cast_precision_loss)]
 fn net_mibps(bytes: u64, us: u64) -> f64 {
     if us == 0 {
         0.0
@@ -721,11 +720,17 @@ fn run_vsock_probe(port: u32) -> VsockResult {
 /// Read the 8-byte `/chosen/kaslr-seed` the kernel received, as lowercase hex
 /// (FDT big-endian order). `None` if absent (x86 / no device tree) or malformed.
 fn read_kaslr_seed() -> Option<String> {
+    use std::fmt::Write as _;
+
     let bytes = fs::read("/proc/device-tree/chosen/kaslr-seed").ok()?;
     if bytes.len() != 8 {
         return None;
     }
-    Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    let mut seed = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(seed, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Some(seed)
 }
 
 fn read_trim(p: &str) -> String {
@@ -916,7 +921,7 @@ fn walk_block() -> Vec<BlockDevice> {
         let model = read_opt(&path.join("device/model"));
         let ro = read_opt(&path.join("ro")).as_deref() == Some("1");
         let size_bytes = size_sectors.saturating_mul(512);
-        let bench = bench::benchmark_device(&name, size_bytes, ro);
+        let bench = Some(bench::benchmark_device(&name, size_bytes, ro));
         out.push(BlockDevice {
             name,
             size_bytes,
@@ -995,7 +1000,7 @@ fn walk_serial() -> Vec<SerialPort> {
                 "port".to_string(),
                 read_opt(&path.join("port")).and_then(parse_hex_or_dec_u64),
             ),
-            Some("2") | Some("3") => (
+            Some("2" | "3") => (
                 "mem".to_string(),
                 read_opt(&path.join("iomem_base")).and_then(parse_hex_or_dec_u64),
             ),

@@ -32,11 +32,11 @@ const TOTAL_CAP: u64 = 16 * 1024 * 1024;
 /// Number of random ops (scaled down for tiny devices).
 const RAND_OPS: u64 = 256;
 
-pub(crate) fn benchmark_device(name: &str, size_bytes: u64, ro: bool) -> Option<BlkBench> {
+pub(crate) fn benchmark_device(name: &str, size_bytes: u64, ro: bool) -> BlkBench {
     if size_bytes < RAND_BLK as u64 {
-        return Some(err_bench(format!(
+        return err_bench(format!(
             "device too small to benchmark ({size_bytes} bytes)"
-        )));
+        ));
     }
 
     let path = format!("/dev/{name}");
@@ -45,7 +45,7 @@ pub(crate) fn benchmark_device(name: &str, size_bytes: u64, ro: bool) -> Option<
         Ok(fd) => (fd, "o_direct"),
         Err(_) => match rustix::fs::open(&path, base, Mode::empty()) {
             Ok(fd) => (fd, "buffered"),
-            Err(e) => return Some(err_bench(format!("open {path}: {e}"))),
+            Err(e) => return err_bench(format!("open {path}: {e}")),
         },
     };
 
@@ -85,7 +85,7 @@ pub(crate) fn benchmark_device(name: &str, size_bytes: u64, ro: bool) -> Option<
         ));
     }
 
-    Some(BlkBench {
+    BlkBench {
         mode: mode.to_string(),
         seq_read,
         rand_read,
@@ -93,7 +93,7 @@ pub(crate) fn benchmark_device(name: &str, size_bytes: u64, ro: bool) -> Option<
         rand_write,
         ro_write_rejected,
         error: None,
-    })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -266,6 +266,8 @@ fn err_bench(msg: String) -> BlkBench {
     }
 }
 
+// Throughput is approximate telemetry; exact integer precision is unnecessary.
+#[allow(clippy::cast_precision_loss)]
 fn mibps(bytes: u64, us: u64) -> f64 {
     if us == 0 {
         0.0
