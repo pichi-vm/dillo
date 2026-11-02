@@ -236,7 +236,7 @@ hex = "0.4"                                         # hex-encode digests
 
 # Named-console-port e2e: parent creates pipes and hands device-side ends to
 # dillo by inheritance. Unix uses workspace nix (pipe/fcntl); Windows uses
-# CreatePipe + inheritable HANDLEs (see tests/boot.rs).
+# CreatePipe + inheritable HANDLEs (see tests/boot/main.rs).
 [target.'cfg(unix)'.dev-dependencies]
 nix = { workspace = true }
 # Host witness for the virtiofs xattr round-trip.

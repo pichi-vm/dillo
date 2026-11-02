@@ -29,9 +29,7 @@ use snuffler::{REPORT_BEGIN, REPORT_END, Report};
 use tempfile::TempDir;
 use wait_timeout::ChildExt;
 
-#[path = "boot/bootconfig.rs"]
 mod bootconfig;
-#[path = "boot/virtiofs.rs"]
 mod virtiofs;
 
 // dillo boots a same-arch guest, so the host arch picks the kernel.
