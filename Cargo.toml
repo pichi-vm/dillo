@@ -41,6 +41,7 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 unreachable_pub = "warn"
 
 [workspace.lints.clippy]
+self_named_module_files = "deny"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
@@ -236,7 +237,7 @@ hex = "0.4"                                         # hex-encode digests
 
 # Named-console-port e2e: parent creates pipes and hands device-side ends to
 # dillo by inheritance. Unix uses workspace nix (pipe/fcntl); Windows uses
-# CreatePipe + inheritable HANDLEs (see tests/boot.rs).
+# CreatePipe + inheritable HANDLEs (see tests/boot/main.rs).
 [target.'cfg(unix)'.dev-dependencies]
 nix = { workspace = true }
 # Host witness for the virtiofs xattr round-trip.
