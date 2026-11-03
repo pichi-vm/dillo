@@ -737,6 +737,8 @@ mod placement {
 
     #[derive(Debug, Error)]
     pub(crate) enum PlanError {
+        #[error("guest range {base:#x} + {size:#x} overflows after 2 MiB rounding")]
+        AddressOverflow { base: u64, size: u64 },
         #[error(
             "--memory {requested_mib} MiB is less than the {islands_mib} MiB required to cover \
              loaded sections + reset trampoline"
@@ -774,17 +776,15 @@ mod placement {
     where
         I: IntoIterator<Item = (u64, u64)>,
     {
-        let budget = round_up_2mib(u64::from(memory_mib) * (1 << 20));
+        let budget = round_up_2mib(u64::from(memory_mib) * (1 << 20))
+            .expect("a u32 MiB budget fits in u64 after rounding");
 
         // ── 1. Islands ────────────────────────────────────────────────
         let mut islands: Vec<Interval> = must_cover
             .iter()
             .filter(|(_, s)| *s > 0)
-            .map(|&(gpa, size)| Interval {
-                start: gpa & !(HUGE_PAGE - 1),
-                end: round_up_2mib(gpa.saturating_add(size)),
-            })
-            .collect();
+            .map(|&(gpa, size)| rounded_interval(gpa, size))
+            .collect::<Result<_, _>>()?;
         merge_intervals(&mut islands);
 
         let islands_total: u64 = islands.iter().map(|i| i.end - i.start).sum();
@@ -814,7 +814,7 @@ mod placement {
 
         // ── 2. Big chunk ─────────────────────────────────────────────
         let device_regions: Vec<_> = device_regions.into_iter().collect();
-        let mut holes: Vec<Interval> = device_holes(device_regions.iter().copied());
+        let mut holes: Vec<Interval> = device_holes(device_regions.iter().copied())?;
         holes.extend(islands.iter().copied());
         merge_intervals(&mut holes);
 
@@ -855,7 +855,8 @@ mod placement {
         for ram in &regions {
             let ram_end = ram.gpa + ram.size;
             for &(device_start, device_size) in &device_regions {
-                let device_end = device_start.saturating_add(device_size);
+                // Nonempty device ranges were checked by device_holes.
+                let device_end = device_start + device_size;
                 if device_size > 0 && ram.gpa < device_end && device_start < ram_end {
                     return Err(PlanError::RamOverlapsDevice {
                         ram_start: ram.gpa,
@@ -874,18 +875,26 @@ mod placement {
     }
 
     /// Device MMIO regions, rounded outward to 2 MiB.
-    fn device_holes<I>(regions: I) -> Vec<Interval>
+    fn device_holes<I>(regions: I) -> Result<Vec<Interval>, PlanError>
     where
         I: IntoIterator<Item = (u64, u64)>,
     {
         regions
             .into_iter()
             .filter(|(_, size)| *size > 0)
-            .map(|(base, size)| Interval {
-                start: base & !(HUGE_PAGE - 1),
-                end: round_up_2mib(base.saturating_add(size)),
-            })
+            .map(|(base, size)| rounded_interval(base, size))
             .collect()
+    }
+
+    fn rounded_interval(base: u64, size: u64) -> Result<Interval, PlanError> {
+        let end = base
+            .checked_add(size)
+            .and_then(round_up_2mib)
+            .ok_or(PlanError::AddressOverflow { base, size })?;
+        Ok(Interval {
+            start: base & !(HUGE_PAGE - 1),
+            end,
+        })
     }
 
     fn to_region(i: &Interval) -> Region {
@@ -919,7 +928,7 @@ mod placement {
     fn find_lowest_fit(size: u64, holes: &[Interval], ceiling: u64) -> Option<Interval> {
         let mut cursor: u64 = 0;
         for h in holes {
-            let candidate_end = cursor.saturating_add(size);
+            let candidate_end = cursor.checked_add(size)?;
             if candidate_end <= h.start && candidate_end <= ceiling {
                 return Some(Interval {
                     start: cursor,
@@ -927,9 +936,9 @@ mod placement {
                 });
             }
             cursor = cursor.max(h.end);
-            cursor = round_up_2mib(cursor);
+            cursor = round_up_2mib(cursor)?;
         }
-        let candidate_end = cursor.saturating_add(size);
+        let candidate_end = cursor.checked_add(size)?;
         if candidate_end <= ceiling {
             Some(Interval {
                 start: cursor,
@@ -940,13 +949,37 @@ mod placement {
         }
     }
 
-    fn round_up_2mib(n: u64) -> u64 {
-        (n + HUGE_PAGE - 1) & !(HUGE_PAGE - 1)
+    fn round_up_2mib(n: u64) -> Option<u64> {
+        n.checked_add(HUGE_PAGE - 1)
+            .map(|end| end & !(HUGE_PAGE - 1))
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn rejects_range_and_alignment_overflow() {
+            for range in [(u64::MAX, 2), (u64::MAX - 1, 1)] {
+                assert!(matches!(
+                    plan_around_regions(&[range], 2, []),
+                    Err(PlanError::AddressOverflow { .. })
+                ));
+                assert!(matches!(
+                    plan_around_regions(&[], 2, [range]),
+                    Err(PlanError::AddressOverflow { .. })
+                ));
+            }
+        }
+
+        #[test]
+        fn fit_does_not_saturate_at_the_address_limit() {
+            let holes = [Interval {
+                start: 0,
+                end: !(HUGE_PAGE - 1),
+            }];
+            assert!(find_lowest_fit(HUGE_PAGE, &holes, u64::MAX).is_none());
+        }
 
         #[test]
         fn merge_intervals_basic() {
