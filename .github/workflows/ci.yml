@@ -94,6 +94,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features
+      - run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --all-features
 
   # Independent of the OS matrix: packaging-only flakes must not burn
   # those runners. Copr runs this Makefile as root with dnf; here we
