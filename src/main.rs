@@ -757,11 +757,12 @@ mod placement {
             islands_mib: u64,
         },
         #[error(
-            "no contiguous {remaining_mib} MiB chunk fits in the {address_bits}-bit address space \
-             after carving out islands and device regions"
+            "requested {requested_mib} MiB, but only {available_mib} MiB fits in the \
+             {address_bits}-bit guest address space after excluding device regions"
         )]
-        NoSpaceForBigChunk {
-            remaining_mib: u64,
+        InsufficientCapacity {
+            requested_mib: u64,
+            available_mib: u64,
             address_bits: u32,
         },
         #[error(
@@ -823,9 +824,9 @@ mod placement {
                 islands_mib: islands_total >> 20,
             });
         }
-        let remaining = budget - islands_total;
+        let mut remaining = budget - islands_total;
 
-        // ── 2. Big chunk ─────────────────────────────────────────────
+        // ── 2. Fill available gaps, lowest addresses first ────────────
         let device_regions: Vec<_> = device_regions.into_iter().collect();
         let mut holes: Vec<Interval> = device_holes(device_regions.iter().copied())?;
         for range in islands.iter().chain(&holes) {
@@ -845,32 +846,37 @@ mod placement {
             log::debug!("  hole [{:#x}..{:#x})", h.start, h.end);
         }
 
-        let big_chunk = if remaining == 0 {
-            None
-        } else {
-            Some(find_lowest_fit(remaining, &holes, ceiling).ok_or(
-                PlanError::NoSpaceForBigChunk {
-                    remaining_mib: remaining >> 20,
-                    address_bits,
-                },
-            )?)
+        let mut ranges = islands;
+        let mut cursor = 0;
+        let limit = Interval {
+            start: ceiling,
+            end: ceiling,
         };
-
-        if let Some(c) = big_chunk {
-            log::debug!(
-                "placement: big_chunk [{:#x}..{:#x}) ({} MiB)",
-                c.start,
-                c.end,
-                (c.end - c.start) >> 20,
-            );
+        for hole in holes.iter().chain(std::iter::once(&limit)) {
+            let size = remaining.min(hole.start - cursor);
+            if size > 0 {
+                ranges.push(Interval {
+                    start: cursor,
+                    end: cursor + size,
+                });
+                remaining -= size;
+            }
+            if remaining == 0 {
+                break;
+            }
+            cursor = hole.end;
+        }
+        if remaining > 0 {
+            return Err(PlanError::InsufficientCapacity {
+                requested_mib: budget >> 20,
+                available_mib: (budget - remaining) >> 20,
+                address_bits,
+            });
         }
 
         // ── 3. Assemble final region set ─────────────────────────────
-        let mut regions: Vec<Region> = islands.iter().map(to_region).collect();
-        if let Some(c) = big_chunk {
-            regions.push(to_region(&c));
-        }
-        regions.sort_by_key(|r| r.gpa);
+        merge_intervals(&mut ranges);
+        let regions: Vec<Region> = ranges.iter().map(to_region).collect();
 
         // Section-byte validation cannot see devices in the padding added by
         // hugepage rounding. Check every final RAM extent before publishing
@@ -946,32 +952,6 @@ mod placement {
         *v = out;
     }
 
-    /// Find the lowest 2 MiB-aligned start such that `[start, start + size)`
-    /// is clear of every hole and ends at or below `ceiling`.
-    fn find_lowest_fit(size: u64, holes: &[Interval], ceiling: u64) -> Option<Interval> {
-        let mut cursor: u64 = 0;
-        for h in holes {
-            let candidate_end = cursor.checked_add(size)?;
-            if candidate_end <= h.start && candidate_end <= ceiling {
-                return Some(Interval {
-                    start: cursor,
-                    end: candidate_end,
-                });
-            }
-            cursor = cursor.max(h.end);
-            cursor = round_up_2mib(cursor)?;
-        }
-        let candidate_end = cursor.checked_add(size)?;
-        if candidate_end <= ceiling {
-            Some(Interval {
-                start: cursor,
-                end: candidate_end,
-            })
-        } else {
-            None
-        }
-    }
-
     fn round_up_2mib(n: u64) -> Option<u64> {
         n.checked_add(HUGE_PAGE - 1)
             .map(|end| end & !(HUGE_PAGE - 1))
@@ -1014,7 +994,7 @@ mod placement {
             assert_eq!(plan.memslots[0].size, 8 << 20);
             assert!(matches!(
                 plan_around_regions(23, &[], 10, []),
-                Err(PlanError::NoSpaceForBigChunk { .. })
+                Err(PlanError::InsufficientCapacity { .. })
             ));
             for bits in [0, 64, 128] {
                 assert!(matches!(
@@ -1022,6 +1002,101 @@ mod placement {
                     Err(PlanError::InvalidAddressBits(_))
                 ));
             }
+        }
+
+        #[test]
+        fn fragmented_capacity_is_combined_and_counted_exactly() {
+            // Eight 2 MiB pages, with device holes in pages 1, 3 and 6.
+            // The other five pages fit even though no gap holds the budget.
+            let devices = [(2 << 20, 2 << 20), (6 << 20, 2 << 20), (12 << 20, 2 << 20)];
+            let plan = plan_around_regions(24, &[(8 << 20, 1)], 10, devices).unwrap();
+            let ranges = plan
+                .memslots
+                .iter()
+                .map(|r| (r.gpa, r.size))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ranges,
+                vec![
+                    (0, 2 << 20),
+                    (4 << 20, 2 << 20),
+                    (8 << 20, 4 << 20),
+                    (14 << 20, 2 << 20)
+                ]
+            );
+            assert_eq!(
+                ranges,
+                plan.memory_nodes
+                    .iter()
+                    .map(|r| (r.gpa, r.size))
+                    .collect::<Vec<_>>()
+            );
+            assert!(matches!(
+                plan_around_regions(24, &[(8 << 20, 1)], 12, devices),
+                Err(PlanError::InsufficientCapacity {
+                    requested_mib: 12,
+                    available_mib: 10,
+                    ..
+                })
+            ));
+        }
+
+        #[test]
+        fn every_eight_page_fragmentation_matches_usable_capacity() {
+            for mask in 0u8..=255 {
+                let devices = (0..8)
+                    .filter(|page| mask & (1 << page) != 0)
+                    .map(|page| (page * HUGE_PAGE, HUGE_PAGE))
+                    .collect::<Vec<_>>();
+                let available = 8 - mask.count_ones();
+                for pages in 0..=9 {
+                    let result = plan_around_regions(24, &[], pages * 2, devices.iter().copied());
+                    if pages > available {
+                        assert!(matches!(
+                            result,
+                            Err(PlanError::InsufficientCapacity { .. })
+                        ));
+                        continue;
+                    }
+                    let plan = result.unwrap();
+                    assert_eq!(
+                        plan.memslots.iter().map(|r| r.size).sum::<u64>(),
+                        u64::from(pages) * HUGE_PAGE
+                    );
+                    for range in plan.memslots {
+                        for page in range.gpa / HUGE_PAGE..(range.gpa + range.size) / HUGE_PAGE {
+                            assert!(page < 8 && mask & (1 << page) == 0);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn rounded_islands_share_the_budget_and_coalesce() {
+            let islands = [(1, 1), (HUGE_PAGE - 1, 2)];
+            assert!(matches!(
+                plan_around_regions(32, &islands, 2, []),
+                Err(PlanError::TooLittleMemory { islands_mib: 4, .. })
+            ));
+            let plan = plan_around_regions(32, &islands, 5, []).unwrap();
+            assert_eq!(plan.memslots.len(), 1);
+            assert_eq!((plan.memslots[0].gpa, plan.memslots[0].size), (0, 6 << 20));
+        }
+
+        #[test]
+        fn four_gib_budget_fills_both_sides_of_device_holes() {
+            let devices = [(0xfec0_0000, 0x1000), (0xfee0_0000, 0x1000)];
+            let plan = plan_around_regions(36, &[(0x100_0000, HUGE_PAGE)], 4096, devices).unwrap();
+            assert_eq!(plan.memslots.iter().map(|r| r.size).sum::<u64>(), 1 << 32);
+            assert!(plan.memslots.iter().any(|r| r.gpa + r.size > 1 << 32));
+            assert!(matches!(
+                plan_around_regions(32, &[(0x100_0000, HUGE_PAGE)], 4096, devices),
+                Err(PlanError::InsufficientCapacity {
+                    available_mib: 4092,
+                    ..
+                })
+            ));
         }
 
         #[test]
@@ -1039,15 +1114,6 @@ mod placement {
         }
 
         #[test]
-        fn fit_does_not_saturate_at_the_address_limit() {
-            let holes = [Interval {
-                start: 0,
-                end: !(HUGE_PAGE - 1),
-            }];
-            assert!(find_lowest_fit(HUGE_PAGE, &holes, u64::MAX).is_none());
-        }
-
-        #[test]
         fn merge_intervals_basic() {
             let mut v = vec![
                 Interval { start: 10, end: 20 },
@@ -1058,42 +1124,6 @@ mod placement {
             assert_eq!(v.len(), 1);
             assert_eq!(v[0].start, 10);
             assert_eq!(v[0].end, 40);
-        }
-
-        #[test]
-        fn find_lowest_fit_skips_holes() {
-            let holes = vec![
-                Interval {
-                    start: 0x10_0000,
-                    end: 0x20_0000,
-                },
-                Interval {
-                    start: 0x40_0000,
-                    end: 0x60_0000,
-                },
-            ];
-            let r = find_lowest_fit(0x10_0000, &holes, u64::MAX).unwrap();
-            assert_eq!(r.start, 0);
-            assert_eq!(r.end, 0x10_0000);
-
-            let r = find_lowest_fit(0x20_0000, &holes, u64::MAX).unwrap();
-            assert_eq!(r.start, 0x20_0000);
-            assert_eq!(r.end, 0x40_0000);
-
-            let r = find_lowest_fit(0x40_0000, &holes, u64::MAX).unwrap();
-            assert_eq!(r.start, 0x60_0000);
-        }
-
-        #[test]
-        fn find_lowest_fit_respects_ceiling() {
-            let holes = vec![Interval {
-                start: 0x10_0000,
-                end: 0x20_0000,
-            }];
-            // Need 0x40_0000, ceiling 0x50_0000, hole at [1M, 2M)
-            // → candidate at 0 (size 4M) ends at 4M, ≤ ceiling? No — overlaps hole.
-            // → candidate at 2M ends at 6M > 5M → rejected.
-            assert!(find_lowest_fit(0x40_0000, &holes, 0x50_0000).is_none());
         }
 
         #[test]
@@ -1120,7 +1150,7 @@ mod placement {
                 // Direct byte overlap remains invalid.
                 ((0x10_0000, 0x1000), (0x10_0000, 4)),
             ] {
-                // Exercise both an island-only plan and one with a big chunk.
+                // Exercise both an island-only plan and one with additional RAM.
                 let island_mib = if must_cover.1 > HUGE_PAGE { 4 } else { 2 };
                 for memory_mib in [island_mib, 8] {
                     let err = plan_around_regions(32, &[must_cover], memory_mib, [device])
