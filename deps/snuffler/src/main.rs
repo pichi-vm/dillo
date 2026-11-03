@@ -36,6 +36,7 @@ use snuffler::{
 };
 
 mod bench;
+mod memory;
 mod virtiofs;
 
 #[cfg(not(test))]
@@ -259,6 +260,7 @@ fn observe() -> Report {
         boot_to_userspace_ns: None,
         cpu: read_cpu(),
         memory: read_memory(),
+        memory_probe: memory::probe(&cmdline),
         consoles: read_consoles(),
         pci: walk_pci(),
         block: walk_block(),

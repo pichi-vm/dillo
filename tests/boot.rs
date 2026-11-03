@@ -102,6 +102,7 @@ const KERNELS: &[Entry] = &[
             "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155.config",
         ),
         builtins: &[
+            "PROC_PAGE_MONITOR",
             "PCI",
             "VIRTIO_PCI",
             "VIRTIO_MMIO",
@@ -162,6 +163,7 @@ const KERNELS: &[Entry] = &[
             "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/aarch64/vmlinux-6.1.155.config",
         ),
         builtins: &[
+            "PROC_PAGE_MONITOR",
             "PCI",
             "VIRTIO_PCI",
             "VIRTIO_MMIO",
@@ -395,11 +397,23 @@ fn build_pmi_from_path(
     cmdline: &str,
     serial: bool,
 ) -> PathBuf {
+    build_pmi_with_platform(dir, kernel, config, cmdline, serial, &[])
+}
+
+fn build_pmi_with_platform(
+    dir: &Path,
+    kernel: &Path,
+    config: &str,
+    cmdline: &str,
+    serial: bool,
+    platform_args: &[&str],
+) -> PathBuf {
     let cfg = dir.join("kernel.config");
     std::fs::write(&cfg, config).unwrap();
     let pmi = dir.join("boot.pmi");
     let mut cmd = Command::new(env!("CARGO_BIN_FILE_ARMA_arma"));
     cmd.arg("build")
+        .args(platform_args)
         .args(["--cmdline", cmdline])
         .args(["--profile", host::PROFILE])
         .arg("--config")
@@ -515,6 +529,72 @@ fn boots_and_reports(#[values(256, 1024)] mem_mib: u32, #[values(1, 2)] cpus: u3
         "hvc0 not among consoles: {:?}",
         r.consoles
     );
+}
+
+#[rstest]
+#[ignore = "requires a host provisioned for an 8 GiB guest; run explicitly in the memory CI lane"]
+fn boots_with_large_memory(#[values(4096, 8192)] mem_mib: u32) {
+    assert!(
+        hypervisor_available(),
+        "large-memory validation requires a native hypervisor"
+    );
+    let kernel = require(
+        &["PCI", "VIRTIO_PCI", "VIRTIO_CONSOLE", "PROC_PAGE_MONITOR"],
+        &[],
+    )
+    .expect("kernel DB: no kernel with pagemap and the required transports");
+    let tmp = TempDir::new().unwrap();
+    // A declared 512 MiB PCI window below 4 GiB leaves enough high RAM for
+    // userspace even at the 4096 MiB budget. The default x86 layout spills
+    // only 4 MiB high, which Linux may consume during boot.
+    let pmi = build_pmi_with_platform(
+        tmp.path(),
+        &kernel,
+        host::CONFIG,
+        "console=hvc0 dillo.memory_probe",
+        false,
+        &["--min-addr-space", "32", "--pci-window", "29"],
+    );
+    let output = boot_with_env(
+        &pmi,
+        mem_mib,
+        1,
+        tmp.path(),
+        &["--preallocate"],
+        &[("RUST_LOG", "dillo=debug")],
+    );
+    if let Some(dir) = std::env::var_os("DILLO_MEMORY_EVIDENCE") {
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{}-{mem_mib}MiB.log", host::ARCH)),
+            &output,
+        )
+        .unwrap();
+    }
+    let report = parse_report(&output).unwrap_or_else(|| panic!("guest did not report:\n{output}"));
+    let probe = report.memory_probe.expect("guest memory probe");
+    println!(
+        "{} {mem_mib} MiB: MemTotal={} KiB; {probe:?}",
+        host::ARCH,
+        report.memory.total_kib
+    );
+    assert!(probe.error.is_none(), "memory probe: {probe:?}");
+    assert!(probe.high_pages > 0 && probe.highest_address >= 1 << 32);
+    assert_eq!(probe.verified_pages * probe.page_size, 256 << 20);
+    let requested = u64::from(mem_mib) << 20;
+    let system_ram: u64 = probe
+        .system_ram
+        .iter()
+        .map(|(start, end)| end - start)
+        .sum();
+    // x86 reserves small firmware/legacy regions below 1 MiB. The kernel's
+    // own allocations affect MemTotal, but remain within System RAM.
+    assert!(
+        system_ram >= requested - (2 << 20) && system_ram <= requested,
+        "System RAM {system_ram} does not match requested {requested}"
+    );
+    assert!(report.memory.total_kib >= (requested >> 10) * 9 / 10);
 }
 
 /// arm64 KASLR end-to-end: tatu overwrites the measured base DTB's
