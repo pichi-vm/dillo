@@ -198,8 +198,8 @@ jobs:
         if: runner.os == 'Linux'
         run: ls -l /dev/kvm && sudo chmod 666 /dev/kvm || true
 
-      - name: Test (Linux, full workspace)
-        if: runner.os == 'Linux'
+      - name: Test (Linux x86_64, full workspace)
+        if: matrix.os == 'ubuntu-24.04'
         shell: bash
         env:
           CARGO_BUILD_RUSTFLAGS: "-D warnings"
@@ -215,13 +215,6 @@ jobs:
           # so it is Unix-only; dillo depends on it via cfg(unix) and never
           # builds it on Windows. snuffler is the Linux guest probe.
           cargo test --workspace --exclude snuffler --exclude dillo-virtio-vsock
-
-      - name: Test (macOS, workspace minus Linux-only crates)
-        if: runner.os == 'macOS'
-        shell: bash
-        env:
-          CARGO_BUILD_RUSTFLAGS: "-D warnings"
-        run: cargo test --workspace --exclude snuffler
 
       - name: Reserve hugepages for guest RAM (Linux/KVM)
         if: runner.os == 'Linux'
@@ -272,3 +265,36 @@ jobs:
         with:
           name: memory-evidence-${{ matrix.name }}
           path: target/memory-evidence
+
+  workspace:
+    name: workspace tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install cargo config
+        shell: bash
+        run: mkdir -p .cargo && cp packaging/cargo-config.toml .cargo/config.toml
+      - name: Install toolchain
+        shell: bash
+        run: |
+          rustup toolchain install "$NIGHTLY" --profile minimal --component rust-src
+          rustup default "$NIGHTLY"
+          rustup target add x86_64-unknown-none aarch64-unknown-none aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (Linux, full workspace)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+        run: cargo test --workspace
+
+      - name: Test (macOS, workspace minus Linux-only crates)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+        run: cargo test --workspace --exclude snuffler
