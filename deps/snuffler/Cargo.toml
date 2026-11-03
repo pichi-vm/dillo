@@ -38,6 +38,7 @@ rustix = { version = "1", default-features = false, features = [
     "system",
     "stdio",
     "process",
+    "param",
     "time",
 ] }
 # AF_VSOCK has no safe rustix wrapper; the `vsock` crate provides a std::io

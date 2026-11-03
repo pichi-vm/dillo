@@ -37,6 +37,9 @@ pub struct Report {
     pub boot_to_userspace_ns: Option<u64>,
     pub cpu: CpuInfo,
     pub memory: MemoryInfo,
+    /// Opt-in physical memory access check (`dillo.memory_probe`).
+    #[serde(default)]
+    pub memory_probe: Option<MemoryProbe>,
     pub consoles: Vec<String>,
     pub pci: Vec<PciDevice>,
     pub block: Vec<BlockDevice>,
@@ -294,6 +297,17 @@ pub struct MemoryInfo {
     pub total_kib: u64,
     pub free_kib: u64,
     pub available_kib: u64,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct MemoryProbe {
+    /// Linux System RAM ranges, as (start, exclusive end) physical addresses.
+    pub system_ram: Vec<(u64, u64)>,
+    pub page_size: u64,
+    pub verified_pages: u64,
+    pub high_pages: u64,
+    pub highest_address: u64,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
