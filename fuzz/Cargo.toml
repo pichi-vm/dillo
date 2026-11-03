@@ -50,3 +50,6 @@ path = "fuzz_targets/ndp_parse.rs"
 test = false
 doc = false
 bench = false
+
+[lints.clippy]
+self_named_module_files = "deny"
