@@ -50,6 +50,14 @@ pub enum HostArchitecture {
     Aarch64,
 }
 
+/// Decode the architectural ARM physical-address range, rejecting reserved
+/// encodings instead of inventing a usable width.
+pub fn aarch64_pa_bits(mmfr0: u64) -> Option<u32> {
+    [32, 36, 40, 42, 44, 48, 52, 56]
+        .get((mmfr0 & 0xf) as usize)
+        .copied()
+}
+
 /// Host-level services exposed by the selected machine backend.
 pub trait Host {
     type RawStdioGuard: 'static;
@@ -109,6 +117,11 @@ pub trait Machine: Sized + 'static {
     type CpuState: CpuState<Error = Self::Error>;
     type Memory: Memory<Error = Self::Error>;
 
+    /// Maximum usable guest address width under this backend's CPU/VM policy.
+    /// Intersects guest-visible physical width with backend GPA/IPA capacity.
+    /// Does not allocate RAM or execute a guest.
+    fn guest_address_bits() -> Result<u32, Self::Error>;
+
     /// Construct the backend VM from selected-machine launch facts.
     fn from_launch_config(config: LaunchConfig) -> Result<Self, Self::Error>;
 
@@ -146,6 +159,16 @@ mod tests {
 
     use super::*;
     use dillo_mmio::Attach;
+
+    #[test]
+    fn arm_physical_width_uses_parange_only() {
+        for (encoding, bits) in [32, 36, 40, 42, 44, 48, 52, 56].into_iter().enumerate() {
+            assert_eq!(aarch64_pa_bits(0xffff_fff0 | encoding as u64), Some(bits));
+        }
+        for encoding in 8..16 {
+            assert_eq!(aarch64_pa_bits(encoding), None);
+        }
+    }
 
     #[derive(Debug)]
     struct TestError;
@@ -225,6 +248,10 @@ mod tests {
         type Cpu = TestCpu;
         type CpuState = TestCpuState;
         type Memory = TestMemory;
+
+        fn guest_address_bits() -> Result<u32, Self::Error> {
+            Ok(48)
+        }
 
         fn from_launch_config(_config: LaunchConfig) -> Result<Self, Self::Error> {
             Ok(Self)

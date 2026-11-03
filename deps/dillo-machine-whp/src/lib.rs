@@ -214,6 +214,10 @@ mod imp {
         type CpuState = CpuState;
         type Memory = Memory;
 
+        fn guest_address_bits() -> Result<u32, Self::Error> {
+            crate::hypervisor::guest_address_bits()
+        }
+
         fn from_launch_config(config: LaunchConfig) -> Result<Self, Self::Error> {
             Self::try_from(Config {
                 processor_count: config.vcpus,

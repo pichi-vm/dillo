@@ -28,6 +28,8 @@ use crate::cpuid_x86;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("WHP guest address space: {0}")]
+    AddressSpace(String),
     #[error("WHP capability HypervisorPresent query failed: {0}")]
     Capability(String),
 
@@ -300,6 +302,21 @@ fn validate_cpu_profile(cpu_profile: &str) -> Result<(), Error> {
         });
     }
     Ok(())
+}
+
+pub(crate) fn guest_address_bits() -> Result<u32, Error> {
+    // The probe uses the launch partition policy, but never maps RAM or runs.
+    // Vcpu and Vm drops release the probe even when a query fails.
+    let vm = Vm::new_x86_64_with_local_apic_count(1)?;
+    let vcpu = vm.create_vcpu(0, "x86-64-v1")?;
+    let physical = raw::guest_physical_bits(vcpu.partition.partition, vcpu.idx)
+        .map_err(|hr| Error::AddressSpace(status(hr)))?;
+    if !(32..=52).contains(&physical) {
+        return Err(Error::AddressSpace(format!(
+            "invalid guest width {physical}"
+        )));
+    }
+    Ok(physical)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -668,7 +685,7 @@ mod raw {
     use std::ptr;
 
     use windows_sys::Win32::System::Hypervisor::{
-        WHV_CAPABILITY_CODE, WHV_EMULATOR_CALLBACKS, WHV_EMULATOR_IO_ACCESS_INFO,
+        WHV_CAPABILITY_CODE, WHV_CPUID_OUTPUT, WHV_EMULATOR_CALLBACKS, WHV_EMULATOR_IO_ACCESS_INFO,
         WHV_EMULATOR_MEMORY_ACCESS_INFO, WHV_EMULATOR_STATUS, WHV_INTERRUPT_CONTROL,
         WHV_PARTITION_HANDLE, WHV_PARTITION_PROPERTY, WHV_REGISTER_NAME, WHV_REGISTER_VALUE,
         WHV_RUN_VP_EXIT_CONTEXT, WHV_SYNTHETIC_PROCESSOR_FEATURES_BANKS, WHV_TRANSLATE_GVA_FLAGS,
@@ -678,10 +695,10 @@ mod raw {
         WHvCapabilityCodeSyntheticProcessorFeaturesBanks, WHvCreatePartition,
         WHvCreateVirtualProcessor, WHvDeletePartition, WHvDeleteVirtualProcessor,
         WHvEmulatorCreateEmulator, WHvEmulatorDestroyEmulator, WHvEmulatorTryIoEmulation,
-        WHvEmulatorTryMmioEmulation, WHvGetCapability, WHvGetVirtualProcessorRegisters,
-        WHvMapGpaRange, WHvMapGpaRangeFlagExecute, WHvMapGpaRangeFlagRead, WHvMapGpaRangeFlagWrite,
-        WHvPartitionPropertyCodeCpuidExitList, WHvPartitionPropertyCodeCpuidResultList,
-        WHvPartitionPropertyCodeInterruptClockFrequency,
+        WHvEmulatorTryMmioEmulation, WHvGetCapability, WHvGetVirtualProcessorCpuidOutput,
+        WHvGetVirtualProcessorRegisters, WHvMapGpaRange, WHvMapGpaRangeFlagExecute,
+        WHvMapGpaRangeFlagRead, WHvMapGpaRangeFlagWrite, WHvPartitionPropertyCodeCpuidExitList,
+        WHvPartitionPropertyCodeCpuidResultList, WHvPartitionPropertyCodeInterruptClockFrequency,
         WHvPartitionPropertyCodeLocalApicEmulationMode,
         WHvPartitionPropertyCodeProcessorClockFrequency, WHvPartitionPropertyCodeProcessorCount,
         WHvPartitionPropertyCodeSyntheticProcessorFeaturesBanks, WHvRequestInterrupt,
@@ -697,6 +714,29 @@ mod raw {
     use super::{HResult, failed, hyperv_leaf1_cpuid};
 
     pub(super) type PartitionHandle = WHV_PARTITION_HANDLE;
+
+    pub(super) fn guest_physical_bits(
+        partition: PartitionHandle,
+        idx: u32,
+    ) -> Result<u32, HResult> {
+        let mut output = WHV_CPUID_OUTPUT::default();
+        // SAFETY: the partition/vCPU are live and output is a correctly sized
+        // writable CPUID result. This queries the value exposed to the guest.
+        let hr = unsafe {
+            WHvGetVirtualProcessorCpuidOutput(partition, idx, 0x8000_0008, 0, &raw mut output)
+        };
+        if failed(hr) {
+            return Err(HResult(hr));
+        }
+        let physical = output.Eax & 0xff;
+        // WHvCapabilityCodePhysicalAddressWidth is newer than windows-sys's
+        // headers. Older WHP versions expose their limit through guest CPUID.
+        match get_capability_u32(0x100a) {
+            Ok(bits) => Ok(physical.min(bits)),
+            Err(HResult(windows_sys::Win32::Foundation::WHV_E_UNKNOWN_CAPABILITY)) => Ok(physical),
+            Err(err) => Err(err),
+        }
+    }
 
     #[derive(Clone, Copy, Debug)]
     pub(super) struct CpuidResult {

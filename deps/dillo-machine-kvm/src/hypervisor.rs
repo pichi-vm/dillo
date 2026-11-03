@@ -37,6 +37,8 @@ use crate::cpuid_x86;
 /// Hypervisor / VM errors.
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("KVM guest address space: {0}")]
+    AddressSpace(String),
     #[error("open /dev/kvm: {0}")]
     OpenKvm(std::io::Error),
 
@@ -141,6 +143,44 @@ pub enum Error {
 /// so our public Error variants stay platform-neutral.
 fn io(e: kvm_ioctls::Error) -> std::io::Error {
     std::io::Error::from_raw_os_error(e.errno())
+}
+
+pub(crate) fn guest_address_bits() -> Result<u32, Error> {
+    let kvm = Kvm::new().map_err(io).map_err(Error::OpenKvm)?;
+    #[cfg(target_arch = "x86_64")]
+    {
+        let supported = kvm
+            .get_supported_cpuid(kvm_bindings::KVM_MAX_CPUID_ENTRIES)
+            .map_err(|err| Error::AddressSpace(err.to_string()))?;
+        cpuid_x86::guest_address_bits(&supported)
+            .ok_or_else(|| Error::AddressSpace("missing or invalid CPUID address widths".into()))
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // create_vm uses this same maximum-IPA policy. On kernels without
+        // KVM_CAP_ARM_VM_IPA_SIZE, VM type 0 has the documented 40-bit limit.
+        let ipa = match kvm.get_host_ipa_limit() {
+            0 => 40,
+            bits if bits > 0 => bits as u32,
+            _ => return Err(Error::AddressSpace("query host IPA size failed".into())),
+        };
+        let vm = kvm.create_vm().map_err(io).map_err(Error::CreateVm)?;
+        let vcpu = vm
+            .create_vcpu(0)
+            .map_err(|err| Error::CreateVcpu(0, io(err)))?;
+        let mut init = kvm_vcpu_init::default();
+        vm.get_preferred_target(&mut init)
+            .map_err(|err| Error::CreateVcpu(0, io(err)))?;
+        init.features[0] |= 1 << KVM_ARM_VCPU_PSCI_0_2;
+        vcpu.vcpu_init(&init)
+            .map_err(|err| Error::CreateVcpu(0, io(err)))?;
+        let mut mmfr0 = [0; 8];
+        vcpu.get_one_reg(sys_reg(3, 0, 0, 7, 0), &mut mmfr0)
+            .map_err(|err| Error::AddressSpace(err.to_string()))?;
+        let physical = dillo_machine::aarch64_pa_bits(u64::from_le_bytes(mmfr0))
+            .ok_or_else(|| Error::AddressSpace("reserved guest PARange encoding".into()))?;
+        Ok(ipa.min(physical))
+    }
 }
 
 /// VM handle. Cheaply cloned via Arc-wrapped inner state.
