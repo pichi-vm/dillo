@@ -19,8 +19,8 @@
 use std::cell::Cell;
 
 use applevisor::prelude::{
-    ExitReason, GicConfig, MemPerms, Memory, Reg, SysReg, Vcpu as AvVcpu, VcpuExit, VcpuHandle,
-    VirtualMachineConfig, VirtualMachineStaticInstance,
+    ExitReason, FeatureReg, GicConfig, MemPerms, Memory, Reg, SysReg, Vcpu as AvVcpu, VcpuConfig,
+    VcpuExit, VcpuHandle, VirtualMachineConfig, VirtualMachineStaticInstance,
 };
 
 use crate::VmExit;
@@ -66,6 +66,14 @@ impl From<applevisor::prelude::HypervisorError> for Error {
     fn from(e: applevisor::prelude::HypervisorError) -> Self {
         Self::Hv(format!("{e:?}"))
     }
+}
+
+pub(crate) fn guest_address_bits() -> Result<u32, Error> {
+    let ipa = VirtualMachineConfig::get_max_ipa_size()?;
+    let mmfr0 = VcpuConfig::default().get_feature_reg(FeatureReg::ID_AA64MMFR0_EL1)?;
+    let physical = dillo_machine::aarch64_pa_bits(mmfr0)
+        .ok_or_else(|| Error::Hv("reserved guest PARange encoding".into()))?;
+    Ok(ipa.min(physical))
 }
 
 /// The per-process HVF virtual machine. Owns the guest-memory mappings; the
