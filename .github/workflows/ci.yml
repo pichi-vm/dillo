@@ -187,6 +187,8 @@ jobs:
           rustup target add x86_64-unknown-none aarch64-unknown-none "${{ matrix.guest_musl }}"
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ runner.environment == 'github-hosted' || github.ref == 'refs/heads/main' }}
 
       - name: Versions
         shell: bash
