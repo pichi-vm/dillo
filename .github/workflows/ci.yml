@@ -227,10 +227,11 @@ jobs:
         shell: bash
         run: |
           # Hosted runners start with a fragmented page allocator, so a single
-          # `sysctl -w vm.nr_hugepages=1024` often only secures a fraction. Free
+          # `sysctl -w vm.nr_hugepages=4096` often only secures a fraction. Free
           # the page cache + compact memory and retry so enough 2 MiB-contiguous
           # regions become available. This is allocation flakiness, not a gap.
-          want=1024
+          # The explicit large-memory tests run one 8 GiB guest at a time.
+          want=4096
           pages=$(sysctl -n vm.nr_hugepages)
           for attempt in 1 2 3 4 5 6; do
             if [ "$pages" -ge "$want" ]; then break; fi
@@ -253,3 +254,20 @@ jobs:
         env:
           CARGO_BUILD_RUSTFLAGS: "-D warnings"
         run: cargo test -p dillo --features vm-tests -- --test-threads=1 --nocapture
+
+      - name: Large-memory boots (Linux x86_64 / ARM64)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+          DILLO_MEMORY_EVIDENCE: target/memory-evidence
+        run: >-
+          cargo test -p dillo --features vm-tests --test boot
+          boots_with_large_memory -- --ignored --test-threads=1 --nocapture
+
+      - name: Upload large-memory boot evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: memory-evidence-${{ matrix.name }}
+          path: target/memory-evidence
