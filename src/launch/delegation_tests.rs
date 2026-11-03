@@ -190,12 +190,67 @@ fn launch(
         &path,
         arch,
         None,
+        || Ok(48),
         4,
         vcpus,
         matches!(channel, BaseChannel::Detached).then_some(dtb_path.as_path()),
         None,
     )
     .map(|plan| (dir, plan))
+}
+
+#[test]
+fn load_validation_uses_guest_capacity_not_platform_minimum() {
+    for arch in ARCHES {
+        let mut bytes = image(
+            arch,
+            BaseChannel::Bundled,
+            &base(arch, false, false),
+            Some(0x1000),
+        );
+        let mut manifest: serde_json::Value =
+            ciborium::from_reader(&bytes[0x1000..0x2000]).unwrap();
+        manifest["actions"][0]["gpa"] = json!(1u64 << 40);
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&manifest, &mut encoded).unwrap();
+        bytes[0x1000..0x2000].fill(0);
+        bytes[0x1000..0x1000 + encoded.len()].copy_from_slice(&encoded);
+        bytes[0x198..0x19c].copy_from_slice(&(encoded.len() as u32).to_le_bytes());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("high.pmi");
+        std::fs::write(&path, &bytes).unwrap();
+        let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 4, 1, None, None).unwrap();
+        assert!(plan.memory.memslots.iter().any(|r| r.gpa == 1u64 << 40));
+        assert!(matches!(
+            LaunchPlan::read(&path, arch, None, || Ok(40), 4, 1, None, None),
+            Err(LaunchError::DtbCrossValidate(
+                SurveyError::LoadAddressOverflow { .. }
+            ))
+        ));
+        assert!(matches!(
+            LaunchPlan::read(&path, arch, None, || Ok(24), 4, 1, None, None),
+            Err(LaunchError::AddressSpace { .. })
+        ));
+    }
+}
+
+#[test]
+fn invalid_image_does_not_require_a_hypervisor() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid.pmi");
+    std::fs::write(&path, b"not a PMI").unwrap();
+    let error = LaunchPlan::read(
+        &path,
+        HostArchitecture::X86_64,
+        None,
+        || panic!("invalid input must be rejected before probing the backend"),
+        4,
+        1,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(error, LaunchError::PmiParse(_)));
 }
 
 // Use a non-arma section name and a 4 KiB capacity. Action GPAs remain the
@@ -245,7 +300,7 @@ fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
                 std::fs::write(&input, text).unwrap();
                 input.as_path()
             });
-            let plan = LaunchPlan::read(&path, arch, None, 4, 1, None, file).unwrap();
+            let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 4, 1, None, file).unwrap();
             let write = plan.guest_writes.last().unwrap();
             assert_eq!(write.section, ".config");
             assert_eq!(write.gpa, 0x20_2000);
@@ -274,7 +329,8 @@ fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
         }
         std::fs::write(&path, image(arch, BaseChannel::Bundled, &base, Some(4096))).unwrap();
         std::fs::write(&input, b"").unwrap();
-        let err = LaunchPlan::read(&path, arch, None, 4, 1, None, Some(&input)).unwrap_err();
+        let err =
+            LaunchPlan::read(&path, arch, None, || Ok(48), 4, 1, None, Some(&input)).unwrap_err();
         assert!(matches!(
             err,
             LaunchError::Bootconfig(bootconfig::Error::Undeclared)

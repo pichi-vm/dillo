@@ -279,9 +279,9 @@ impl ResourcePlan {
 
     /// Reject loaded sections that overlap any surveyed non-RAM region, or that
     /// fall outside the guest's physical address space. Per pmi spec bc7f581 the
-    /// upper bound is the guest address width — `pa_bits` (the image's declared
-    /// address-space width, [`Machine::min_addr_space_bits`]) — never a
-    /// hardcoded 2^48.
+    /// upper bound is the effective guest/backend address width supplied by
+    /// the launcher. [`Machine::min_addr_space_bits`] is a requirement, not
+    /// this upper bound.
     pub fn cross_validate_loads(
         &self,
         loaded: &[(String, u64, u64)],
@@ -298,7 +298,7 @@ impl ResourcePlan {
                     start: *gpa,
                     end: u64::MAX,
                 })?;
-            if u128::from(end) > (1u128 << pa_bits) {
+            if pa_bits == 0 || pa_bits > 64 || u128::from(end) > (1u128 << pa_bits) {
                 return Err(SurveyError::LoadAddressOverflow {
                     section: section.clone(),
                     start: *gpa,
@@ -621,18 +621,21 @@ impl Machine {
             .map(|region| (region.gpa, region.size))
     }
 
-    /// Address-space watermark used by HVF: with PCIe present, the BAR
-    /// burned-buddy top; otherwise the highest declared region end.
+    /// Minimum address width required by the platform. Include every declared
+    /// region and, with PCIe, the existing BAR-window compatibility watermark.
+    /// Wider arithmetic lets malformed declarations be refused without wrap.
     pub fn min_addr_space_bits(&self) -> u32 {
-        let space_top = if self.has_pcie {
-            self.pcie.mmio_base + 2 * self.pcie.mmio_size
-        } else {
-            self.placement_regions()
-                .map(|(base, size)| base.saturating_add(size))
-                .max()
-                .unwrap_or(1 << 20)
-        };
-        space_top.max(2).next_power_of_two().ilog2()
+        let mut space_top = self
+            .placement_regions()
+            .filter(|(_, size)| *size > 0)
+            .map(|(base, size)| u128::from(base) + u128::from(size))
+            .max()
+            .unwrap_or(1 << 20);
+        if self.has_pcie {
+            space_top = space_top
+                .max(u128::from(self.pcie.mmio_base) + 2 * u128::from(self.pcie.mmio_size));
+        }
+        u128::BITS - (space_top.max(2) - 1).leading_zeros()
     }
 }
 
@@ -1795,11 +1798,7 @@ mod tests {
     fn cross_validate_loads_rejects_address_above_guest_width() {
         let m = Machine::survey(&dtb(base_root()), Arch::Aarch64).expect("survey ok");
 
-        // An address at 2^48 exceeds the test platform's declared address
-        // width (min_addr_space_bits ≪ 48), so it is rejected by the derived
-        // bound — not a hardcoded constant (pmi spec bc7f581).
-        let pa_bits = m.min_addr_space_bits();
-        assert!(pa_bits < 48);
+        let pa_bits = 48;
         let err = m
             .plan
             .cross_validate_loads(&[("too-high".to_string(), 1u64 << 48, 1)], pa_bits)
@@ -1812,6 +1811,21 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn platform_minimum_does_not_overflow() {
+        let mut m = Machine::survey(&dtb(base_root()), Arch::Aarch64).unwrap();
+        m.pcie.mmio_base = u64::MAX;
+        m.pcie.mmio_size = u64::MAX;
+        assert_eq!(m.min_addr_space_bits(), 66);
+        for bits in [0, 65, 128] {
+            assert!(
+                m.plan
+                    .cross_validate_loads(&[("load".into(), 0, 1)], bits)
+                    .is_err()
+            );
+        }
     }
 
     // x86-64 base layout (arma `src/base_dtb/x86_64.rs`).

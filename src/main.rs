@@ -156,6 +156,7 @@ fn main() {
         &pmi,
         <machine::Vm as Host>::ARCH,
         <machine::Vm as Host>::cpu_compatible(),
+        || <machine::Vm as dillo_machine::Machine>::guest_address_bits().map_err(Into::into),
         memory,
         cpus,
         args.dtb.as_deref(),
@@ -739,6 +740,14 @@ mod placement {
     pub(crate) enum PlanError {
         #[error("guest range {base:#x} + {size:#x} overflows after 2 MiB rounding")]
         AddressOverflow { base: u64, size: u64 },
+        #[error("invalid guest address width {0}")]
+        InvalidAddressBits(u32),
+        #[error("range [{start:#x}..{end:#x}) exceeds the {address_bits}-bit guest address space")]
+        OutOfRange {
+            start: u64,
+            end: u64,
+            address_bits: u32,
+        },
         #[error(
             "--memory {requested_mib} MiB is less than the {islands_mib} MiB required to cover \
              loaded sections + reset trampoline"
@@ -748,10 +757,13 @@ mod placement {
             islands_mib: u64,
         },
         #[error(
-            "no contiguous {remaining_mib} MiB chunk fits below the 4 GiB identity-map ceiling \
+            "no contiguous {remaining_mib} MiB chunk fits in the {address_bits}-bit address space \
              after carving out islands and device regions"
         )]
-        NoSpaceForBigChunk { remaining_mib: u64 },
+        NoSpaceForBigChunk {
+            remaining_mib: u64,
+            address_bits: u32,
+        },
         #[error(
             "RAM region [{ram_start:#x}..{ram_end:#x}) overlaps declared device region \
              [{device_start:#x}..{device_end:#x}) after 2 MiB rounding"
@@ -764,11 +776,8 @@ mod placement {
         },
     }
 
-    /// Identity-map ceiling on x86: 4 GiB. Big chunk must end at or below this
-    /// (so its GPAs are reachable from tatu's 4 GiB identity pgtable).
-    const IDENTITY_CEILING: u64 = 1u64 << 32;
-
     pub(crate) fn plan_around_regions<I>(
+        address_bits: u32,
         must_cover: &[(u64, u64)],
         memory_mib: u32,
         device_regions: I,
@@ -776,6 +785,10 @@ mod placement {
     where
         I: IntoIterator<Item = (u64, u64)>,
     {
+        let ceiling = 1u64
+            .checked_shl(address_bits)
+            .filter(|_| address_bits > 0)
+            .ok_or(PlanError::InvalidAddressBits(address_bits))?;
         let budget = round_up_2mib(u64::from(memory_mib) * (1 << 20))
             .expect("a u32 MiB budget fits in u64 after rounding");
 
@@ -815,6 +828,15 @@ mod placement {
         // ── 2. Big chunk ─────────────────────────────────────────────
         let device_regions: Vec<_> = device_regions.into_iter().collect();
         let mut holes: Vec<Interval> = device_holes(device_regions.iter().copied())?;
+        for range in islands.iter().chain(&holes) {
+            if range.end > ceiling {
+                return Err(PlanError::OutOfRange {
+                    start: range.start,
+                    end: range.end,
+                    address_bits,
+                });
+            }
+        }
         holes.extend(islands.iter().copied());
         merge_intervals(&mut holes);
 
@@ -826,9 +848,10 @@ mod placement {
         let big_chunk = if remaining == 0 {
             None
         } else {
-            Some(find_lowest_fit(remaining, &holes, IDENTITY_CEILING).ok_or(
+            Some(find_lowest_fit(remaining, &holes, ceiling).ok_or(
                 PlanError::NoSpaceForBigChunk {
                     remaining_mib: remaining >> 20,
+                    address_bits,
                 },
             )?)
         };
@@ -959,14 +982,57 @@ mod placement {
         use super::*;
 
         #[test]
+        fn budgets_cross_four_gib_without_allocating_backing() {
+            for memory_mib in [3072, 4096, 8192] {
+                let plan = plan_around_regions(36, &[(0, HUGE_PAGE)], memory_mib, [])
+                    .expect("budget fits guest width");
+                assert_eq!(
+                    plan.memslots.iter().map(|r| r.size).sum::<u64>(),
+                    u64::from(memory_mib) << 20
+                );
+            }
+        }
+
+        #[test]
+        fn width_bounds_islands_even_when_no_ram_remains() {
+            let top = 1 << 36;
+            let plan = plan_around_regions(36, &[(top - HUGE_PAGE, HUGE_PAGE)], 2, []).unwrap();
+            assert_eq!(plan.memslots[0].gpa + plan.memslots[0].size, top);
+            assert!(matches!(
+                plan_around_regions(36, &[(top - HUGE_PAGE, HUGE_PAGE + 1)], 4, []),
+                Err(PlanError::OutOfRange { .. })
+            ));
+            assert!(matches!(
+                plan_around_regions(36, &[], 2, [(top, 1)]),
+                Err(PlanError::OutOfRange { .. })
+            ));
+        }
+
+        #[test]
+        fn exact_address_space_capacity_and_one_page_more() {
+            let plan = plan_around_regions(23, &[], 8, []).unwrap();
+            assert_eq!(plan.memslots[0].size, 8 << 20);
+            assert!(matches!(
+                plan_around_regions(23, &[], 10, []),
+                Err(PlanError::NoSpaceForBigChunk { .. })
+            ));
+            for bits in [0, 64, 128] {
+                assert!(matches!(
+                    plan_around_regions(bits, &[], 2, []),
+                    Err(PlanError::InvalidAddressBits(_))
+                ));
+            }
+        }
+
+        #[test]
         fn rejects_range_and_alignment_overflow() {
             for range in [(u64::MAX, 2), (u64::MAX - 1, 1)] {
                 assert!(matches!(
-                    plan_around_regions(&[range], 2, []),
+                    plan_around_regions(32, &[range], 2, []),
                     Err(PlanError::AddressOverflow { .. })
                 ));
                 assert!(matches!(
-                    plan_around_regions(&[], 2, [range]),
+                    plan_around_regions(32, &[], 2, [range]),
                     Err(PlanError::AddressOverflow { .. })
                 ));
             }
@@ -1032,7 +1098,7 @@ mod placement {
 
         #[test]
         fn plan_around_regions_uses_declared_holes() {
-            let plan = plan_around_regions(&[(0, 0x20_0000)], 8, [(0x20_0000, 0x20_0000)])
+            let plan = plan_around_regions(32, &[(0, 0x20_0000)], 8, [(0x20_0000, 0x20_0000)])
                 .expect("placement");
 
             assert_eq!(plan.memslots.len(), 2);
@@ -1057,7 +1123,7 @@ mod placement {
                 // Exercise both an island-only plan and one with a big chunk.
                 let island_mib = if must_cover.1 > HUGE_PAGE { 4 } else { 2 };
                 for memory_mib in [island_mib, 8] {
-                    let err = plan_around_regions(&[must_cover], memory_mib, [device])
+                    let err = plan_around_regions(32, &[must_cover], memory_mib, [device])
                         .expect_err("RAM must not cover a device");
                     assert!(
                         matches!(err, PlanError::RamOverlapsDevice {
@@ -1073,9 +1139,13 @@ mod placement {
         fn plan_around_regions_rejects_device_in_load_and_fill_island() {
             // The issue #5 layout: the DTB load and DTBO fill share a page;
             // neither section's bytes touch the poweroff register.
-            let err =
-                plan_around_regions(&[(0, 0x8_0000), (0x8_0000, 0x1000)], 2, [(0x10_0000, 4)])
-                    .unwrap_err();
+            let err = plan_around_regions(
+                32,
+                &[(0, 0x8_0000), (0x8_0000, 0x1000)],
+                2,
+                [(0x10_0000, 4)],
+            )
+            .unwrap_err();
             assert!(matches!(
                 err,
                 PlanError::RamOverlapsDevice {
@@ -1091,7 +1161,7 @@ mod placement {
         fn plan_around_regions_accepts_adjacent_device_pages() {
             let devices = [(0x1f_f000, 0x1000), (0x40_0000, 4)];
             for memory_mib in [2, 8] {
-                let plan = plan_around_regions(&[(0x20_1000, 0x1000)], memory_mib, devices)
+                let plan = plan_around_regions(32, &[(0x20_1000, 0x1000)], memory_mib, devices)
                     .expect("devices outside the rounded section");
                 assert_eq!(plan.memslots[0].gpa, 0x20_0000);
                 assert_eq!(plan.memslots[0].size, 0x20_0000);
@@ -1112,6 +1182,7 @@ mod placement {
         #[test]
         fn plan_around_regions_ignores_zero_sized_regions() {
             let plan = plan_around_regions(
+                32,
                 &[(0x10_0000, 0), (0x20_1000, 0x1000)],
                 2,
                 [(0x10_0000, 4), (0x20_1000, 0)],
@@ -1452,10 +1523,12 @@ mod launch {
     impl LaunchPlan {
         /// Read a PMI file, validate target-neutral launch facts, and compute RAM
         /// placement from the DTB-declared platform.
+        #[allow(clippy::too_many_arguments)]
         pub(crate) fn read(
             pmi_path: &Path,
             host_arch: HostArchitecture,
             cpu_compatible: Option<&str>,
+            address_bits: impl FnOnce() -> anyhow::Result<u32>,
             memory_mib: u32,
             vcpus: u32,
             base_dtb_path: Option<&Path>,
@@ -1527,14 +1600,23 @@ mod launch {
                 return Err(LaunchError::DelegatedAllocationRequiresDtbo);
             }
 
+            // Invalid images must still fail without requiring a hypervisor.
+            let address_bits = address_bits().map_err(LaunchError::AddressSpaceProbe)?;
             let load_ranges: Vec<(String, u64, u64)> = parsed
                 .sections
                 .iter()
                 .map(|(name, section)| (name.clone(), section.gpa, section.virtual_size))
                 .collect();
+            let required_bits = platform.min_addr_space_bits();
+            if required_bits > address_bits {
+                return Err(LaunchError::AddressSpace {
+                    required_bits,
+                    available_bits: address_bits,
+                });
+            }
             platform
                 .plan
-                .cross_validate_loads(&load_ranges, platform.min_addr_space_bits())
+                .cross_validate_loads(&load_ranges, address_bits)
                 .map_err(LaunchError::DtbCrossValidate)?;
 
             let must_cover: Vec<(u64, u64)> = parsed
@@ -1543,6 +1625,7 @@ mod launch {
                 .map(|section| (section.gpa, section.virtual_size))
                 .collect();
             let memory = placement::plan_around_regions(
+                address_bits,
                 &must_cover,
                 memory_mib,
                 platform.placement_regions(),
@@ -1592,6 +1675,13 @@ mod launch {
     /// Error produced by target-neutral launch preflight.
     #[derive(Debug, Error)]
     pub(crate) enum LaunchError {
+        #[error("guest address space: {0}")]
+        AddressSpaceProbe(#[source] anyhow::Error),
+        #[error("platform requires {required_bits} address bits; guest provides {available_bits}")]
+        AddressSpace {
+            required_bits: u32,
+            available_bits: u32,
+        },
         #[error("read PMI {path}: {source}")]
         ReadPmi {
             path: String,
@@ -1668,7 +1758,7 @@ mod launch {
                 | Self::MalformedLoadSection(_)
                 | Self::DtboSynth(_)
                 | Self::Bootconfig(_) => 11,
-                Self::Placement(_) => 13,
+                Self::Placement(_) | Self::AddressSpace { .. } | Self::AddressSpaceProbe(_) => 13,
                 Self::UnknownCpuProfile(_, _) => 12,
             }
         }
@@ -2523,7 +2613,13 @@ mod machine_select {
             let mut vm = M::from_launch_config(LaunchConfig {
                 dtb,
                 vcpus,
-                min_addr_space_bits: platform.min_addr_space_bits(),
+                min_addr_space_bits: platform.min_addr_space_bits().max(
+                    plan.memslots
+                        .iter()
+                        .map(|r| u64::BITS - (r.gpa + r.size - 1).leading_zeros())
+                        .max()
+                        .unwrap_or(0),
+                ),
             })
             .map_err(RunError::machine)?;
             crate::boot_trace::mark("vm_created");

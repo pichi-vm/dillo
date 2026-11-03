@@ -586,7 +586,15 @@ mod imp {
         }
 
         fn from_launch_config(config: LaunchConfig) -> Result<Self, Self::Error> {
-            Self::try_from(Config { dtb: config.dtb })
+            let vm = Self::try_from(Config { dtb: config.dtb })?;
+            let available = Self::guest_address_bits()?;
+            if config.min_addr_space_bits > available {
+                return Err(Error::AddressSpace(format!(
+                    "launch requires {} bits; backend provides {available}",
+                    config.min_addr_space_bits
+                )));
+            }
+            Ok(vm)
         }
 
         fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Self::Error> {

@@ -18,6 +18,7 @@ pub mod cpuid_x86;
 pub struct LaunchConfig {
     pub dtb: Vec<u8>,
     pub vcpus: u32,
+    /// Required width of the declared platform and every planned RAM extent.
     pub min_addr_space_bits: u32,
 }
 

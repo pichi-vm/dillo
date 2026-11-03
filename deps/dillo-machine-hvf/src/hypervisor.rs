@@ -103,10 +103,10 @@ impl Vm {
     pub(crate) fn new(gic: &GicParams, min_addr_space_bits: u32) -> Result<Self, Error> {
         let mut vm_config = VirtualMachineConfig::new();
         let max_ipa = VirtualMachineConfig::get_max_ipa_size()?;
-        if max_ipa < min_addr_space_bits {
+        let available = guest_address_bits()?;
+        if available < min_addr_space_bits {
             return Err(Error::Hv(format!(
-                "host max IPA {max_ipa} bits < image requires {min_addr_space_bits} bits \
-                 (--min-addr-space); cannot launch on this host"
+                "launch requires {min_addr_space_bits} address bits; backend provides {available}"
             )));
         }
         vm_config.set_ipa_size(max_ipa)?;

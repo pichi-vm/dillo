@@ -783,8 +783,8 @@ pub mod pmi_parse {
 
         // The guest-address-width bound is no longer a hardcoded 2^48 (pmi
         // spec bc7f581): it is enforced post-survey in dillo-devtree's
-        // `cross_validate_loads`, which knows the image's declared
-        // address-space width. Parse-time validation here is width-agnostic.
+        // `cross_validate_loads`, using the effective backend/guest width.
+        // Parse-time validation here is width-agnostic.
 
         // Alignment per PMI granularity (`pmi/spec/granularity.md`, commits
         // 15768cf + 3b2260e): only a section's START is constrained — `gpa`
