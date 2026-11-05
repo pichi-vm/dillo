@@ -7,7 +7,7 @@
 //!
 //! Synthesizes the in-RAM bytes of a UEFI-compliant GPT layout (protective MBR
 //! at LBA 0 + primary header at LBA 1 + 32-LBA primary entry array + partition
-//! data starting at LBA 34 + 32-LBA backup entry array + backup header at the
+//! data starting at LBA 40 + 32-LBA backup entry array + backup header at the
 //! last LBA) using the `gpt 4.1.0` crate. Caller-supplied `PartitionSpec` fields
 //! (PARTUUID / type GUID / label / 64-bit Attributes) are stamped verbatim per
 //! the dumb-backend rule (Phase 48 D-vgpt-02 / D-vgpt-07).
@@ -65,8 +65,8 @@ pub struct SynthResult {
     /// Bytes covering LBA `(N-33)..=(N-1)` inclusive (backup entry array +
     /// backup header). Length = `33 * 512 = 16896` bytes.
     pub backup_gpt_bytes: Arc<Vec<u8>>,
-    /// Exclusive byte offset where the primary GPT region ends and the
-    /// partition-data region begins. Equal to `FRONT_RESERVED_LBAS * 512`.
+    /// Exclusive byte offset where the primary GPT region ends, before the
+    /// first alignment gap. Equal to `FRONT_RESERVED_LBAS * 512`.
     pub primary_gpt_end_bytes: u64,
     /// Inclusive byte offset where the backup GPT region begins. Equal to
     /// `(total_sectors - BACK_RESERVED_LBAS) * 512`.
@@ -266,6 +266,10 @@ pub fn build(
     let mut partition_lba_ends: Vec<u64> = Vec::with_capacity(partitions.len());
     let mut next_first_lba: u64 = FRONT_RESERVED_LBAS;
     for (i, &size) in sizes_bytes.iter().enumerate() {
+        // Match the backing's advertised 4096-byte physical block size.
+        next_first_lba = next_first_lba
+            .checked_next_multiple_of(4096 / SECTOR_SIZE)
+            .ok_or_else(|| anyhow!("LBA alignment overflow at partition {i}"))?;
         let sectors = size.div_ceil(SECTOR_SIZE);
         let last_lba = next_first_lba
             .checked_add(sectors)
@@ -447,13 +451,13 @@ mod tests {
         let dg = make_disk_guid();
         let synth = build(&specs, &sizes, id, dg).expect("build OK");
 
-        // Layout: front 34 LBAs, p0 = 8 sectors (4096/512), p1 = 16 sectors (8192/512)
-        assert_eq!(synth.partition_lba_starts, vec![34, 42]);
-        assert_eq!(synth.partition_lba_ends, vec![41, 57]);
+        // Layout: 34 GPT sectors, 6 padding sectors, then aligned partitions.
+        assert_eq!(synth.partition_lba_starts, vec![40, 48]);
+        assert_eq!(synth.partition_lba_ends, vec![47, 63]);
         assert_eq!(synth.primary_gpt_end_bytes, 34 * 512);
-        // total_sectors = 34 + 8 + 16 + 33 = 91; backup_start = (91-33)*512 = 58*512
-        assert_eq!(synth.backup_gpt_start_bytes, 58 * 512);
-        assert_eq!(synth.total_size_bytes, 91 * 512);
+        // total_sectors = 40 + 8 + 16 + 33 = 97; backup starts at LBA 64.
+        assert_eq!(synth.backup_gpt_start_bytes, 64 * 512);
+        assert_eq!(synth.total_size_bytes, 97 * 512);
 
         // Re-parse round-trip via gpt::GptConfig::open_from_device on a
         // reconstructed full-disk Cursor (primary | partition data | backup).
@@ -480,8 +484,8 @@ mod tests {
         );
         assert_eq!(p1.name, specs[0].label, "p1 label verbatim");
         assert_eq!(p1.flags, specs[0].attrs, "p1 attrs verbatim (D-vgpt-07)");
-        assert_eq!(p1.first_lba, 34);
-        assert_eq!(p1.last_lba, 41);
+        assert_eq!(p1.first_lba, 40);
+        assert_eq!(p1.last_lba, 47);
 
         assert_eq!(p2.part_guid, specs[1].partuuid, "p2 partuuid verbatim");
         assert_eq!(
@@ -490,8 +494,8 @@ mod tests {
         );
         assert_eq!(p2.name, specs[1].label, "p2 label verbatim");
         assert_eq!(p2.flags, specs[1].attrs, "p2 attrs verbatim");
-        assert_eq!(p2.first_lba, 42);
-        assert_eq!(p2.last_lba, 57);
+        assert_eq!(p2.first_lba, 48);
+        assert_eq!(p2.last_lba, 63);
     }
 
     /// Different `disk_guid` values ⇒ different primary GPT bytes (the GPT
