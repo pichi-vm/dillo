@@ -1008,7 +1008,9 @@ mod imp {
                             .expect("MMIO bus lock poisoned")
                             .write(addr, &data[..size as usize]);
                         let Some(outcome) = outcome else {
-                            log::warn!(
+                            // Unmapped probes are non-fatal, like reads above.
+                            // Keep their details available in diagnostic logs.
+                            log::debug!(
                                 "MMIO write to unmapped {:#x} (size {}, data {:02x?})",
                                 addr,
                                 size,

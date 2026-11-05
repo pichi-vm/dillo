@@ -2405,7 +2405,8 @@ mod machine_select {
             M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn MmioAttachment>>,
         {
             let Some(uart) = platform.uart.as_ref() else {
-                log::warn!("no UART in Machine - guest console output will be dropped");
+                // UART is optional; a virtio console can carry guest output.
+                log::debug!("platform declares no UART");
                 return Ok(());
             };
             let serial = Arc::new(dillo_mmio_uart::Ns16550::with_interrupt_requirement(
