@@ -104,9 +104,41 @@ fn run() {
     let json = serde_json::to_string(&report)
         .unwrap_or_else(|e| format!("{{\"error\":\"serialize: {e}\"}}"));
     write_report(&json);
+    if report
+        .cmdline
+        .split_whitespace()
+        .any(|token| token == "dillo.console_lifetime_probe")
+    {
+        probe_console_input();
+        // The host lifetime test stops this healthy, booted VM externally.
+        loop {
+            std::thread::park();
+        }
+    }
     rustix::fs::sync();
     #[cfg(not(test))]
     poweroff();
+}
+
+fn probe_console_input() {
+    use std::io::Write;
+    const EXPECTED: &[u8] = b"madrillo input\n";
+    let mut bytes = [0; EXPECTED.len()];
+    let mut received = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while received < bytes.len() && std::time::Instant::now() < deadline {
+        match rustix::io::read(rustix::stdio::stdin(), &mut bytes[received..]) {
+            Ok(0) => break,
+            Ok(count) => received += count,
+            Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(_) => break,
+        }
+    }
+    if bytes == EXPECTED {
+        let _ = std::io::stdout().write_all(b"<<<CONSOLE-INPUT-OK>>>\n");
+    }
 }
 
 /// Read the kernel ring buffer from `/dev/kmsg` (non-draining: yields the whole

@@ -41,6 +41,11 @@ struct Args {
     #[argh(option)]
     console: Option<dillo_config::ConsoleSpec>,
 
+    /// stop the VM when the last writer of its stdin pipe closes, including
+    /// with unread input. For a process monitor that owns the console pipe.
+    #[argh(switch)]
+    exit_on_stdin_close: bool,
+
     /// default bus for devices that don't pin one, when the DTB exposes both:
     /// `pci` (default) or `mmio`.
     #[argh(option)]
@@ -139,6 +144,13 @@ fn main() {
     // Drop guard and leaves the terminal mangled.
     if let Err(e) = validate(&args) {
         eprintln!("dillo: {e}");
+        std::process::exit(2);
+    }
+    if args.exit_on_stdin_close
+        && let Err(error) =
+            dillo_virtio_console::liveness::InputLifetime::watch_stdin(&SUPERVISOR_SHUTDOWN)
+    {
+        eprintln!("dillo: console lifetime: {error}");
         std::process::exit(2);
     }
     // Guest-RAM commit policy. Lazy first-touch by default; `--preallocate`
