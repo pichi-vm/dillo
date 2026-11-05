@@ -878,12 +878,12 @@ fn boots_with_raw_disk_over_mmio() {
 
 /// Two backing files combined via one `--gpt` (nested `partitions=[[…],[…]]`)
 /// show up as a single virtio-blk disk whose total size is the synthesized GPT
-/// layout (front-reserved 34 LBAs + partition data + back-reserved 33 LBAs).
+/// layout (34 GPT LBAs + 6 alignment LBAs + data + 33 backup GPT LBAs).
 /// device-id/disk-guid are auto-derived from the PARTUUIDs.
 #[test]
 fn boots_with_vgpt_disk() {
-    // total_sectors = 34 (front) + 1024 + 1024 + 33 (back) = 2115 → 1,082,880 bytes.
-    const EXPECTED_BYTES: u64 = 2115 * 512;
+    // total_sectors = 40 (aligned front) + 1024 + 1024 + 33 (back) = 2121.
+    const EXPECTED_BYTES: u64 = 2121 * 512;
     if !hypervisor_available() {
         eprintln!("skip: no usable /dev/kvm on this host (local dev only)");
         return;

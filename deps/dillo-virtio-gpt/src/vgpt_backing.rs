@@ -17,7 +17,8 @@
 //! 3. Otherwise (partition-data region) → binary search over
 //!    `partition_lba_starts` to find the partition `i`, compute
 //!    `offset_within_partition = offset - partition_lba_starts[i] * 512`,
-//!    and `pread(&fds[i], buf, offset_within_partition)`.
+//!    and `pread(&fds[i], buf, offset_within_partition)`. Alignment gaps read
+//!    as zeros.
 //!
 //! Short reads at partition boundaries are intentional and match
 //! `BlockBacking`'s D-03 short-read semantics: the dispatch loop's
@@ -190,33 +191,24 @@ impl BlockBacking for VgptBacking {
         }
 
         // ---- Region 3: partition data (Pitfall A: stateless dispatch) ------
-        // Binary-search the sorted partition_lba_starts for the largest
-        // start <= lba(offset). `partition_lba_starts` is built ascending in
-        // `synth_gpt::build`, so binary_search is well-defined.
+        // Find the next partition, then distinguish payload from alignment padding.
         let lba = offset / SECTOR_SIZE;
-        let i = match self.partition_lba_starts.binary_search(&lba) {
-            // Exact hit: lba == partition_lba_starts[idx] → partition idx.
-            Ok(idx) => idx,
-            // Insertion point `idx`: lba would go between idx-1 and idx, so
-            // the partition containing it is idx-1. Subtract; the offset >=
-            // primary_gpt_end_bytes guarantees idx >= 1 (the smallest start
-            // is 34, and offset / 512 >= 34 here means the search never
-            // returns Err(0) for lba >= 34).
-            Err(idx) => idx
-                .checked_sub(1)
-                .expect("Pitfall A invariant: offset is past primary GPT, so idx >= 1"),
-        };
+        let next = self
+            .partition_lba_starts
+            .partition_point(|&start| start <= lba);
+        if next == 0 || lba > self.partition_lba_ends[next - 1] {
+            let end = self
+                .partition_lba_starts
+                .get(next)
+                .map_or(self.backup_gpt_start_bytes, |start| start * SECTOR_SIZE);
+            let n = buf.len().min((end - offset) as usize);
+            buf[..n].fill(0);
+            return Ok(n);
+        }
 
-        // Defense-in-depth: confirm offset really sits inside partition i's
-        // [start, end] range. Should be unreachable given the GPT region
-        // checks above and the synth invariant that partition data fully
-        // tiles [primary_gpt_end_bytes, backup_gpt_start_bytes), but be
-        // defensive against future layout changes.
+        let i = next - 1;
         let part_start_bytes = self.partition_lba_starts[i] * SECTOR_SIZE;
         let part_end_bytes_exclusive = (self.partition_lba_ends[i] + 1) * SECTOR_SIZE;
-        if offset < part_start_bytes || offset >= part_end_bytes_exclusive {
-            return Ok(0);
-        }
 
         let offset_within = offset - part_start_bytes;
         let avail = (part_end_bytes_exclusive - offset) as usize;
@@ -358,19 +350,53 @@ mod tests {
     #[test]
     fn read_at_partition_data_dispatches_to_correct_fd() {
         let (backing, _a, _b, synth) = build_vgpt();
-        // p0 starts at lba 34 → byte 17408; backed by file A (0xAA).
+        // p0 starts at LBA 40; backed by file A (0xAA).
         let p0_off = synth.partition_lba_starts[0] * SECTOR_SIZE;
         let mut buf_a = [0u8; 512];
         let n_a = backing.read_at(p0_off, &mut buf_a).expect("read p0");
         assert_eq!(n_a, 512);
         assert!(buf_a.iter().all(|&b| b == 0xAA), "p0 must read 0xAA bytes");
 
-        // p1 starts at lba 42 → byte 21504; backed by file B (0xBB).
+        // p1 starts at LBA 48; backed by file B (0xBB).
         let p1_off = synth.partition_lba_starts[1] * SECTOR_SIZE;
         let mut buf_b = [0u8; 512];
         let n_b = backing.read_at(p1_off, &mut buf_b).expect("read p1");
         assert_eq!(n_b, 512);
         assert!(buf_b.iter().all(|&b| b == 0xBB), "p1 must read 0xBB bytes");
+    }
+
+    #[test]
+    fn aligned_partitions_preserve_data_and_zero_gaps() {
+        let (a, b) = make_two_backing_files(512, 0xAA, 0xBB);
+        let synth = synth_gpt::build(
+            &make_specs(&a, &b),
+            &[512, 512],
+            make_device_id(),
+            [0xCC; 16],
+        )
+        .expect("build synth");
+        let start = synth.primary_gpt_end_bytes;
+        let end = synth.backup_gpt_start_bytes;
+        let starts = synth.partition_lba_starts.clone();
+        let backing = VgptBacking::new(open_fds(&a, &b), synth, make_device_id());
+        let mut actual = vec![0xCC; (end - start) as usize];
+        let mut read = 0;
+        while read < actual.len() {
+            let n = backing
+                .read_at(start + read as u64, &mut actual[read..])
+                .expect("read across alignment gaps");
+            assert_ne!(n, 0, "alignment padding must not report EOF");
+            read += n;
+        }
+
+        let mut expected = vec![0; actual.len()];
+        for (lba, byte) in starts.into_iter().zip([0xAA, 0xBB]) {
+            let offset = lba * SECTOR_SIZE;
+            assert_eq!(offset % u64::from(backing.physical_block_size()), 0);
+            let within = (offset - start) as usize;
+            expected[within..within + 512].fill(byte);
+        }
+        assert_eq!(actual, expected);
     }
 
     /// Test 7: Pitfall A regression — random-access offsets across partition
@@ -464,11 +490,9 @@ mod tests {
     #[test]
     fn read_at_short_read_at_partition_boundary() {
         let (backing, _a, _b, synth) = build_vgpt();
-        // p0 ends at lba 41 → byte (41+1)*512 - 1 = 21503 inclusive. So a
-        // read of 512 bytes starting at byte 21000 (which is inside p0 with
-        // 21504-21000 = 504 bytes remaining in p0) must return at most 504.
+        // A read starting 504 bytes before p0 ends must stop at that boundary.
         let p0_end_exclusive = (synth.partition_lba_ends[0] + 1) * SECTOR_SIZE;
-        assert_eq!(p0_end_exclusive, 21504);
+        assert_eq!(p0_end_exclusive, 48 * SECTOR_SIZE);
         let off = p0_end_exclusive - 504;
         let mut buf = [0u8; 512];
         let n = backing.read_at(off, &mut buf).expect("read OK");
