@@ -1,26 +1,44 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Optional process lifetime tied to the ordinary console input pipe.
+//! Process lifetime follows closure of the ordinary console input.
 //! Observations never consume input or depend on the guest draining a queue.
 //! Named guest API ports have their own lifetime and are not observed here.
 
 use std::{
     fs::File,
     io,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
+
+static SHUTDOWN: OnceLock<&'static AtomicBool> = OnceLock::new();
+
+/// EOF/read failure observed by the existing stdin producer also closes the
+/// console (including regular files, null input and native Windows consoles).
+pub(super) fn input_closed() {
+    if let Some(shutdown) = SHUTDOWN.get() {
+        log::info!("console input closed; stopping VM");
+        shutdown.store(true, Ordering::Release);
+    }
+}
 
 /// A duplicate of the console read end, used only for native hangup queries.
 #[derive(Debug)]
 pub struct InputLifetime(File);
 
 impl InputLifetime {
-    /// Request the existing VM shutdown path when stdin's last writer closes.
-    /// Call before starting console workers; non-pipe stdin is rejected.
+    /// Request the existing VM shutdown path when the console closes.
+    /// Native hangup observation supplements the stdin reader so queued input
+    /// cannot conceal writer loss. Call before starting console workers.
     pub fn watch_stdin(shutdown: &'static AtomicBool) -> io::Result<()> {
+        SHUTDOWN
+            .set(shutdown)
+            .map_err(|_| io::Error::other("console lifetime already initialized"))?;
         #[cfg(unix)]
         let handle = {
             use std::os::fd::AsFd;
@@ -31,19 +49,38 @@ impl InputLifetime {
             use std::os::windows::io::AsHandle;
             io::stdin().as_handle().try_clone_to_owned()?
         };
-        let input = Self::new(File::from(handle))?;
-        input.watch(shutdown).map(drop)
+        let file = File::from(handle);
+        if Self::observable(&file)? {
+            drop(Self::new(file)?.watch(shutdown)?);
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn observable(file: &File) -> io::Result<bool> {
+        use std::{io::IsTerminal, os::unix::fs::FileTypeExt};
+        let kind = file.metadata()?.file_type();
+        Ok(kind.is_fifo() || kind.is_socket() || file.is_terminal())
+    }
+
+    #[cfg(windows)]
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "same fallible classification API on Unix and Windows"
+    )]
+    fn observable(file: &File) -> io::Result<bool> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType};
+        // SAFETY: the borrowed file handle remains owned throughout this
+        // synchronous type query. Native console EOF uses the stdin reader.
+        #[allow(unsafe_code)]
+        let kind = unsafe { GetFileType(file.as_raw_handle()) };
+        Ok(kind == FILE_TYPE_PIPE)
     }
 
     fn new(file: File) -> io::Result<Self> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileTypeExt;
-            if !file.metadata()?.file_type().is_fifo() {
-                return Err(io::Error::other(
-                    "console lifetime requires a pipe on stdin",
-                ));
-            }
+        if !Self::observable(&file)? {
+            return Err(io::Error::other("console has no native hangup query"));
         }
         #[cfg(windows)]
         {
@@ -106,10 +143,13 @@ impl InputLifetime {
         let events = descriptors[0]
             .revents()
             .ok_or_else(|| io::Error::other("missing pipe readiness"))?;
+        if events.contains(PollFlags::POLLHUP) {
+            return Ok(true);
+        }
         if events.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL) {
             return Err(io::Error::other("console lifetime pipe is invalid"));
         }
-        Ok(events.contains(PollFlags::POLLHUP))
+        Ok(false)
     }
 
     #[cfg(windows)]
@@ -253,6 +293,17 @@ mod tests {
         assert_eq!(&bytes, b"input");
         assert!(!input.disconnected()?);
         drop(writer);
+        assert!(input.disconnected()?);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_hangup_is_console_close() -> io::Result<()> {
+        let terminal = nix::pty::openpty(None, None)?;
+        let input = InputLifetime::new(File::from(terminal.slave))?;
+        assert!(!input.disconnected()?);
+        drop(terminal.master);
         assert!(input.disconnected()?);
         Ok(())
     }

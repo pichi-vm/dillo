@@ -24,6 +24,7 @@ pub(super) fn next() -> io::Result<Option<Vec<u8>>> {
                     if let Err(error) = copy(io::stdin().lock(), sender) {
                         log::debug!("console stdin reader: {error}");
                     }
+                    super::liveness::input_closed();
                 })?;
             Ok(Mutex::new(receiver))
         })

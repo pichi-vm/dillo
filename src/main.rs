@@ -37,14 +37,10 @@ struct Args {
     /// `rx` is host→guest and `tx` is guest→host, each `pipe:N` an inherited
     /// descriptor the parent process created; an omitted direction is closed,
     /// and each port must set at least one. `endpoint` is required once
-    /// `ports=` is present.
+    /// `ports=` is present. Closing console input requests VM shutdown;
+    /// a parent process must retain the writer for the VM's lifetime.
     #[argh(option)]
     console: Option<dillo_config::ConsoleSpec>,
-
-    /// stop the VM when the last writer of its stdin pipe closes, including
-    /// with unread input. For a process monitor that owns the console pipe.
-    #[argh(switch)]
-    exit_on_stdin_close: bool,
 
     /// default bus for devices that don't pin one, when the DTB exposes both:
     /// `pci` (default) or `mmio`.
@@ -146,9 +142,8 @@ fn main() {
         eprintln!("dillo: {e}");
         std::process::exit(2);
     }
-    if args.exit_on_stdin_close
-        && let Err(error) =
-            dillo_virtio_console::liveness::InputLifetime::watch_stdin(&SUPERVISOR_SHUTDOWN)
+    if let Err(error) =
+        dillo_virtio_console::liveness::InputLifetime::watch_stdin(&SUPERVISOR_SHUTDOWN)
     {
         eprintln!("dillo: console lifetime: {error}");
         std::process::exit(2);

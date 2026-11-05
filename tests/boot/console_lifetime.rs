@@ -37,7 +37,7 @@ fn managed_console_close_stops_a_booted_vm() {
     let mut vm = Vm(Command::new(env!("CARGO_BIN_EXE_dillo"))
         .arg("--pmi")
         .arg(&pmi)
-        .args(["--memory", "256", "--cpus", "1", "--exit-on-stdin-close"])
+        .args(["--memory", "256", "--cpus", "1"])
         .stdin(Stdio::from(reader))
         .stdout(File::create(&stdout).unwrap())
         .stderr(File::create(&stderr).unwrap())
@@ -93,6 +93,41 @@ fn managed_console_close_stops_a_booted_vm() {
             .contains("console input closed; stopping VM")
     );
     println!("native VM console lifetime: boot report, ordinary input, cooperative zero exit");
+}
+
+#[test]
+fn null_console_input_requests_shutdown_without_a_flag() {
+    assert!(
+        hypervisor_available(),
+        "console lifetime requires a native hypervisor"
+    );
+    sign_dillo_for_hvf();
+    let root = TempDir::new().unwrap();
+    let pmi = build_pmi(
+        root.path(),
+        "console=hvc0 dillo.console_lifetime_probe",
+        false,
+    );
+    let stderr = root.path().join("console.err");
+    let mut vm = Vm(Command::new(env!("CARGO_BIN_EXE_dillo"))
+        .arg("--pmi")
+        .arg(&pmi)
+        .args(["--memory", "256", "--cpus", "1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(File::create(&stderr).unwrap())
+        .spawn()
+        .unwrap());
+    let status =
+        vm.0.wait_timeout(Duration::from_secs(90))
+            .unwrap()
+            .expect("null console EOF must stop the VM");
+    let diagnostics = std::fs::read_to_string(stderr).unwrap();
+    assert!(status.success(), "{status:?}: {diagnostics}");
+    assert!(
+        diagnostics.contains("console input closed; stopping VM"),
+        "{diagnostics}"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -222,7 +257,7 @@ fn monitor_crash_allows_cooperative_vm_teardown() {
             .arg(env!("CARGO_BIN_EXE_dillo"))
             .arg("--pmi")
             .arg(pmi)
-            .args(["--memory", "256", "--cpus", "1", "--exit-on-stdin-close"])
+            .args(["--memory", "256", "--cpus", "1"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(File::create(root.path().join("monitor.err")).unwrap())
