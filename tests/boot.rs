@@ -31,6 +31,8 @@ use wait_timeout::ChildExt;
 
 #[path = "boot/bootconfig.rs"]
 mod bootconfig;
+#[path = "boot/console_input.rs"]
+mod console_input;
 #[path = "boot/virtiofs.rs"]
 mod virtiofs;
 

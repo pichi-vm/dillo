@@ -34,6 +34,7 @@
 //!
 //! See `DESIGN-named-ports.md` and `PLAN-named-ports.md` in this crate.
 mod control;
+mod input;
 pub mod pipe;
 
 use std::collections::VecDeque;
@@ -859,8 +860,17 @@ fn rx_worker(
             return;
         }
         if pending.is_empty() {
-            thread::sleep(Duration::from_millis(50));
-            continue;
+            match input::next() {
+                Ok(Some(bytes)) => pending.extend(bytes),
+                Ok(None) => {
+                    thread::sleep(PIPE_POLL);
+                    continue;
+                }
+                Err(error) => {
+                    log::debug!("virtio-console stdin ended: {error}");
+                    return;
+                }
+            }
         }
 
         while !pending.is_empty() {
