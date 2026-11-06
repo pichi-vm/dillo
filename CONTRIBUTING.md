@@ -2,13 +2,7 @@
 
 ## Cargo config
 
-`.cargo/config.toml` is not committed. Copy the developer config before
-building or testing:
-
-```
-mkdir -p .cargo
-cp packaging/cargo-config.toml .cargo/config.toml
-```
+The committed `.cargo/config.toml` applies automatically to builds and tests.
 
 That file enables artifact dependencies (`-Z bindeps`), sets the musl
 rustflags used to cross-build the snuffler guest probe, and raises
