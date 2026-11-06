@@ -254,7 +254,7 @@ jobs:
         shell: bash
         env:
           CARGO_BUILD_RUSTFLAGS: "-D warnings"
-          MADRILLO_REV: 0b8da071298a25845b15a2f0bd2c06d7442e65bd
+          MADRILLO_REV: 24275d87ea3bf071b5588f0d4143327d8d9bb10b
         run: |
           python3 - <<'PY'
           import os, pathlib, subprocess, tempfile

@@ -139,6 +139,20 @@ On Linux, device processes must use strict seccomp filters. Filtering belongs in
 
 Common interfaces express required services and semantics; they do not expose Linux-specific sandbox configuration. Other host backends realize confinement through their own mechanisms.
 
+### PROCESS-005 — Keep helpers in the managed workload scope
+
+When Madrillo launches Dillo, helper processes must inherit Dillo's workload
+scope. On macOS, this is the process group established by Madrillo. Helpers
+must not create another group or session as part of ordinary startup. This
+allows Madrillo to stop Dillo, its children, and its grandchildren on leader
+exit, forced stop, or timeout.
+
+If Dillo deliberately creates a helper outside that group, Dillo owns its
+shutdown, including cleanup when console loss requests VM teardown. Madrillo
+does not promise to find or contain escaped macOS processes. Future helper
+launch paths must enforce this contract at the host-backend boundary and test
+their shutdown behavior.
+
 ## 6. Trait and type responsibilities
 
 These assignments describe intended responsibilities. They are not assertions that every current implementation enforces them.
