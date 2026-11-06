@@ -106,6 +106,9 @@ pub enum Error {
     #[error("set TSS address: {0}")]
     SetTss(std::io::Error),
 
+    #[error("allocate guest memory (2 MiB huge pages): {0:#}")]
+    AllocateMemory(#[source] anyhow::Error),
+
     #[error("set user memory region: {0}")]
     SetMemRegion(std::io::Error),
 

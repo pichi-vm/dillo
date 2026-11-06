@@ -635,7 +635,7 @@ mod imp {
         fn from_ranges(ranges: &[RamRange]) -> Result<Self, Self::Error> {
             let mapped =
                 memory::MappedMemory::new(ranges.iter().map(|range| (range.gpa, range.size)))
-                    .map_err(|e| Error::UnhandledExit(e.to_string()))?;
+                    .map_err(Error::AllocateMemory)?;
             Ok(Self {
                 mapped: Arc::new(mapped),
             })
