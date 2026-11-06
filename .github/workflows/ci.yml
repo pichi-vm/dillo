@@ -250,6 +250,26 @@ jobs:
           CARGO_BUILD_RUSTFLAGS: "-D warnings"
         run: cargo test -p dillo --features vm-tests -- --test-threads=1 --nocapture
 
+      - name: Native VM teardown after Madrillo crash
+        shell: bash
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+          MADRILLO_REV: 0b8da071298a25845b15a2f0bd2c06d7442e65bd
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess, tempfile
+          with tempfile.TemporaryDirectory(prefix="madrillo-vm-") as tmp:
+              monitor = pathlib.Path(tmp) / "source"
+              subprocess.run(["git", "init", str(monitor)], check=True)
+              subprocess.run(["git", "fetch", "--depth=1", "https://github.com/pichi-vm/madrillo.git", os.environ["MADRILLO_REV"]], cwd=monitor, check=True)
+              subprocess.run(["git", "checkout", "--detach", "FETCH_HEAD"], cwd=monitor, check=True)
+              subprocess.run(["rustup", "toolchain", "install", "1.94.0", "--profile", "minimal"], check=True)
+              target = pathlib.Path(tmp) / "target"
+              subprocess.run(["cargo", "build", "--locked", "--features", "cli", "--bin", "madrillo"], cwd=monitor, env=dict(os.environ, CARGO_TARGET_DIR=str(target)), check=True)
+              executable = target / "debug" / ("madrillo.exe" if os.name == "nt" else "madrillo")
+              subprocess.run(["cargo", "test", "--locked", "-p", "dillo", "--features", "vm-tests", "--test", "boot", "monitor_crash_allows_cooperative_vm_teardown", "--", "--ignored", "--test-threads=1", "--nocapture"], env=dict(os.environ, MADRILLO_BIN=str(executable)), check=True)
+          PY
+
       - name: Large-memory boots (Linux x86_64 / ARM64)
         if: runner.os == 'Linux'
         shell: bash
