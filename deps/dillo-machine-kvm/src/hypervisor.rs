@@ -343,7 +343,7 @@ impl Vm {
                     profile: cpu_profile.to_string(),
                 }
             })?;
-            let supported = self
+            let mut supported = self
                 .inner
                 .kvm
                 .get_supported_cpuid(kvm_bindings::KVM_MAX_CPUID_ENTRIES)
@@ -354,6 +354,7 @@ impl Vm {
                     feature: missing,
                 });
             }
+            cpuid_x86::set_apic_id(&mut supported, idx);
             fd.set_cpuid2(&supported)
                 .map_err(|e| Error::CreateVcpu(idx, io(e)))?;
 
