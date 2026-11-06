@@ -107,6 +107,27 @@ fn run() {
     if report
         .cmdline
         .split_whitespace()
+        .any(|token| token == "dillo.console_resize_probe")
+    {
+        let mut previous = (0, 0);
+        loop {
+            if let Ok(size) = rustix::termios::tcgetwinsize(rustix::stdio::stdin()) {
+                let dimensions = (size.ws_col, size.ws_row);
+                if dimensions != previous {
+                    println!("<<<CONSOLE-SIZE:{}x{}>>>", size.ws_col, size.ws_row);
+                    previous = dimensions;
+                    if dimensions == (81, 25) {
+                        break;
+                    }
+                }
+            }
+            // The host finishes the probe with 81 columns and 25 rows.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    if report
+        .cmdline
+        .split_whitespace()
         .any(|token| token == "dillo.console_input_probe")
         && let Err(error) = probe_console_input()
     {

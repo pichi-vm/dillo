@@ -7,6 +7,8 @@ license.workspace = true
 description = "virtio-console device implementing dillo_virtio::VirtioDevice. Drives hvc0 to stdout."
 
 [dependencies]
+dillo-config.workspace = true
+interprocess = "=2.4.7"
 dillo-mmio.workspace = true
 dillo-virtio.workspace = true
 vm-memory.workspace = true
@@ -18,9 +20,11 @@ thiserror.workspace = true
 # (DuplicateHandle + PeekNamedPipe-before-ReadFile). Both stay behind
 # `cfg(unix)` / `cfg(windows)` so the portable core builds everywhere.
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true }
+nix = { workspace = true, features = ["user"] }
 
 [target.'cfg(windows)'.dependencies]
+win-custody = "=0.1.2"
+widestring = "1"
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
@@ -28,6 +32,9 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

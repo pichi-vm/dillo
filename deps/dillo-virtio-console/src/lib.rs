@@ -14,11 +14,10 @@
 //! - Queue 0: RX (host → guest input from stdin).
 //! - Queue 1: TX (guest → host output → stdout).
 //!
-//! With no named ports configured that is the whole device: no multiport, no
-//! control queue, exactly the minimal feature set Linux's `hvc_virtio` binds
-//! `hvc0` with.
+//! With no named ports or resize endpoint configured that is the whole device.
 //!
-//! Given named ports ([`VirtioConsole::with_ports`]) the device additionally
+//! Given named ports ([`VirtioConsole::with_ports`]) or a resize endpoint
+//! ([`VirtioConsole::with_resize`]), the device additionally
 //! negotiates `VIRTIO_CONSOLE_F_MULTIPORT` and grows the spec's queue map:
 //!
 //! | queues | purpose |
@@ -36,6 +35,7 @@
 mod control;
 mod input;
 pub mod pipe;
+mod resize;
 
 use std::collections::VecDeque;
 use std::io::{self, BufWriter, Write};
@@ -223,8 +223,9 @@ pub fn flush_output() {
 /// virtio-console: thread-mode device.
 pub struct VirtioConsole {
     activated: bool,
-    /// Named MULTIPORT ports (port 0 is implicit and not in here). Empty ⇒
-    /// today's two-queue single-port console.
+    resize: Option<resize::Receiver>,
+    size: Option<Arc<std::sync::atomic::AtomicU32>>,
+    /// Named MULTIPORT ports (port 0 is implicit and not in here).
     ports: Vec<NamedPort>,
     /// `queue_max_sizes` hands out a slice, so the sizes live here.
     queue_sizes: Vec<u16>,
@@ -234,6 +235,8 @@ impl std::fmt::Debug for VirtioConsole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VirtioConsole")
             .field("activated", &self.activated)
+            .field("resize", &self.resize)
+            .field("size", &self.size)
             .field("ports", &self.ports)
             .field("queues", &self.queue_sizes.len())
             .finish()
@@ -264,6 +267,8 @@ impl VirtioConsole {
         };
         Self {
             activated: false,
+            resize: None,
+            size: None,
             ports,
             queue_sizes: vec![QUEUE_MAX; queues],
         }
@@ -271,7 +276,18 @@ impl VirtioConsole {
 
     /// `true` once the device will negotiate `VIRTIO_CONSOLE_F_MULTIPORT`.
     fn multiport(&self) -> bool {
-        !self.ports.is_empty()
+        self.queue_sizes.len() > 2
+    }
+
+    /// Receive terminal sizes directly from a caller over a private local
+    /// endpoint. Enables the standard MULTIPORT resize control messages even
+    /// when the console has no named data ports. No guest agent is involved.
+    pub fn with_resize(mut self, path: &std::path::Path) -> io::Result<Self> {
+        let current = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        self.resize = Some(resize::Receiver::bind(path, Arc::clone(&current))?);
+        self.size = Some(current);
+        self.queue_sizes.resize(4 + 2 * self.ports.len(), QUEUE_MAX);
+        Ok(self)
     }
 
     /// Total ports the guest may see: port 0 plus every named port.
@@ -298,14 +314,13 @@ impl VirtioDevice for VirtioConsole {
     }
 
     fn features(&self) -> u64 {
-        // Without named ports: only VIRTIO_F_VERSION_1 — no multiport, no
-        // size, no emerg-write. Linux's hvc_virtio binds hvc0 with exactly
-        // this minimal feature set, so that path is untouched.
-        if self.multiport() {
-            VIRTIO_F_VERSION_1 | VIRTIO_CONSOLE_F_MULTIPORT
-        } else {
-            VIRTIO_F_VERSION_1
-        }
+        VIRTIO_F_VERSION_1
+            | if self.multiport() {
+                VIRTIO_CONSOLE_F_MULTIPORT
+            } else {
+                0
+            }
+            | u64::from(self.size.is_some()) // VIRTIO_CONSOLE_F_SIZE (bit 0)
     }
 
     fn activate(
@@ -391,6 +406,7 @@ impl VirtioDevice for VirtioConsole {
                 control_tx_queue,
                 activation.queue_interrupt(CONTROL_RX_QUEUE),
                 activation.queue_interrupt(CONTROL_TX_QUEUE),
+                self.resize.take(),
             )?);
 
             // Take only PipeEnds. Emptying `ports` would collapse MULTIPORT
@@ -498,6 +514,13 @@ impl VirtioDevice for VirtioConsole {
         // advertised and the whole 12-byte region reads as zero; with it, the
         // guest sizes its port table from `max_nr_ports` at offset 4.
         let mut config = [0u8; 12];
+        if let Some(size) = &self.size {
+            config[..4].copy_from_slice(
+                &size
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    .to_le_bytes(),
+            );
+        }
         if self.multiport() {
             config[4..8].copy_from_slice(&self.max_nr_ports().to_le_bytes());
         }
@@ -572,6 +595,7 @@ fn spawn_control_worker(
     tx_queue: Queue,
     rx_call_interrupt: Option<Interrupt>,
     tx_call_interrupt: Option<Interrupt>,
+    resize: Option<resize::Receiver>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
     host.spawn(Box::new(move |token| {
         control_worker(
@@ -583,6 +607,7 @@ fn spawn_control_worker(
             rx_call_interrupt.as_ref(),
             tx_call_interrupt.as_ref(),
             &token,
+            resize,
         );
         Ok(())
     }))
@@ -654,11 +679,25 @@ fn control_worker(
     rx_call_interrupt: Option<&Interrupt>,
     tx_call_interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
+    mut resize: Option<resize::Receiver>,
 ) {
     let rx_queue = Arc::new(Mutex::new(rx_queue));
     let tx_queue = Arc::new(Mutex::new(tx_queue));
     while !token.is_shutdown_requested() {
         let mut progress = false;
+        if let Some(receiver) = &mut resize {
+            match receiver.poll() {
+                Ok(Some(size)) => {
+                    plane.resize(size);
+                    progress = true;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn!("virtio-console: resize endpoint failed: {error}");
+                    resize = None;
+                }
+            }
+        }
 
         // Guest → device: DEVICE_READY, PORT_READY, PORT_OPEN.
         for buf in drain_tx_buffers(queue_memory, buffer_memory, &tx_queue, tx_call_interrupt) {

@@ -40,6 +40,7 @@ rustix = { version = "1", default-features = false, features = [
     "process",
     "param",
     "time",
+    "termios",
 ] }
 # AF_VSOCK has no safe rustix wrapper; the `vsock` crate provides a std::io
 # stream (its unsafe/libc is internal — our code stays unsafe-free). Used only
