@@ -39,13 +39,8 @@ impl Receiver {
         let options = ListenerOptions::new()
             .name(path.to_fs_name::<GenericFilePath>()?)
             .nonblocking(ListenerNonblockingMode::Both);
-        // Interprocess's atomic pre-bind mode is Linux-only. Every Unix
-        // connection is authenticated by kernel peer UID below, including macOS.
-        #[cfg(target_os = "linux")]
-        let options = {
-            use interprocess::os::unix::local_socket::ListenerOptionsExt;
-            options.mode(0o600)
-        };
+        // Unix authorization uses kernel peer credentials below. Socket-file
+        // permissions are not a portable authentication mechanism on macOS.
         #[cfg(windows)]
         let options = {
             use interprocess::os::windows::{
