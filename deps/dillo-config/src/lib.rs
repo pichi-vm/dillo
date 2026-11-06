@@ -90,9 +90,6 @@ pub struct ConsoleSpec {
     pub endpoint: Option<String>,
     #[serde(default)]
     pub bus: Option<Bus>,
-    /// Preferred transport when `bus` is not pinned; may fall back.
-    #[serde(default)]
-    pub preferred_bus: Option<Bus>,
     #[serde(default)]
     pub slot: Option<u32>,
     /// Named MULTIPORT ports **in addition to** the unnamed port 0. Non-empty
@@ -188,9 +185,6 @@ pub struct BlkSpec {
     pub readonly: bool,
     #[serde(default)]
     pub bus: Option<Bus>,
-    /// Preferred transport when `bus` is not pinned; may fall back.
-    #[serde(default)]
-    pub preferred_bus: Option<Bus>,
     #[serde(default)]
     pub slot: Option<u32>,
 }
@@ -207,9 +201,6 @@ pub struct GptSpec {
     pub partitions: Vec<PartSpec>,
     #[serde(default)]
     pub bus: Option<Bus>,
-    /// Preferred transport when `bus` is not pinned; may fall back.
-    #[serde(default)]
-    pub preferred_bus: Option<Bus>,
     #[serde(default)]
     pub slot: Option<u32>,
 }
@@ -225,9 +216,6 @@ pub struct VsockSpec {
     pub uds: PathBuf,
     #[serde(default)]
     pub bus: Option<Bus>,
-    /// Preferred transport when `bus` is not pinned; may fall back.
-    #[serde(default)]
-    pub preferred_bus: Option<Bus>,
     #[serde(default)]
     pub slot: Option<u32>,
 }
@@ -247,9 +235,6 @@ pub struct FsSpec {
     pub readonly: bool,
     #[serde(default)]
     pub bus: Option<Bus>,
-    /// Preferred transport when `bus` is not pinned; may fall back.
-    #[serde(default)]
-    pub preferred_bus: Option<Bus>,
     #[serde(default)]
     pub slot: Option<u32>,
 }
@@ -440,9 +425,6 @@ pub struct NetSpec {
     pub forwards: Vec<ForwardSpec>,
     #[serde(default)]
     pub bus: Option<Bus>,
-    /// Preferred transport when `bus` is not pinned; may fall back.
-    #[serde(default)]
-    pub preferred_bus: Option<Bus>,
     #[serde(default)]
     pub slot: Option<u32>,
 }
@@ -518,8 +500,6 @@ pub struct Resolved {
 #[derive(Debug, Clone)]
 pub struct Placement {
     pub bus: Option<Bus>,
-    /// A soft preference, overridden by an explicit bus or numeric slot.
-    pub preferred_bus: Option<Bus>,
     pub slot: Option<u32>,
 }
 
@@ -633,7 +613,6 @@ pub fn resolve(layout: Layout) -> anyhow::Result<Resolved> {
         None => ResolvedConsole {
             placement: Placement {
                 bus: None,
-                preferred_bus: None,
                 slot: None,
             },
             ports: Vec::new(),
@@ -735,7 +714,6 @@ fn resolve_console(c: ConsoleSpec) -> anyhow::Result<ResolvedConsole> {
     Ok(ResolvedConsole {
         placement: Placement {
             bus: c.bus,
-            preferred_bus: c.preferred_bus,
             slot: c.slot,
         },
         ports,
@@ -749,7 +727,6 @@ fn resolve_device(device: Device) -> anyhow::Result<ResolvedDevice> {
             readonly: b.readonly,
             placement: Placement {
                 bus: b.bus,
-                preferred_bus: b.preferred_bus,
                 slot: b.slot,
             },
         }),
@@ -758,7 +735,6 @@ fn resolve_device(device: Device) -> anyhow::Result<ResolvedDevice> {
             uds: v.uds,
             placement: Placement {
                 bus: v.bus,
-                preferred_bus: v.preferred_bus,
                 slot: v.slot,
             },
         }),
@@ -774,7 +750,6 @@ fn resolve_device(device: Device) -> anyhow::Result<ResolvedDevice> {
                 readonly: f.readonly,
                 placement: Placement {
                     bus: f.bus,
-                    preferred_bus: f.preferred_bus,
                     slot: f.slot,
                 },
             })
@@ -826,7 +801,6 @@ fn resolve_device(device: Device) -> anyhow::Result<ResolvedDevice> {
                 forwards,
                 placement: Placement {
                     bus: n.bus,
-                    preferred_bus: n.preferred_bus,
                     slot: n.slot,
                 },
             })
@@ -878,7 +852,6 @@ fn resolve_device(device: Device) -> anyhow::Result<ResolvedDevice> {
                 partitions,
                 placement: Placement {
                     bus: g.bus,
-                    preferred_bus: g.preferred_bus,
                     slot: g.slot,
                 },
             })
@@ -1044,10 +1017,9 @@ const PCI_FIRST_SLOT: u32 = 1;
 /// Assign every request a bus + slot.
 ///
 /// Bus per request: explicit `bus` if present (error if that bus is absent from
-/// the DTB), else the preferred bus (or `default_bus`), falling back when absent or full.
+/// the DTB), else `default_bus` when available, else the other available bus.
 /// Slots: requests with an explicit `slot` are placed first (reserving it),
-/// then explicit buses reserve capacity before flexible requests. Numeric slot
-/// pins retain their selected bus; flexible requests try both transports.
+/// then auto requests take the lowest free slot on their bus, in input order.
 pub fn allocate(
     cap: &Capacity,
     default_bus: Bus,
@@ -1058,20 +1030,22 @@ pub fn allocate(
         Bus::Mmio => cap.mmio > 0,
     };
     let resolve_bus = |index: usize, req: &Placement| -> Result<Bus, AllocError> {
-        if let Some(bus) = req.bus {
-            if available(bus) {
-                Ok(bus)
-            } else {
-                Err(AllocError::BusUnavailable { index, bus })
+        match req.bus {
+            Some(bus) => {
+                if available(bus) {
+                    Ok(bus)
+                } else {
+                    Err(AllocError::BusUnavailable { index, bus })
+                }
             }
-        } else {
-            let preferred = req.preferred_bus.unwrap_or(default_bus);
-            if available(preferred) {
-                Ok(preferred)
-            } else if available(preferred.other()) {
-                Ok(preferred.other())
-            } else {
-                Err(AllocError::NoBus { index })
+            None => {
+                if available(default_bus) {
+                    Ok(default_bus)
+                } else if available(default_bus.other()) {
+                    Ok(default_bus.other())
+                } else {
+                    Err(AllocError::NoBus { index })
+                }
             }
         }
     };
@@ -1114,38 +1088,26 @@ pub fn allocate(
         out[index] = Some(Placed { bus, index: slot });
     }
 
-    // Pass 2: mandatory buses reserve capacity before flexible requests.
-    // Explicit numeric slots were already handled and are never reassigned.
-    for mandatory in [true, false] {
-        for (index, req) in requests.iter().enumerate() {
-            if req.slot.is_some() || req.bus.is_some() != mandatory {
-                continue;
-            }
-            let mut bus = resolve_bus(index, req)?;
-            let free_slot = |bus: Bus| {
-                let used = match bus {
-                    Bus::Pci => &used_pci,
-                    Bus::Mmio => &used_mmio,
-                };
-                slot_range(bus).find(|slot| !used.contains(slot))
-            };
-            let mut slot = free_slot(bus);
-            if slot.is_none() && !mandatory && available(bus.other()) {
-                bus = bus.other();
-                slot = free_slot(bus);
-            }
-            let slot = slot.ok_or(AllocError::Exhausted {
+    // Pass 2: auto slots take the lowest free index on their bus.
+    for (index, req) in requests.iter().enumerate() {
+        if req.slot.is_some() {
+            continue;
+        }
+        let bus = resolve_bus(index, req)?;
+        let set = match bus {
+            Bus::Pci => &mut used_pci,
+            Bus::Mmio => &mut used_mmio,
+        };
+        let slot = slot_range(bus)
+            .find(|s| !set.contains(s))
+            .ok_or(AllocError::Exhausted {
                 index,
                 bus,
                 requested: requests.len(),
                 capacity: slot_max(bus),
             })?;
-            match bus {
-                Bus::Pci => used_pci.insert(slot),
-                Bus::Mmio => used_mmio.insert(slot),
-            };
-            out[index] = Some(Placed { bus, index: slot });
-        }
+        set.insert(slot);
+        out[index] = Some(Placed { bus, index: slot });
     }
 
     Ok(out.into_iter().map(|p| p.expect("all placed")).collect())
@@ -1262,7 +1224,6 @@ mod tests {
                 mac: None,
                 forwards,
                 bus: None,
-                preferred_bus: None,
                 slot: None,
             })],
         }
@@ -1400,7 +1361,6 @@ mod tests {
                 source: PathBuf::from("/srv/ctx"),
                 readonly: false,
                 bus: None,
-                preferred_bus: None,
                 slot: None,
             })],
         };
@@ -1414,7 +1374,6 @@ mod tests {
                 source: PathBuf::from("/srv/ctx"),
                 readonly: false,
                 bus: None,
-                preferred_bus: None,
                 slot: None,
             })],
         };
@@ -1502,7 +1461,6 @@ mod tests {
         console(ConsoleSpec {
             endpoint: Some("stdio".into()),
             bus: None,
-            preferred_bus: None,
             slot: None,
             ports,
         })
@@ -1514,7 +1472,6 @@ mod tests {
         let r = resolve(console(ConsoleSpec {
             endpoint: None,
             bus: Some(Bus::Mmio),
-            preferred_bus: None,
             slot: None,
             ports: Vec::new(),
         }))
@@ -1528,7 +1485,6 @@ mod tests {
         let err = resolve(console(ConsoleSpec {
             endpoint: None,
             bus: None,
-            preferred_bus: None,
             slot: None,
             ports: vec![port("build", Some(3), None)],
         }))
@@ -1542,7 +1498,6 @@ mod tests {
             resolve(console(ConsoleSpec {
                 endpoint: Some("file".into()),
                 bus: None,
-                preferred_bus: None,
                 slot: None,
                 ports: Vec::new(),
             }))
@@ -1552,7 +1507,6 @@ mod tests {
             resolve(console(ConsoleSpec {
                 endpoint: Some("file".into()),
                 bus: None,
-                preferred_bus: None,
                 slot: None,
                 ports: vec![port("build", Some(3), None)],
             }))
@@ -1680,7 +1634,6 @@ mod tests {
         (0..n)
             .map(|_| Placement {
                 bus: None,
-                preferred_bus: None,
                 slot: None,
             })
             .collect()
@@ -1714,7 +1667,6 @@ mod tests {
         let cap = Capacity { pci: None, mmio: 4 };
         let reqs = vec![Placement {
             bus: Some(Bus::Pci),
-            preferred_bus: None,
             slot: None,
         }];
         assert_eq!(
@@ -1736,12 +1688,10 @@ mod tests {
         let reqs = vec![
             Placement {
                 bus: None,
-                preferred_bus: None,
                 slot: None,
             },
             Placement {
                 bus: Some(Bus::Pci),
-                preferred_bus: None,
                 slot: Some(1),
             },
         ];
@@ -1772,12 +1722,10 @@ mod tests {
         let reqs = vec![
             Placement {
                 bus: Some(Bus::Pci),
-                preferred_bus: None,
                 slot: Some(3),
             },
             Placement {
                 bus: Some(Bus::Pci),
-                preferred_bus: None,
                 slot: Some(3),
             },
         ];
@@ -1800,167 +1748,6 @@ mod tests {
         // pci slots 1,2 only → 3 auto devices overflow.
         let err = allocate(&cap, Bus::Pci, &auto(3)).unwrap_err();
         assert!(matches!(err, AllocError::Exhausted { bus: Bus::Pci, .. }));
-    }
-
-    #[test]
-    fn preferences_fall_back_when_absent_or_full() {
-        for preferred in [Bus::Pci, Bus::Mmio] {
-            let cap = Capacity {
-                pci: Some(1),
-                mmio: 1,
-            };
-            let requests: Vec<_> = auto(2)
-                .into_iter()
-                .map(|mut p| {
-                    p.preferred_bus = Some(preferred);
-                    p
-                })
-                .collect();
-            let placed = allocate(&cap, preferred.other(), &requests).unwrap();
-            assert_eq!(placed[0].bus, preferred);
-            assert_eq!(placed[1].bus, preferred.other());
-            let absent = match preferred {
-                Bus::Pci => Capacity { pci: None, mmio: 2 },
-                Bus::Mmio => Capacity {
-                    pci: Some(2),
-                    mmio: 0,
-                },
-            };
-            let placed = allocate(&absent, preferred, &requests).unwrap();
-            assert!(placed.iter().all(|p| p.bus == preferred.other()));
-        }
-        let cap = Capacity {
-            pci: Some(1),
-            mmio: 1,
-        };
-        let placed = allocate(&cap, Bus::Pci, &auto(2)).unwrap();
-        assert_eq!(placed[1].bus, Bus::Mmio);
-        assert!(matches!(
-            allocate(&cap, Bus::Pci, &auto(3)),
-            Err(AllocError::Exhausted { .. })
-        ));
-        assert_eq!(
-            allocate(&Capacity { pci: None, mmio: 0 }, Bus::Pci, &auto(1)),
-            Err(AllocError::NoBus { index: 0 })
-        );
-    }
-
-    #[test]
-    fn mandatory_buses_and_numeric_slots_reserve_before_preferences() {
-        let cap = Capacity {
-            pci: Some(2),
-            mmio: 1,
-        };
-        let mut requests = auto(3);
-        requests[0].preferred_bus = Some(Bus::Pci);
-        requests[1].bus = Some(Bus::Pci);
-        requests[1].preferred_bus = Some(Bus::Mmio);
-        requests[2].bus = Some(Bus::Pci);
-        requests[2].slot = Some(1);
-        let placed = allocate(&cap, Bus::Pci, &requests).unwrap();
-        assert_eq!(
-            placed[0],
-            Placed {
-                bus: Bus::Mmio,
-                index: 0
-            }
-        );
-        assert_eq!(
-            placed[1],
-            Placed {
-                bus: Bus::Pci,
-                index: 2
-            }
-        );
-        assert_eq!(
-            placed[2],
-            Placed {
-                bus: Bus::Pci,
-                index: 1
-            }
-        );
-
-        requests[0].bus = Some(Bus::Pci);
-        assert!(matches!(
-            allocate(&cap, Bus::Pci, &requests),
-            Err(AllocError::Exhausted { bus: Bus::Pci, .. })
-        ));
-    }
-
-    #[test]
-    fn flexible_placement_fits_exactly_when_capacity_allows() {
-        for pci in 0..=2 {
-            for mmio in 0..=2 {
-                let cap = Capacity {
-                    pci: Some(pci),
-                    mmio,
-                };
-                for count in 0..=4 {
-                    for mut choices in 0..5_u32.pow(count) {
-                        let mut requests = auto(count as usize);
-                        for request in &mut requests {
-                            match choices % 5 {
-                                1 => request.bus = Some(Bus::Pci),
-                                2 => request.bus = Some(Bus::Mmio),
-                                3 => request.preferred_bus = Some(Bus::Pci),
-                                4 => request.preferred_bus = Some(Bus::Mmio),
-                                _ => {}
-                            }
-                            choices /= 5;
-                        }
-                        let pinned_pci =
-                            requests.iter().filter(|r| r.bus == Some(Bus::Pci)).count();
-                        let pinned_mmio =
-                            requests.iter().filter(|r| r.bus == Some(Bus::Mmio)).count();
-                        let fits = pinned_pci <= pci as usize
-                            && pinned_mmio <= mmio as usize
-                            && count <= pci + mmio;
-                        let result = allocate(&cap, Bus::Pci, &requests);
-                        assert_eq!(result.is_ok(), fits, "{cap:?} {requests:?}");
-                        if let Ok(placed) = result {
-                            let mut slots = std::collections::BTreeSet::new();
-                            for p in placed {
-                                assert!(slots.insert((p.bus == Bus::Pci, p.index)));
-                                match p.bus {
-                                    Bus::Pci => assert!((1..=pci).contains(&p.index)),
-                                    Bus::Mmio => assert!(p.index < mmio),
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn every_device_resolves_its_preferred_transport() {
-        let mut layout: serde_json::Value = serde_json::json!({
-            "console": {"preferred-bus": "mmio"},
-            "devices": [
-                {"blk": {"path": "disk"}},
-                {"gpt": {"partitions": [{"path": "part",
-                    "partuuid": "11111111-2222-3333-4444-555555555555",
-                    "typeguid": "11111111-2222-3333-4444-555555555555", "label": "root"}]}},
-                {"net": {}},
-                {"fs": {"tag": "repo", "source": "."}},
-                {"vsock": {"cid": 3, "uds": "."}}
-            ]
-        });
-        for device in layout["devices"].as_array_mut().unwrap() {
-            device.as_object_mut().unwrap().values_mut().next().unwrap()["preferred-bus"] =
-                "mmio".into();
-        }
-        let resolved = resolve(serde_json::from_value(layout).unwrap()).unwrap();
-        assert_eq!(resolved.console.placement.preferred_bus, Some(Bus::Mmio));
-        for device in resolved.devices {
-            assert_eq!(device.placement().preferred_bus, Some(Bus::Mmio));
-            assert_eq!(device.placement().bus, None);
-        }
-        let net: NetSpec =
-            serde_keyvalue::from_key_values("backend=user,preferred-bus=mmio").unwrap();
-        assert_eq!(net.preferred_bus, Some(Bus::Mmio));
-        assert_eq!(net.bus, None);
     }
 
     #[test]

@@ -37,16 +37,6 @@ A reserved range alone neither identifies its purpose nor authorizes arbitrary V
 
 Host-generated allocations and overlays must remain within the governing PMI contract. A backend limitation does not authorize silently changing the hardware model.
 
-Device placement distinguishes mandatory `bus=pci|mmio` from soft
-`preferred-bus=pci|mmio`. Each console, block/GPT, network, filesystem and vsock
-device accepts the latter. An explicit bus wins over a preference; otherwise
-the per-device preference wins over the global `--bus` default. Numeric slot
-pins reserve their chosen bus first, then mandatory buses reserve capacity,
-then flexible devices use a free slot on the preferred or alternate transport.
-Fallback is permitted when a preferred transport is absent or full, within
-the platform's declared slots and address windows. Mandatory placements never
-silently move to another bus.
-
 Where the contract permits child-resource derivation, preserve its bounds and relationships. Address containment alone is not permission to instantiate arbitrary child hardware.
 
 ### DT-005 — Parsing is not conformance
