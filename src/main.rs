@@ -42,12 +42,12 @@ struct Args {
     console: Option<dillo_config::ConsoleSpec>,
 
     /// default bus for devices that don't pin one, when the DTB exposes both:
-    /// `pci` (default) or `mmio`. Automatic devices fall back when it is full.
+    /// `pci` (default) or `mmio`.
     #[argh(option)]
     bus: Option<dillo_config::Bus>,
 
     /// virtio-blk device (raw image). Repeatable. Key/value:
-    /// `path=P[,readonly][,bus=pci|mmio][,preferred-bus=pci|mmio][,slot=N]`.
+    /// `path=P[,readonly][,bus=pci|mmio][,slot=N]`.
     #[argh(option)]
     blk: Vec<dillo_config::BlkSpec>,
 
@@ -74,7 +74,7 @@ struct Args {
 
     /// virtio-net device. Repeatable. Key/value:
     /// `[backend=user|bridge|macvtap][,iface=NAME][,mac=aa:bb:cc:dd:ee:ff]`
-    /// `[,forwards=[2222:22,udp:5353:53]][,bus=pci|mmio][,preferred-bus=pci|mmio][,slot=N]`.
+    /// `[,forwards=[2222:22,udp:5353:53]][,bus=pci|mmio][,slot=N]`.
     /// `user` (the default) is cross-platform user-mode NAT with inbound port
     /// forwarding and needs no privilege; `bridge` (Linux/macOS, needs
     /// CAP_NET_ADMIN/root) joins the host's L2 segment via `iface`; `macvtap`
