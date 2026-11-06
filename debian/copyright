@@ -1,0 +1,15 @@
+Dillo
+Source: https://github.com/pichi-vm/dillo
+Copyright: the Dillo authors and contributors; Amazon.com, Inc. or its affiliates
+License: Apache-2.0 and Apache-2.0 or BSD-3-Clause
+
+Dillo and its Debian packaging are distributed under the Apache License,
+Version 2.0, with Firecracker-derived portions under Apache-2.0 or
+BSD-3-Clause as described in NOTICE. The full text is shipped in LICENSE and is also available on
+Debian systems in /usr/share/common-licenses/Apache-2.0.
+
+The generated source package includes the Rust dependencies pinned by
+Cargo.lock. These retain their upstream copyrights and licenses. Their
+license and notice files are installed in dependency-licenses/ alongside
+this file; their individual license declarations are in the vendored
+Cargo.toml files in the source package.
