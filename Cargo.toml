@@ -248,6 +248,7 @@ nix = { workspace = true }
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
+widestring = "1"
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",

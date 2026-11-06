@@ -37,7 +37,8 @@ struct Args {
     /// `rx` is host→guest and `tx` is guest→host, each `pipe:N` an inherited
     /// descriptor the parent process created; an omitted direction is closed,
     /// and each port must set at least one. `endpoint` is required once
-    /// `ports=` is present.
+    /// `ports=` is present. Closing console input requests VM shutdown;
+    /// a parent process must retain the writer for the VM's lifetime.
     #[argh(option)]
     console: Option<dillo_config::ConsoleSpec>,
 
@@ -139,6 +140,12 @@ fn main() {
     // Drop guard and leaves the terminal mangled.
     if let Err(e) = validate(&args) {
         eprintln!("dillo: {e}");
+        std::process::exit(2);
+    }
+    if let Err(error) =
+        dillo_virtio_console::liveness::InputLifetime::watch_stdin(&SUPERVISOR_SHUTDOWN)
+    {
+        eprintln!("dillo: console lifetime: {error}");
         std::process::exit(2);
     }
     // Guest-RAM commit policy. Lazy first-touch by default; `--preallocate`
