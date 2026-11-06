@@ -10,6 +10,7 @@
 
 use std::num::Wrapping;
 use std::sync::Arc;
+use std::sync::atomic::{Ordering, fence};
 
 use dillo_mmio::{SharedAccess, SharedMemory, SharedMemoryError, SharedRange};
 use vm_memory::{Address, GuestAddress};
@@ -296,6 +297,9 @@ impl Queue {
             return None;
         }
 
+        // Observe the driver's descriptor and buffer writes before consuming them.
+        fence(Ordering::Acquire);
+
         // Read descriptor index from the available ring.
         // ring[] starts at offset 4, each entry is u16.
         let ring_offset = 4 + 2 * (self.next_avail.0 % self.size) as u64;
@@ -336,7 +340,8 @@ impl Queue {
 
         self.next_used += Wrapping(1);
 
-        // Write updated used_idx at offset 2.
+        // Publish buffer and used-entry writes before the driver observes used_idx.
+        fence(Ordering::Release);
         let _ = mem.write_u16(self.used_ring.unchecked_add(2), self.next_used.0);
 
         // Update avail_event: tell the driver to notify us when it adds more
@@ -347,6 +352,9 @@ impl Queue {
             self.used_ring.unchecked_add(avail_event_offset),
             self.next_avail.0,
         );
+
+        // Order avail_event before the next avail_idx read to avoid a lost kick.
+        fence(Ordering::SeqCst);
     }
 }
 
