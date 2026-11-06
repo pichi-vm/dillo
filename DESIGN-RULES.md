@@ -37,6 +37,12 @@ A reserved range alone neither identifies its purpose nor authorizes arbitrary V
 
 Host-generated allocations and overlays must remain within the governing PMI contract. A backend limitation does not authorize silently changing the hardware model.
 
+Each attached device must specify its bus. Dillo does not supply a global
+bus default or substitute another transport when a bus is absent or full.
+An optional numeric slot pins the exact position; otherwise Dillo allocates
+the lowest free slot on the specified bus, reserving explicit slots first.
+Unavailable buses, exhaustion and conflicting slot assignments are errors.
+
 Where the contract permits child-resource derivation, preserve its bounds and relationships. Address containment alone is not permission to instantiate arbitrary child hardware.
 
 ### DT-005 — Parsing is not conformance
