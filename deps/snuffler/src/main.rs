@@ -109,7 +109,9 @@ fn run() {
         .split_whitespace()
         .any(|token| token == "dillo.console_lifetime_probe")
     {
-        probe_console_input();
+        if let Err(error) = probe_console_input() {
+            eprintln!("console lifetime probe: {error}");
+        }
         // The host lifetime test stops this healthy, booted VM externally.
         loop {
             std::thread::park();
@@ -120,7 +122,7 @@ fn run() {
     poweroff();
 }
 
-fn probe_console_input() {
+fn probe_console_input() -> std::io::Result<()> {
     use std::io::Write;
     const EXPECTED: &[u8] = b"madrillo input\n";
     let mut bytes = [0; EXPECTED.len()];
@@ -137,8 +139,18 @@ fn probe_console_input() {
         }
     }
     if bytes == EXPECTED {
-        let _ = std::io::stdout().write_all(b"<<<CONSOLE-INPUT-OK>>>\n");
+        // Stop reading with a raw terminal. Canonical input can discard bytes
+        // after its line limit, which would hide backpressure from the host.
+        let mut mode = rustix::termios::tcgetattr(rustix::stdio::stdin())?;
+        mode.make_raw();
+        rustix::termios::tcsetattr(
+            rustix::stdio::stdin(),
+            rustix::termios::OptionalActions::Now,
+            &mode,
+        )?;
+        std::io::stdout().write_all(b"<<<CONSOLE-INPUT-OK>>>\n")?;
     }
+    Ok(())
 }
 
 /// Read the kernel ring buffer from `/dev/kmsg` (non-draining: yields the whole

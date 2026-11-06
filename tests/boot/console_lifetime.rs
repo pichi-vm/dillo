@@ -244,6 +244,16 @@ fn monitor_crash_allows_cooperative_vm_teardown() {
         assert_eq!(response["version"], 1);
         response["message"].clone()
     }
+    fn send(client: &mut impl Write, message: serde_json::Value) {
+        let request = serde_json::to_vec(&serde_json::json!({
+            "version": 1, "message": message
+        }))
+        .unwrap();
+        client
+            .write_all(&u32::try_from(request.len()).unwrap().to_be_bytes())
+            .unwrap();
+        client.write_all(&request).unwrap();
+    }
     fn until(client: &mut impl Read, needle: &[u8]) {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut output = Vec::new();
@@ -381,15 +391,55 @@ fn monitor_crash_allows_cooperative_vm_teardown() {
         (queue, request)
     };
     until(&mut client, REPORT_END.as_bytes());
-    let request = serde_json::to_vec(&serde_json::json!({
-        "version": 1, "message": {"type": "input", "bytes": b"madrillo input\n".to_vec()}
-    }))
-    .unwrap();
-    client
-        .write_all(&(request.len() as u32).to_be_bytes())
-        .unwrap();
-    client.write_all(&request).unwrap();
+    send(
+        &mut client,
+        serde_json::json!({"type": "input", "bytes": b"madrillo input\n".to_vec()}),
+    );
     until(&mut client, b"<<<CONSOLE-INPUT-OK>>>");
+    // The guest now leaves raw console input unread. Fill the entire path,
+    // then require sustained rejection across spaced requests: one transient
+    // full monitor queue is insufficient evidence of blocked guest input.
+    let mut saturated = 0;
+    for _ in 0..32 {
+        for _ in 0..8 {
+            send(
+                &mut client,
+                serde_json::json!({"type": "input", "bytes": vec![b'x'; 48 * 1024]}),
+            );
+        }
+        // Attach acknowledges processing all preceding input on this stream.
+        send(
+            &mut client,
+            serde_json::json!({"type": "attach", "input": true, "streams": []}),
+        );
+        let mut refused = 0;
+        loop {
+            let message = next(&mut client);
+            match message["type"].as_str() {
+                Some("error") => {
+                    assert_eq!(message["code"], "resource_limit", "{message}");
+                    refused += 1;
+                }
+                Some("attached") => {
+                    assert_eq!(message["input"], true);
+                    break;
+                }
+                Some("output") => {}
+                _ => panic!("unexpected monitor response while filling input: {message}"),
+            }
+        }
+        saturated = if refused == 8 { saturated + 1 } else { 0 };
+        assert!(vm.monitor.try_wait().unwrap().is_none());
+        if saturated == 3 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    assert_eq!(
+        saturated, 3,
+        "unread guest input never stayed backpressured"
+    );
+    println!("madrillo crash: unread guest console input stayed backpressured");
     assert!(vm.monitor.try_wait().unwrap().is_none());
     vm.monitor.kill().unwrap();
     assert!(!vm.monitor.wait().unwrap().success());
