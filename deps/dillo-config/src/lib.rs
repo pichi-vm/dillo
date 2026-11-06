@@ -23,6 +23,9 @@
 //! (hex parsing, GUID derivation, endpoint checks); [`allocate`] then assigns
 //! each device a bus + slot.
 
+mod console_size;
+pub use console_size::ConsoleSize;
+
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;

@@ -12,8 +12,8 @@ file as a crate patch list or build plan.
 - **One** plugged virtio-console (virtio device ID **3**). No second console
   instance for named ports. No new virtio device ID.
 - Negotiate `VIRTIO_CONSOLE_F_MULTIPORT` when the layout's `ports=` list is
-  present (non-empty after parse). Without `ports=`, keep today's single-port
-  console behavior (no MULTIPORT feature).
+  present (non-empty after parse), or when `--console-resize` is supplied.
+  Without either, keep the two-queue single-port console behavior.
 - **DT-006** (see top-level `DESIGN-RULES.md`): discovery via virtio-mmio or
   PCI. The device tree may declare those transports; it must **not** describe
   virtio-console devices or their ports. Platform UART / early serial may stay
@@ -56,7 +56,32 @@ does **not** move into `devices[]`.
 ```
 
 Bare `--console stdio` (no `ports=`) remains valid and means today's single-port
-console.
+console unless `--console-resize` is also supplied.
+
+### Host terminal resize
+
+`--console-resize ENDPOINT` creates a private Unix socket on Linux/macOS or
+named pipe on Windows. Each connection sends one four-byte update: nonzero
+columns followed by nonzero rows, each a little-endian u16. The shared type is
+`dillo_config::ConsoleSize`. There is no response, history, or connection-lifetime
+effect. Closing this endpoint does not close the console input/liveness pipe.
+Madrillo does not interpret or relay this caller–Dillo contract.
+
+The endpoint enables `VIRTIO_CONSOLE_F_SIZE` and `VIRTIO_CONSOLE_F_MULTIPORT`,
+including when there are no named ports. The existing control worker accepts
+updates and sends the standard `VIRTIO_CONSOLE_RESIZE` message for port 0 after
+the guest marks it ready. Only the latest unsent size is retained. A partial
+client occupies one four-byte buffer for at most one second; the listener is
+removed at device teardown.
+
+Guest resize requires Linux's
+[cols/rows fix](https://github.com/torvalds/linux/commit/5326ab737a47278dbd16ed3ee7380b26c7056ddd)
+or its backport. Older kernels, including the usual 6.1 boot-test image,
+interpret the standard dimensions in reverse. Dillo follows the standard
+format, as does [QEMU's resize implementation](https://github.com/qemu/qemu/commit/d2f8f40f01fb97fc49d5c1fb5fa98fa6233da460);
+it does not infer a guest kernel version or swap dimensions heuristically.
+The native VM resize fixture uses Fedora 44's fixed kernel and verifies
+non-square dimensions through the guest's actual hvc terminal.
 
 ## Schema
 

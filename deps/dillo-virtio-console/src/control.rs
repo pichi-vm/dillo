@@ -21,6 +21,7 @@
 //! `CONSOLE_PORT` (port 0 only), `PORT_NAME` (named ports only), and
 //! `PORT_OPEN`.
 
+use dillo_config::ConsoleSize;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -41,8 +42,7 @@ pub(crate) mod event {
     pub(crate) const PORT_READY: u16 = 3;
     /// Device → guest: this port is a console (port 0).
     pub(crate) const CONSOLE_PORT: u16 = 4;
-    /// Device → guest / guest → device: terminal resize. Unused.
-    #[allow(dead_code)]
+    /// Device → guest: console columns and rows changed.
     pub(crate) const RESIZE: u16 = 5;
     /// Either direction: the far side opened (1) or closed (0) the port.
     pub(crate) const PORT_OPEN: u16 = 6;
@@ -135,6 +135,9 @@ struct State {
     /// Set once the guest sends `DEVICE_READY`; nothing is announced before.
     device_ready: bool,
     outbound: VecDeque<ControlMessage>,
+    console_ready: bool,
+    console_size: Option<ConsoleSize>,
+    resize_pending: bool,
 }
 
 impl ControlPlane {
@@ -197,11 +200,15 @@ impl ControlPlane {
                 }
                 let mut state = self.lock();
                 match kind {
-                    PortKind::Console => state.outbound.push_back(ControlMessage::new(
-                        msg.id,
-                        event::CONSOLE_PORT,
-                        1,
-                    )),
+                    PortKind::Console => {
+                        state.console_ready = true;
+                        state.resize_pending = state.console_size.is_some();
+                        state.outbound.push_back(ControlMessage::new(
+                            msg.id,
+                            event::CONSOLE_PORT,
+                            1,
+                        ));
+                    }
                     PortKind::Named(name) => state
                         .outbound
                         .push_back(ControlMessage::port_name(msg.id, &name)),
@@ -244,12 +251,38 @@ impl ControlPlane {
 
     /// Take the next message owed to the guest, if any.
     pub(crate) fn pop_outbound(&self) -> Option<ControlMessage> {
-        self.lock().outbound.pop_front()
+        let mut state = self.lock();
+        state.outbound.pop_front().or_else(|| {
+            if state.device_ready && state.console_ready && state.resize_pending {
+                state.resize_pending = false;
+                state.console_size.map(|size| ControlMessage {
+                    id: 0,
+                    event: event::RESIZE,
+                    value: 0,
+                    payload: <[u8; 4]>::from(size).to_vec(),
+                })
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Retain only the latest dimensions while the guest is not ready or its
+    /// control receive queue is full. Resizes never accumulate in a backlog.
+    pub(crate) fn resize(&self, size: ConsoleSize) {
+        let mut state = self.lock();
+        state.console_size = Some(size);
+        state.resize_pending = true;
     }
 
     /// Put a message back when no guest buffer was available for it.
     pub(crate) fn requeue(&self, msg: ControlMessage) {
-        self.lock().outbound.push_front(msg);
+        let mut state = self.lock();
+        if msg.event == event::RESIZE {
+            state.resize_pending = true;
+        } else {
+            state.outbound.push_front(msg);
+        }
     }
 }
 
@@ -292,6 +325,28 @@ mod tests {
             assert_eq!(msg.event, event::PORT_ADD);
             assert_eq!(msg.id, id as u32);
         }
+    }
+
+    #[test]
+    fn resize_waits_for_console_and_coalesces_under_backpressure() {
+        let plane = plane();
+        plane.resize((300, 77).try_into().unwrap());
+        assert!(drain(&plane).is_empty());
+        plane.handle(&ControlMessage::new(0, event::DEVICE_READY, 1));
+        assert!(drain(&plane).iter().all(|msg| msg.event == event::PORT_ADD));
+        plane.handle(&ControlMessage::new(0, event::PORT_READY, 1));
+        let messages = drain(&plane);
+        let resize = messages.last().unwrap();
+        assert_eq!(resize.encode(), [0, 0, 0, 0, 5, 0, 0, 0, 44, 1, 77, 0]);
+        // A buffer shortage requeues only a pending-size bit. New sizes replace
+        // it, including when a previously popped message is returned late.
+        for cols in 1..=1000 {
+            plane.resize((cols, 41).try_into().unwrap());
+        }
+        plane.requeue(resize.clone());
+        let messages = drain(&plane);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].payload, [232, 3, 41, 0]);
     }
 
     #[test]

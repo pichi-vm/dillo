@@ -232,6 +232,7 @@ rstest = "0.23"                                    # parameterized boot matrix
 burrow = { workspace = true }               # cached kernel download
 tempfile = "3"                                      # scratch dirs for PMIs
 wait-timeout = "0.2"                                # cross-platform boot timeout
+interprocess = "=2.4.7"                            # private console resize endpoint
 sha2 = "0.10"                                       # verify pinned kernel digests
 hex = "0.4"                                         # hex-encode digests
 

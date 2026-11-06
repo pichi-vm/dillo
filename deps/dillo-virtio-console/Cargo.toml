@@ -7,18 +7,23 @@ license.workspace = true
 description = "virtio-console device implementing dillo_virtio::VirtioDevice. Drives hvc0 to stdout."
 
 [dependencies]
+dillo-config.workspace = true
 dillo-mmio.workspace = true
 dillo-virtio.workspace = true
 vm-memory.workspace = true
 log.workspace = true
 thiserror.workspace = true
+interprocess = "=2.4.7"
+
+[dev-dependencies]
+tempfile.workspace = true
 
 # Named-port host backends are inherited pipe ends. Unix adopts a file
 # descriptor (nix: dup + O_NONBLOCK on our own copy); Windows adopts a handle
 # (DuplicateHandle + PeekNamedPipe-before-ReadFile). Both stay behind
 # `cfg(unix)` / `cfg(windows)` so the portable core builds everywhere.
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true, features = ["poll"] }
+nix = { workspace = true, features = ["poll", "user"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
@@ -30,9 +35,7 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 winx = "=0.36.4"
-
-[target.'cfg(windows)'.dev-dependencies]
-interprocess = "=2.4.7"
+win-custody = "=0.1.2"
 widestring = "1"
 
 [lints]

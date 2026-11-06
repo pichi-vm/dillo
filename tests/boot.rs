@@ -33,6 +33,8 @@ use wait_timeout::ChildExt;
 mod bootconfig;
 #[path = "boot/console_lifetime.rs"]
 mod console_lifetime;
+#[path = "boot/console_resize.rs"]
+mod console_resize;
 #[path = "boot/virtiofs.rs"]
 mod virtiofs;
 

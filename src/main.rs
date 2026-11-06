@@ -42,6 +42,11 @@ struct Args {
     #[argh(option)]
     console: Option<dillo_config::ConsoleSpec>,
 
+    /// private local endpoint for console resize updates: columns then rows
+    /// as two little-endian u16s, one four-byte update per connection.
+    #[argh(option)]
+    console_resize: Option<std::path::PathBuf>,
+
     /// default bus for devices that don't pin one, when the DTB exposes both:
     /// `pci` (default) or `mmio`. Automatic devices fall back when it is full.
     #[argh(option)]
@@ -337,7 +342,10 @@ fn build_placements(
     requests.push(resolved.console.placement.clone());
     built.push((
         "virtio-console",
-        Box::new(build_console_device(&resolved.console)?),
+        Box::new(build_console_device(
+            &resolved.console,
+            args.console_resize.as_deref(),
+        )?),
     ));
 
     for device in &resolved.devices {
@@ -415,6 +423,7 @@ fn msix_vectors_for(device: &dyn dillo_virtio::VirtioDevice) -> u16 {
 /// bad descriptor is a plain startup error rather than a mid-boot surprise.
 fn build_console_device(
     console: &dillo_config::ResolvedConsole,
+    resize: Option<&std::path::Path>,
 ) -> anyhow::Result<dillo_virtio_console::VirtioConsole> {
     use dillo_virtio_console::pipe::{Direction, PipeEnd};
 
@@ -430,7 +439,11 @@ fn build_console_device(
             adopt(Direction::Tx, port.tx)?,
         ));
     }
-    Ok(dillo_virtio_console::VirtioConsole::with_ports(ports))
+    let device = dillo_virtio_console::VirtioConsole::with_ports(ports);
+    Ok(match resize {
+        Some(path) => device.with_resize(path)?,
+        None => device,
+    })
 }
 
 /// Construct the `VirtioBlk` for one resolved device (opening its backing files).
