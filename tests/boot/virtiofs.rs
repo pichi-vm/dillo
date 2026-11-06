@@ -75,8 +75,8 @@ fn virtiofs_filesystem_ops() {
     );
     let (kernel, config) = kernel();
     let pmi = build_pmi_from_path(tmp.path(), &kernel, config, &cmdline, false);
-    let rw = format!("tag=ctx,source={}", share.display());
-    let ro = format!("tag=roctx,source={},readonly", ro_share.display());
+    let rw = format!("tag=ctx,source={},bus=pci", share.display());
+    let ro = format!("tag=roctx,source={},readonly,bus=pci", ro_share.display());
     let output = boot_with_env(
         &pmi,
         512,

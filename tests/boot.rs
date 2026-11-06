@@ -457,7 +457,11 @@ fn boot_with_env(
 
     let out_path = dir.join("console.out");
     let err_path = dir.join("console.err");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_dillo"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dillo"));
+    if !extra.contains(&"--console") {
+        command.args(["--console", "endpoint=stdio,bus=pci"]);
+    }
+    let mut child = command
         .arg("--pmi")
         .arg(pmi)
         .args(["--memory", &mem_mib.to_string()])
@@ -765,7 +769,7 @@ fn boots_with_raw_disk() {
     let tmp = TempDir::new().unwrap();
     let disk = make_raw(tmp.path(), "data.raw", DISK_BYTES);
     let pmi = build_pmi(tmp.path(), "console=hvc0", false);
-    let blk = format!("path={}", disk.display());
+    let blk = format!("path={},bus=pci", disk.display());
     let output = boot_with(&pmi, 256, 1, tmp.path(), &["--blk", &blk]);
     let r = parse_report(&output).unwrap_or_else(|| {
         panic!("boot produced no snuffler report (guest did not boot):\n{output}")
@@ -842,8 +846,14 @@ fn boots_with_raw_disk_over_mmio() {
         "console=hvc0",
         false,
     );
-    let blk = format!("path={}", disk.display());
-    let output = boot_with(&pmi, 256, 1, tmp.path(), &["--blk", &blk]);
+    let blk = format!("path={},bus=mmio", disk.display());
+    let output = boot_with(
+        &pmi,
+        256,
+        1,
+        tmp.path(),
+        &["--console", "endpoint=stdio,bus=mmio", "--blk", &blk],
+    );
     let r = parse_report(&output).unwrap_or_else(|| {
         panic!("boot produced no snuffler report (guest did not boot):\n{output}")
     });
@@ -895,7 +905,7 @@ fn boots_with_vgpt_disk() {
 
     let typeguid = "0fc63daf-8483-4772-8e79-3d69d84330f1";
     let gpt = format!(
-        "partitions=[\
+        "bus=pci,partitions=[\
            [path={p0},partuuid=11111111-2222-2222-3333-333333334444,typeguid={typeguid},label=alpha],\
            [path={p1},partuuid=55555555-6666-6666-7777-777777778888,typeguid={typeguid},label=beta]\
          ]",
@@ -999,7 +1009,7 @@ fn boots_with_vsock() {
 
     let cmdline = format!("console=hvc0 dillo.vsock_port={PORT}");
     let pmi = build_pmi_from_path(tmp.path(), &kernel, host::CONFIG, &cmdline, false);
-    let vsock = format!("cid=3,uds={}", tmp.path().display());
+    let vsock = format!("cid=3,uds={},bus=pci", tmp.path().display());
     let output = boot_with(&pmi, 256, 1, tmp.path(), &["--vsock", &vsock]);
     let r = parse_report(&output).unwrap_or_else(|| {
         panic!("boot produced no snuffler report (guest did not boot):\n{output}")
@@ -1051,7 +1061,7 @@ fn boots_with_net() {
 
     let cmdline = format!("console=hvc0 dillo.net_mac={MAC}");
     let pmi = build_pmi_from_path(tmp.path(), &kernel, host::CONFIG, &cmdline, false);
-    let net = format!("mac={MAC}");
+    let net = format!("mac={MAC},bus=pci");
     let output = boot_with(&pmi, 256, 1, tmp.path(), &["--net", &net]);
     let r = parse_report(&output).unwrap_or_else(|| {
         panic!("boot produced no snuffler report (guest did not boot):\n{output}")
@@ -1239,7 +1249,7 @@ fn boots_with_net_user() {
          dillo.net_listen={GUEST_FWD_PORT}{reach_token}"
     );
     let pmi = build_pmi_from_path(tmp.path(), &kernel, host::CONFIG, &cmdline, false);
-    let net = format!("backend=user,forwards=[{fwd_host_port}:{GUEST_FWD_PORT}]");
+    let net = format!("bus=pci,backend=user,forwards=[{fwd_host_port}:{GUEST_FWD_PORT}]");
     let output = boot_with(&pmi, 256, 1, tmp.path(), &["--net", &net]);
     let r = parse_report(&output).unwrap_or_else(|| {
         panic!("boot produced no snuffler report (guest did not boot):\n{output}")
@@ -1403,7 +1413,7 @@ fn boots_with_named_console_ports() {
     let device_tx = device_tx.into_raw_fd();
     let log_device_tx = log_device_tx.into_raw_fd();
     let console = format!(
-        "endpoint=stdio,ports=[[name=build,rx=pipe:{device_rx},tx=pipe:{device_tx}],\
+        "endpoint=stdio,bus=pci,ports=[[name=build,rx=pipe:{device_rx},tx=pipe:{device_tx}],\
          [name=log,tx=pipe:{log_device_tx}]]"
     );
 
@@ -1613,7 +1623,7 @@ fn boots_with_named_console_ports() {
     let device_tx = device_tx.into_raw_handle();
     let log_device_tx = log_device_tx.into_raw_handle();
     let console = format!(
-        "endpoint=stdio,ports=[[name=build,rx=pipe:{},tx=pipe:{}],\
+        "endpoint=stdio,bus=pci,ports=[[name=build,rx=pipe:{},tx=pipe:{}],\
          [name=log,tx=pipe:{}]]",
         handle_number(device_rx),
         handle_number(device_tx),
