@@ -165,6 +165,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - name: Provide Python on minimal NixOS runners
+        shell: bash
+        run: |
+          if ! command -v python3 >/dev/null; then
+            python=$(nix --extra-experimental-features 'nix-command flakes' build \
+              --out-link "$RUNNER_TEMP/dillo-ci-python" --print-out-paths \
+              github:NixOS/nixpkgs/7dcdd87373d72e7a2173e4db02e20d3d7f495cfd#python313)
+            echo "$python/bin" >> "$GITHUB_PATH"
+          fi
+
       - name: Install cargo config
         shell: bash
         run: mkdir -p .cargo && cp packaging/cargo-config.toml .cargo/config.toml
@@ -254,7 +264,7 @@ jobs:
         shell: bash
         env:
           CARGO_BUILD_RUSTFLAGS: "-D warnings"
-          MADRILLO_REV: 99520651e2175b52ef5ea72692812eac1c46423a
+          MADRILLO_REV: 30437e1cc1089057e7a14d973723e27dc8e65876
         run: |
           python3 - <<'PY'
           import os, pathlib, subprocess, tempfile
@@ -286,3 +296,8 @@ jobs:
         with:
           name: memory-evidence-${{ matrix.name }}
           path: target/memory-evidence
+
+      - name: Release the CI Python store reference
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/dillo-ci-python"
