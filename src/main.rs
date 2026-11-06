@@ -30,10 +30,10 @@ struct Args {
     #[argh(option, default = "1")]
     cpus: u32,
 
-    /// console device. `stdio` (default), or key/value with placement, e.g.
+    /// console device. Specify a bus with key/value placement, e.g.
     /// `endpoint=stdio,bus=mmio,slot=0`. Add named MULTIPORT ports alongside
     /// the unnamed hvc0 with
-    /// `endpoint=stdio,ports=[[name=build,rx=pipe:3,tx=pipe:4],[name=log,tx=pipe:5]]`:
+    /// `endpoint=stdio,bus=mmio,ports=[[name=build,rx=pipe:3,tx=pipe:4],[name=log,tx=pipe:5]]`:
     /// `rx` is host→guest and `tx` is guest→host, each `pipe:N` an inherited
     /// descriptor the parent process created; an omitted direction is closed,
     /// and each port must set at least one. `endpoint` is required once
@@ -47,25 +47,20 @@ struct Args {
     #[argh(option)]
     console_resize: Option<std::path::PathBuf>,
 
-    /// default bus for devices that don't pin one, when the DTB exposes both:
-    /// `pci` (default) or `mmio`. Automatic devices fall back when it is full.
-    #[argh(option)]
-    bus: Option<dillo_config::Bus>,
-
     /// virtio-blk device (raw image). Repeatable. Key/value:
-    /// `path=P[,readonly][,bus=pci|mmio][,preferred-bus=pci|mmio][,slot=N]`.
+    /// `path=P[,readonly],bus=pci|mmio[,slot=N]`.
     #[argh(option)]
     blk: Vec<dillo_config::BlkSpec>,
 
     /// virtualized-GPT device (one GPT synthesized over its partitions).
     /// Repeatable. Key/value, e.g.
-    /// `partitions=[[path=P,partuuid=U,typeguid=U,label=S]][,bus=pci|mmio][,slot=N]`;
+    /// `partitions=[[path=P,partuuid=U,typeguid=U,label=S]],bus=pci|mmio[,slot=N]`;
     /// `device-id`/`disk-guid` are derived from the PARTUUIDs if omitted.
     #[argh(option)]
     gpt: Vec<dillo_config::GptSpec>,
 
     /// virtio-vsock device (host CID 2 ⇄ guest). Repeatable. Key/value:
-    /// `cid=N,uds=PATH[,bus=pci|mmio][,slot=N]`. Guest connections to port N
+    /// `cid=N,uds=PATH,bus=pci|mmio[,slot=N]`. Guest connections to port N
     /// bridge to `PATH/N.sock` on the host. Unix hosts only.
     #[cfg(unix)]
     #[argh(option)]
@@ -73,14 +68,14 @@ struct Args {
 
     /// virtio-fs device: share a host directory into the guest (read-write by
     /// default; pass `readonly` to forbid guest writes). Repeatable. Key/value:
-    /// `tag=NAME,source=DIR[,readonly][,bus=pci|mmio][,slot=N]`. The guest mounts
+    /// `tag=NAME,source=DIR[,readonly],bus=pci|mmio[,slot=N]`. The guest mounts
     /// it with `mount -t virtiofs NAME <dir>`.
     #[argh(option)]
     fs: Vec<dillo_config::FsSpec>,
 
     /// virtio-net device. Repeatable. Key/value:
     /// `[backend=user|bridge|macvtap][,iface=NAME][,mac=aa:bb:cc:dd:ee:ff]`
-    /// `[,forwards=[2222:22,udp:5353:53]][,bus=pci|mmio][,preferred-bus=pci|mmio][,slot=N]`.
+    /// `[,forwards=[2222:22,udp:5353:53]],bus=pci|mmio[,slot=N]`.
     /// `user` (the default) is cross-platform user-mode NAT with inbound port
     /// forwarding and needs no privilege; `bridge` (Linux/macOS, needs
     /// CAP_NET_ADMIN/root) joins the host's L2 segment via `iface`; `macvtap`
@@ -89,7 +84,7 @@ struct Args {
     net: Vec<dillo_config::NetSpec>,
 
     /// path to a JSON device layout file. Mutually exclusive with
-    /// `--blk`/`--gpt`/`--vsock`/`--fs`/`--net`/`--bus`/`--console`.
+    /// `--blk`/`--gpt`/`--vsock`/`--fs`/`--net`/`--console`.
     #[argh(option)]
     layout: Option<std::path::PathBuf>,
 
@@ -260,6 +255,44 @@ fn main() {
     }
 }
 
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn global_bus_flag_is_rejected() {
+        assert!(Args::from_args(&["dillo"], &["--bus", "pci"]).is_err());
+    }
+
+    #[test]
+    fn explicit_device_bus_does_not_require_a_numeric_slot() {
+        let args = Args::from_args(
+            &["dillo"],
+            &[
+                "--pmi",
+                "guest.pmi",
+                "--console",
+                "endpoint=stdio,bus=mmio",
+                "--blk",
+                "path=disk,bus=pci",
+            ],
+        )
+        .unwrap();
+        let layout = layout_from_args(&args).unwrap();
+        let resolved = dillo_config::resolve(layout).unwrap();
+        assert_eq!(
+            resolved.console.placement.bus,
+            Some(dillo_config::Bus::Mmio)
+        );
+        assert_eq!(resolved.console.placement.slot, None);
+        assert_eq!(
+            resolved.devices[0].placement().bus,
+            Some(dillo_config::Bus::Pci)
+        );
+        assert_eq!(resolved.devices[0].placement().slot, None);
+    }
+}
+
 fn validate(args: &Args) -> Result<(), &'static str> {
     if args.pmi.is_none() {
         return Err("--pmi required");
@@ -283,14 +316,13 @@ fn layout_from_args(args: &Args) -> anyhow::Result<dillo_config::Layout> {
                 && args.gpt.is_empty()
                 && args.fs.is_empty()
                 && args.net.is_empty()
-                && args.bus.is_none()
                 && args.console.is_none(),
-            "--layout is mutually exclusive with --blk/--gpt/--fs/--vsock/--net/--bus/--console"
+            "--layout is mutually exclusive with --blk/--gpt/--fs/--vsock/--net/--console"
         );
         #[cfg(unix)]
         anyhow::ensure!(
             args.vsock.is_empty(),
-            "--layout is mutually exclusive with --blk/--gpt/--fs/--vsock/--bus/--console"
+            "--layout is mutually exclusive with --blk/--gpt/--fs/--vsock/--console"
         );
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading layout file {}", path.display()))?;
@@ -315,7 +347,6 @@ fn layout_from_args(args: &Args) -> anyhow::Result<dillo_config::Layout> {
         #[cfg(unix)]
         devices.extend(args.vsock.iter().cloned().map(dillo_config::Device::Vsock));
         Ok(dillo_config::Layout {
-            bus: args.bus,
             console: args.console.clone(),
             devices,
         })
@@ -391,9 +422,8 @@ fn build_placements(
     }
 
     let capacity = capacity_from_platform(platform);
-    let default_bus = resolved.default_bus.unwrap_or(dillo_config::Bus::Pci);
-    let placed = dillo_config::allocate(&capacity, default_bus, &requests)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let placed =
+        dillo_config::allocate(&capacity, &requests).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     Ok(placed
         .into_iter()

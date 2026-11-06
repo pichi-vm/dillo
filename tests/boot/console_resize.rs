@@ -62,7 +62,14 @@ fn console_resize_reaches_guest_and_preserves_lifetime() {
     let mut vm = Vm(Command::new(env!("CARGO_BIN_EXE_dillo"))
         .arg("--pmi")
         .arg(&pmi)
-        .args(["--memory", "512", "--cpus", "1", "--bus", "pci"])
+        .args([
+            "--memory",
+            "512",
+            "--cpus",
+            "1",
+            "--console",
+            "endpoint=stdio,bus=pci",
+        ])
         .arg("--console-resize")
         .arg(&endpoint)
         .stdin(Stdio::from(reader))
