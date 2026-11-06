@@ -91,6 +91,9 @@ const FUSE_OUT_HEADER_LEN: usize = 16;
 const FUSE_NAME_OFFSET: usize = 24; // offsetof(fuse_dirent, name)
 const FUSE_ROOT_ID: u64 = 1;
 
+/// The server accepts writes larger than one page, bounded by `max_write`.
+const FUSE_BIG_WRITES: u32 = 1 << 5;
+
 /// `open(2)` access-mode mask; a nonzero masked value means write intent.
 const O_ACCMODE: u32 = 0o3;
 /// `open(2)` O_TRUNC.
@@ -597,16 +600,17 @@ fn is_write_opcode(op: u32) -> bool {
 }
 
 fn handle_init(unique: u64, args: &[u8]) -> Vec<u8> {
-    // fuse_init_in: major, minor, max_readahead, flags (we only need minor).
+    // fuse_init_in: major, minor, max_readahead, flags.
     let their_minor = rd_u32(args, 4).unwrap_or(FUSE_KERNEL_MINOR_VERSION);
     let minor = their_minor.min(FUSE_KERNEL_MINOR_VERSION);
     let max_readahead = rd_u32(args, 8).unwrap_or(0);
+    let flags = rd_u32(args, 12).unwrap_or(0) & FUSE_BIG_WRITES;
 
     let mut w = Writer::with_header();
     w.u32(FUSE_KERNEL_VERSION); // major
     w.u32(minor); // minor
     w.u32(max_readahead); // max_readahead (echo)
-    w.u32(0); // flags (negotiate nothing extra)
+    w.u32(flags);
     w.bytes(&0u16.to_le_bytes()); // max_background
     w.bytes(&0u16.to_le_bytes()); // congestion_threshold
     w.u32(MAX_PAYLOAD); // max_write
@@ -1467,6 +1471,24 @@ mod tests {
     }
 
     #[test]
+    fn init_negotiates_only_offered_large_writes() {
+        for (offered, expected) in [
+            (0, 0),
+            (FUSE_BIG_WRITES, FUSE_BIG_WRITES),
+            (u32::MAX, FUSE_BIG_WRITES),
+            (u32::MAX ^ FUSE_BIG_WRITES, 0),
+        ] {
+            let args: Vec<_> = [7, FUSE_KERNEL_MINOR_VERSION, 0, offered]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            let reply = handle_init(1, &args);
+            assert_eq!(rd_u32(&reply, FUSE_OUT_HEADER_LEN + 12), Some(expected));
+            assert_eq!(rd_u32(&reply, FUSE_OUT_HEADER_LEN + 20), Some(MAX_PAYLOAD));
+        }
+    }
+
+    #[test]
     fn getattr_root_is_directory() {
         let mut state = FsState::new(true);
         let fs = MapFs::new().with_file("a.txt", "a");
@@ -1684,27 +1706,28 @@ mod tests {
         // fuse_open_out follows the 128-byte fuse_entry_out.
         let fh = rd_u64(&reply, FUSE_OUT_HEADER_LEN + 128).unwrap();
 
-        // WRITE "hello" at offset 0.
+        // One multipage WRITE at offset 0 exercises the advertised capability.
+        let data = vec![0x5a; 64 * 1024];
         let reply = dispatch(
             &mut state,
             &fs,
-            &request(FUSE_WRITE, 2, child, &write_in(fh, 0, b"hello")),
+            &request(FUSE_WRITE, 2, child, &write_in(fh, 0, &data)),
         )
         .unwrap();
         assert_eq!(out_error(&reply), 0);
-        assert_eq!(rd_u32(&reply, FUSE_OUT_HEADER_LEN), Some(5)); // fuse_write_out.size
+        assert_eq!(rd_u32(&reply, FUSE_OUT_HEADER_LEN), Some(data.len() as u32));
 
         // It actually hit the host.
-        assert_eq!(std::fs::read(dir.path().join("hi.txt")).unwrap(), b"hello");
+        assert_eq!(std::fs::read(dir.path().join("hi.txt")).unwrap(), data);
 
         // READ it back through the same fh.
         let mut read_in = Vec::new();
         read_in.extend_from_slice(&fh.to_le_bytes());
         read_in.extend_from_slice(&0u64.to_le_bytes());
-        read_in.extend_from_slice(&64u32.to_le_bytes());
+        read_in.extend_from_slice(&(data.len() as u32).to_le_bytes());
         read_in.extend_from_slice(&[0u8; 16]);
         let reply = dispatch(&mut state, &fs, &request(FUSE_READ, 3, child, &read_in)).unwrap();
-        assert_eq!(&reply[FUSE_OUT_HEADER_LEN..], b"hello");
+        assert_eq!(&reply[FUSE_OUT_HEADER_LEN..], data);
     }
 
     #[test]
