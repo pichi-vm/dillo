@@ -28,3 +28,11 @@ gitlint (see `.gitlint`) in CI.
   for a reader with no knowledge of the project's history or how the work was
   produced. Do not reference internal process, prior iterations, or review
   back-and-forth. (gitlint cannot check this — it is a review responsibility.)
+
+## COPR packages
+
+The `npmccallum/pichi` COPR project builds `main` for Fedora on x86_64 and
+aarch64. `.copr/Makefile` creates one source RPM; COPR builds the native
+packages using the spec in `packaging/`. Binary builds need network access
+for Cargo's locked dependencies. The unreleased RPM version is `0.1.0~dev`;
+COPR's build ID in `Release` makes successive builds of that version upgrades.
