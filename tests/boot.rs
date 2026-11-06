@@ -33,6 +33,8 @@ use wait_timeout::ChildExt;
 mod bootconfig;
 #[path = "boot/console_input.rs"]
 mod console_input;
+#[path = "boot/console_lifetime.rs"]
+mod console_lifetime;
 #[path = "boot/console_resize.rs"]
 mod console_resize;
 #[path = "boot/virtiofs.rs"]
@@ -472,10 +474,14 @@ fn boot_with_env(
         .args(["--cpus", &cpus.to_string()])
         .args(extra)
         .envs(env.iter().copied())
+        // The test owns the console writer until guest-initiated shutdown.
+        .stdin(std::process::Stdio::piped())
         .stdout(File::create(&out_path).unwrap())
         .stderr(File::create(&err_path).unwrap())
         .spawn()
         .expect("spawn dillo");
+    // wait_timeout closes Child::stdin; retain the console through guest exit.
+    let _console_writer = child.stdin.take().expect("console writer");
     if child
         .wait_timeout(Duration::from_secs(120))
         .expect("wait dillo")
@@ -1430,6 +1436,7 @@ fn boots_with_named_console_ports() {
         .arg(&pmi)
         .args(["--memory", "256", "--cpus", "1"])
         .args(["--console", &console])
+        .stdin(std::process::Stdio::piped())
         .stdout(File::create(&out_path).unwrap())
         .stderr(File::create(&err_path).unwrap());
     // SAFETY: `fcntl` is async-signal-safe, and this closure touches nothing
@@ -1444,6 +1451,7 @@ fn boots_with_named_console_ports() {
         });
     }
     let mut child = cmd.spawn().expect("spawn dillo");
+    let _console_writer = child.stdin.take().expect("console writer");
 
     // Our copies of the device-side ends are now the child's business: close
     // them so the guest sees a real EOF if dillo ever drops its own.
@@ -1641,12 +1649,14 @@ fn boots_with_named_console_ports() {
         .arg(&pmi)
         .args(["--memory", "256", "--cpus", "1"])
         .args(["--console", &console])
+        .stdin(std::process::Stdio::piped())
         .stdout(File::create(&out_path).unwrap())
         .stderr(File::create(&err_path).unwrap())
         // Required: with redirected stdio, Rust may otherwise skip inheriting
         // the extra pipe handles we prepared for `pipe:N`.
         .inherit_handles(true);
     let mut child = cmd.spawn().expect("spawn dillo");
+    let _console_writer = child.stdin.take().expect("console writer");
 
     // Parent copies of the device-side ends are now the child's: close them
     // so the guest sees a real EOF if dillo ever drops its own.
