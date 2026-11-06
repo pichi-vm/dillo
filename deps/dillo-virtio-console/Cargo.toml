@@ -20,12 +20,14 @@ thiserror.workspace = true
 # (DuplicateHandle + PeekNamedPipe-before-ReadFile). Both stay behind
 # `cfg(unix)` / `cfg(windows)` so the portable core builds everywhere.
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true, features = ["user"] }
+nix = { workspace = true, features = ["poll", "user"] }
 
 [target.'cfg(windows)'.dependencies]
 win-custody = "=0.1.2"
 widestring = "1"
+winx = "=0.36.4"
 windows-sys = { workspace = true, features = [
+    "Wdk_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",

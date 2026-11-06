@@ -58,6 +58,7 @@ fn console_resize_reaches_guest_after_reconnect() {
     ));
     let stdout = root.path().join("console.out");
     let stderr = root.path().join("console.err");
+    let (reader, _console_writer) = std::io::pipe().unwrap();
     let mut vm = Vm(Command::new(env!("CARGO_BIN_EXE_dillo"))
         .arg("--pmi")
         .arg(&pmi)
@@ -71,7 +72,7 @@ fn console_resize_reaches_guest_after_reconnect() {
         ])
         .arg("--console-resize")
         .arg(&endpoint)
-        .stdin(Stdio::null())
+        .stdin(Stdio::from(reader))
         .stdout(File::create(&stdout).unwrap())
         .stderr(File::create(&stderr).unwrap())
         .spawn()

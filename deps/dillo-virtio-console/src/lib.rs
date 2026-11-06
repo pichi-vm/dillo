@@ -34,6 +34,7 @@
 //! See `DESIGN-named-ports.md` and `PLAN-named-ports.md` in this crate.
 mod control;
 mod input;
+pub mod liveness;
 pub mod pipe;
 mod resize;
 

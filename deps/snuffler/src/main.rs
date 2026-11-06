@@ -125,13 +125,24 @@ fn run() {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
-    if report
+    let console_lifetime = report
         .cmdline
         .split_whitespace()
-        .any(|token| token == "dillo.console_input_probe")
+        .any(|token| token == "dillo.console_lifetime_probe");
+    if (console_lifetime
+        || report
+            .cmdline
+            .split_whitespace()
+            .any(|token| token == "dillo.console_input_probe"))
         && let Err(error) = probe_console_input()
     {
         eprintln!("console input probe: {error}");
+    }
+    if console_lifetime {
+        // The lifetime test stops a healthy VM after console-owner loss.
+        loop {
+            std::thread::park();
+        }
     }
     rustix::fs::sync();
     #[cfg(not(test))]
@@ -155,6 +166,15 @@ fn probe_console_input() -> std::io::Result<()> {
         }
     }
     if bytes == EXPECTED {
+        // Stop reading with a raw terminal. Canonical input can discard bytes
+        // after its line limit, which would hide backpressure from the host.
+        let mut mode = rustix::termios::tcgetattr(rustix::stdio::stdin())?;
+        mode.make_raw();
+        rustix::termios::tcsetattr(
+            rustix::stdio::stdin(),
+            rustix::termios::OptionalActions::Now,
+            &mode,
+        )?;
         std::io::stdout().write_all(b"<<<CONSOLE-INPUT-OK>>>\n")?;
     }
     Ok(())

@@ -509,6 +509,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "wait-timeout",
+ "widestring",
  "windows-sys 0.61.2",
 ]
 
@@ -675,6 +676,7 @@ dependencies = [
  "widestring",
  "win-custody",
  "windows-sys 0.61.2",
+ "winx",
 ]
 
 [[package]]
@@ -2342,6 +2344,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0592e1c9d151f854e6fd382574c3a0855250e1d9b2f99d9281c6e6391af352f1"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winx"
+version = "0.36.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
+dependencies = [
+ "bitflags 2.13.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
