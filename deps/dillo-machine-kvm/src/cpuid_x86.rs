@@ -14,6 +14,18 @@ use dillo_machine::cpuid_x86::{CpuidFeature, Reg};
 
 pub(crate) use dillo_machine::cpuid_x86::X86Level;
 
+/// Match CPUID's APIC identifiers to the ID given to KVM_CREATE_VCPU.
+pub(crate) fn set_apic_id(cpuid: &mut CpuId, id: u32) {
+    for entry in cpuid.as_mut_slice() {
+        match entry.function {
+            1 => entry.ebx = (entry.ebx & 0x00ff_ffff) | (id << 24),
+            0x0b | 0x1f => entry.edx = id,
+            0x8000_001e => entry.eax = id,
+            _ => {}
+        }
+    }
+}
+
 /// KVM reports guest MAXPHYADDR in EAX[7:0], and, with hardware second-stage
 /// paging, its addressable GPA width in EAX[23:16]. The latter can be smaller
 /// (e.g. 48-bit EPT with a 52-bit CPU). Zero means it supplies no extra bound.
@@ -68,6 +80,64 @@ fn extract(reg: Reg, entry: &kvm_bindings::kvm_cpuid_entry2) -> u32 {
 mod tests {
     use super::*;
     use kvm_bindings::kvm_cpuid_entry2;
+
+    #[test]
+    fn apic_ids_preserve_other_cpuid_fields() {
+        let entries: Vec<_> = [
+            (1, 0),
+            (0x0b, 0),
+            (0x0b, 1),
+            (0x1f, 2),
+            (0x8000_001e, 0),
+            (7, 0),
+        ]
+        .into_iter()
+        .map(|(function, index)| kvm_cpuid_entry2 {
+            function,
+            index,
+            flags: 1,
+            eax: 0x1234_5678,
+            ebx: 0xabcd_ef01,
+            ecx: 0x2345_6789,
+            edx: 0x3456_789a,
+            ..Default::default()
+        })
+        .collect();
+        for id in [0, 1, 0x123] {
+            let mut cpuid = CpuId::from_entries(&entries).unwrap();
+            set_apic_id(&mut cpuid, id);
+            for (before, after) in entries.iter().zip(cpuid.as_slice()) {
+                assert_eq!(after.function, before.function);
+                assert_eq!(after.index, before.index);
+                assert_eq!(after.flags, before.flags);
+                assert_eq!(after.ecx, before.ecx);
+                assert_eq!(
+                    after.eax,
+                    if before.function == 0x8000_001e {
+                        id
+                    } else {
+                        before.eax
+                    }
+                );
+                assert_eq!(
+                    after.ebx,
+                    if before.function == 1 {
+                        ((id & 0xff) << 24) | 0x00cd_ef01
+                    } else {
+                        before.ebx
+                    }
+                );
+                assert_eq!(
+                    after.edx,
+                    if matches!(before.function, 0x0b | 0x1f) {
+                        id
+                    } else {
+                        before.edx
+                    }
+                );
+            }
+        }
+    }
 
     #[test]
     fn address_width_intersects_cpu_and_kvm_limits() {
