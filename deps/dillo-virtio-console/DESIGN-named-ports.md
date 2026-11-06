@@ -63,8 +63,10 @@ console unless `--console-resize` is also supplied.
 `--console-resize ENDPOINT` creates a private Unix socket on Linux/macOS or
 named pipe on Windows. Each connection sends one four-byte update: nonzero
 columns followed by nonzero rows, each a little-endian u16. The shared type is
-`dillo_config::ConsoleSize`. There is no response, history, or connection-lifetime
-effect. Closing this endpoint does not close the console input/liveness pipe.
+`dillo_config::ConsoleSize`. The receiver closes after consuming the update;
+senders retain their connection until that EOF, with a bounded deadline. A
+Windows client closing before accept can discard its update. There is no reply
+payload or history. Closing this endpoint does not close the console input/liveness pipe.
 Madrillo does not interpret or relay this caller–Dillo contract.
 
 The endpoint enables `VIRTIO_CONSOLE_F_SIZE` and `VIRTIO_CONSOLE_F_MULTIPORT`,

@@ -3,6 +3,8 @@
 
 //! Dillo's console-resize endpoint accepts columns then rows as two LE u16s.
 //! Each connection sends one four-byte update; there is no response or backlog.
+//! Keep the sender open until Dillo closes its end after consuming the update;
+//! an early Windows client close can discard a not-yet-accepted connection.
 
 #![forbid(unsafe_code)]
 
