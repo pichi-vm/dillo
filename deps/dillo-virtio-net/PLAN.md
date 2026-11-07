@@ -288,10 +288,10 @@ locally.
   `NetBench` — `bytes`/`errors`/`verified` are asserted, throughput is telemetry
   only (virtio-blk philosophy). Guest IP via kernel `ip=` (`IP_PNP=y`).
 
-### Layer 3 — bridge integration (opt-in, NEVER in CI)
+### Layer 3 — bridge integration
 
-- macOS vmnet has a manual environment-gated test. Linux bridge attachment
-  is not covered by integration tests.
+Real Linux bridge attachment and macOS vmnet startup are not covered by
+integration tests.
 
 ### Layer 4 — negative / error paths (unit)
 

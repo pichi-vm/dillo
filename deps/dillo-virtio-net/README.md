@@ -77,19 +77,10 @@ Bridge mode is **unsupported on Windows** (a clean error).
 Bridge construction and error handling are unit-tested. Real bridge
 attachment is not covered by the automated suite.
 
-### Setup recipe (macOS) + running the integration test
+### macOS testing
 
-`vmnet` bridged mode needs root or the `com.apple.vm.networking` entitlement.
-The XPC param-dict construction is unit-tested (`bridged_desc_builds`); a real
-start is covered by an opt-in, `#[ignore]`d test run manually:
-
-```sh
-# `en0` is typically the primary Ethernet/Wi-Fi interface (see `ifconfig`).
-sudo DILLO_NET_VMNET_TEST=en0 \
-  cargo test -p dillo-virtio-net -- --ignored vmnet_starts
-```
-
-The test starts vmnet bridged mode on the interface and writes one frame.
+The XPC parameter dictionary is unit-tested. Real vmnet startup and frame
+transmission are not covered by the automated suite.
 
 ## `macvtap` — Linux only
 
