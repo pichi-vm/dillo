@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 /// Transport-resolved activation inputs for one virtio device.
 pub struct VirtioActivate {
+    negotiated_features: u64,
     shared_memory: Vec<Arc<dyn SharedMemory>>,
     queue_memory: Arc<dyn QueueMemory>,
     buffer_memory: Arc<dyn VirtioMemory>,
@@ -28,6 +29,7 @@ pub struct VirtioActivate {
 impl std::fmt::Debug for VirtioActivate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VirtioActivate")
+            .field("negotiated_features", &self.negotiated_features)
             .field("shared_memory_count", &self.shared_memory.len())
             .field("queue_memory", &"QueueMemory")
             .field("buffer_memory", &"VirtioMemory")
@@ -40,8 +42,18 @@ impl std::fmt::Debug for VirtioActivate {
 }
 
 impl VirtioActivate {
+    #[must_use]
+    pub fn with_negotiated_features(mut self, features: u64) -> Self {
+        self.negotiated_features = features;
+        self
+    }
+    pub fn negotiated_features(&self) -> u64 {
+        self.negotiated_features
+    }
+
     pub fn new(queues: Vec<Queue>, queue_evts: Vec<Kick>) -> Self {
         Self {
+            negotiated_features: 0,
             shared_memory: Vec::new(),
             queue_memory: Arc::new(NullQueueMemory),
             buffer_memory: Arc::new(NullVirtioMemory),
@@ -61,6 +73,7 @@ impl VirtioActivate {
         let queue_memory = Self::make_queue_memory(&shared_memory);
         let buffer_memory = Self::make_buffer_memory(&shared_memory);
         Self {
+            negotiated_features: 0,
             shared_memory,
             queue_memory,
             buffer_memory,
@@ -81,6 +94,7 @@ impl VirtioActivate {
         let queue_memory = Self::make_queue_memory(&shared_memory);
         let buffer_memory = Self::make_buffer_memory(&shared_memory);
         Self {
+            negotiated_features: 0,
             shared_memory,
             queue_memory,
             buffer_memory,
@@ -100,6 +114,7 @@ impl VirtioActivate {
         let queue_memory = Self::make_queue_memory(&shared_memory);
         let buffer_memory = Self::make_buffer_memory(&shared_memory);
         Self {
+            negotiated_features: 0,
             shared_memory,
             queue_memory,
             buffer_memory,

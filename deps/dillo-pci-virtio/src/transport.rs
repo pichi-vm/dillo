@@ -661,7 +661,8 @@ impl VirtioPciDevice {
         };
 
         let handle = match self.device.lock().expect("device mutex").activate(
-            VirtioActivate::with_host_and_queue_interrupts(queues, kicks, host, queue_interrupts),
+            VirtioActivate::with_host_and_queue_interrupts(queues, kicks, host, queue_interrupts)
+                .with_negotiated_features(self.driver_features),
         ) {
             Ok(handle) => handle,
             Err(e) => {
