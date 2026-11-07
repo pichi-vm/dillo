@@ -505,10 +505,10 @@ fn build_block_device(
                 })
                 .collect();
             let backing = dillo_virtio_gpt::assemble(*device_id, *disk_guid, specs)?;
-            // Virtualized-GPT is read-only by construction (no writable fd).
+            // Virtualized-GPT is read-only by construction (no mutation capability).
             Ok((
                 "virtio-gpt",
-                VirtioBlk::new(std::sync::Arc::new(backing), None, true),
+                VirtioBlk::new(std::sync::Arc::new(backing), true),
             ))
         }
         // vsock/fs devices are dispatched in `build_placements` before reaching
