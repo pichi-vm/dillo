@@ -224,7 +224,6 @@ jobs:
         shell: bash
         env:
           CARGO_BUILD_RUSTFLAGS: "-D warnings"
-          DILLO_MEMORY_EVIDENCE: target/memory-evidence
         run: >-
           cargo test -p dillo --features vm-tests --test boot
           boots_with_large_memory -- --ignored --test-threads=1 --nocapture

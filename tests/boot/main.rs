@@ -572,15 +572,13 @@ fn boots_with_large_memory(#[values(4096, 8192)] mem_mib: u32) {
         &["--preallocate"],
         &[("RUST_LOG", "dillo=debug")],
     );
-    if let Some(dir) = std::env::var_os("DILLO_MEMORY_EVIDENCE") {
-        let dir = PathBuf::from(dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(format!("{}-{mem_mib}MiB.log", host::ARCH)),
-            &output,
-        )
-        .unwrap();
-    }
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/memory-evidence");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{}-{mem_mib}MiB.log", host::ARCH)),
+        &output,
+    )
+    .unwrap();
     let report = parse_report(&output).unwrap_or_else(|| panic!("guest did not report:\n{output}"));
     let probe = report.memory_probe.expect("guest memory probe");
     println!(
