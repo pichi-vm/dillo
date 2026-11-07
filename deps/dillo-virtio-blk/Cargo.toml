@@ -17,3 +17,7 @@ thiserror.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+imago.workspace = true
+tempfile.workspace = true

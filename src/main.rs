@@ -483,9 +483,55 @@ fn build_block_device(
     use anyhow::Context as _;
     use dillo_virtio_blk::VirtioBlk;
     match device {
-        dillo_config::ResolvedDevice::Blk { path, readonly, .. } => {
-            let blk = VirtioBlk::open_raw(path, *readonly)
-                .with_context(|| format!("opening blk image {}", path.display()))?;
+        dillo_config::ResolvedDevice::Blk {
+            path,
+            readonly,
+            format,
+            ..
+        } => {
+            let blk = match format {
+                dillo_config::BlockFormat::Raw => VirtioBlk::open_raw(path, *readonly)
+                    .with_context(|| format!("opening blk image {}", path.display()))?,
+                dillo_config::BlockFormat::Qcow2 => {
+                    use imago::{StorageExt, StorageOpenOptions};
+                    let file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(!readonly)
+                        .open(path)?;
+                    if !file.metadata()?.is_file() {
+                        anyhow::bail!("qcow2 requires a regular file");
+                    }
+                    if *readonly {
+                        file.try_lock_shared()?;
+                    } else {
+                        file.try_lock()?;
+                    }
+                    if !readonly {
+                        // Probe a disposable sibling on the same filesystem; never
+                        // punch an unknown range in the actual image.
+                        let parent = path
+                            .parent()
+                            .filter(|p| !p.as_os_str().is_empty())
+                            .unwrap_or(std::path::Path::new("."));
+                        let probe = tempfile::NamedTempFile::new_in(parent)?;
+                        let storage = imago::file::File::from_open_file(
+                            probe.reopen()?,
+                            StorageOpenOptions::new().write(true),
+                        )?;
+                        storage.write(&vec![0x5a; 1024 * 1024][..], 0)?;
+                        storage
+                            .reclaim(0, 1024 * 1024)
+                            .context("qcow2 requires host hole punching")?;
+                    }
+                    let storage = imago::file::File::from_open_file(
+                        file,
+                        StorageOpenOptions::new().write(!readonly),
+                    )?;
+                    let backing = dillo_storage::Qcow2Backing::open(storage, *readonly)
+                        .with_context(|| format!("opening qcow2 image {}", path.display()))?;
+                    VirtioBlk::new(std::sync::Arc::new(backing), *readonly)
+                }
+            };
             Ok(("virtio-blk", blk))
         }
         dillo_config::ResolvedDevice::Gpt {

@@ -167,10 +167,21 @@ impl<'de> Deserialize<'de> for PipeRef {
     }
 }
 
+/// Explicit on-disk format; extensions never select a format implicitly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockFormat {
+    #[default]
+    Raw,
+    Qcow2,
+}
+
 /// Traditional single-file virtio-blk device.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct BlkSpec {
+    #[serde(default)]
+    pub format: BlockFormat,
     pub path: PathBuf,
     #[serde(default)]
     pub readonly: bool,
@@ -515,6 +526,7 @@ pub struct ResolvedConsolePort {
 #[derive(Debug, Clone)]
 pub enum ResolvedDevice {
     Blk {
+        format: BlockFormat,
         path: PathBuf,
         readonly: bool,
         placement: Placement,
@@ -709,6 +721,7 @@ fn resolve_console(c: ConsoleSpec) -> anyhow::Result<ResolvedConsole> {
 fn resolve_device(device: Device) -> anyhow::Result<ResolvedDevice> {
     match device {
         Device::Blk(b) => Ok(ResolvedDevice::Blk {
+            format: b.format,
             path: b.path,
             readonly: b.readonly,
             placement: Placement {
@@ -1085,6 +1098,26 @@ mod tests {
     use super::*;
 
     // --- schema parity: CLI key/value == JSON ---
+
+    #[test]
+    fn qcow2_format_is_explicit_and_unknown_formats_fail() {
+        let raw: BlkSpec = serde_keyvalue::from_key_values("path=disk.qcow2").unwrap();
+        assert_eq!(raw.format, BlockFormat::Raw);
+        let qcow: BlkSpec =
+            serde_keyvalue::from_key_values("path=disk.qcow2,format=qcow2").unwrap();
+        assert_eq!(qcow.format, BlockFormat::Qcow2);
+        let resolved = resolve_device(Device::Blk(qcow)).unwrap();
+        assert!(matches!(
+            resolved,
+            ResolvedDevice::Blk {
+                format: BlockFormat::Qcow2,
+                ..
+            }
+        ));
+        assert!(serde_keyvalue::from_key_values::<BlkSpec>("path=disk,format=guess").is_err());
+        let json: BlkSpec = serde_json::from_str(r#"{"path":"disk","format":"qcow2"}"#).unwrap();
+        assert_eq!(json.format, BlockFormat::Qcow2);
+    }
 
     #[test]
     fn blk_kv_matches_json() {

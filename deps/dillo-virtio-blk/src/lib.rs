@@ -3,23 +3,14 @@
 
 // SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
 
-//! In-process virtio-blk device implementing [`VirtioDevice`].
+//! Format-aware virtio-blk device implementing [`VirtioDevice`].
 //!
-//! Ported from the dillo PoC's out-of-process vhost-user backend
-//! (`dillo-virtio-blk`, `VhostUserBackendMut`) to the new in-process device
-//! model. The data source is abstracted behind the [`BlockBacking`] trait —
-//! [`RawImageBacking`] (this crate) is the single-file raw-image path; the
-//! `dillo-virtio-gpt` crate provides a synthesized-GPT backing over multiple
-//! files. Both present as a standard virtio-blk device to the guest.
-//!
-//! The transport (virtio-pci or virtio-mmio) wraps this device, handles
-//! config-space + queue setup, and calls [`VirtioBlk::activate`] once the guest
-//! writes `DRIVER_OK`. We then spawn a single request worker that blocks on the
-//! queue [`Kick`] and services `VIRTIO_BLK_T_IN`/`OUT`/`FLUSH`/`GET_ID`.
-//!
-//! Single request queue (no `VIRTIO_BLK_F_MQ`). Seccomp / process-isolation
-//! from the PoC is intentionally not ported: the worker runs as a thread inside
-//! the VMM process, so a per-process syscall filter is not applicable.
+//! A [`BlockBacking`] session supplies reads and optional mutation authority for
+//! raw, qcow2, or synthesized GPT storage. The transport (PCI or MMIO) supplies
+//! negotiated features and activates one request worker through the host boundary.
+//! Requests support read, write, flush, get-id and discard as
+//! advertised by the backing. Process isolation and confinement are host-backend
+//! responsibilities; see the repository's design rules and qualification gates.
 
 use std::fs::File;
 use std::path::Path;
@@ -31,7 +22,7 @@ use dillo_virtio::{
     ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
     VirtioMemory, VirtioRunToken,
 };
-use vm_memory::GuestAddress;
+use vm_memory::{Address, GuestAddress};
 
 /// Cross-platform positional read (`pread`/`seek_read`).
 fn read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
@@ -82,6 +73,10 @@ const VIRTIO_BLK_F_BLK_SIZE: u64 = 1 << 6;
 const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
 /// `topology` + `opt_io_size` fields in config space are valid (bit 10).
 const VIRTIO_BLK_F_TOPOLOGY: u64 = 1 << 10;
+const VIRTIO_BLK_F_DISCARD: u64 = 1 << 13;
+const MAX_RANGES: usize = 32;
+const MAX_RANGE_SECTORS: u32 = 65536;
+const MAX_TRANSFER: usize = 16 * 1024 * 1024;
 
 // --- Request types ---------------------------------------------------------
 
@@ -89,6 +84,7 @@ const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
 const VIRTIO_BLK_T_FLUSH: u32 = 4;
 const VIRTIO_BLK_T_GET_ID: u32 = 8;
+const VIRTIO_BLK_T_DISCARD: u32 = 11;
 
 // --- Status bytes ----------------------------------------------------------
 
@@ -248,12 +244,25 @@ impl VirtioBlk {
         Ok(Self::new(backing, read_only))
     }
 
-    /// Materialize the first 32 bytes of `virtio_blk_config` (virtio 1.1
+    fn discard_enabled(&self) -> bool {
+        !self.read_only
+            && self
+                .backing
+                .writer()
+                .is_some_and(WritableBlockBacking::supports_discard)
+    }
+
+    /// Materialize the first 48 bytes of `virtio_blk_config` (virtio 1.1
     /// §5.2.4), then copy the requested `offset..offset+len` range out. Bytes
     /// outside populated fields stay zero (also spec-correct for fields gated by
     /// un-negotiated features).
     fn read_config_bytes(&self, offset: u64, data: &mut [u8]) {
-        let mut config = [0u8; 32];
+        let mut config = [0u8; 48];
+        if self.discard_enabled() {
+            config[36..40].copy_from_slice(&MAX_RANGE_SECTORS.to_le_bytes());
+            config[40..44].copy_from_slice(&(MAX_RANGES as u32).to_le_bytes());
+            config[44..48].copy_from_slice(&128u32.to_le_bytes());
+        }
 
         // capacity @ 0..8 (le64) — always populated (in 512-byte sectors).
         config[0..8].copy_from_slice(&self.capacity.to_le_bytes());
@@ -301,6 +310,9 @@ impl VirtioDevice for VirtioBlk {
         // Always advertise BLK_SIZE so guests see the explicit logical block
         // size. TOPOLOGY iff physical != logical. SEG_MAX iff max_segments set.
         let mut features = VIRTIO_F_VERSION_1 | VIRTIO_BLK_F_FLUSH | VIRTIO_BLK_F_BLK_SIZE;
+        if self.discard_enabled() {
+            features |= VIRTIO_BLK_F_DISCARD;
+        }
         if self.read_only {
             features |= VIRTIO_BLK_F_RO;
         }
@@ -342,6 +354,7 @@ impl VirtioDevice for VirtioBlk {
 
         let backing = Arc::clone(&self.backing);
         let read_only = self.read_only;
+        let negotiated = activation.negotiated_features();
 
         let handle = Arc::new(Mutex::new(Some(spawn_request_worker(
             host,
@@ -352,6 +365,7 @@ impl VirtioDevice for VirtioBlk {
             call_interrupt,
             backing,
             read_only,
+            negotiated,
         )?)));
         let shutdown_handle = Arc::clone(&handle);
 
@@ -400,6 +414,7 @@ fn spawn_request_worker(
     call_interrupt: Option<Interrupt>,
     backing: Arc<dyn BlockBacking>,
     read_only: bool,
+    negotiated: u64,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
     host.spawn(Box::new(move |token| {
         request_worker(
@@ -410,9 +425,10 @@ fn spawn_request_worker(
             call_interrupt,
             backing,
             read_only,
+            negotiated,
             token,
-        );
-        Ok(())
+        )
+        .map_err(|e| dillo_virtio::DeviceJoinError::Worker(e.to_string()))
     }))
 }
 
@@ -425,16 +441,17 @@ fn request_worker(
     call_interrupt: Option<Interrupt>,
     backing: Arc<dyn BlockBacking>,
     read_only: bool,
+    negotiated: u64,
     token: VirtioRunToken,
-) {
+) -> std::io::Result<()> {
     let queue = Arc::new(Mutex::new(queue));
     loop {
         if let Err(e) = kick.read() {
             log::error!("virtio-blk: kick read error: {e}");
-            return;
+            return Err(e);
         }
         if token.is_shutdown_requested() {
-            return;
+            return backing.flush();
         }
         drain_requests(
             &queue_memory,
@@ -443,6 +460,7 @@ fn request_worker(
             call_interrupt.as_ref(),
             backing.as_ref(),
             read_only,
+            negotiated,
         );
     }
 }
@@ -457,6 +475,7 @@ fn drain_requests(
     call_interrupt: Option<&Interrupt>,
     backing: &dyn BlockBacking,
     read_only: bool,
+    negotiated: u64,
 ) {
     let mut q = queue.lock().expect("virtio-blk queue mutex");
     let mut signaled = false;
@@ -467,31 +486,61 @@ fn drain_requests(
         let mut readable: Vec<Desc> = Vec::new();
         let mut writable: Vec<Desc> = Vec::new();
         let mut current = Some(head);
+        let mut count = 0usize;
+        let mut malformed = false;
         while let Some(desc) = current {
+            count += 1;
+            if count > q.size as usize {
+                malformed = true;
+                break;
+            }
+            if desc.flags & VIRTQ_DESC_F_WRITE == 0 && !writable.is_empty() {
+                malformed = true;
+                break;
+            }
             if desc.flags & VIRTQ_DESC_F_WRITE != 0 {
                 writable.push((desc.addr, desc.len));
             } else {
                 readable.push((desc.addr, desc.len));
             }
+            let has_next = desc.flags & dillo_virtio::queue::VIRTQ_DESC_F_NEXT != 0;
+            if desc.flags & !3 != 0 {
+                malformed = true;
+                break;
+            }
             current = desc.next_desc(queue_memory);
+            if has_next && current.is_none() {
+                malformed = true;
+                break;
+            }
         }
 
-        if readable.is_empty() || writable.is_empty() {
+        if malformed || readable.is_empty() || writable.is_empty() {
             log::warn!("virtio-blk: malformed descriptor chain (no readable or writable)");
             q.add_used(queue_memory, head_index, 0);
             signaled = true;
             continue;
         }
 
-        let (status, used_len) =
-            process_request(buffer_memory, &readable, &writable, backing, read_only);
+        let (status, used_len) = process_request(
+            buffer_memory,
+            &readable,
+            &writable,
+            backing,
+            read_only,
+            negotiated,
+        );
 
-        // Status byte goes to the last writable descriptor.
         let (status_addr, status_len) = writable[writable.len() - 1];
-        if status_len >= 1 {
-            let _ = buffer_memory.write(status_addr, &[status]);
-        }
-        q.add_used(queue_memory, head_index, used_len + 1);
+        let status_written = status_len
+            .checked_sub(1)
+            .and_then(|n| status_addr.checked_add(u64::from(n)))
+            .is_some_and(|addr| buffer_memory.write(addr, &[status]).is_ok());
+        q.add_used(
+            queue_memory,
+            head_index,
+            used_len + u32::from(status_written),
+        );
         signaled = true;
     }
     if signaled && let Some(intr) = call_interrupt {
@@ -499,114 +548,169 @@ fn drain_requests(
     }
 }
 
+/// Read/write a bounded scatter/gather stream, allowing fields to cross descriptors.
+fn transfer(
+    memory: &Arc<dyn VirtioMemory>,
+    descs: &[Desc],
+    mut skip: usize,
+    bytes: &mut [u8],
+    write: bool,
+) -> std::io::Result<()> {
+    let mut done = 0;
+    for &(address, length) in descs {
+        let length = length as usize;
+        if skip >= length {
+            skip -= length;
+            continue;
+        }
+        let n = (length - skip).min(bytes.len() - done);
+        let address = address
+            .checked_add(skip as u64)
+            .ok_or(std::io::ErrorKind::InvalidInput)?;
+        let result = if write {
+            memory.write(address, &bytes[done..done + n])
+        } else {
+            memory.read(address, &mut bytes[done..done + n])
+        };
+        result.map_err(|_| std::io::Error::other("Guest memory access failed"))?;
+        done += n;
+        skip = 0;
+        if done == bytes.len() {
+            return Ok(());
+        }
+    }
+    if done == bytes.len() {
+        Ok(())
+    } else {
+        Err(std::io::ErrorKind::UnexpectedEof.into())
+    }
+}
+fn stream_len(descs: &[Desc]) -> Option<usize> {
+    descs
+        .iter()
+        .try_fold(0usize, |sum, &(_, n)| sum.checked_add(n as usize))
+}
 fn process_request(
-    buffer_memory: &Arc<dyn VirtioMemory>,
+    memory: &Arc<dyn VirtioMemory>,
     readable: &[Desc],
     writable: &[Desc],
     backing: &dyn BlockBacking,
     read_only: bool,
+    negotiated: u64,
 ) -> (u8, u32) {
-    // Request header is the first readable descriptor (16 bytes).
-    let (hdr_addr, hdr_len) = readable[0];
-    if (hdr_len as usize) < 16 {
-        return (VIRTIO_BLK_S_IOERR, 0);
+    let failure = (VIRTIO_BLK_S_IOERR, 0);
+    let Some(read_len) = stream_len(readable).filter(|n| *n >= 16 && *n <= MAX_TRANSFER + 16)
+    else {
+        return failure;
+    };
+    let Some(write_len) = stream_len(writable).filter(|n| *n >= 1 && *n <= MAX_TRANSFER + 1) else {
+        return failure;
+    };
+    let mut header = [0; 16];
+    if transfer(memory, readable, 0, &mut header, false).is_err() {
+        return failure;
     }
-    let mut hdr = [0u8; 16];
-    if buffer_memory.read(hdr_addr, &mut hdr).is_err() {
-        return (VIRTIO_BLK_S_IOERR, 0);
+    let kind = u32::from_le_bytes(header[..4].try_into().unwrap());
+    let sector = u64::from_le_bytes(header[8..].try_into().unwrap());
+    let valid_range = |sector: u64, length: u64| {
+        sector.checked_mul(512).filter(|start| {
+            start
+                .checked_add(length)
+                .is_some_and(|end| end <= backing.len_bytes())
+        })
+    };
+    let mutation = matches!(kind, VIRTIO_BLK_T_OUT | VIRTIO_BLK_T_DISCARD);
+    if mutation && (read_only || backing.is_read_only() || backing.writer().is_none()) {
+        return failure;
     }
-    let request_type = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
-    let sector = u64::from_le_bytes([
-        hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15],
-    ]);
-
-    match request_type {
+    let result: std::io::Result<u32> = (|| match kind {
         VIRTIO_BLK_T_IN => {
-            // Read: data goes into the writable descriptors before the status.
-            let data = &writable[..writable.len() - 1];
-            handle_read(buffer_memory, data, sector, backing)
+            let length = write_len - 1;
+            if read_len != 16 || length % 512 != 0 {
+                return Err(std::io::ErrorKind::InvalidInput.into());
+            }
+            let start =
+                valid_range(sector, length as u64).ok_or(std::io::ErrorKind::InvalidInput)?;
+            let mut data = vec![0; length];
+            let mut done = 0;
+            while done < length {
+                match backing.read_at(start + done as u64, &mut data[done..]) {
+                    Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                    Ok(n) if n <= length - done => done += n,
+                    Ok(_) => return Err(std::io::ErrorKind::InvalidData.into()),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            transfer(memory, writable, 0, &mut data, true)?;
+            Ok(length as u32)
         }
         VIRTIO_BLK_T_OUT => {
-            // Write: data is in the readable descriptors after the header.
-            handle_write(buffer_memory, &readable[1..], sector, backing, read_only)
+            let length = read_len - 16;
+            if write_len != 1 || length % 512 != 0 {
+                return Err(std::io::ErrorKind::InvalidInput.into());
+            }
+            let start =
+                valid_range(sector, length as u64).ok_or(std::io::ErrorKind::InvalidInput)?;
+            let mut data = vec![0; length];
+            transfer(memory, readable, 16, &mut data, false)?;
+            backing.writer().unwrap().write_at(start, &data)?;
+            Ok(0)
         }
-        VIRTIO_BLK_T_FLUSH => match backing.flush() {
-            Ok(()) => (VIRTIO_BLK_S_OK, 0),
-            Err(_) => (VIRTIO_BLK_S_IOERR, 0),
-        },
-        VIRTIO_BLK_T_GET_ID => handle_get_id(buffer_memory, writable, backing),
-        _ => (VIRTIO_BLK_S_UNSUPP, 0),
-    }
-}
-
-fn handle_read(
-    buffer_memory: &Arc<dyn VirtioMemory>,
-    data: &[Desc],
-    sector: u64,
-    backing: &dyn BlockBacking,
-) -> (u8, u32) {
-    let mut offset = sector * SECTOR_SIZE;
-    let mut total_written = 0u32;
-    for &(addr, len) in data {
-        let mut buf = vec![0u8; len as usize];
-        let Ok(bytes_read) = backing.read_at(offset, &mut buf) else {
-            return (VIRTIO_BLK_S_IOERR, 0);
-        };
-        if buffer_memory.write(addr, &buf[..bytes_read]).is_err() {
-            return (VIRTIO_BLK_S_IOERR, 0);
+        VIRTIO_BLK_T_DISCARD => {
+            if negotiated & VIRTIO_BLK_F_DISCARD == 0 {
+                return Err(std::io::ErrorKind::Unsupported.into());
+            }
+            let length = read_len - 16;
+            if write_len != 1 || length == 0 || length % 16 != 0 || length / 16 > MAX_RANGES {
+                return Err(std::io::ErrorKind::InvalidInput.into());
+            }
+            let mut data = vec![0; length];
+            transfer(memory, readable, 16, &mut data, false)?;
+            let mut ranges = Vec::new();
+            for record in data.as_chunks::<16>().0 {
+                let sector = u64::from_le_bytes(record[..8].try_into().unwrap());
+                let sectors = u32::from_le_bytes(record[8..12].try_into().unwrap());
+                let flags = u32::from_le_bytes(record[12..].try_into().unwrap());
+                if flags != 0 {
+                    return Err(std::io::ErrorKind::Unsupported.into());
+                }
+                if sectors > MAX_RANGE_SECTORS {
+                    return Err(std::io::ErrorKind::InvalidInput.into());
+                }
+                let length = u64::from(sectors) * 512;
+                let start = valid_range(sector, length).ok_or(std::io::ErrorKind::InvalidInput)?;
+                ranges.push((start, length));
+            }
+            let writer = backing.writer().unwrap();
+            for (start, length) in ranges {
+                writer.discard(start, length)?;
+            }
+            Ok(0)
         }
-        offset += bytes_read as u64;
-        total_written += bytes_read as u32;
-    }
-    (VIRTIO_BLK_S_OK, total_written)
-}
-
-fn handle_write(
-    buffer_memory: &Arc<dyn VirtioMemory>,
-    data: &[Desc],
-    sector: u64,
-    backing: &dyn BlockBacking,
-    read_only: bool,
-) -> (u8, u32) {
-    if read_only {
-        return (VIRTIO_BLK_S_IOERR, 0);
-    }
-    let Some(writer) = backing.writer() else {
-        return (VIRTIO_BLK_S_IOERR, 0);
-    };
-    let mut offset = sector * SECTOR_SIZE;
-    for &(addr, len) in data {
-        let mut buf = vec![0u8; len as usize];
-        if buffer_memory.read(addr, &mut buf).is_err() {
-            return (VIRTIO_BLK_S_IOERR, 0);
+        VIRTIO_BLK_T_FLUSH => {
+            backing.flush()?;
+            Ok(0)
         }
-        if writer.write_at(offset, &buf).is_err() {
-            return (VIRTIO_BLK_S_IOERR, 0);
+        VIRTIO_BLK_T_GET_ID => {
+            if read_len != 16 || write_len < 21 {
+                return Err(std::io::ErrorKind::InvalidInput.into());
+            }
+            transfer(memory, writable, 0, &mut backing.get_id(), true)?;
+            Ok(20)
         }
-        offset += u64::from(len);
+        _ => Err(std::io::ErrorKind::Unsupported.into()),
+    })();
+    match result {
+        Ok(n) => {
+            if mutation && negotiated & VIRTIO_BLK_F_FLUSH == 0 && backing.flush().is_err() {
+                return failure;
+            }
+            (VIRTIO_BLK_S_OK, n)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => (VIRTIO_BLK_S_UNSUPP, 0),
+        Err(_) => failure,
     }
-    (VIRTIO_BLK_S_OK, 0)
-}
-
-fn handle_get_id(
-    buffer_memory: &Arc<dyn VirtioMemory>,
-    writable: &[Desc],
-    backing: &dyn BlockBacking,
-) -> (u8, u32) {
-    // The id buffer is the first writable descriptor; the last is the status
-    // byte. Need at least one data descriptor distinct from status.
-    if writable.len() < 2 {
-        return (VIRTIO_BLK_S_IOERR, 0);
-    }
-    let (addr, len) = writable[0];
-    if (len as usize) < 20 {
-        return (VIRTIO_BLK_S_IOERR, 0);
-    }
-    let id = backing.get_id();
-    if buffer_memory.write(addr, &id).is_err() {
-        return (VIRTIO_BLK_S_IOERR, 0);
-    }
-    (VIRTIO_BLK_S_OK, 20)
 }
 
 #[cfg(test)]
@@ -823,7 +927,15 @@ mod tests {
         }
         let backing = RamBacking::new(data, false);
 
-        drain_requests(&queue_memory, &buffer_memory, &q, None, &backing, false);
+        drain_requests(
+            &queue_memory,
+            &buffer_memory,
+            &q,
+            None,
+            &backing,
+            false,
+            VIRTIO_BLK_F_FLUSH,
+        );
 
         // Guest data buffer filled with backing bytes.
         let mut out = [0u8; 512];
@@ -855,5 +967,287 @@ mod tests {
         mem.write_obj::<u32>(len, base.unchecked_add(8)).unwrap();
         mem.write_obj::<u16>(flags, base.unchecked_add(12)).unwrap();
         mem.write_obj::<u16>(next, base.unchecked_add(14)).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod qcow2_tests {
+    use super::*;
+    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_virtio::SharedVirtioMemory;
+    use vm_memory::{Bytes, GuestMemoryMmap};
+
+    fn memory() -> (GuestMemoryMmap, Arc<dyn VirtioMemory>) {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 65536)]).unwrap();
+        let shared = Arc::new(MappedSharedMemory::new(
+            mem.clone(),
+            SharedMemoryRequirement {
+                range: AddressRange {
+                    base: 0,
+                    size: 65536,
+                },
+                access: SharedAccess::ReadWrite,
+            },
+        ));
+        (mem, Arc::new(SharedVirtioMemory::new(vec![shared])))
+    }
+    fn submit(
+        mem: &GuestMemoryMmap,
+        access: &Arc<dyn VirtioMemory>,
+        backing: &dyn BlockBacking,
+        kind: u32,
+        ranges: &[(u64, u32, u32)],
+        negotiated: u64,
+        ro: bool,
+    ) -> u8 {
+        let mut request = vec![0; 16];
+        request[..4].copy_from_slice(&kind.to_le_bytes());
+        for &(sector, length, flags) in ranges {
+            request.extend_from_slice(&sector.to_le_bytes());
+            request.extend_from_slice(&length.to_le_bytes());
+            request.extend_from_slice(&flags.to_le_bytes());
+        }
+        mem.write_slice(&request, GuestAddress(1024)).unwrap();
+        // Split in the middle of the header and the first range's sector field.
+        let readable = [
+            (GuestAddress(1024), 7),
+            (GuestAddress(1031), 12),
+            (GuestAddress(1043), (request.len() - 19) as u32),
+        ];
+        process_request(
+            access,
+            &readable,
+            &[(GuestAddress(4096), 1)],
+            backing,
+            ro,
+            negotiated,
+        )
+        .0
+    }
+    #[test]
+    fn discard_negotiation_flags_and_all_ranges_are_validated_before_mutation() {
+        struct Backing(std::sync::atomic::AtomicUsize);
+        impl BlockBacking for Backing {
+            fn len_bytes(&self) -> u64 {
+                1024 * 1024
+            }
+            fn read_at(&self, _: u64, _: &mut [u8]) -> std::io::Result<usize> {
+                unreachable!()
+            }
+            fn get_id(&self) -> [u8; 20] {
+                [0; 20]
+            }
+            fn is_read_only(&self) -> bool {
+                false
+            }
+            fn writer(&self) -> Option<&dyn WritableBlockBacking> {
+                Some(self)
+            }
+        }
+        impl WritableBlockBacking for Backing {
+            fn write_at(&self, _: u64, _: &[u8]) -> std::io::Result<()> {
+                unreachable!()
+            }
+            fn supports_discard(&self) -> bool {
+                true
+            }
+            fn discard(&self, _: u64, _: u64) -> std::io::Result<()> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }
+        }
+        let backing = Backing(std::sync::atomic::AtomicUsize::new(0));
+        let (mem, access) = memory();
+        for (ranges, mask, ro, expected) in [
+            (vec![(0, 128, 0)], 0, false, VIRTIO_BLK_S_UNSUPP),
+            (
+                vec![(0, 128, 1)],
+                VIRTIO_BLK_F_DISCARD,
+                false,
+                VIRTIO_BLK_S_UNSUPP,
+            ),
+            (
+                vec![(0, 128, 0), (u64::MAX, 1, 0)],
+                VIRTIO_BLK_F_DISCARD,
+                false,
+                VIRTIO_BLK_S_IOERR,
+            ),
+            (
+                vec![(0, 128, 0)],
+                VIRTIO_BLK_F_DISCARD,
+                true,
+                VIRTIO_BLK_S_IOERR,
+            ),
+        ] {
+            assert_eq!(
+                submit(
+                    &mem,
+                    &access,
+                    &backing,
+                    VIRTIO_BLK_T_DISCARD,
+                    &ranges,
+                    mask,
+                    ro
+                ),
+                expected
+            );
+            assert_eq!(backing.0.load(std::sync::atomic::Ordering::Relaxed), 0);
+        }
+        assert_eq!(
+            submit(
+                &mem,
+                &access,
+                &backing,
+                VIRTIO_BLK_T_DISCARD,
+                &[(0, 128, 0)],
+                VIRTIO_BLK_F_DISCARD,
+                false
+            ),
+            VIRTIO_BLK_S_OK
+        );
+        assert_eq!(backing.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn writes_without_negotiated_flush_require_durable_completion() {
+        struct Backing(Mutex<Vec<u8>>);
+        impl BlockBacking for Backing {
+            fn len_bytes(&self) -> u64 {
+                512
+            }
+            fn read_at(&self, _: u64, _: &mut [u8]) -> std::io::Result<usize> {
+                unreachable!()
+            }
+            fn get_id(&self) -> [u8; 20] {
+                [0; 20]
+            }
+            fn is_read_only(&self) -> bool {
+                false
+            }
+            fn writer(&self) -> Option<&dyn WritableBlockBacking> {
+                Some(self)
+            }
+            fn flush(&self) -> std::io::Result<()> {
+                Err(std::io::Error::other("injected sync failure"))
+            }
+        }
+        impl WritableBlockBacking for Backing {
+            fn write_at(&self, _: u64, data: &[u8]) -> std::io::Result<()> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(())
+            }
+        }
+        let backing = Backing(Mutex::new(Vec::new()));
+        let (mem, access) = memory();
+        let mut data = vec![0x5a; 528];
+        data[..16].fill(0);
+        data[..4].copy_from_slice(&VIRTIO_BLK_T_OUT.to_le_bytes());
+        mem.write_slice(&data, GuestAddress(1024)).unwrap();
+        let readable = [(GuestAddress(1024), 528)];
+        let writable = [(GuestAddress(4096), 1)];
+        // No negotiated FLUSH means the sync error must fail this write.
+        assert_eq!(
+            process_request(&access, &readable, &writable, &backing, false, 0).0,
+            VIRTIO_BLK_S_IOERR
+        );
+        assert_eq!(backing.0.lock().unwrap().len(), 512);
+        assert_eq!(
+            process_request(
+                &access,
+                &readable,
+                &writable,
+                &backing,
+                false,
+                VIRTIO_BLK_F_FLUSH
+            )
+            .0,
+            VIRTIO_BLK_S_OK
+        );
+        // An overflow must be rejected before a third mutation.
+        mem.write_slice(&u64::MAX.to_le_bytes(), GuestAddress(1032))
+            .unwrap();
+        assert_eq!(
+            process_request(
+                &access,
+                &readable,
+                &writable,
+                &backing,
+                false,
+                VIRTIO_BLK_F_FLUSH
+            )
+            .0,
+            VIRTIO_BLK_S_IOERR
+        );
+        assert_eq!(backing.0.lock().unwrap().len(), 1024);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "requires qemu-img and a hole-punch-capable filesystem"]
+    fn guest_discard_reclaims_qcow2() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("disk.qcow2");
+        assert!(
+            std::process::Command::new("qemu-img")
+                .args(["create", "-f", "qcow2", "-o", "cluster_size=65536"])
+                .arg(&path)
+                .arg("1G")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let file = File::options().read(true).write(true).open(&path).unwrap();
+        let storage =
+            imago::file::File::from_open_file(file, imago::StorageOpenOptions::new().write(true))
+                .unwrap();
+        let backing = dillo_storage::Qcow2Backing::open(storage, false).unwrap();
+        backing
+            .writer()
+            .unwrap()
+            .write_at(0, &vec![0x5a; 1024 * 1024])
+            .unwrap();
+        backing.flush().unwrap();
+        let before = std::fs::metadata(&path).unwrap().blocks();
+        let (mem, access) = memory();
+        let features = VIRTIO_BLK_F_FLUSH | VIRTIO_BLK_F_DISCARD;
+        assert_eq!(
+            submit(
+                &mem,
+                &access,
+                &backing,
+                VIRTIO_BLK_T_DISCARD,
+                &[(0, 2048, 0)],
+                features,
+                false
+            ),
+            VIRTIO_BLK_S_OK
+        );
+        backing.flush().unwrap();
+        assert!(std::fs::metadata(&path).unwrap().blocks() < before / 2);
+        let mut data = vec![1; 1024 * 1024];
+        backing.read_at(0, &mut data).unwrap();
+        assert!(data.iter().all(|b| *b == 0));
+        let device = VirtioBlk::new(Arc::new(backing), false);
+        assert_eq!(
+            device.features() & VIRTIO_BLK_F_DISCARD,
+            VIRTIO_BLK_F_DISCARD
+        );
+        let mut config = [0; 60];
+        device.read_config(0, &mut config);
+        assert_eq!(
+            u32::from_le_bytes(config[36..40].try_into().unwrap()),
+            MAX_RANGE_SECTORS
+        );
+        assert!(config[48..].iter().all(|byte| *byte == 0));
+        drop(device);
+        assert!(
+            std::process::Command::new("qemu-img")
+                .args(["check", "-f", "qcow2"])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 }
