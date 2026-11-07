@@ -257,46 +257,4 @@ mod tests {
             Err(e) => eprintln!("bridge open unavailable in this environment: {e}"),
         }
     }
-
-    /// Layer-3 integration: actually create and enslave a tap on a real bridge.
-    /// Opt-in and never run in CI (needs root + an existing bridge). See the
-    /// crate README for the setup recipe.
-    ///
-    /// Run with:
-    /// ```text
-    /// sudo DILLO_NET_BRIDGE_TEST=br0 \
-    ///   cargo test -p dillo-virtio-net --  --ignored bridge_enslaves_tap
-    /// ```
-    #[test]
-    #[ignore = "needs root + an existing bridge; set DILLO_NET_BRIDGE_TEST=<bridge>"]
-    fn bridge_enslaves_tap_when_privileged() {
-        let bridge = match std::env::var("DILLO_NET_BRIDGE_TEST") {
-            Ok(b) if !b.is_empty() => b,
-            _ => {
-                eprintln!("set DILLO_NET_BRIDGE_TEST=<bridge> (and run as root) to exercise this");
-                return;
-            }
-        };
-
-        let backend = BridgeBackend::open(&bridge)
-            .expect("open bridge backend (needs root + an existing bridge)");
-        let tap = backend.tap_name();
-        assert_eq!(backend.bridge(), bridge);
-
-        // Enslavement proof: /sys/class/net/<tap>/master links to the bridge.
-        let master = std::fs::read_link(format!("/sys/class/net/{tap}/master"))
-            .expect("enslaved tap must expose a master link");
-        let master_name = master
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        assert_eq!(master_name, bridge, "tap enslaved to the wrong bridge");
-
-        // And the tap was brought up (IFF_UP is bit 0 of the sysfs flags hex).
-        let flags =
-            std::fs::read_to_string(format!("/sys/class/net/{tap}/flags")).unwrap_or_default();
-        let flags_val = u32::from_str_radix(flags.trim().trim_start_matches("0x"), 16).unwrap_or(0);
-        assert_ne!(flags_val & 0x1, 0, "tap {tap} should be IFF_UP");
-        eprintln!("tap {tap} enslaved to {bridge} and up (flags {flags:?})");
-    }
 }

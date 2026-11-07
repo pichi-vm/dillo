@@ -72,29 +72,10 @@ or the `com.apple.vm.networking` entitlement).
 
 Bridge mode is **unsupported on Windows** (a clean error).
 
-### Setup recipe (Linux) + running the integration test
+### Linux testing
 
-The bridge datapath needs root and a real bridge, so it is **never exercised in
-CI**. Its construction is unit-tested (`braddif_ifreq_layout`,
-`open_is_clean_without_privilege`), and a real enslave is covered by an opt-in,
-`#[ignore]`d integration test you run manually:
-
-```sh
-# 1. Create a bridge (and optionally enslave a NIC to reach the LAN).
-sudo ip link add br0 type bridge
-sudo ip link set br0 up
-# sudo ip link set eth0 master br0     # to bridge onto the physical network
-
-# 2. Run the integration test as root with the bridge named.
-sudo DILLO_NET_BRIDGE_TEST=br0 \
-  cargo test -p dillo-virtio-net -- --ignored bridge_enslaves_tap
-
-# 3. Tear down when done.
-sudo ip link del br0
-```
-
-The test creates a tap via `BridgeBackend::open("br0")`, then asserts the tap's
-`/sys/class/net/<tap>/master` link points at `br0` and that the tap is `IFF_UP`.
+Bridge construction and error handling are unit-tested. Real bridge
+attachment is not covered by the automated suite.
 
 ### Setup recipe (macOS) + running the integration test
 
