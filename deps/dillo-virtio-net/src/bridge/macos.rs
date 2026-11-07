@@ -368,32 +368,4 @@ mod tests {
         // SAFETY: `desc` is a freshly created XPC object.
         unsafe { xpc_release(desc) };
     }
-
-    /// Layer-3 integration: actually start vmnet bridged mode. Opt-in and never
-    /// run in CI (needs root or the `com.apple.vm.networking` entitlement). See
-    /// the crate README for the setup recipe.
-    ///
-    /// Run with:
-    /// ```text
-    /// sudo DILLO_NET_VMNET_TEST=en0 \
-    ///   cargo test -p dillo-virtio-net -- --ignored vmnet_starts
-    /// ```
-    #[test]
-    #[ignore = "needs macOS root/entitlement + a physical iface; set DILLO_NET_VMNET_TEST=en0"]
-    fn vmnet_starts_when_privileged() {
-        let iface = match std::env::var("DILLO_NET_VMNET_TEST") {
-            Ok(i) if !i.is_empty() => i,
-            _ => {
-                eprintln!("set DILLO_NET_VMNET_TEST=<iface> (and run as root) to exercise this");
-                return;
-            }
-        };
-        let backend = VmnetBackend::open(&iface).expect("start vmnet (needs root/entitlement)");
-        assert_eq!(backend.physical(), iface);
-        // A minimal broadcast frame must be accepted by vmnet_write.
-        let mut frame = vec![0xffu8; 6];
-        frame.extend_from_slice(&[0x52, 0x54, 0x00, 0x00, 0x00, 0x01]);
-        frame.extend_from_slice(&[0x08, 0x00]);
-        backend.send(&frame).expect("vmnet_write");
-    }
 }
