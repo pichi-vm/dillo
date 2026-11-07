@@ -1,33 +1,17 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Native bootconfig through an unmodified stock kernel. Override the paired
-//! kernel/config environment variables to run the same checks on another distro.
+//! Native bootconfig through an unmodified stock kernel.
 
 use super::*;
 
 fn image(dir: &Path, cmdline: &str) -> PathBuf {
-    let (kernel, config) = match (
-        std::env::var_os("DILLO_BOOTCONFIG_KERNEL"),
-        std::env::var_os("DILLO_BOOTCONFIG_CONFIG"),
-    ) {
-        (Some(kernel), Some(config)) => (
-            PathBuf::from(kernel),
-            std::fs::read_to_string(config).unwrap(),
-        ),
-        (None, None) => {
-            let entry = KERNELS
-                .iter()
-                .find(|entry| entry.arch == host::ARCH && entry.builtins.contains(&"BOOT_CONFIG"))
-                .expect("stock bootconfig kernel catalog entry");
-            let (kernel, config) =
-                resolve(entry).expect("download stock bootconfig kernel and config");
-            (kernel, config.expect("stock config"))
-        }
-        _ => {
-            panic!("DILLO_BOOTCONFIG_KERNEL and DILLO_BOOTCONFIG_CONFIG must be supplied together")
-        }
-    };
+    let entry = KERNELS
+        .iter()
+        .find(|entry| entry.arch == host::ARCH && entry.builtins.contains(&"BOOT_CONFIG"))
+        .expect("stock bootconfig kernel catalog entry");
+    let (kernel, config) = resolve(entry).expect("download stock bootconfig kernel and config");
+    let config = config.expect("stock config");
     for option in ["BOOT_CONFIG", "BLK_DEV_INITRD", "PROC_FS", "VIRTIO_CONSOLE"] {
         assert!(config_is_y(&config, option), "stock config lacks {option}");
     }
