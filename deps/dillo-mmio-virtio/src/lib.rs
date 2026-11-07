@@ -127,6 +127,7 @@ struct Inner {
     device: Box<dyn VirtioDevice>,
     device_id: u32,
     device_features: u64,
+    driver_features: u64,
     dev_feat_sel: u32,
     drv_feat_sel: u32,
     queue_sel: usize,
@@ -206,6 +207,7 @@ impl VirtioMmio {
                 device,
                 device_id,
                 device_features,
+                driver_features: 0,
                 dev_feat_sel: 0,
                 drv_feat_sel: 0,
                 queue_sel: 0,
@@ -284,11 +286,14 @@ impl VirtioMmio {
         match offset {
             DEVICE_FEATURES_SEL => g.dev_feat_sel = val,
             DRIVER_FEATURES_SEL => g.drv_feat_sel = val,
-            // Accepted but ignored: the device fixes its own feature set. Kept as
-            // a named arm to document the register map; its (empty) body
-            // coincides with the unhandled-register case.
-            #[allow(clippy::match_same_arms)]
-            DRIVER_FEATURES => {}
+            DRIVER_FEATURES => {
+                if g.drv_feat_sel <= 1 {
+                    let shift = g.drv_feat_sel * 32;
+                    let mask = 0xffff_ffffu64 << shift;
+                    g.driver_features = (g.driver_features & !mask)
+                        | ((u64::from(val) << shift) & g.device_features);
+                }
+            }
             QUEUE_SEL => g.queue_sel = val as usize,
             QUEUE_NUM => {
                 if let Some(q) = g.queues.get_mut(sel) {
@@ -324,6 +329,8 @@ impl VirtioMmio {
                     // re-activation path is out of scope for the boot console.
                     g.activation.take();
                     g.activated = false;
+                    g.driver_features = 0;
+                    g.drv_feat_sel = 0;
                 } else {
                     maybe_activate(
                         &mut g,
@@ -434,14 +441,11 @@ fn maybe_activate(g: &mut Inner, interrupt: Interrupt) {
     };
     g.kicks = kicks.iter().filter_map(|k| k.try_clone().ok()).collect();
     let queue_interrupts = queues.iter().map(|_| Some(interrupt.clone())).collect();
-    let handle = match g
-        .device
-        .activate(VirtioActivate::with_host_and_queue_interrupts(
-            queues,
-            kicks,
-            host,
-            queue_interrupts,
-        )) {
+    let negotiated = g.driver_features;
+    let handle = match g.device.activate(
+        VirtioActivate::with_host_and_queue_interrupts(queues, kicks, host, queue_interrupts)
+            .with_negotiated_features(negotiated),
+    ) {
         Ok(handle) => handle,
         Err(e) => {
             log::error!("virtio-mmio: activate failed: {e}");
