@@ -68,6 +68,8 @@ devtree = { git = "https://github.com/pichi-vm/devtree" }
 # Dev-only caching URL downloader (shared by arma/dillo tests).
 burrow = { git = "https://github.com/pichi-vm/burrow" }
 
+imago = { git = "https://github.com/pichi-vm/imago", rev = "d6c321f48c86bc9d675eea08f323205eae1465f8", default-features = false, features = ["sync"] }
+
 # dillo-internal crates
 dillo-storage = { path = "deps/dillo-storage" }
 dillo-config = { path = "deps/dillo-config" }
