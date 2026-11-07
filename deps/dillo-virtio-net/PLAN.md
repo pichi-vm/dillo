@@ -290,10 +290,8 @@ locally.
 
 ### Layer 3 — bridge integration (opt-in, NEVER in CI)
 
-- Env-gated `#[ignore]`d tests (`DILLO_NET_BRIDGE_TEST=br0` on Linux as root;
-  macOS vmnet likewise) that actually move packets, with a **documented setup
-  recipe in the crate README** so it is a repeatable procedure. This is the
-  confidence mechanism for the paths CI cannot run.
+- macOS vmnet has a manual environment-gated test. Linux bridge attachment
+  is not covered by integration tests.
 
 ### Layer 4 — negative / error paths (unit)
 
