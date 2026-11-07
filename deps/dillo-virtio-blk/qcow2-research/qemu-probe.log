@@ -1,0 +1,5 @@
+{"state": "empty", "apparent_bytes": 196624, "allocated_bytes": 200704}
+{"state": "written", "apparent_bytes": 67436544, "allocated_bytes": 67375104}
+{"state": "discarded", "apparent_bytes": 67436544, "allocated_bytes": 266240}
+No errors were found on the image.
+Image end offset: 327680
