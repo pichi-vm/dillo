@@ -1,21 +1,31 @@
-The PPA source workflow vendors locked dependencies and pushes generated
-source directly to build/ppa in Launchpad's dillo-ppa repository. The
-branch exists only on Launchpad. No compilation or GPG signing happens in CI.
+The PPA workflow prepares locked source on a GitHub-hosted runner, pushes
+it to main in Launchpad's dillo repository, and requests recipe builds.
+Launchpad's main is generated; GitHub's main remains the source of truth.
+No compilation or GPG signing happens in GitHub Actions.
 
 Configure https://code.launchpad.net/~nmccallum/+recipe/dillo with:
 
     # git-build-recipe format 0.4 deb-version {debversion}+{time}
-    lp:~nmccallum/pichi-vm/+git/dillo-ppa build/ppa
+    lp:~nmccallum/pichi-vm/+git/dillo main
 
-Select Ubuntu Noble (24.04) and any newer supported releases, disable daily
-builds, and target ppa:nmccallum/pichi with amd64 and arm64 enabled.
-The workflow requests builds after each main push. Publication is asynchronous.
+Select Noble (24.04), Resolute (26.04), Stonking (26.10), and Tenacious (27.04).
+Disable daily builds and target ppa:nmccallum/pichi with amd64 and arm64
+enabled. One prepared source serves all releases and both architectures.
+Every main push publishes source and requests builds. CI finishes when
+Launchpad accepts the request; building and publication continue there.
 
 The repository Actions secret LAUNCHPAD_AUTHORIZATION contains the pichi-vm
-OAuth Authorization header, as in Corium. CI obtains a short-lived repository
-Git token from Launchpad; no GPG key or separate Git credential is needed.
+OAuth Authorization header (consumer key, access token, PLAINTEXT signature
+method, and encoded signature), authorized to change non-private data.
+CI adds a timestamp and nonce, obtains a
+short-lived repository Git token, and masks it before use. No GPG key or
+separate Git credential is needed. Revoke access through Launchpad's
+application authorizations. Authentication setup is documented at:
+https://ubuntu.com/docs/launchpad/user/how-to/launchpad-web-signing/
 
-Build the prepared source offline with dpkg-buildpackage -b -us -uc.
-Noble uses its versioned cargo-1.91 and rustc-1.91 packages; newer Ubuntu can
-use its default compiler. Only the host executable is built; VM tests need
-separate guest artifacts. The package build checks the executable's --help.
+Build prepared source offline with dpkg-buildpackage -b -us -uc.
+
+Noble uses official cargo-1.91 and rustc-1.91 packages; newer Ubuntu can
+use its default compiler. The build uses packaging/cargo-config.toml.
+Only the host executable is built; VM tests need separate guest artifacts.
+The package build checks the executable's --help.
