@@ -7,7 +7,7 @@ building or testing:
 
 ```
 mkdir -p .cargo
-cp packaging/cargo-config.toml .cargo/config.toml
+cp .copr/cargo-config.toml .cargo/config.toml
 ```
 
 That file enables artifact dependencies (`-Z bindeps`), sets the musl
@@ -33,6 +33,6 @@ gitlint (see `.gitlint`) in CI.
 
 The `npmccallum/pichi` COPR project builds `main` for Fedora on x86_64 and
 aarch64. `.copr/Makefile` creates one source RPM; COPR builds the native
-packages using the spec in `packaging/`. Binary builds need network access
+packages using the spec in `.copr/`. Binary builds need network access
 for Cargo's locked dependencies. The unreleased RPM version is `0.1.0~dev`;
 COPR's build ID in `Release` makes successive builds of that version upgrades.

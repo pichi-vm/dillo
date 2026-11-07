@@ -23,7 +23,7 @@ VMM that boots PMI files.
 %build
 export CARGO_HOME="$PWD/.cargo-home"
 export RUSTC_BOOTSTRAP=1
-cargo --config packaging/cargo-config.toml build --locked --release --bin dillo
+cargo --config .copr/cargo-config.toml build --locked --release --bin dillo
 
 %install
 install -Dpm0755 target/release/dillo %{buildroot}%{_bindir}/dillo

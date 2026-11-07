@@ -27,7 +27,7 @@ jobs:
       - name: Prepare source
         run: |
           mkdir -p .cargo
-          RUSTC_BOOTSTRAP=1 cargo +stable --config packaging/cargo-config.toml vendor --locked --versioned-dirs vendor > .cargo/vendor.toml
+          RUSTC_BOOTSTRAP=1 cargo +stable --config .copr/cargo-config.toml vendor --locked --versioned-dirs vendor > .cargo/vendor.toml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -f .cargo/vendor.toml vendor

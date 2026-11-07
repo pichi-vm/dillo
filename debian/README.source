@@ -26,6 +26,6 @@ https://ubuntu.com/docs/launchpad/user/how-to/launchpad-web-signing/
 Build prepared source offline with dpkg-buildpackage -b -us -uc.
 
 Noble uses official cargo-1.91 and rustc-1.91 packages; newer Ubuntu can
-use its default compiler. The build uses packaging/cargo-config.toml.
+use its default compiler. The build uses .copr/cargo-config.toml.
 Only the host executable is built; VM tests need separate guest artifacts.
 The package build checks the executable's --help.

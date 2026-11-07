@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - name: Install cargo config
         shell: bash
-        run: mkdir -p .cargo && cp packaging/cargo-config.toml .cargo/config.toml
+        run: mkdir -p .cargo && cp .copr/cargo-config.toml .cargo/config.toml
       # artifact deps make `cargo metadata` nightly-only, so install the pinned
       # toolchain (from rust-toolchain.toml) before cargo-deny reads the tree.
       - run: rustup show
@@ -85,7 +85,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - name: Install cargo config
         shell: bash
-        run: mkdir -p .cargo && cp packaging/cargo-config.toml .cargo/config.toml
+        run: mkdir -p .cargo && cp .copr/cargo-config.toml .cargo/config.toml
       - name: Install toolchain
         shell: bash
         run: |
@@ -134,7 +134,7 @@ jobs:
 
       - name: Install cargo config
         shell: bash
-        run: mkdir -p .cargo && cp packaging/cargo-config.toml .cargo/config.toml
+        run: mkdir -p .cargo && cp .copr/cargo-config.toml .cargo/config.toml
 
       - name: Install toolchain
         shell: bash

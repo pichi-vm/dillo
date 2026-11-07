@@ -11,7 +11,7 @@ export RUSTC_BOOTSTRAP = 1
 	dh $@ --buildsystem=none
 
 override_dh_auto_build:
-	cargo --config packaging/cargo-config.toml --config .cargo/vendor.toml build --frozen --release --bin dillo
+	cargo --config .copr/cargo-config.toml --config .cargo/vendor.toml build --frozen --release --bin dillo
 
 override_dh_auto_test:
 	target/release/dillo --help > /dev/null
