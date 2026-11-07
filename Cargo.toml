@@ -180,6 +180,9 @@ default = []
 vm-tests = []
 
 [dependencies]
+tempfile.workspace = true
+dillo-storage.workspace = true
+imago.workspace = true
 dillo-machine.workspace = true
 dillo-mmio.workspace = true
 dillo-mmio-uart.workspace = true
