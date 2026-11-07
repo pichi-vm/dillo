@@ -640,6 +640,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "dillo-storage"
+version = "0.1.0"
+
+[[package]]
 name = "dillo-virtio"
 version = "0.1.0"
 dependencies = [
@@ -654,6 +658,7 @@ name = "dillo-virtio-blk"
 version = "0.1.0"
 dependencies = [
  "dillo-mmio",
+ "dillo-storage",
  "dillo-virtio",
  "log",
  "thiserror 2.0.18",

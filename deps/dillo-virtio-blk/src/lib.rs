@@ -97,85 +97,34 @@ const VIRTIO_BLK_S_IOERR: u8 = 1;
 const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
 // ---------------------------------------------------------------------------
-// BlockBacking trait (ported verbatim from the PoC Phase 45 BACKING-01)
+// BlockBacking storage contracts
 // ---------------------------------------------------------------------------
 
-/// Sync, RO-by-construction abstraction over the data source behind a virtio-blk
-/// device.
-///
-/// - `&self` only (no `&mut self`): the trait object is shared via `Arc`.
-/// - NO `write_at` method — RO-by-construction. The raw-image write path flows
-///   through a separate `writable_fd` side-channel that RO backings never get,
-///   so a confused-deputy write cannot reach disk.
-/// - `flush()` defaults to `Ok(())` so RO impls satisfy virtio §5.2.6.2
-///   (`T_FLUSH` on a `VIRTIO_BLK_F_RO` device returns `S_OK` with no work).
-pub trait BlockBacking: Send + Sync {
-    /// Total length in BYTES (not sectors). Capacity = `len_bytes / SECTOR_SIZE`.
-    fn len_bytes(&self) -> u64;
-
-    /// `pread(2)`-style read. Returns `Ok(n)` where `n <= buf.len()`. Short
-    /// reads are permitted; the caller advances by `n`.
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize>;
-
-    /// Flush in-flight writes. Default `Ok(())` for RO backings.
-    fn flush(&self) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    /// 20-byte serial returned to the guest by `VIRTIO_BLK_T_GET_ID`. Stable
-    /// across process lifetime.
-    fn get_id(&self) -> [u8; 20];
-
-    /// True if the backing rejects writes structurally (RO-by-construction).
-    fn is_read_only(&self) -> bool;
-
-    /// Logical block size in bytes (the smallest unit the device will accept).
-    /// Default `512`. Surfaced via `VIRTIO_BLK_F_BLK_SIZE` at config offset 20.
-    /// Implementations MUST return a power of two `<= physical_block_size`.
-    fn logical_block_size(&self) -> u32 {
-        512
-    }
-
-    /// Physical block size in bytes. Default `512`. When it differs from
-    /// `logical_block_size`, `VIRTIO_BLK_F_TOPOLOGY` is negotiated and
-    /// `physical_block_exp = log2(physical / logical)` is exposed at offset 24.
-    /// Implementations MUST return a power-of-two multiple of
-    /// `logical_block_size`.
-    fn physical_block_size(&self) -> u32 {
-        512
-    }
-
-    /// Optional max segments per request. `None` (default) means
-    /// `VIRTIO_BLK_F_SEG_MAX` is NOT advertised; `Some(n)` advertises it and
-    /// exposes `seg_max = n` at config offset 12.
-    fn max_segments(&self) -> Option<u32> {
-        None
-    }
-}
+pub use dillo_storage::{BlockBacking, WritableBlockBacking};
 
 // ---------------------------------------------------------------------------
-// RawImageBacking — single-file raw image (ported verbatim)
+// RawImageBacking — single-file raw image
 // ---------------------------------------------------------------------------
 
-/// [`BlockBacking`] backed by a single raw-image file. Writes (when the device
-/// is not read-only) flow through the separate `writable_fd` held by
-/// [`VirtioBlk`], not through this trait.
+/// A raw-image session; read and mutation capabilities share the same file.
 #[derive(Debug)]
 pub struct RawImageBacking {
     backing_fd: File,
     len_bytes: u64,
+    read_only: bool,
 }
 
 impl RawImageBacking {
     /// Create a `RawImageBacking` from an open `File`, pre-computing `len_bytes`
     /// from its metadata.
-    pub fn new(file: File) -> Self {
-        let len_bytes = file.metadata().map_or(0, |m| m.len());
+    pub fn new(file: File, read_only: bool) -> std::io::Result<Self> {
+        let len_bytes = file.metadata()?.len();
         let backing_fd = file;
-        Self {
+        Ok(Self {
             backing_fd,
             len_bytes,
-        }
+            read_only,
+        })
     }
 }
 
@@ -189,8 +138,12 @@ impl BlockBacking for RawImageBacking {
     }
 
     fn flush(&self) -> std::io::Result<()> {
-        // Raw-image is writable; fdatasync is meaningful.
-        self.backing_fd.sync_data()
+        // Read-only sessions must not require a writable handle for FLUSH.
+        if self.read_only {
+            Ok(())
+        } else {
+            self.backing_fd.sync_data()
+        }
     }
 
     fn get_id(&self) -> [u8; 20] {
@@ -200,9 +153,36 @@ impl BlockBacking for RawImageBacking {
     }
 
     fn is_read_only(&self) -> bool {
-        // The raw-image backing supports writes; the read-only CLI flag is
-        // honored by VirtioBlk's `read_only` gate + the absence of `writable_fd`.
-        false
+        self.read_only
+    }
+    fn writer(&self) -> Option<&dyn WritableBlockBacking> {
+        if self.read_only { None } else { Some(self) }
+    }
+}
+
+impl WritableBlockBacking for RawImageBacking {
+    fn write_at(&self, mut offset: u64, mut data: &[u8]) -> std::io::Result<()> {
+        if self.read_only {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        if offset
+            .checked_add(data.len() as u64)
+            .is_none_or(|end| end > self.len_bytes)
+        {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        while !data.is_empty() {
+            match write_at(&self.backing_fd, data, offset) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(n) => {
+                    offset += n as u64;
+                    data = &data[n..];
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -213,9 +193,6 @@ impl BlockBacking for RawImageBacking {
 /// In-process virtio-blk device.
 pub struct VirtioBlk {
     backing: Arc<dyn BlockBacking>,
-    /// Writable fd for the raw-image path; `None` for RO backings. A guest
-    /// write is rejected if EITHER `read_only` is true OR this is `None`.
-    writable_fd: Option<Arc<File>>,
     /// Capacity in 512-byte sectors.
     capacity: u64,
     read_only: bool,
@@ -239,22 +216,17 @@ impl std::fmt::Debug for VirtioBlk {
 }
 
 impl VirtioBlk {
-    /// Build a `VirtioBlk` from a [`BlockBacking`] trait object plus an optional
-    /// writable fd (raw-image only) and the read-only flag. Topology values are
+    /// Build a device from one image session and a read-only policy. Topology values are
     /// captured at construction so the hot config-space path avoids vtable
     /// dispatch.
-    pub fn new(
-        backing: Arc<dyn BlockBacking>,
-        writable_fd: Option<Arc<File>>,
-        read_only: bool,
-    ) -> Self {
+    pub fn new(backing: Arc<dyn BlockBacking>, read_only: bool) -> Self {
+        let read_only = read_only || backing.is_read_only();
         let capacity = backing.len_bytes() / SECTOR_SIZE;
         let logical_block_size = backing.logical_block_size();
         let physical_block_size = backing.physical_block_size();
         let max_segments = backing.max_segments();
         Self {
             backing,
-            writable_fd,
             capacity,
             read_only,
             logical_block_size,
@@ -265,23 +237,15 @@ impl VirtioBlk {
     }
 
     /// Open a raw-image file and build a `VirtioBlk` over it. When `read_only`
-    /// is false the disk is opened read-write and a duplicated fd is retained
-    /// for the write path.
+    /// is false the disk is opened read-write.
     pub fn open_raw(path: &Path, read_only: bool) -> std::io::Result<Self> {
         let file = if read_only {
             File::open(path)?
         } else {
             File::options().read(true).write(true).open(path)?
         };
-        // For the writable path, dup the fd so the backing and the write
-        // side-channel can both hold one (both inherit the open-mode flags).
-        let writable_fd: Option<Arc<File>> = if read_only {
-            None
-        } else {
-            Some(Arc::new(file.try_clone()?))
-        };
-        let backing: Arc<dyn BlockBacking> = Arc::new(RawImageBacking::new(file));
-        Ok(Self::new(backing, writable_fd, read_only))
+        let backing: Arc<dyn BlockBacking> = Arc::new(RawImageBacking::new(file, read_only)?);
+        Ok(Self::new(backing, read_only))
     }
 
     /// Materialize the first 32 bytes of `virtio_blk_config` (virtio 1.1
@@ -377,7 +341,6 @@ impl VirtioDevice for VirtioBlk {
         let wake = evt.try_clone()?;
 
         let backing = Arc::clone(&self.backing);
-        let writable_fd = self.writable_fd.clone();
         let read_only = self.read_only;
 
         let handle = Arc::new(Mutex::new(Some(spawn_request_worker(
@@ -388,7 +351,6 @@ impl VirtioDevice for VirtioBlk {
             evt,
             call_interrupt,
             backing,
-            writable_fd,
             read_only,
         )?)));
         let shutdown_handle = Arc::clone(&handle);
@@ -437,7 +399,6 @@ fn spawn_request_worker(
     kick: Kick,
     call_interrupt: Option<Interrupt>,
     backing: Arc<dyn BlockBacking>,
-    writable_fd: Option<Arc<File>>,
     read_only: bool,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
     host.spawn(Box::new(move |token| {
@@ -448,7 +409,6 @@ fn spawn_request_worker(
             kick,
             call_interrupt,
             backing,
-            writable_fd,
             read_only,
             token,
         );
@@ -464,7 +424,6 @@ fn request_worker(
     kick: Kick,
     call_interrupt: Option<Interrupt>,
     backing: Arc<dyn BlockBacking>,
-    writable_fd: Option<Arc<File>>,
     read_only: bool,
     token: VirtioRunToken,
 ) {
@@ -483,7 +442,6 @@ fn request_worker(
             &queue,
             call_interrupt.as_ref(),
             backing.as_ref(),
-            writable_fd.as_deref(),
             read_only,
         );
     }
@@ -498,7 +456,6 @@ fn drain_requests(
     queue: &Arc<Mutex<Queue>>,
     call_interrupt: Option<&Interrupt>,
     backing: &dyn BlockBacking,
-    writable_fd: Option<&File>,
     read_only: bool,
 ) {
     let mut q = queue.lock().expect("virtio-blk queue mutex");
@@ -526,14 +483,8 @@ fn drain_requests(
             continue;
         }
 
-        let (status, used_len) = process_request(
-            buffer_memory,
-            &readable,
-            &writable,
-            backing,
-            writable_fd,
-            read_only,
-        );
+        let (status, used_len) =
+            process_request(buffer_memory, &readable, &writable, backing, read_only);
 
         // Status byte goes to the last writable descriptor.
         let (status_addr, status_len) = writable[writable.len() - 1];
@@ -553,7 +504,6 @@ fn process_request(
     readable: &[Desc],
     writable: &[Desc],
     backing: &dyn BlockBacking,
-    writable_fd: Option<&File>,
     read_only: bool,
 ) -> (u8, u32) {
     // Request header is the first readable descriptor (16 bytes).
@@ -578,13 +528,7 @@ fn process_request(
         }
         VIRTIO_BLK_T_OUT => {
             // Write: data is in the readable descriptors after the header.
-            handle_write(
-                buffer_memory,
-                &readable[1..],
-                sector,
-                writable_fd,
-                read_only,
-            )
+            handle_write(buffer_memory, &readable[1..], sector, backing, read_only)
         }
         VIRTIO_BLK_T_FLUSH => match backing.flush() {
             Ok(()) => (VIRTIO_BLK_S_OK, 0),
@@ -621,14 +565,13 @@ fn handle_write(
     buffer_memory: &Arc<dyn VirtioMemory>,
     data: &[Desc],
     sector: u64,
-    writable_fd: Option<&File>,
+    backing: &dyn BlockBacking,
     read_only: bool,
 ) -> (u8, u32) {
-    // Defense-in-depth: reject if read-only OR no writable fd (RO backing).
     if read_only {
         return (VIRTIO_BLK_S_IOERR, 0);
     }
-    let Some(fd) = writable_fd else {
+    let Some(writer) = backing.writer() else {
         return (VIRTIO_BLK_S_IOERR, 0);
     };
     let mut offset = sector * SECTOR_SIZE;
@@ -637,10 +580,10 @@ fn handle_write(
         if buffer_memory.read(addr, &mut buf).is_err() {
             return (VIRTIO_BLK_S_IOERR, 0);
         }
-        let Ok(written) = write_at(fd, &buf, offset) else {
+        if writer.write_at(offset, &buf).is_err() {
             return (VIRTIO_BLK_S_IOERR, 0);
-        };
-        offset += written as u64;
+        }
+        offset += u64::from(len);
     }
     (VIRTIO_BLK_S_OK, 0)
 }
@@ -755,7 +698,6 @@ mod tests {
                 max_segments,
                 read_only,
             }),
-            None,
             read_only,
         )
     }
@@ -881,15 +823,7 @@ mod tests {
         }
         let backing = RamBacking::new(data, false);
 
-        drain_requests(
-            &queue_memory,
-            &buffer_memory,
-            &q,
-            None,
-            &backing,
-            None,
-            false,
-        );
+        drain_requests(&queue_memory, &buffer_memory, &q, None, &backing, false);
 
         // Guest data buffer filled with backing bytes.
         let mut out = [0u8; 512];

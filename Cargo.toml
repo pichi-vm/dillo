@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     ".",
     "deps/dillo-config",
+    "deps/dillo-storage",
     "deps/dillo-devtree",
     "deps/dillo-machine",
     "deps/dillo-machine-hvf",
@@ -68,6 +69,7 @@ devtree = { git = "https://github.com/pichi-vm/devtree" }
 burrow = { git = "https://github.com/pichi-vm/burrow" }
 
 # dillo-internal crates
+dillo-storage = { path = "deps/dillo-storage" }
 dillo-config = { path = "deps/dillo-config" }
 dillo-devtree = { path = "deps/dillo-devtree" }
 dillo-machine = { path = "deps/dillo-machine" }
