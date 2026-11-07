@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   source:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -23,9 +24,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - name: Publish source and request builds
-        env:
-          LAUNCHPAD_AUTHORIZATION: ${{ secrets.LAUNCHPAD_AUTHORIZATION }}
+      - name: Prepare source
         run: |
           mkdir -p .cargo
           RUSTC_BOOTSTRAP=1 cargo +stable --config packaging/cargo-config.toml vendor --locked --versioned-dirs vendor > .cargo/vendor.toml
@@ -33,6 +32,10 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -f .cargo/vendor.toml vendor
           git commit -m 'build: prepare PPA source'
+      - name: Publish source and request builds
+        env:
+          LAUNCHPAD_AUTHORIZATION: ${{ secrets.LAUNCHPAD_AUTHORIZATION }}
+        run: |
           token=$(curl -fsS -X POST \
             https://api.launchpad.net/devel/~nmccallum/pichi-vm/+git/dillo \
             -d ws.op=issueAccessToken \
