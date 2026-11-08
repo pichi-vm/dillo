@@ -147,7 +147,7 @@ jobs:
 
       # Handle sandbox-denied sudo purge until the upstream fix is available.
       # https://github.com/Swatinem/rust-cache/pull/400
-      - uses: pichi-vm/rust-cache@c21f30586e995d7bc93110b6538b713925f08b18
+      - uses: pichi-vm/rust-cache@fix/macos-purge-spawn-failure
         with:
           save-if: ${{ runner.environment == 'github-hosted' || github.ref == 'refs/heads/main' }}
 
