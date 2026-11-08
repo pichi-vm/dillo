@@ -134,7 +134,7 @@ dependencies = [
 [[package]]
 name = "arma"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?rev=b792e9a3463f65c821cfa4f15c3d2b6a6b5e2a94#b792e9a3463f65c821cfa4f15c3d2b6a6b5e2a94"
+source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
 dependencies = [
  "anyhow",
  "ciborium",
@@ -442,7 +442,7 @@ dependencies = [
 [[package]]
 name = "devtree"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/devtree#95b8d62cce42b77cb08ed9922de012a5d416bee7"
+source = "git+https://github.com/pichi-vm/devtree#07526cfdba0ce0eefdcf641c582a44ce335cd4fe"
 
 [[package]]
 name = "digest"
@@ -763,7 +763,7 @@ checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
 [[package]]
 name = "dtb2acpi"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?rev=b792e9a3463f65c821cfa4f15c3d2b6a6b5e2a94#b792e9a3463f65c821cfa4f15c3d2b6a6b5e2a94"
+source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
 dependencies = [
  "devtree",
  "zerocopy",
@@ -772,7 +772,7 @@ dependencies = [
 [[package]]
 name = "dtb2e820"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?rev=b792e9a3463f65c821cfa4f15c3d2b6a6b5e2a94#b792e9a3463f65c821cfa4f15c3d2b6a6b5e2a94"
+source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
 dependencies = [
  "devtree",
 ]
@@ -813,7 +813,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1175,7 +1175,7 @@ dependencies = [
 [[package]]
 name = "imago"
 version = "0.2.6"
-source = "git+https://github.com/pichi-vm/imago?rev=d6c321f48c86bc9d675eea08f323205eae1465f8#d6c321f48c86bc9d675eea08f323205eae1465f8"
+source = "git+https://github.com/pichi-vm/imago?branch=upstream%2Freclamation#d6c321f48c86bc9d675eea08f323205eae1465f8"
 dependencies = [
  "cfg-if",
  "libc",
@@ -1527,7 +1527,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "pmi"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/pmi?rev=2b922270cd81bba763ea781f3eb5ff238f037c97#2b922270cd81bba763ea781f3eb5ff238f037c97"
+source = "git+https://github.com/pichi-vm/pmi?branch=main#5d6fe93b87d5af20d7387491f97aa89f31361ef9"
 dependencies = [
  "serde",
 ]
@@ -1735,7 +1735,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1995,7 +1995,7 @@ dependencies = [
 [[package]]
 name = "tatu"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?rev=b792e9a3463f65c821cfa4f15c3d2b6a6b5e2a94#b792e9a3463f65c821cfa4f15c3d2b6a6b5e2a94"
+source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
 dependencies = [
  "arrayvec",
  "devtree",
@@ -2013,7 +2013,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
