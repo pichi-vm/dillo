@@ -49,6 +49,10 @@ const QUEUE_DRIVER_LOW: u64 = 0x090;
 const QUEUE_DRIVER_HIGH: u64 = 0x094;
 const QUEUE_DEVICE_LOW: u64 = 0x0a0;
 const QUEUE_DEVICE_HIGH: u64 = 0x0a4;
+const SHM_LEN_LOW: u64 = 0x0b0;
+const SHM_LEN_HIGH: u64 = 0x0b4;
+const SHM_BASE_LOW: u64 = 0x0b8;
+const SHM_BASE_HIGH: u64 = 0x0bc;
 const CONFIG_GENERATION: u64 = 0x0fc;
 const CONFIG: u64 = 0x100;
 
@@ -296,6 +300,8 @@ impl VirtioMmio {
             // register map; its body coincides with the unhandled-register case.
             #[allow(clippy::match_same_arms)]
             CONFIG_GENERATION => 0,
+            // No shared memory regions: virtio 1.2 §4.2.2 requires all ones.
+            SHM_LEN_LOW | SHM_LEN_HIGH | SHM_BASE_LOW | SHM_BASE_HIGH => u32::MAX,
             _ => 0,
         };
         let bytes = val.to_le_bytes();
