@@ -7,6 +7,14 @@
 //! [`dillo_machine::cpuid_x86`]. This module keeps the `CpuId` /
 //! `kvm_cpuid_entry2` path local so `dillo-machine` stays free of
 //! `kvm-bindings`.
+//!
+//! For ordinary KVM guests, the CPU profile is a minimum capability level.
+//! Dillo retains additional features returned by KVM, including VMX/SVM when
+//! the host permits nested virtualization. Guest udev may therefore load
+//! kvm_intel or kvm_amd during CPU coldplug, even in a shutdown-only workload.
+//! Keep this capability exposure; image-specific module exclusions belong in
+//! specialized guest images. This does not qualify arbitrary nested workloads
+//! or define CPU exposure for confidential guests or other host backends.
 
 use kvm_bindings::CpuId;
 
