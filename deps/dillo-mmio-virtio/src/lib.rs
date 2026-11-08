@@ -57,6 +57,40 @@ const STATUS_DRIVER_OK: u32 = 0x4;
 /// InterruptStatus bit: used-buffer notification (a virtqueue completed).
 const INT_VRING: u32 = 0x1;
 
+/// An unoccupied, declared virtio-mmio slot (Virtio 1.2, section 4.2.2).
+#[derive(Debug)]
+pub struct EmptySlot {
+    pub window: MmioWindow,
+}
+
+impl MmioDevice for EmptySlot {
+    fn windows(&self) -> &[MmioWindow] {
+        std::slice::from_ref(&self.window)
+    }
+
+    fn read(&self, _window: MmioWindow, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
+        let value: u32 = match offset {
+            MAGIC => MAGIC_VALUE,
+            VERSION => 2,
+            _ => 0,
+        };
+        let bytes = value.to_le_bytes();
+        for (index, byte) in data.iter_mut().enumerate() {
+            *byte = bytes.get(index).copied().unwrap_or(0);
+        }
+        Ok(())
+    }
+
+    fn write(
+        &self,
+        _window: MmioWindow,
+        _offset: u64,
+        _data: &[u8],
+    ) -> Result<MmioWriteOutcome, MmioError> {
+        Ok(MmioWriteOutcome::Continue)
+    }
+}
+
 #[derive(Clone)]
 pub struct WiredIrq {
     intid: u32,
@@ -501,5 +535,33 @@ impl VirtioDeviceHost for MmioVirtioHost {
                 Ok(())
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_slot_passes_transport_probe_without_a_device() {
+        let slot = EmptySlot {
+            window: MmioWindow {
+                base: 0x1000,
+                size: 0x1000,
+            },
+        };
+        assert_eq!(slot.windows(), &[slot.window]);
+        assert!(slot.interrupts().is_empty());
+        assert!(slot.shared_memory().is_empty());
+        for (offset, expected) in [(0, 0x7472_6976), (4, 2), (8, 0)] {
+            let mut value = [0xff; 4];
+            slot.read(slot.window, offset, &mut value).unwrap();
+            assert_eq!(u32::from_le_bytes(value), expected);
+        }
+        slot.write(slot.window, STATUS, &4u32.to_le_bytes())
+            .unwrap();
+        let mut status = [0xff; 4];
+        slot.read(slot.window, STATUS, &mut status).unwrap();
+        assert_eq!(status, [0; 4]);
     }
 }
