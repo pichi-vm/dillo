@@ -32,6 +32,8 @@ use thiserror::Error;
 
 use crate::VmExit;
 #[cfg(target_arch = "x86_64")]
+use crate::amd_tsc::AmdTsc as _;
+#[cfg(target_arch = "x86_64")]
 use crate::cpuid_x86;
 
 /// Hypervisor / VM errors.
@@ -360,6 +362,8 @@ impl Vm {
             cpuid_x86::set_apic_id(&mut supported, idx);
             fd.set_cpuid2(&supported)
                 .map_err(|e| Error::CreateVcpu(idx, io(e)))?;
+            fd.initialize_amd_tsc(&supported)
+                .map_err(|e| Error::CreateVcpu(idx, e))?;
 
             // Point this vCPU's in-kernel LAPIC at the declared base. KVM
             // resets `IA32_APIC_BASE` to its own default when the vCPU is

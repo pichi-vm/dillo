@@ -4,6 +4,8 @@
 #![cfg(target_os = "linux")]
 
 #[cfg(target_arch = "x86_64")]
+mod amd_tsc;
+#[cfg(target_arch = "x86_64")]
 mod cpuid_x86;
 mod hypervisor;
 #[cfg(target_arch = "x86_64")]
