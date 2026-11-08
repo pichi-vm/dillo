@@ -2408,6 +2408,7 @@ mod machine_select {
             E: std::error::Error + Send + Sync + 'static,
             M: Machine<Error = E>,
             M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn MmioAttachment>>,
+            M: Attach<Arc<dillo_mmio_virtio::EmptySlot>, Error = E>,
             M: Attach<
                     Arc<dillo_mmio_virtio::VirtioMmio>,
                     Error = E,
@@ -2461,6 +2462,25 @@ mod machine_select {
                 let attachment =
                     Attach::attach(vm, Arc::clone(&pci_root)).map_err(RunError::machine)?;
                 pci_root.set_attachment(attachment);
+            }
+
+            for (index, slot) in platform.virtio_mmio.iter().enumerate() {
+                if mmio
+                    .iter()
+                    .any(|placement| placement.index as usize == index)
+                {
+                    continue;
+                }
+                Attach::attach(
+                    vm,
+                    Arc::new(dillo_mmio_virtio::EmptySlot {
+                        window: MmioWindow {
+                            base: slot.base,
+                            size: slot.size,
+                        },
+                    }),
+                )
+                .map_err(RunError::machine)?;
             }
 
             // --- MMIO: one transport per placement ---
@@ -2705,6 +2725,7 @@ mod machine_select {
             M: Attach<M::Memory, Error = E, Output = ()>,
             M: Attach<M::CpuState, Error = E, Output = Arc<M::Cpu>>,
             M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn MmioAttachment>>,
+            M: Attach<Arc<dillo_mmio_virtio::EmptySlot>, Error = E>,
             M: Attach<
                     Arc<dillo_mmio_virtio::VirtioMmio>,
                     Error = E,
