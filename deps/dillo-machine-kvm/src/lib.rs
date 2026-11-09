@@ -982,6 +982,83 @@ mod imp {
         }
     }
 
+    #[cfg(all(test, target_arch = "x86_64"))]
+    mod stop_signal_tests {
+        use super::*;
+        use nix::sys::signal::{SigSet, SigmaskHow};
+
+        struct RestoreMask(SigSet);
+
+        impl Drop for RestoreMask {
+            fn drop(&mut self) {
+                self.0.thread_set_mask().unwrap();
+            }
+        }
+
+        fn assert_current_mask(expected: SigSet) {
+            let actual = SigSet::thread_get_mask().unwrap();
+            // SigSet equality omits realtime signals. Compare membership in
+            // every Linux signal instead of comparing libc's unused padding.
+            for signal in 1..=libc::SIGRTMAX() {
+                // SAFETY: both signal sets are initialized and signal is in
+                // the supported Linux range.
+                #[allow(unsafe_code)]
+                unsafe {
+                    assert_eq!(
+                        libc::sigismember(actual.as_ref(), signal),
+                        libc::sigismember(expected.as_ref(), signal),
+                        "signal {signal}",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn stop_before_guest_entry_interrupts_kvm_run() {
+            let kvm = kvm_ioctls::Kvm::new().unwrap();
+            let vm = kvm.create_vm().unwrap();
+            let mut cpu = vm.create_vcpu(0).unwrap();
+            let requester = VcpuExitRequester::new();
+            let _restore = RestoreMask(
+                SigSet::all()
+                    .thread_swap_mask(SigmaskHow::SIG_SETMASK)
+                    .unwrap(),
+            );
+            let previous = SigSet::thread_get_mask().unwrap();
+            let mask = crate::hypervisor::block_kick_signal(&cpu, VCPU_KICK_SIGNAL).unwrap();
+            let registration = requester.register_current_thread();
+            requester.request_exit();
+            assert_eq!(cpu.run().unwrap_err().errno(), libc::EINTR);
+            drop(registration);
+            drop(mask);
+            assert_current_mask(previous);
+        }
+
+        #[test]
+        fn signal_mask_is_restored_on_failure_and_unwind() {
+            let mut populated = SigSet::all();
+            populated.remove(VCPU_KICK_SIGNAL);
+            let _restore =
+                RestoreMask(populated.thread_swap_mask(SigmaskHow::SIG_SETMASK).unwrap());
+            let previous = SigSet::thread_get_mask().unwrap();
+            let file = std::fs::File::open("/dev/null").unwrap();
+            assert!(crate::hypervisor::block_kick_signal(&file, VCPU_KICK_SIGNAL).is_err());
+            assert_current_mask(previous);
+            let kvm = kvm_ioctls::Kvm::new().unwrap();
+            let vm = kvm.create_vm().unwrap();
+            let cpu = vm.create_vcpu(0).unwrap();
+            let result = std::panic::catch_unwind(|| {
+                let _mask = crate::hypervisor::block_kick_signal(&cpu, VCPU_KICK_SIGNAL).unwrap();
+                let mut blocked = previous;
+                blocked.add(VCPU_KICK_SIGNAL);
+                assert_current_mask(blocked);
+                panic!("worker failure");
+            });
+            assert!(result.is_err());
+            assert_current_mask(previous);
+        }
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum VcpuExit {
         MmioWrite { addr: u64, data: [u8; 8], size: u8 },
@@ -1083,6 +1160,7 @@ mod imp {
         }
 
         fn run_to_stop(&mut self) -> Result<VcpuStop, Error> {
+            let _signal_mask = crate::hypervisor::block_kick_signal(&self.inner, VCPU_KICK_SIGNAL)?;
             let _registration = self.exit_requester.register_current_thread();
             loop {
                 if self.exit_requester.requested() {

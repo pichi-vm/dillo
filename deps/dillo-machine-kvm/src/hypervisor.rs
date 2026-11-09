@@ -41,6 +41,9 @@ use crate::cpuid_x86;
 pub enum Error {
     #[error("KVM guest address space: {0}")]
     AddressSpace(String),
+    #[error("configure vCPU kick signal mask: {0}")]
+    SignalMask(std::io::Error),
+
     #[error("open /dev/kvm: {0}")]
     OpenKvm(std::io::Error),
 
@@ -827,5 +830,73 @@ fn translate_exit(exit: VcpuExit<'_>) -> VmExit {
         VcpuExit::Debug(_) => VmExit::Unknown("debug exit unsupported".to_owned()),
         VcpuExit::SystemEvent(_ty, _data) => VmExit::Shutdown,
         other => VmExit::Unknown(format!("{other:?}")),
+    }
+}
+
+/// Block the kick outside KVM_RUN, which atomically unmasks it on entry.
+/// A kick delivered between the stop check and guest entry remains pending.
+pub(crate) fn block_kick_signal(
+    vcpu: &impl AsRawFd,
+    signal: nix::sys::signal::Signal,
+) -> Result<KickSignalMask, Error> {
+    use nix::sys::signal::{SigSet, SigmaskHow};
+
+    // Linux exposes 64 signals to the kernel; libc's sigset_t reserves
+    // more space. KVM's flexible-array payload begins immediately after len.
+    #[repr(C)]
+    struct KernelMask {
+        len: u32,
+        sigset: [u8; 8],
+    }
+    nix::ioctl_write_ptr!(
+        set_signal_mask,
+        kvm_bindings::KVMIO,
+        0x8b,
+        kvm_bindings::kvm_signal_mask
+    );
+
+    let mut blocked = SigSet::empty();
+    blocked.add(signal);
+    let previous = blocked
+        .thread_swap_mask(SigmaskHow::SIG_BLOCK)
+        .map_err(|error| Error::SignalMask(error.into()))?;
+    let guard = KickSignalMask {
+        previous,
+        _thread_bound: std::marker::PhantomData,
+    };
+    let mut running = previous;
+    running.remove(signal);
+    let mut mask = KernelMask {
+        len: 8,
+        sigset: [0; 8],
+    };
+    // SAFETY: both objects contain at least eight initialized bytes. Copying
+    // the native representation preserves every signal, including realtime.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            std::ptr::from_ref(running.as_ref()).cast::<u8>(),
+            mask.sigset.as_mut_ptr(),
+            mask.sigset.len(),
+        );
+    }
+    // SAFETY: the fd is a live vCPU; mask has the UAPI header and exactly
+    // len trailing bytes, and remains alive through this synchronous ioctl.
+    #[allow(unsafe_code)]
+    unsafe { set_signal_mask(vcpu.as_raw_fd(), std::ptr::from_ref(&mask).cast()) }
+        .map_err(|error| Error::SignalMask(error.into()))?;
+    Ok(guard)
+}
+
+pub(crate) struct KickSignalMask {
+    previous: nix::sys::signal::SigSet,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for KickSignalMask {
+    fn drop(&mut self) {
+        self.previous
+            .thread_set_mask()
+            .expect("restore vCPU signal mask");
     }
 }
