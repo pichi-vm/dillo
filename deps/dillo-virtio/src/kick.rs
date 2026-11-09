@@ -13,7 +13,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 /// Queue notification shared between the transport and a device worker.
 #[derive(Clone, Debug)]
-pub struct Kick(Arc<Inner>);
+pub struct Kick(Arc<dyn dillo_mmio::WriteNotification>);
 
 #[derive(Debug)]
 struct Inner {
@@ -29,22 +29,36 @@ impl Kick {
         })))
     }
 
+    pub fn from_notification(notification: Arc<dyn dillo_mmio::WriteNotification>) -> Self {
+        Self(notification)
+    }
+
     pub fn read(&self) -> std::io::Result<u64> {
-        let mut count = self.0.count.lock().expect("kick mutex poisoned");
+        self.0.read()
+    }
+
+    pub fn write(&self, count: u64) -> std::io::Result<()> {
+        self.0.write(count)
+    }
+
+    pub fn try_clone(&self) -> std::io::Result<Self> {
+        Ok(self.clone())
+    }
+}
+
+impl dillo_mmio::WriteNotification for Inner {
+    fn read(&self) -> std::io::Result<u64> {
+        let mut count = self.count.lock().expect("kick mutex poisoned");
         while *count == 0 {
-            count = self.0.cv.wait(count).expect("kick mutex poisoned");
+            count = self.cv.wait(count).expect("kick mutex poisoned");
         }
         Ok(std::mem::take(&mut *count))
     }
 
-    pub fn write(&self, count: u64) -> std::io::Result<()> {
-        let mut guard = self.0.count.lock().expect("kick mutex poisoned");
+    fn write(&self, count: u64) -> std::io::Result<()> {
+        let mut guard = self.count.lock().expect("kick mutex poisoned");
         *guard = guard.saturating_add(count);
-        self.0.cv.notify_one();
+        self.cv.notify_one();
         Ok(())
-    }
-
-    pub fn try_clone(&self) -> std::io::Result<Self> {
-        Ok(Self(Arc::clone(&self.0)))
     }
 }

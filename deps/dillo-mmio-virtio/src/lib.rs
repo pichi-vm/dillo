@@ -169,7 +169,7 @@ struct Inner {
     status: u32,
     activated: bool,
     activation: Option<VirtioDeviceHandle>,
-    host: Option<Arc<dyn VirtioDeviceHost>>,
+    host: Option<Arc<MmioVirtioHost>>,
     /// One per queue after activation; `QueueNotify` writes kick these.
     kicks: Vec<Kick>,
 }
@@ -362,12 +362,14 @@ impl VirtioMmio {
                     // Reset: the driver will re-negotiate. Devices stay; a real
                     // re-activation path is out of scope for the boot console.
                     g.activation.take();
+                    g.kicks.clear();
                     g.activated = false;
                     g.driver_features = 0;
                     g.drv_feat_sel = 0;
                 } else {
                     maybe_activate(
                         &mut g,
+                        self.window,
                         Self::interrupt(Arc::clone(&self.int_status), self.irq.clone()),
                     );
                 }
@@ -442,7 +444,7 @@ fn set_hi(g: &mut Inner, sel: usize, field: impl Fn(&mut QueueCfg) -> &mut u64, 
     }
 }
 
-fn maybe_activate(g: &mut Inner, interrupt: Interrupt) {
+fn maybe_activate(g: &mut Inner, window: MmioWindow, interrupt: Interrupt) {
     if g.activated || g.status & STATUS_DRIVER_OK == 0 {
         return;
     }
@@ -464,7 +466,16 @@ fn maybe_activate(g: &mut Inner, interrupt: Interrupt) {
         })
         .collect();
     let kicks: Vec<Kick> = match (0..queues.len())
-        .map(|_| Kick::new())
+        .map(|index| {
+            let value = u32::try_from(index).map_err(|_| std::io::ErrorKind::InvalidInput)?;
+            match host
+                .attachment
+                .write_notification(window, QUEUE_NOTIFY, value)?
+            {
+                Some(notification) => Ok(Kick::from_notification(notification)),
+                None => Kick::new(),
+            }
+        })
         .collect::<std::io::Result<Vec<_>>>()
     {
         Ok(k) => k,
@@ -483,6 +494,7 @@ fn maybe_activate(g: &mut Inner, interrupt: Interrupt) {
         Ok(handle) => handle,
         Err(e) => {
             log::error!("virtio-mmio: activate failed: {e}");
+            g.kicks.clear();
             return;
         }
     };
@@ -541,6 +553,162 @@ impl VirtioDeviceHost for MmioVirtioHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, Default)]
+    struct TestAttachment {
+        notifications: Mutex<Vec<std::sync::Weak<TestNotification>>>,
+        accelerate: bool,
+        registration_error: bool,
+    }
+
+    #[derive(Debug)]
+    struct TestNotification(Kick);
+
+    impl dillo_mmio::WriteNotification for TestNotification {
+        fn read(&self) -> std::io::Result<u64> {
+            self.0.read()
+        }
+        fn write(&self, count: u64) -> std::io::Result<()> {
+            self.0.write(count)
+        }
+    }
+
+    impl MmioAttachment for TestAttachment {
+        fn interrupts(&self) -> &[MmioInterrupt] {
+            &[]
+        }
+        fn shared_memory(&self) -> &[Arc<dyn SharedMemory>] {
+            &[]
+        }
+        fn spawn(
+            self: Arc<Self>,
+            _: dillo_mmio::MmioDeviceRun,
+        ) -> Result<dillo_mmio::MmioDeviceHandle, dillo_mmio::MmioSpawnError> {
+            unreachable!("test device starts no workers")
+        }
+        fn write_notification(
+            &self,
+            window: MmioWindow,
+            offset: u64,
+            value: u32,
+        ) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
+            if self.registration_error {
+                return Err(std::io::ErrorKind::OutOfMemory.into());
+            }
+            if !self.accelerate {
+                return Ok(None);
+            }
+            assert_eq!(window.base, 0x1000);
+            assert_eq!(offset, QUEUE_NOTIFY);
+            assert_eq!(value, 0);
+            let mut registrations = self.notifications.lock().unwrap();
+            assert!(registrations.iter().all(|weak| weak.strong_count() == 0));
+            let notification = Arc::new(TestNotification(Kick::new()?));
+            registrations.push(Arc::downgrade(&notification));
+            Ok(Some(notification))
+        }
+    }
+
+    struct TestDevice {
+        fail: bool,
+    }
+
+    impl VirtioDevice for TestDevice {
+        fn device_type(&self) -> u32 {
+            2
+        }
+        fn num_queues(&self) -> usize {
+            1
+        }
+        fn queue_max_sizes(&self) -> &[u16] {
+            &[16]
+        }
+        fn features(&self) -> u64 {
+            1 << 32
+        }
+        fn activate(
+            &mut self,
+            mut activation: VirtioActivate,
+        ) -> Result<VirtioDeviceHandle, ActivateError> {
+            if self.fail {
+                return Err(ActivateError::InvalidConfig("test failure".into()));
+            }
+            let kick = activation.take_queue_evts().remove(0);
+            let reader = kick.clone();
+            let worker = std::thread::spawn(move || {
+                assert_eq!(reader.read().unwrap(), 1);
+            });
+            Ok(VirtioDeviceHandle::new(
+                move || kick.write(1).unwrap(),
+                move || {
+                    worker.join().unwrap();
+                    Ok(())
+                },
+            ))
+        }
+        fn read_config(&self, _: u64, _: &mut [u8]) {}
+        fn write_config(&mut self, _: u64, _: &[u8]) {}
+    }
+
+    #[test]
+    fn accelerated_notifications_are_released_on_reset_and_failed_activation() {
+        for fail in [false, true] {
+            let attachment = Arc::new(TestAttachment {
+                accelerate: true,
+                ..Default::default()
+            });
+            let transport = VirtioMmio::new(
+                MmioWindow {
+                    base: 0x1000,
+                    size: 0x1000,
+                },
+                Box::new(TestDevice { fail }),
+                Arc::new(AtomicU32::new(0)),
+                WiredIrq::unresolved(1),
+            );
+            transport.set_attachment(attachment.clone());
+            for _ in 0..2 {
+                transport.write(STATUS, &STATUS_DRIVER_OK.to_le_bytes());
+                let weak = attachment
+                    .notifications
+                    .lock()
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .clone();
+                assert_eq!(weak.strong_count() > 0, !fail);
+                transport.write(STATUS, &0u32.to_le_bytes());
+                assert_eq!(weak.strong_count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_notifications_activate_but_registration_errors_do_not() {
+        for registration_error in [false, true] {
+            let attachment = Arc::new(TestAttachment {
+                registration_error,
+                ..Default::default()
+            });
+            let transport = VirtioMmio::new(
+                MmioWindow {
+                    base: 0x1000,
+                    size: 0x1000,
+                },
+                Box::new(TestDevice { fail: false }),
+                Arc::new(AtomicU32::new(0)),
+                WiredIrq::unresolved(1),
+            );
+            transport.set_attachment(attachment);
+            transport.write(STATUS, &STATUS_DRIVER_OK.to_le_bytes());
+            assert_eq!(
+                transport.inner.lock().unwrap().activated,
+                !registration_error
+            );
+            transport.write(STATUS, &0u32.to_le_bytes());
+            assert!(transport.inner.lock().unwrap().kicks.is_empty());
+        }
+    }
 
     #[test]
     fn empty_slot_passes_transport_probe_without_a_device() {

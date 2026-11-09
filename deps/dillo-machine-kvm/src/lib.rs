@@ -13,6 +13,7 @@ mod intc_x86;
 mod irq;
 mod memory;
 mod msi;
+mod notification;
 
 /// Reasons a KVM vCPU run returned to backend code.
 #[derive(Debug)]
@@ -794,11 +795,16 @@ mod imp {
                 )));
             }
             let interrupts = self.resolve_interrupts(item.interrupts())?;
+            let notifications = crate::notification::Notifications::new(
+                self.inner.vm_fd_arc(),
+                item.windows().to_vec(),
+            );
             self.mmio_bus
                 .lock()
                 .expect("MMIO bus lock poisoned")
                 .register_device(item);
             Ok(Arc::new(MachineMmioAttachment {
+                notifications,
                 interrupts,
                 shared_memory: self.shared_memory.clone(),
             }))
@@ -806,6 +812,7 @@ mod imp {
     }
 
     struct MachineMmioAttachment {
+        notifications: crate::notification::Notifications,
         interrupts: Vec<MmioInterrupt>,
         shared_memory: Vec<Arc<dyn SharedMemory>>,
     }
@@ -815,11 +822,20 @@ mod imp {
             f.debug_struct("MachineMmioAttachment")
                 .field("interrupts", &self.interrupts.len())
                 .field("shared_memory", &self.shared_memory.len())
-                .finish()
+                .finish_non_exhaustive()
         }
     }
 
     impl MmioAttachment for MachineMmioAttachment {
+        fn write_notification(
+            &self,
+            window: dillo_mmio::MmioWindow,
+            offset: u64,
+            value: u32,
+        ) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
+            self.notifications.register(window, offset, value)
+        }
+
         fn interrupts(&self) -> &[MmioInterrupt] {
             &self.interrupts
         }
