@@ -352,7 +352,6 @@ mod imp {
                 inner: self.inner.create_vcpu(idx, cpu_profile)?,
                 mmio_bus: Arc::clone(&self.mmio_bus),
                 exit_requester: self.exit_requester(),
-                registered_thread: AtomicBool::new(false),
             })
         }
 
@@ -854,7 +853,6 @@ mod imp {
         inner: crate::hypervisor::Vcpu,
         mmio_bus: Arc<Mutex<MmioBus>>,
         exit_requester: VcpuExitRequester,
-        registered_thread: AtomicBool,
     }
 
     #[derive(Clone, Debug)]
@@ -890,19 +888,22 @@ mod imp {
             });
         }
 
-        fn register_current_thread(&self) {
+        fn register_current_thread(&self) -> VcpuRegistration {
             // SAFETY: pthread_self returns the current thread identifier. It is
             // stored only so request_exit can send the wake signal while
             // the vCPU worker thread may be blocked in KVM_RUN.
             #[allow(unsafe_code)]
             let thread = unsafe { libc::pthread_self() };
             let mut threads = self.threads.lock().expect("vCPU thread list poisoned");
-            if !threads.contains(&thread) {
-                threads.push(thread);
-            }
+            threads.push(thread);
             drop(threads);
             if self.requested.load(Ordering::Acquire) {
                 Self::kick_thread(thread);
+            }
+            VcpuRegistration {
+                requester: self.clone(),
+                thread,
+                _thread_bound: std::marker::PhantomData,
             }
         }
 
@@ -924,14 +925,60 @@ mod imp {
 
         fn kick_thread(thread: libc::pthread_t) {
             // SAFETY: pthread_t values come from vCPU worker threads that
-            // registered themselves before entering KVM_RUN. If a thread
-            // has already exited, pthread_kill returns ESRCH and there is
-            // nothing left to wake.
+            // registered themselves before entering KVM_RUN. Remote kicks
+            // hold the list lock to prevent retirement; registration can also
+            // kick its own still-running thread after releasing that lock.
             #[allow(unsafe_code)]
             let rc = unsafe { libc::pthread_kill(thread, VCPU_KICK_SIGNAL as libc::c_int) };
             if rc != 0 && rc != libc::ESRCH {
                 log::warn!("failed to kick vCPU thread with signal: errno {rc}");
             }
+        }
+    }
+
+    struct VcpuRegistration {
+        requester: VcpuExitRequester,
+        thread: libc::pthread_t,
+        _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
+
+    impl Drop for VcpuRegistration {
+        fn drop(&mut self) {
+            self.requester
+                .threads
+                .lock()
+                .expect("vCPU thread list poisoned")
+                .retain(|thread| *thread != self.thread);
+        }
+    }
+
+    #[cfg(test)]
+    mod registration_tests {
+        use super::*;
+
+        #[test]
+        fn finished_workers_are_not_signalled() {
+            let requester = VcpuExitRequester::new();
+            let worker_requester = requester.clone();
+            std::thread::spawn(move || {
+                let _registration = worker_requester.register_current_thread();
+                assert_eq!(worker_requester.threads.lock().unwrap().len(), 1);
+            })
+            .join()
+            .unwrap();
+            assert!(requester.threads.lock().unwrap().is_empty());
+            requester.request_exit();
+        }
+
+        #[test]
+        fn unwinding_retires_registration() {
+            let requester = VcpuExitRequester::new();
+            let _ = std::panic::catch_unwind(|| {
+                let _registration = requester.register_current_thread();
+                panic!("worker failure");
+            });
+            assert!(requester.threads.lock().unwrap().is_empty());
+            requester.request_exit();
         }
     }
 
@@ -1036,9 +1083,7 @@ mod imp {
         }
 
         fn run_to_stop(&mut self) -> Result<VcpuStop, Error> {
-            if !self.registered_thread.swap(true, Ordering::AcqRel) {
-                self.exit_requester.register_current_thread();
-            }
+            let _registration = self.exit_requester.register_current_thread();
             loop {
                 if self.exit_requester.requested() {
                     return Ok(VcpuStop::Stopped);
