@@ -1,0 +1,794 @@
+{
+  "date": "2026-11-07",
+  "dillo_revision": "d30e8cfbc6671f4b0e653400cfaca8d7ec948dd3",
+  "repositories": [
+    {
+      "repository": "CaddyGlow/virtdisk",
+      "revision": "714aae847a23ebb15d56d7f4efd97d1404b3c0a7",
+      "tree_complete": true,
+      "qcow_paths": [
+        "docs/evidence/provider-benchmarks-windows-20261010/qcow2-dense.json",
+        "docs/evidence/provider-benchmarks-windows-20261010/qcow2-sparse.json",
+        "docs/qcow2-refcount-growth.md",
+        "docs/qcow2-resize.md",
+        "docs/qcow2-snapshot-lifecycle-design.md",
+        "docs/qcow2-snapshot-write.md",
+        "docs/qcow2-snapshots.md",
+        "docs/qcow2-write-recovery.md",
+        "fuzz/src/bin/qcow2-write.rs",
+        "fuzz/src/bin/qcow2.rs",
+        "src/qcow2.rs",
+        "src/qcow2/snapshots.rs",
+        "src/qcow2/validation.rs",
+        "src/qcow2_allocate.rs",
+        "src/qcow2_journal.rs",
+        "src/qcow2_overlay.rs",
+        "src/qcow2_snapshot_write.rs",
+        "src/qcow2_write.rs",
+        "src/qcow2_writer.rs",
+        "tests/graph_qcow2_format.rs",
+        "tests/portable_qcow_vdi.rs",
+        "tests/qcow2.rs",
+        "tests/qcow2_allocation_index.rs",
+        "tests/qcow2_backed_snapshots.rs",
+        "tests/qcow2_discard.rs",
+        "tests/qcow2_overlay.rs",
+        "tests/qcow2_overlay_writer.rs",
+        "tests/qcow2_pending.rs",
+        "tests/qcow2_refcount_growth.rs",
+        "tests/qcow2_resize.rs",
+        "tests/qcow2_shared_l2.rs",
+        "tests/qcow2_snapshot_lifecycle.rs",
+        "tests/qcow2_snapshot_resize.rs",
+        "tests/qcow2_snapshot_validation.rs",
+        "tests/qcow2_snapshot_write.rs",
+        "tests/qcow2_snapshots.rs",
+        "tests/qcow2_write.rs",
+        "tests/qcow2_writer.rs"
+      ]
+    },
+    {
+      "repository": "JulesIMF/imgdelta",
+      "revision": "b43d688041d3a0c6b85eaa32ce89243c9099d730",
+      "tree_complete": true,
+      "qcow_paths": [
+        "core/src/image/qcow2.rs",
+        "core/tests/qcow2_mount.rs"
+      ]
+    },
+    {
+      "repository": "KarpelesLab/fstool",
+      "revision": "d01fbe06168451c66c5f509ff7e2b9067e644af7",
+      "tree_complete": true,
+      "qcow_paths": [
+        "src/block/qcow2/compress.rs",
+        "src/block/qcow2/crypto.rs",
+        "src/block/qcow2/header.rs",
+        "src/block/qcow2/l1l2.rs",
+        "src/block/qcow2/mod.rs",
+        "src/block/qcow2/refcount.rs",
+        "tests/qcow2_external.rs"
+      ]
+    },
+    {
+      "repository": "NYU-RTS/streaming-qcow2-writer",
+      "revision": "914ca00285f03ddd2c4644bf6acdb829a7999030",
+      "tree_complete": true,
+      "qcow_paths": [
+        "src/qcow2.rs"
+      ]
+    },
+    {
+      "repository": "SecurityRonin/qcow2-forensic",
+      "revision": "6dadec4f2bfd57ee6e25c5ecd6af41ce4245a3dd",
+      "tree_complete": true,
+      "qcow_paths": [
+        "docs/decisions/0002-crate-name-collision-qcow2-core.md"
+      ]
+    },
+    {
+      "repository": "antimatter-studios/rust-img-qcow2",
+      "revision": "c4894ec56946d88dabf89349c17511fc9ff93482",
+      "tree_complete": true,
+      "qcow_paths": [
+        "fuzz/corpus/image/backed.qcow2",
+        "fuzz/corpus/image/cluster-1k.qcow2",
+        "fuzz/corpus/image/compressed.qcow2",
+        "fuzz/corpus/image/default.qcow2",
+        "fuzz/corpus/image/v2.qcow2",
+        "include/img_qcow2.h",
+        "src/cli/qcow2/img.rs",
+        "src/cli/qcow2/mod.rs",
+        "src/cli/qcow2/size.rs"
+      ]
+    },
+    {
+      "repository": "boxlite-ai/boxlite",
+      "revision": "fa440ced71f56348473e8ce5bc711ad4a4a67bfc",
+      "tree_complete": true,
+      "qcow_paths": [
+        "src/boxlite/src/disk/qcow2.rs"
+      ]
+    },
+    {
+      "repository": "cloud-hypervisor/cloud-hypervisor",
+      "revision": "fbb64e0c53cdd654f3637b04b2a6a44da6569eb2",
+      "tree_complete": true,
+      "qcow_paths": [
+        "block/src/formats/qcow/backing.rs",
+        "block/src/formats/qcow/common.rs",
+        "block/src/formats/qcow/decoder.rs",
+        "block/src/formats/qcow/engine_sync.rs",
+        "block/src/formats/qcow/engine_uring.rs",
+        "block/src/formats/qcow/header.rs",
+        "block/src/formats/qcow/metadata.rs",
+        "block/src/formats/qcow/mod.rs",
+        "block/src/formats/qcow/parser.rs",
+        "block/src/formats/qcow/qcow_raw_file.rs",
+        "block/src/formats/qcow/refcount.rs",
+        "block/src/formats/qcow/test_util.rs",
+        "block/src/formats/qcow/util.rs",
+        "block/src/formats/qcow/vec_cache.rs",
+        "fuzz/dictionaries/qcow2.dict",
+        "fuzz/dictionaries/qcow2_chain.dict",
+        "fuzz/fuzz_targets/disk_qcow2.rs",
+        "fuzz/fuzz_targets/disk_qcow2_chain.rs",
+        "fuzz/fuzz_targets/disk_qcow2_ops.rs",
+        "fuzz/fuzz_targets/qcow.rs",
+        "fuzz/src/disk_engine/formats/qcow2.rs",
+        "fuzz/src/disk_engine/formats/qcow2_chain.rs"
+      ]
+    },
+    {
+      "repository": "coinman-dev/own-backup",
+      "revision": "febd28fd10a5a6ede46bb180d5b71904df36a6b8",
+      "tree_complete": true,
+      "qcow_paths": [
+        "crates/backup/src/qcow2/consolidate.rs",
+        "crates/backup/src/qcow2/io.rs",
+        "crates/backup/src/qcow2/layout.rs",
+        "crates/backup/src/qcow2/merge.rs",
+        "crates/backup/src/qcow2/mod.rs",
+        "crates/backup/src/qcow2/reader.rs",
+        "crates/backup/src/qcow2/writer.rs",
+        "crates/backup/src/qcow2_removal_win.rs",
+        "crates/backup/tests/qcow2.rs"
+      ]
+    },
+    {
+      "repository": "containers/libkrun",
+      "revision": "2fc56b5b6fcef00fc327768c8bbd692cf90b03df",
+      "tree_complete": true,
+      "qcow_paths": []
+    },
+    {
+      "repository": "firecracker-microvm/firecracker",
+      "revision": "c774bddb8246b64daa7cae6d09d56194a07d7851",
+      "tree_complete": true,
+      "qcow_paths": []
+    },
+    {
+      "repository": "forensicxlab/exhume_body",
+      "revision": "b824d198479eb663b2f55764062a09c2defd2fbe",
+      "tree_complete": true,
+      "qcow_paths": [
+        "src/qcow2.rs"
+      ]
+    },
+    {
+      "repository": "google/alioth",
+      "revision": "74c41b92e7677a01f4283ef8a382ad8450286448",
+      "tree_complete": true,
+      "qcow_paths": [
+        "alioth/src/blk/qcow2.rs",
+        "alioth/src/blk/qcow2_test.rs"
+      ]
+    },
+    {
+      "repository": "google/crosvm",
+      "revision": "f0880b36b6e3f25ee814222e6bd1cead4151bc85",
+      "tree_complete": true,
+      "qcow_paths": [
+        "disk/src/qcow/mod.rs",
+        "disk/src/qcow/qcow_raw_file.rs",
+        "disk/src/qcow/refcount.rs",
+        "disk/src/qcow/vec_cache.rs",
+        "fuzz/fuzz_targets/qcow_fuzzer.rs"
+      ]
+    },
+    {
+      "repository": "inalto/partition-manager",
+      "revision": "397dec1d79c734056917d22ecd423fdaf909b597",
+      "tree_complete": true,
+      "qcow_paths": [
+        "crates/pm-image/src/qcow2.rs"
+      ]
+    },
+    {
+      "repository": "kata-containers/kata-containers",
+      "revision": "86dcc18971958caf58325bb196e349f7d5cc80cc",
+      "tree_complete": true,
+      "qcow_paths": []
+    },
+    {
+      "repository": "keramics/keramics",
+      "revision": "a3623ffbfa02a39d1104c6e83e6d9277bf020d36",
+      "tree_complete": true,
+      "qcow_paths": [
+        "docs/formats/src/qcow.md",
+        "fuzz/fuzz_targets/qcow.rs",
+        "keramics-formats/src/qcow/README.md",
+        "keramics-formats/src/qcow/block_range.rs",
+        "keramics-formats/src/qcow/block_reader.rs",
+        "keramics-formats/src/qcow/block_stream.rs",
+        "keramics-formats/src/qcow/cluster_table.rs",
+        "keramics-formats/src/qcow/constants.rs",
+        "keramics-formats/src/qcow/credential.rs",
+        "keramics-formats/src/qcow/encryption.rs",
+        "keramics-formats/src/qcow/encryption_type.rs",
+        "keramics-formats/src/qcow/enums.rs",
+        "keramics-formats/src/qcow/features.rs",
+        "keramics-formats/src/qcow/file.rs",
+        "keramics-formats/src/qcow/file_header.rs",
+        "keramics-formats/src/qcow/file_header_v1.rs",
+        "keramics-formats/src/qcow/file_header_v2.rs",
+        "keramics-formats/src/qcow/file_header_v3.rs",
+        "keramics-formats/src/qcow/header_extension.rs",
+        "keramics-formats/src/qcow/image.rs",
+        "keramics-formats/src/qcow/mod.rs",
+        "keramics-formats/tests/qcow.rs",
+        "keramics-tools/src/info/qcow.rs",
+        "keramics-vfs/src/qcow/file_entry.rs",
+        "keramics-vfs/src/qcow/file_system.rs",
+        "keramics-vfs/src/qcow/mod.rs",
+        "scripts/generate_qcow_test_data_linux.sh",
+        "test_data/qcow/ext2.qcow",
+        "test_data/qcow/ext2.qcow2",
+        "test_data/qcow/ext2_aes128.qcow2",
+        "test_data/qcow/ext2_zlib.qcow2",
+        "test_data/qcow/fat16.qcow2",
+        "test_data/qcow/fat32.qcow2"
+      ]
+    },
+    {
+      "repository": "ltstriker/imago",
+      "revision": "b5625f2a95ea71bbbd0dd689a276a0cff719b654",
+      "tree_complete": true,
+      "qcow_paths": [
+        "src/qcow2/allocation.rs",
+        "src/qcow2/builder.rs",
+        "src/qcow2/cache.rs",
+        "src/qcow2/compressed.rs",
+        "src/qcow2/cow.rs",
+        "src/qcow2/io_func.rs",
+        "src/qcow2/mappings.rs",
+        "src/qcow2/metadata.rs",
+        "src/qcow2/mod.rs",
+        "src/qcow2/preallocation.rs",
+        "src/qcow2/sync_wrappers.rs",
+        "src/qcow2/types.rs"
+      ]
+    },
+    {
+      "repository": "mariobm/imago",
+      "revision": "59f50a479f8d30fff7cd19405c1ed24de0c7b83d",
+      "tree_complete": true,
+      "qcow_paths": [
+        "src/qcow2/allocation.rs",
+        "src/qcow2/builder.rs",
+        "src/qcow2/cache.rs",
+        "src/qcow2/compressed.rs",
+        "src/qcow2/cow.rs",
+        "src/qcow2/io_func.rs",
+        "src/qcow2/mappings.rs",
+        "src/qcow2/metadata.rs",
+        "src/qcow2/mod.rs",
+        "src/qcow2/preallocation.rs",
+        "src/qcow2/sync_wrappers.rs",
+        "src/qcow2/types.rs"
+      ]
+    },
+    {
+      "repository": "microsoft/openvmm",
+      "revision": "ba105dd7f00499acc1862456c179c0930cb2c8f7",
+      "tree_complete": true,
+      "qcow_paths": []
+    },
+    {
+      "repository": "nikaiw/VMkatz",
+      "revision": "46e45a7d599c587b8bc60c1f98e21afc44a44c1f",
+      "tree_complete": true,
+      "qcow_paths": [
+        "src/disk/qcow2.rs"
+      ]
+    },
+    {
+      "repository": "openeuler-mirror/stratovirt",
+      "revision": "2846f668ea971dd4539852aeb5436af56ff84696",
+      "tree_complete": true,
+      "qcow_paths": [
+        "block_backend/src/qcow2/cache.rs",
+        "block_backend/src/qcow2/check.rs",
+        "block_backend/src/qcow2/header.rs",
+        "block_backend/src/qcow2/mod.rs",
+        "block_backend/src/qcow2/refcount.rs",
+        "block_backend/src/qcow2/snapshot.rs",
+        "block_backend/src/qcow2/table.rs",
+        "tests/mod_test/src/libdriver/qcow2.rs"
+      ]
+    },
+    {
+      "repository": "oxidecomputer/propolis",
+      "revision": "12b00ba88d088e0c61b2d4d26f765fc83f6a76b8",
+      "tree_complete": true,
+      "qcow_paths": []
+    },
+    {
+      "repository": "panda-re/qcow-rs",
+      "revision": "9189780bdd99cd0c48a6b96718bbd129b57f5c82",
+      "tree_complete": true,
+      "qcow_paths": [
+        "src/dynamic_qcow.rs"
+      ]
+    },
+    {
+      "repository": "pcbastler/qcow2-lib",
+      "revision": "8f1e5f3aac14973524dbdaff502ed79fda0870c2",
+      "tree_complete": true,
+      "qcow_paths": [
+        "crates/qcow2-core/Cargo.toml",
+        "crates/qcow2-core/src/engine/bitmap_manager.rs",
+        "crates/qcow2-core/src/engine/block_writer/buffer.rs",
+        "crates/qcow2-core/src/engine/block_writer/config.rs",
+        "crates/qcow2-core/src/engine/block_writer/engine.rs",
+        "crates/qcow2-core/src/engine/block_writer/finalize.rs",
+        "crates/qcow2-core/src/engine/block_writer/metadata.rs",
+        "crates/qcow2-core/src/engine/block_writer/mod.rs",
+        "crates/qcow2-core/src/engine/block_writer/zero_detect.rs",
+        "crates/qcow2-core/src/engine/cache.rs",
+        "crates/qcow2-core/src/engine/cluster_mapping.rs",
+        "crates/qcow2-core/src/engine/encryption/af_splitter.rs",
+        "crates/qcow2-core/src/engine/encryption/cipher.rs",
+        "crates/qcow2-core/src/engine/encryption/key_derivation.rs",
+        "crates/qcow2-core/src/engine/encryption/mod.rs",
+        "crates/qcow2-core/src/engine/hash_manager.rs",
+        "crates/qcow2-core/src/engine/image_meta.rs",
+        "crates/qcow2-core/src/engine/metadata_io.rs",
+        "crates/qcow2-core/src/engine/mod.rs",
+        "crates/qcow2-core/src/engine/read_mode.rs",
+        "crates/qcow2-core/src/engine/reader.rs",
+        "crates/qcow2-core/src/engine/refcount_manager.rs",
+        "crates/qcow2-core/src/engine/snapshot_manager.rs",
+        "crates/qcow2-core/src/engine/writer/compressed.rs",
+        "crates/qcow2-core/src/engine/writer/data_ops.rs",
+        "crates/qcow2-core/src/engine/writer/mod.rs",
+        "crates/qcow2-core/src/error.rs",
+        "crates/qcow2-core/src/format/mod.rs",
+        "crates/qcow2-core/src/io.rs",
+        "crates/qcow2-core/src/lib.rs",
+        "crates/qcow2-core/src/lru.rs",
+        "crates/qcow2-format/Cargo.toml",
+        "crates/qcow2-format/src/bitmap.rs",
+        "crates/qcow2-format/src/compressed.rs",
+        "crates/qcow2-format/src/constants.rs",
+        "crates/qcow2-format/src/error.rs",
+        "crates/qcow2-format/src/feature_flags.rs",
+        "crates/qcow2-format/src/hash.rs",
+        "crates/qcow2-format/src/header.rs",
+        "crates/qcow2-format/src/header_extension.rs",
+        "crates/qcow2-format/src/l1.rs",
+        "crates/qcow2-format/src/l2.rs",
+        "crates/qcow2-format/src/lib.rs",
+        "crates/qcow2-format/src/refcount.rs",
+        "crates/qcow2-format/src/snapshot.rs",
+        "crates/qcow2-format/src/types.rs",
+        "crates/qcow2-rescue-e2e/.gitignore",
+        "crates/qcow2-rescue-e2e/Cargo.toml",
+        "crates/qcow2-rescue-e2e/Dockerfile",
+        "crates/qcow2-rescue-e2e/run.sh",
+        "crates/qcow2-rescue-e2e/src/config.rs",
+        "crates/qcow2-rescue-e2e/src/corruptor.rs",
+        "crates/qcow2-rescue-e2e/src/fs_setup.rs",
+        "crates/qcow2-rescue-e2e/src/image_gen.rs",
+        "crates/qcow2-rescue-e2e/src/main.rs",
+        "crates/qcow2-rescue-e2e/src/recovery.rs",
+        "crates/qcow2-rescue-e2e/src/runner.rs",
+        "crates/qcow2-rescue-e2e/src/validator.rs",
+        "crates/qcow2-rescue/Cargo.toml",
+        "crates/qcow2-rescue/README.md",
+        "crates/qcow2-rescue/src/config.rs",
+        "crates/qcow2-rescue/src/error.rs",
+        "crates/qcow2-rescue/src/lib.rs",
+        "crates/qcow2-rescue/src/main.rs",
+        "crates/qcow2-rescue/src/reconstruct/l1.rs",
+        "crates/qcow2-rescue/src/reconstruct/l2.rs",
+        "crates/qcow2-rescue/src/reconstruct/mod.rs",
+        "crates/qcow2-rescue/src/reconstruct/orphan.rs",
+        "crates/qcow2-rescue/src/reconstruct/refcount.rs",
+        "crates/qcow2-rescue/src/reconstruct/scoring.rs",
+        "crates/qcow2-rescue/src/recover/cluster_io.rs",
+        "crates/qcow2-rescue/src/recover/encryption.rs",
+        "crates/qcow2-rescue/src/recover/merge.rs",
+        "crates/qcow2-rescue/src/recover/mod.rs",
+        "crates/qcow2-rescue/src/recover/progress.rs",
+        "crates/qcow2-rescue/src/recover/writer/chain.rs",
+        "crates/qcow2-rescue/src/recover/writer/mod.rs",
+        "crates/qcow2-rescue/src/recover/writer/qcow2.rs",
+        "crates/qcow2-rescue/src/recover/writer/raw.rs",
+        "crates/qcow2-rescue/src/report/cluster.rs",
+        "crates/qcow2-rescue/src/report/mapping.rs",
+        "crates/qcow2-rescue/src/report/mod.rs",
+        "crates/qcow2-rescue/src/report/reconstruction.rs",
+        "crates/qcow2-rescue/src/report/recovery.rs",
+        "crates/qcow2-rescue/src/report/tree.rs",
+        "crates/qcow2-rescue/src/scan/classifier.rs",
+        "crates/qcow2-rescue/src/scan/detection.rs",
+        "crates/qcow2-rescue/src/scan/mod.rs",
+        "crates/qcow2-rescue/src/scan/refinement.rs",
+        "crates/qcow2-rescue/src/tree/discovery.rs",
+        "crates/qcow2-rescue/src/tree/mod.rs",
+        "crates/qcow2-rescue/src/tree/resolve.rs",
+        "crates/qcow2-rescue/src/validate/compression.rs",
+        "crates/qcow2-rescue/src/validate/mod.rs",
+        "crates/qcow2-rescue/src/validate/structure.rs",
+        "crates/qcow2-rescue/tests/corruption_recovery.rs",
+        "crates/qcow2-tool/Cargo.toml",
+        "crates/qcow2-tool/src/cli/bitmap.rs",
+        "crates/qcow2-tool/src/cli/check.rs",
+        "crates/qcow2-tool/src/cli/commit.rs",
+        "crates/qcow2-tool/src/cli/compact.rs",
+        "crates/qcow2-tool/src/cli/convert.rs",
+        "crates/qcow2-tool/src/cli/dump.rs",
+        "crates/qcow2-tool/src/cli/hash.rs",
+        "crates/qcow2-tool/src/cli/info.rs",
+        "crates/qcow2-tool/src/cli/main.rs",
+        "crates/qcow2-tool/src/cli/rebase.rs",
+        "crates/qcow2-tool/src/cli/resize.rs",
+        "crates/qcow2-tool/src/cli/snapshot.rs",
+        "crates/qcow2/Cargo.toml",
+        "crates/qcow2/benches/io_overhead.rs",
+        "crates/qcow2/examples/generate_13t.rs",
+        "crates/qcow2/examples/test_normal_writer_compress.rs",
+        "crates/qcow2/examples/test_read_13t.rs",
+        "crates/qcow2/src/engine/backing.rs",
+        "crates/qcow2/src/engine/block_writer/create.rs",
+        "crates/qcow2/src/engine/block_writer/finalize.rs",
+        "crates/qcow2/src/engine/block_writer/mod.rs",
+        "crates/qcow2/src/engine/block_writer/write.rs",
+        "crates/qcow2/src/engine/compression.rs",
+        "crates/qcow2/src/engine/converter.rs",
+        "crates/qcow2/src/engine/encryption/af_splitter.rs",
+        "crates/qcow2/src/engine/encryption/create.rs",
+        "crates/qcow2/src/engine/encryption/key_derivation.rs",
+        "crates/qcow2/src/engine/encryption/luks_header.rs",
+        "crates/qcow2/src/engine/encryption/mod.rs",
+        "crates/qcow2/src/engine/image/accessors.rs",
+        "crates/qcow2/src/engine/image/backing_ops.rs",
+        "crates/qcow2/src/engine/image/bitmap.rs",
+        "crates/qcow2/src/engine/image/create.rs",
+        "crates/qcow2/src/engine/image/hash.rs",
+        "crates/qcow2/src/engine/image/integrity.rs",
+        "crates/qcow2/src/engine/image/mod.rs",
+        "crates/qcow2/src/engine/image/open.rs",
+        "crates/qcow2/src/engine/image/read_write.rs",
+        "crates/qcow2/src/engine/image/resize.rs",
+        "crates/qcow2/src/engine/image/snapshot.rs",
+        "crates/qcow2/src/engine/image/tests.rs",
+        "crates/qcow2/src/engine/image_async/accessors.rs",
+        "crates/qcow2/src/engine/image_async/bitmap.rs",
+        "crates/qcow2/src/engine/image_async/hash.rs",
+        "crates/qcow2/src/engine/image_async/integrity.rs",
+        "crates/qcow2/src/engine/image_async/mod.rs",
+        "crates/qcow2/src/engine/image_async/read_write.rs",
+        "crates/qcow2/src/engine/image_async/snapshot.rs",
+        "crates/qcow2/src/engine/image_async/tests.rs",
+        "crates/qcow2/src/engine/integrity.rs",
+        "crates/qcow2/src/engine/mod.rs",
+        "crates/qcow2/src/engine/tests/mod.rs",
+        "crates/qcow2/src/engine/tests/test_bitmap_manager.rs",
+        "crates/qcow2/src/engine/tests/test_cluster_mapping.rs",
+        "crates/qcow2/src/engine/tests/test_metadata_io.rs",
+        "crates/qcow2/src/engine/tests/test_reader.rs",
+        "crates/qcow2/src/engine/tests/test_refcount_manager.rs",
+        "crates/qcow2/src/engine/tests/test_snapshot_manager.rs",
+        "crates/qcow2/src/engine/tests/test_writer.rs",
+        "crates/qcow2/src/error.rs",
+        "crates/qcow2/src/format/mod.rs",
+        "crates/qcow2/src/io/mod.rs",
+        "crates/qcow2/src/io/sync_backend.rs",
+        "crates/qcow2/src/lib.rs",
+        "crates/qcow2/tests/allocation.rs",
+        "crates/qcow2/tests/backing_chain.rs",
+        "crates/qcow2/tests/bitmaps.rs",
+        "crates/qcow2/tests/bitmaps_detailed.rs",
+        "crates/qcow2/tests/block_writer.rs",
+        "crates/qcow2/tests/cli_snapshot_workflow.sh",
+        "crates/qcow2/tests/commit_compressed.rs",
+        "crates/qcow2/tests/common/mod.rs",
+        "crates/qcow2/tests/compressed_corruption.rs",
+        "crates/qcow2/tests/compression_detailed.rs",
+        "crates/qcow2/tests/convert.rs",
+        "crates/qcow2/tests/corrupt_bit.rs",
+        "crates/qcow2/tests/corruption_detection.rs",
+        "crates/qcow2/tests/cow_detailed.rs",
+        "crates/qcow2/tests/create_options.rs",
+        "crates/qcow2/tests/dirty_flag.rs",
+        "crates/qcow2/tests/edge_cases.rs",
+        "crates/qcow2/tests/encryption.rs",
+        "crates/qcow2/tests/encryption_detailed.rs",
+        "crates/qcow2/tests/encryption_qemu.rs",
+        "crates/qcow2/tests/extended_l2.rs",
+        "crates/qcow2/tests/extended_l2_detailed.rs",
+        "crates/qcow2/tests/external_data.rs",
+        "crates/qcow2/tests/format_round_trip.rs",
+        "crates/qcow2/tests/hashes.rs",
+        "crates/qcow2/tests/header_validation.rs",
+        "crates/qcow2/tests/image_operations.rs",
+        "crates/qcow2/tests/integrity.rs",
+        "crates/qcow2/tests/read_backing.rs",
+        "crates/qcow2/tests/read_basic.rs",
+        "crates/qcow2/tests/read_compressed.rs",
+        "crates/qcow2/tests/refcount_edge_cases.rs",
+        "crates/qcow2/tests/repair.rs",
+        "crates/qcow2/tests/resize.rs",
+        "crates/qcow2/tests/resize_detailed.rs",
+        "crates/qcow2/tests/snapshot_stress.rs",
+        "crates/qcow2/tests/snapshots.rs",
+        "crates/qcow2/tests/snapshots_detailed.rs",
+        "crates/qcow2/tests/stress.rs",
+        "crates/qcow2/tests/write_and_create.rs",
+        "crates/qcow2/tests/write_zeroes.rs",
+        "crates/qcow2/tests/zstd_compression.rs"
+      ]
+    },
+    {
+      "repository": "puffyCid/calf",
+      "revision": "4e036426132b0190523daf0cf846a6b3604ac032",
+      "tree_complete": true,
+      "qcow_paths": [
+        "tests/qcow_tests.rs",
+        "tests/test_data/qcow/README.md"
+      ]
+    },
+    {
+      "repository": "qntx/bux",
+      "revision": "85b994523957423f2ec98248f859d52d3e114df4",
+      "tree_complete": true,
+      "qcow_paths": [
+        "crates/bux-qcow2/Cargo.toml",
+        "crates/bux-qcow2/README.md",
+        "crates/bux-qcow2/src/chain.rs",
+        "crates/bux-qcow2/src/error.rs",
+        "crates/bux-qcow2/src/format.rs",
+        "crates/bux-qcow2/src/header.rs",
+        "crates/bux-qcow2/src/lib.rs",
+        "crates/bux-qcow2/src/ops.rs",
+        "crates/bux-qcow2/src/overlay.rs",
+        "crates/bux-qcow2/tests/roundtrip.rs"
+      ]
+    },
+    {
+      "repository": "quickemu-project/qe_mac_apid",
+      "revision": "90e6975b884d0742e5106e604e80acc633d442ee",
+      "tree_complete": true,
+      "qcow_paths": [
+        "src/qcow2.rs"
+      ]
+    },
+    {
+      "repository": "rust-vmm/vhost-device",
+      "revision": "0484a75df5c8e77a708af10b24dd34f596b25084",
+      "tree_complete": true,
+      "qcow_paths": []
+    },
+    {
+      "repository": "rust-vmm/vm-device",
+      "revision": "39ceae64edc11860c44679f4b1563cec358047e2",
+      "tree_complete": true,
+      "qcow_paths": []
+    },
+    {
+      "repository": "shakenfist/instar",
+      "revision": "e0b0fe13f48f4e95db8a687519b4c889eee1885a",
+      "tree_complete": true,
+      "qcow_paths": [
+        "docs/image_notes/cirros-qcow2.md",
+        "docs/image_notes/qcow2-v2.md",
+        "docs/plans/PLAN-amend-phase-02-qcow2-planner.md",
+        "docs/plans/PLAN-bug-fixes-phase-03-qcow2-shrink-subbyte-refcount.md",
+        "docs/plans/PLAN-format-coverage-phase-04-qcow1-read.md",
+        "docs/plans/PLAN-qcow2-write-infrastructure-phase-01-semantics.md",
+        "docs/plans/PLAN-qcow2-write-infrastructure-phase-02-gates.md",
+        "docs/plans/PLAN-qcow2-write-infrastructure-phase-03-crate.md",
+        "docs/plans/PLAN-qcow2-write-infrastructure-phase-04-commit.md",
+        "docs/plans/PLAN-qcow2-write-infrastructure-phase-05-rebase.md",
+        "docs/plans/PLAN-qcow2-write-infrastructure-phase-06-bench.md",
+        "docs/plans/PLAN-qcow2-write-infrastructure-phase-07-cow.md",
+        "docs/plans/PLAN-qcow2-write-infrastructure-phase-08-fuzz.md",
+        "docs/plans/PLAN-qcow2-write-infrastructure-phase-09-docs.md",
+        "docs/plans/PLAN-qcow2-write-infrastructure.md",
+        "docs/plans/PLAN-resize-phase-02-qcow2-grow.md",
+        "docs/plans/PLAN-resize-phase-03-qcow2-shrink.md",
+        "docs/qcow2/qcow2-compression.md",
+        "docs/qcow2/qcow2-encryption.md",
+        "docs/qcow2/qcow2-format.md",
+        "docs/qcow2/qcow2-implementation-notes.md",
+        "docs/qcow2/qcow2-l1l2-tables.md",
+        "docs/qcow2/qcow2-refcount.md",
+        "docs/qcow2/qcow2-snapshots.md",
+        "docs/qcow2/qcow2-write-planner.md",
+        "scripts/create-qcow2-encrypted-testdata.sh",
+        "scripts/create-qcow2-luks-testdata.sh",
+        "scripts/create-qcow2-snapshot-testdata.sh",
+        "src/crates/amend/src/qcow2.rs",
+        "src/crates/amend/tests/qcow2_round_trip.rs",
+        "src/crates/check/src/qcow2.rs",
+        "src/crates/commit/src/qcow2.rs",
+        "src/crates/commit/tests/qcow2.rs",
+        "src/crates/qcow1/Cargo.toml",
+        "src/crates/qcow1/src/lib.rs",
+        "src/crates/qcow2-write-exec/Cargo.toml",
+        "src/crates/qcow2-write-exec/src/growth.rs",
+        "src/crates/qcow2-write-exec/src/lib.rs",
+        "src/crates/qcow2-write/Cargo.toml",
+        "src/crates/qcow2-write/src/growth.rs",
+        "src/crates/qcow2-write/src/lib.rs",
+        "src/crates/qcow2-write/src/sim.rs",
+        "src/crates/qcow2-write/tests/ordering.rs",
+        "src/crates/qcow2-write/tests/simulation.rs",
+        "src/crates/qcow2/Cargo.toml",
+        "src/crates/qcow2/src/bitmap.rs",
+        "src/crates/qcow2/src/create.rs",
+        "src/crates/qcow2/src/lib.rs",
+        "src/crates/rebase/src/qcow2.rs",
+        "src/crates/rebase/tests/qcow2_safe.rs",
+        "src/crates/rebase/tests/qcow2_unsafe.rs",
+        "src/crates/resize/src/qcow2.rs",
+        "src/crates/resize/tests/qcow2_grow.rs",
+        "src/crates/resize/tests/qcow2_grow_large.rs",
+        "src/crates/resize/tests/qcow2_shrink.rs",
+        "src/crates/snapshot/src/qcow2.rs",
+        "src/fuzz/fuzz_targets/fuzz_qcow1_header.rs",
+        "src/fuzz/fuzz_targets/fuzz_qcow1_table.rs",
+        "src/fuzz/fuzz_targets/fuzz_qcow2_decompress.rs",
+        "src/fuzz/fuzz_targets/fuzz_qcow2_header.rs",
+        "src/fuzz/fuzz_targets/fuzz_qcow2_l1l2.rs",
+        "src/fuzz/fuzz_targets/fuzz_qcow2_refcount.rs",
+        "src/fuzz/fuzz_targets/fuzz_qcow2_write.rs",
+        "src/fuzz/fuzz_targets/fuzz_qcow2_write_growth.rs",
+        "tests/golden/snapshot-list/snap-qcow2-512.json",
+        "tests/golden/snapshot-list/snap-qcow2-backing-base.json",
+        "tests/golden/snapshot-list/snap-qcow2-backing.json",
+        "tests/golden/snapshot-list/snap-qcow2-dupname.json",
+        "tests/golden/snapshot-list/snap-qcow2-extl2.json",
+        "tests/golden/snapshot-list/snap-qcow2-longname.json",
+        "tests/golden/snapshot-list/snap-qcow2-namecollision.json",
+        "tests/golden/snapshot-list/snap-qcow2-v2.json",
+        "tests/golden/snapshot-list/snap-qcow2-v3-one.json",
+        "tests/golden/snapshot-list/snap-qcow2-v3-sixteen.json",
+        "tests/golden/snapshot-list/snap-qcow2-v3-two.json",
+        "tests/golden/snapshot-list/snap-qcow2-vmstate.json",
+        "tests/helpers/qcow2_subclusters.py",
+        "tests/test_qcow1_smoke.py",
+        "tests/test_qcow2_subclusters.py"
+      ]
+    },
+    {
+      "repository": "smol-machines/smolvm",
+      "revision": "af441b1b72465ce9c1cd6ac0718a5e5871d6eca6",
+      "tree_complete": true,
+      "qcow_paths": []
+    },
+    {
+      "repository": "tamnd/ruvm",
+      "revision": "d9f4ea18ec3d137f27715c8f19dac652e8a825ca",
+      "tree_complete": true,
+      "qcow_paths": [
+        "crates/block/src/qcow.rs",
+        "crates/block/src/qcow2/amend.rs",
+        "crates/block/src/qcow2/bitmap.rs",
+        "crates/block/src/qcow2/cache.rs",
+        "crates/block/src/qcow2/check.rs",
+        "crates/block/src/qcow2/cluster.rs",
+        "crates/block/src/qcow2/compress.rs",
+        "crates/block/src/qcow2/create.rs",
+        "crates/block/src/qcow2/crypto.rs",
+        "crates/block/src/qcow2/header.rs",
+        "crates/block/src/qcow2/io.rs",
+        "crates/block/src/qcow2/mod.rs",
+        "crates/block/src/qcow2/open.rs",
+        "crates/block/src/qcow2/refcount.rs",
+        "crates/block/src/qcow2/resize.rs",
+        "crates/block/src/qcow2/rw.rs",
+        "crates/block/src/qcow2/snapshot.rs",
+        "crates/block/src/qcow2/state.rs",
+        "crates/block/tests/qcow.rs",
+        "crates/block/tests/qcow2.rs",
+        "crates/crypto/src/block/qcow.rs"
+      ]
+    },
+    {
+      "repository": "ublk-org/qcow2-rs",
+      "revision": "d917cbf58e48a4329f242039dc0b6abb0e7cc650",
+      "tree_complete": true,
+      "qcow_paths": [
+        "tests/qcow2_util.rs"
+      ]
+    },
+    {
+      "repository": "ublk-org/rublk",
+      "revision": "8913b4a0b2d007b034ccf16be7eec077fa4b70b4",
+      "tree_complete": true,
+      "qcow_paths": [
+        "src/qcow2.rs"
+      ]
+    },
+    {
+      "repository": "unixshells/clone",
+      "revision": "a9525154846e709bd46a7aeb64ceb1fb43547ee2",
+      "tree_complete": true,
+      "qcow_paths": [
+        "src/storage/qcow2.rs"
+      ]
+    },
+    {
+      "repository": "vasi/qcow2-fuse",
+      "revision": "c8888621a7a6af0abdea1e1934980d85bdca2d49",
+      "tree_complete": true,
+      "qcow_paths": []
+    },
+    {
+      "repository": "vasi/qcow2-rs",
+      "revision": "3ed3ff55b96a2f519216ace7b3a02ac29bf8ba65",
+      "tree_complete": true,
+      "qcow_paths": [
+        "src/bin/qcow2-dump.rs",
+        "tests/test.qcow2"
+      ]
+    },
+    {
+      "repository": "virtainer/cloud-image-inspector",
+      "revision": "432b7f93948d43a8741847555b71481037d0a82e",
+      "tree_complete": true,
+      "qcow_paths": [
+        "src/qcow2.rs"
+      ]
+    },
+    {
+      "repository": "wtfrank/dump_qcow",
+      "revision": "0c4e7a5e0290d45ee32e1c0457ede6c5f69a96d4",
+      "tree_complete": true,
+      "qcow_paths": [
+        "src/qcow.rs"
+      ]
+    },
+    {
+      "repository": "https://gitlab.com/hreitz/imago",
+      "revision": "ff96e18ce872bb3dec4f1f2d178fc41dc89d3bf6",
+      "branch": "HEAD"
+    },
+    {
+      "repository": "https://gitlab.com/hreitz/rsd",
+      "revision": "7b01edd81a8a12c5806ce60be860ed563384fb9c",
+      "branch": "HEAD"
+    },
+    {
+      "repository": "https://github.com/ltstriker/imago",
+      "revision": "182f7cd95adbc525679ff3be8cebeaa0850e3a11",
+      "branch": "boxlite/punch-hole"
+    }
+  ],
+  "additional_primary_pages": [
+    {
+      "url": "https://aenertia.codeberg.page/foxing/src/fxcp_core/qcow2.rs.html",
+      "retrieved": "2026-11-07",
+      "sha256": "00ef73cf73e23a94e470d81c5bc6c42eea795383079946907f22b5bcb0226de9",
+      "classification": "read-only metadata parser"
+    },
+    {
+      "url": "https://github.com/LevitateOS/recqemu",
+      "retrieved": "2026-11-07",
+      "classification": "QEMU command builder, qemu-img creation wrapper"
+    }
+  ]
+}

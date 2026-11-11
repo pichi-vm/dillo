@@ -1,0 +1,6 @@
+Formatting '/tmp/dillo-qcow-research/imago-probe.qcow2', fmt=qcow2 cluster_size=65536 extended_l2=off compression_type=zlib size=1073741824 lazy_refcounts=off refcount_bits=16
+empty allocated=200704
+written allocated=67375104
+discarded allocated=67375104
+No errors were found on the image.
+Image end offset: 327680
