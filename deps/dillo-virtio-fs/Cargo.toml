@@ -13,6 +13,7 @@ dillo-mmio.workspace = true
 vm-memory.workspace = true
 log.workspace = true
 thiserror.workspace = true
+cap-primitives = "4.0.3"
 
 # Safe host-syscall wrappers for the Unix passthrough (xattr, fallocate,
 # SEEK_DATA/HOLE, renameat2, mkfifo). Windows uses std plus a few Win32 calls.
