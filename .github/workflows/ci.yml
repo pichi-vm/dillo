@@ -145,9 +145,9 @@ jobs:
           # musl triple matching this host's arch.
           rustup target add x86_64-unknown-none aarch64-unknown-none "${{ matrix.guest_musl }}"
 
-      # Handle sandbox-denied sudo purge until the upstream fix is available.
-      # https://github.com/Swatinem/rust-cache/pull/400
-      - uses: pichi-vm/rust-cache@fix/macos-purge-spawn-failure
+      # The sandbox-denied sudo purge fix is unreleased; switch to @v2 once
+      # it ships in a release.
+      - uses: Swatinem/rust-cache@master
         with:
           save-if: ${{ runner.environment == 'github-hosted' || github.ref == 'refs/heads/main' }}
 
