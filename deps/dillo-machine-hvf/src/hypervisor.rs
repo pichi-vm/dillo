@@ -309,8 +309,15 @@ pub(crate) struct Vcpu {
     // Native CPU destruction precedes release of registered RAM and VM authority.
     _native: NativeVm,
     pending_mmio: Cell<Option<PendingMmio>>,
+    // Guest emulation is separate from unavailable admission evidence.
+    served_isar1: u64,
+    served_mmfr2: u64,
+    #[cfg(test)]
+    require_native_operations: bool,
     #[cfg(test)]
     configured_mmfr1: u64,
+    #[cfg(test)]
+    configured_v82: [Result<u64, dillo_machine::aarch64::AdmissionError>; 2],
 }
 
 impl Vcpu {
@@ -324,13 +331,25 @@ impl Vcpu {
         use dillo_machine::aarch64::{AdmissionError, CpuSnapshot, Register};
         if !matches!(
             profile,
-            pmi::aarch64::Profile::V8_0 | pmi::aarch64::Profile::V8_1
+            pmi::aarch64::Profile::V8_0 | pmi::aarch64::Profile::V8_1 | pmi::aarch64::Profile::V8_2
         ) {
             return Err(AdmissionError::UnsupportedProfile(profile).into());
         }
         let config = VcpuConfig::new();
         #[cfg(test)]
         let configured_mmfr1 = config.get_feature_reg(FeatureReg::ID_AA64MMFR1_EL1)?;
+        let configured_v82 = [
+            (Register::Isar1, FeatureReg::ID_AA64ISAR1_EL1),
+            (Register::Mmfr2, FeatureReg::ID_AA64MMFR2_EL1),
+        ]
+        .map(|(register, native)| {
+            config
+                .get_feature_reg(native)
+                .map_err(|error| AdmissionError::Unavailable {
+                    register,
+                    reason: error.to_string(),
+                })
+        });
         let configured = config
             .get_feature_reg(FeatureReg::ID_AA64MMFR0_EL1)
             .map_err(|e| AdmissionError::Unavailable {
@@ -353,6 +372,14 @@ impl Vcpu {
             let native = match register {
                 Register::Pfr0 => SysReg::ID_AA64PFR0_EL1,
                 Register::Isar0 => SysReg::ID_AA64ISAR0_EL1,
+                Register::Isar1 => SysReg::ID_AA64ISAR1_EL1,
+                Register::Mmfr2 => SysReg::ID_AA64MMFR2_EL1,
+                Register::A32Mmfr4 => {
+                    return Err(AdmissionError::Unavailable {
+                        register,
+                        reason: "native HVF binding has no AArch32 MMFR4 selector".into(),
+                    });
+                }
                 Register::Mmfr0 => SysReg::ID_AA64MMFR0_EL1,
                 Register::Mmfr1 => SysReg::ID_AA64MMFR1_EL1,
                 Register::Dfr0 => SysReg::ID_AA64DFR0_EL1,
@@ -366,19 +393,37 @@ impl Vcpu {
                     reason: e.to_string(),
                 })
         })?;
-        if dillo_machine::aarch64_pa_bits(snapshot.value(Register::Mmfr0)) != Some(configured_bits)
+        if dillo_machine::aarch64_pa_bits(snapshot.value(Register::Mmfr0)?) != Some(configured_bits)
         {
             return Err(Error::Hv(
                 "created CPU PARange differs from its inspected configuration".into(),
             ));
         }
+        // Native/config values may serve optional baseline IDs even if one
+        // API cannot read them. If neither can, preserve the earlier-profile
+        // RAZ emulation. These values never replace failed admission evidence;
+        // v8.2 requires successful retained native reads before construction.
+        let served_isar1 = snapshot
+            .value(Register::Isar1)
+            .or_else(|_| configured_v82[0].clone())
+            .unwrap_or(0);
+        let served_mmfr2 = snapshot
+            .value(Register::Mmfr2)
+            .or_else(|_| configured_v82[1].clone())
+            .unwrap_or(0);
         let admitted = snapshot.admit(profile)?;
         Ok(Self {
             inner,
             _native: vm.clone(),
             pending_mmio: Cell::new(None),
+            served_isar1,
+            served_mmfr2,
+            #[cfg(test)]
+            require_native_operations: false,
             #[cfg(test)]
             configured_mmfr1,
+            #[cfg(test)]
+            configured_v82,
             admitted,
         })
     }
@@ -516,25 +561,53 @@ impl Vcpu {
     fn handle_sysreg_trap(&self, esr: u64) -> Result<(), Error> {
         let iss = esr & 0x1FF_FFFF;
         let is_read = iss & 1 == 1; // ISS[0]: 0=MSR(write), 1=MRS(read)
+        let encoding = (((iss >> 20) & 3) << 14)
+            | (((iss >> 14) & 7) << 11)
+            | (((iss >> 10) & 15) << 7)
+            | (((iss >> 1) & 15) << 3)
+            | ((iss >> 17) & 7);
+        #[cfg(test)]
+        {
+            eprintln!("HVF served SYS trap: encoding={encoding:#x}, read={is_read}");
+            if self.require_native_operations
+                && !(is_read
+                    && dillo_machine::aarch64::Register::from_encoding(encoding as u16).is_some())
+            {
+                return Err(Error::Hv(format!(
+                    "native operation probe reached unsupported SYS trap {encoding:#x}, read={is_read}"
+                )));
+            }
+        }
         if is_read {
             let rt = ((iss >> 5) & 0x1F) as u8; // ISS[9:5]
             if rt != 31 {
                 use dillo_machine::aarch64::Register;
-                let encoding = (((iss >> 20) & 3) << 14)
-                    | (((iss >> 14) & 7) << 11)
-                    | (((iss >> 10) & 15) << 7)
-                    | (((iss >> 1) & 15) << 3)
-                    | ((iss >> 17) & 7);
                 let value = match Register::from_encoding(encoding as u16) {
-                    // SCTLR is mutable guest control state, not an ID register.
-                    Some(Register::Sctlr) => self.inner.get_sys_reg(SysReg::SCTLR_EL1)?,
-                    Some(register) => self.admitted.value(register),
+                    Some(register) => self.guest_register_value(register)?,
                     None => 0,
                 };
                 self.inner.set_reg(gpr(rt), value)?;
             }
         }
         self.advance_pc()
+    }
+
+    fn guest_register_value(
+        &self,
+        register: dillo_machine::aarch64::Register,
+    ) -> Result<u64, Error> {
+        use dillo_machine::aarch64::Register;
+        Ok(match register {
+            // SCTLR is mutable guest control state, not an immutable ID.
+            Register::Sctlr => self.inner.get_sys_reg(SysReg::SCTLR_EL1)?,
+            Register::Isar1 => self.served_isar1,
+            Register::Mmfr2 => self.served_mmfr2,
+            // Without AArch32, MMFR4 is UNKNOWN (D24.2.111). With AArch32,
+            // preserve earlier-profile RAZ; v8.2 refuses unavailable evidence
+            // because this native binding has no MMFR4 selector.
+            Register::A32Mmfr4 => 0,
+            _ => self.admitted.value(register)?,
+        })
     }
 
     /// Complete an [`VmExit::MmioRead`] by writing the bus-provided value into
@@ -674,9 +747,141 @@ fn gpr(n: u8) -> Reg {
 mod arm_v81;
 
 #[cfg(test)]
+#[path = "../../dillo-machine/tests/fixtures/arm_v82.rs"]
+mod arm_v82;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use vm_memory::{Bytes, GuestAddress, VolatileMemory};
+
+    #[test]
+    fn hvf_v82_native_operations_for_one_and_two_owners() {
+        use dillo_machine::aarch64::{AdmissionError, Register};
+        if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
+            SignedNativeTest::spawn(
+                "hypervisor::tests::hvf_v82_native_operations_for_one_and_two_owners",
+            )
+            .verify();
+            return;
+        }
+        for count in [1u32, 2] {
+            let gic = GicParams {
+                dist_base: 0x0800_0000,
+                redist_base: 0x0810_0000,
+                msi_base: 0x0a10_0000,
+                msi_intid_base: 64,
+                msi_intid_count: 32,
+            };
+            let vm = Vm::new(&gic, 36).expect("native HVF/GIC is required");
+            vm.attach(std::sync::Arc::new(
+                crate::memory::MappedMemory::new(&arm_v82::RANGES).unwrap(),
+            ))
+            .unwrap();
+            let memory = vm.guest_memory().unwrap();
+            let probe = arm_v82::NativeOperations::new(memory, count);
+            let (all_ready, results) = std::thread::scope(|scope| {
+                let probe = &probe;
+                let (ready, prepared) = std::sync::mpsc::channel();
+                let mut owners = Vec::new();
+                let mut releases = Vec::new();
+                for index in 0..count {
+                    let native = vm.cpu_instance();
+                    let ready = ready.clone();
+                    let (release, gate) = std::sync::mpsc::channel();
+                    releases.push(release);
+                    owners.push(scope.spawn(move || {
+                        let prepared = (|| {
+                            let mut cpu = Vcpu::prepare(&native, pmi::aarch64::Profile::V8_2)?;
+                            eprintln!(
+                                "HVF native operations owner {index} admission: {:?}",
+                                cpu.admitted
+                            );
+                            let (owner, owners) = probe
+                                .entry_arguments(index, &cpu.admitted)
+                                .map_err(|message| Error::Hv(message.into()))?;
+                            cpu.prepare_affinity(0x8000_0000 | u64::from(index))?;
+                            cpu.initialize_bsp()?;
+                            cpu.set_gpr(0, owner)?;
+                            cpu.set_gpr(1, owners)?;
+                            cpu.require_native_operations = true;
+                            Ok::<_, Error>(cpu)
+                        })();
+                        ready.send(prepared.is_ok()).unwrap();
+                        let cpu = prepared?;
+                        if gate.recv().is_err() {
+                            return Ok(None);
+                        }
+                        cpu.run(&std::sync::atomic::AtomicBool::new(false))
+                            .map(Some)
+                    }));
+                }
+                drop(ready);
+                let all_ready = (0..count).all(|_| {
+                    prepared
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap_or(false)
+                });
+                if all_ready {
+                    for release in &releases {
+                        let _ = release.send(());
+                    }
+                }
+                drop(releases);
+                let results: Vec<_> = owners
+                    .into_iter()
+                    .map(std::thread::ScopedJoinHandle::join)
+                    .collect();
+                (all_ready, results)
+            });
+            for (owner, result) in results.iter().enumerate() {
+                eprintln!("HVF native operations owner {owner} exit: {result:?}");
+            }
+            probe.report("HVF");
+            if !all_ready {
+                let mut deficient = false;
+                for result in results {
+                    match result.expect("native owner panic") {
+                        Err(Error::ArmAdmission(AdmissionError::MissingField {
+                            feature: "FEAT_Debugv8p2",
+                            register: Register::Dfr0,
+                            observed: 6,
+                            minimum: 8,
+                        })) => deficient = true,
+                        Ok(None) => {}
+                        other => panic!("unexpected native V82 preparation result: {other:?}"),
+                    }
+                }
+                assert!(
+                    deficient,
+                    "refusal must be bound to actual DebugVer 6 evidence"
+                );
+                probe.verify_unexecuted();
+                eprintln!(
+                    "HVF V82 operations NOT EXECUTED ({count} owners): actual DebugVer 6 < 8; positive HVF qualification remains open"
+                );
+                continue;
+            }
+            for result in results {
+                let exit = result
+                    .expect("native owner panic")
+                    .expect("native operation provider failure")
+                    .expect("initial gate release");
+                assert!(
+                    matches!(
+                        exit,
+                        VmExit::MmioWrite {
+                            addr: 0x2_0000,
+                            size: 8,
+                            ..
+                        }
+                    ),
+                    "{exit:?}"
+                );
+            }
+            probe.verify();
+        }
+    }
 
     #[test]
     fn hvf_v81_native_lor_and_owner_floor() {
@@ -722,12 +927,12 @@ pub(crate) mod tests {
                 );
                 for register in Register::ALL {
                     eprintln!(
-                        "HVF owner {index} {}: actual/default effective={:#x}",
+                        "HVF owner {index} {}: actual/default effective={:#x?}",
                         register.name(),
                         cpu.admitted.value(register)
                     );
                 }
-                let v81 = CpuSnapshot::capture(|register| Ok(cpu.admitted.value(register)))
+                let v81 = CpuSnapshot::capture(|register| cpu.admitted.value(register))
                     .and_then(|snapshot| snapshot.admit(pmi::aarch64::Profile::V8_1));
                 eprintln!("HVF owner {index} actual-owner v8.1 admission: {v81:?}");
                 ready.send(()).unwrap();
@@ -735,7 +940,7 @@ pub(crate) mod tests {
                     return None;
                 }
                 let exit = cpu.run(&std::sync::atomic::AtomicBool::new(false));
-                Some((cpu.admitted.value(Register::Mmfr1), v81, exit))
+                Some((cpu.admitted.value(Register::Mmfr1).unwrap(), v81, exit))
             }));
         }
         drop(ready);
@@ -997,6 +1202,9 @@ pub(crate) mod tests {
             (Register::Dfr0, 0xd538_0500),
             (Register::Ctr, 0xd53b_0020),
             (Register::Sctlr, 0xd538_1000),
+            (Register::Isar1, 0xd538_0620),
+            (Register::Mmfr2, 0xd538_0740),
+            (Register::A32Mmfr4, 0xd538_02c0),
         ];
         let mut code = Vec::new();
         for (index, (_, instruction)) in inputs.iter().enumerate() {
@@ -1006,80 +1214,166 @@ pub(crate) mod tests {
         code.extend_from_slice(&0xf900_0040u32.to_le_bytes());
         vm.write_guest(0, &code).unwrap();
         let native = vm.cpu_instance();
-        let (admitted, trapped, saved_sctlr, configured_mmfr1) = std::thread::spawn(move || {
-            let cpu =
-                Vcpu::prepare(&native, pmi::aarch64::Profile::V8_0).expect("admit retained owner");
-            cpu.prepare_affinity(0x8000_0000).unwrap();
-            cpu.initialize_bsp().unwrap();
-            cpu.set_gpr(1, 0x1000).unwrap();
-            cpu.set_gpr(2, 0x2_0000).unwrap();
-            let exit = cpu.run(&std::sync::atomic::AtomicBool::new(false)).unwrap();
-            assert!(
-                matches!(
-                    exit,
-                    VmExit::MmioWrite {
-                        addr: 0x2_0000,
-                        size: 8,
-                        ..
+        let (admitted, trapped, saved_sctlr, configured_mmfr1, configured_v82, served) =
+            std::thread::spawn(move || {
+                let mut cpu = Vcpu::prepare(&native, pmi::aarch64::Profile::V8_0)
+                    .expect("admit retained owner");
+                let v82 = dillo_machine::aarch64::CpuSnapshot::capture(|register| {
+                    cpu.admitted.value(register)
+                })
+                .and_then(|snapshot| snapshot.admit(pmi::aarch64::Profile::V8_2));
+                eprintln!("HVF actual-owner armv8.2-a admission: {v82:?}");
+                cpu.prepare_affinity(0x8000_0000).unwrap();
+                cpu.initialize_bsp().unwrap();
+                cpu.set_gpr(1, 0x1000).unwrap();
+                cpu.set_gpr(2, 0x2_0000).unwrap();
+                let exit = cpu.run(&std::sync::atomic::AtomicBool::new(false)).unwrap();
+                assert!(
+                    matches!(
+                        exit,
+                        VmExit::MmioWrite {
+                            addr: 0x2_0000,
+                            size: 8,
+                            ..
+                        }
+                    ),
+                    "{exit:?}"
+                );
+                // Native API readback and an explicit decoder exercise complement
+                // the real guest MRS path, regardless of which IDs HVF traps.
+                eprintln!("HVF native MRS run complete; explicit decoder checks begin");
+                let admitted = cpu.admitted.clone();
+                let served =
+                    inputs.map(|(register, _)| cpu.guest_register_value(register).unwrap());
+                let trapped = inputs.map(|(_, instruction)| {
+                    let op = instruction >> 5;
+                    let iss = (((op >> 14) & 3) << 20)
+                        | ((op & 7) << 17)
+                        | (((op >> 11) & 7) << 14)
+                        | (((op >> 7) & 15) << 10)
+                        | (((op >> 3) & 15) << 1)
+                        | (3 << 5)
+                        | 1;
+                    cpu.handle_sysreg_trap((0x18 << 26) | u64::from(iss))
+                        .unwrap();
+                    cpu.inner.get_reg(Reg::X3).unwrap()
+                });
+                // Inject unavailable optional evidence on an earlier profile,
+                // including exposed AArch32. Guest-serving values must survive;
+                // their separate values cannot admit the newer floor.
+                let unavailable = dillo_machine::aarch64::CpuSnapshot::capture(|register| {
+                    use dillo_machine::aarch64::AdmissionError;
+                    match register {
+                        Register::Isar1 | Register::Mmfr2 | Register::A32Mmfr4 => {
+                            Err(AdmissionError::Unavailable {
+                                register,
+                                reason: "injected optional native read failure".into(),
+                            })
+                        }
+                        Register::Pfr0 => admitted.value(register).map(|value| (value & !15) | 2),
+                        _ => admitted.value(register),
                     }
-                ),
-                "{exit:?}"
-            );
-            // Native API readback and an explicit decoder exercise complement
-            // the real guest MRS path, regardless of which IDs HVF traps.
-            let trapped = inputs.map(|(_, instruction)| {
-                let op = instruction >> 5;
-                let iss = (((op >> 14) & 3) << 20)
-                    | ((op & 7) << 17)
-                    | (((op >> 11) & 7) << 14)
-                    | (((op >> 7) & 15) << 10)
-                    | (((op >> 3) & 15) << 1)
-                    | (3 << 5)
-                    | 1;
-                cpu.handle_sysreg_trap((0x18 << 26) | u64::from(iss))
-                    .unwrap();
-                cpu.inner.get_reg(Reg::X3).unwrap()
-            });
-            (
-                cpu.admitted.clone(),
-                trapped,
-                cpu.inner.get_sys_reg(SysReg::SCTLR_EL1).unwrap(),
-                cpu.configured_mmfr1,
-            )
-        })
-        .join()
-        .unwrap();
-        let mut bytes = [0; 56];
+                })
+                .unwrap();
+                assert!(
+                    unavailable
+                        .clone()
+                        .admit(pmi::aarch64::Profile::V8_2)
+                        .is_err()
+                );
+                cpu.admitted = unavailable.admit(pmi::aarch64::Profile::V8_0).unwrap();
+                for register in [Register::Isar1, Register::Mmfr2, Register::A32Mmfr4] {
+                    let encoding = u32::from(register.encoding());
+                    let iss = (((encoding >> 14) & 3) << 20)
+                        | ((encoding & 7) << 17)
+                        | (((encoding >> 11) & 7) << 14)
+                        | (((encoding >> 7) & 15) << 10)
+                        | (((encoding >> 3) & 15) << 1)
+                        | (3 << 5)
+                        | 1;
+                    let expected = cpu.guest_register_value(register).unwrap();
+                    cpu.handle_sysreg_trap((0x18 << 26) | u64::from(iss))
+                        .unwrap();
+                    assert_eq!(cpu.inner.get_reg(Reg::X3).unwrap(), expected);
+                }
+                cpu.require_native_operations = true;
+                for encoding in [0x43c8u32, 0x5be1] {
+                    // AT S1E1RP, DC CVAP
+                    let iss = (((encoding >> 14) & 3) << 20)
+                        | ((encoding & 7) << 17)
+                        | (((encoding >> 11) & 7) << 14)
+                        | (((encoding >> 7) & 15) << 10)
+                        | (((encoding >> 3) & 15) << 1);
+                    let before = cpu.inner.get_reg(Reg::PC).unwrap();
+                    let error = cpu
+                        .handle_sysreg_trap((0x18 << 26) | u64::from(iss))
+                        .unwrap_err();
+                    assert!(error.to_string().contains("unsupported SYS trap"));
+                    assert_eq!(
+                        cpu.inner.get_reg(Reg::PC).unwrap(),
+                        before,
+                        "unsupported operation is not silently completed"
+                    );
+                }
+                (
+                    admitted,
+                    trapped,
+                    cpu.inner.get_sys_reg(SysReg::SCTLR_EL1).unwrap(),
+                    cpu.configured_mmfr1,
+                    cpu.configured_v82,
+                    served,
+                )
+            })
+            .join()
+            .unwrap();
+        let mut bytes = [0; 80];
         vm.guest_memory()
             .unwrap()
             .read_slice(&mut bytes, GuestAddress(0x1000))
             .unwrap();
-        let mut file_bytes = [0; 56];
+        let mut file_bytes = [0; 80];
         alias
             .as_volatile_slice()
             .read_slice(&mut file_bytes, 0x1000)
             .unwrap();
-        let observed: [u64; 7] = std::array::from_fn(|index| {
+        let observed: [u64; 10] = std::array::from_fn(|index| {
             u64::from_le_bytes(bytes[index * 8..index * 8 + 8].try_into().unwrap())
         });
         eprintln!(
-            "HVF exact consumed config MMFR1={configured_mmfr1:#x}; post-run SCTLR={saved_sctlr:#x}"
+            "HVF exact consumed config MMFR1={configured_mmfr1:#x}, ISAR1={:#x?}, MMFR2={:#x?}; post-run SCTLR={saved_sctlr:#x}",
+            configured_v82[0], configured_v82[1]
         );
         for (index, (register, _)) in inputs.iter().enumerate() {
             eprintln!(
-                "HVF {}: guest={:#x}, admitted API={:#x}, explicit trap={:#x}",
+                "HVF {}: guest={:#x}, admitted API={:#x?}, explicit trap={:#x}",
                 register.name(),
                 observed[index],
                 admitted.value(*register),
                 trapped[index]
             );
         }
+        for (register, configured) in [Register::Isar1, Register::Mmfr2]
+            .into_iter()
+            .zip(configured_v82)
+        {
+            if let (Ok(native), Ok(configured)) = (admitted.value(register), configured) {
+                assert_eq!(native, configured, "consumed config {}", register.name());
+            }
+        }
         assert_eq!(
             file_bytes, bytes,
             "native guest writes reach an independent MAP_SHARED object mapping"
         );
         for (index, (register, _)) in inputs.into_iter().enumerate() {
-            let expected = admitted.value(register);
+            assert_eq!(
+                trapped[index],
+                served[index],
+                "explicit guest serving {}",
+                register.name()
+            );
+            let Ok(expected) = admitted.value(register) else {
+                continue;
+            };
             if register == Register::Sctlr {
                 assert_eq!(
                     observed[index] & 0x0300_0000,
