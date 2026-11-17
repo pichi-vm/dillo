@@ -8,7 +8,7 @@
 //! Linux and macOS backends. Register state, memory mapping, and exit
 //! translation are added in later phases.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
@@ -90,6 +90,15 @@ pub enum Error {
         feature: &'static str,
     },
 
+    #[error("WHP RAM is already registered; replacement or enlargement is not allowed")]
+    MemoryAlreadyRegistered,
+
+    #[error("WHP RAM registration is not ready")]
+    MemoryNotReady,
+
+    #[error("WHP RAM registration failed after {attempts}/{regions} attempted maps")]
+    MemoryRegistrationFailed { attempts: usize, regions: usize },
+
     #[error("WHP guest memory size must be non-zero")]
     EmptyMemoryRegion,
 
@@ -136,61 +145,96 @@ fn status(hr: HResult) -> String {
 
 #[derive(Debug)]
 pub(crate) struct Vm {
-    regions: Vec<Region>,
-    memory: Option<GuestMemoryMmap>,
     inner: Arc<VmInner>,
 }
 
 #[derive(Debug)]
 struct VmInner {
     partition: raw::PartitionHandle,
+    memory: Mutex<RamRegistration>,
+    #[cfg(test)]
+    fail_map_at: Mutex<Option<usize>>,
+    #[cfg(test)]
+    fail_delete: bool,
+}
+
+#[derive(Debug)]
+enum RamRegistration {
+    Empty,
+    Attempted {
+        memory: GuestMemoryMmap,
+        attempts: usize,
+    },
+    Ready(GuestMemoryMmap),
+}
+
+impl RamRegistration {
+    fn ready(&self) -> Result<&GuestMemoryMmap, Error> {
+        match self {
+            Self::Ready(memory) => Ok(memory),
+            Self::Empty => Err(Error::MemoryNotReady),
+            Self::Attempted { memory, attempts } => Err(Error::MemoryRegistrationFailed {
+                attempts: *attempts,
+                regions: memory.num_regions(),
+            }),
+        }
+    }
 }
 
 impl Vm {
     #[cfg(test)]
     pub(crate) fn new() -> Result<Self, Error> {
-        Self::new_with_options(PartitionOptions::default())
+        Self::new_with_options(PartitionOptions::default(), false)
     }
 
     pub(crate) fn new_x86_64_with_local_apic_count(processor_count: u32) -> Result<Self, Error> {
-        Self::new_with_options(PartitionOptions {
-            processor_count,
-            local_apic: true,
-            hyperv_enlightenments: true,
-        })
+        Self::new_with_options(
+            PartitionOptions {
+                processor_count,
+                local_apic: true,
+                hyperv_enlightenments: true,
+            },
+            #[cfg(test)]
+            false,
+        )
     }
 
-    fn new_with_options(options: PartitionOptions) -> Result<Self, Error> {
+    fn new_with_options(
+        options: PartitionOptions,
+        #[cfg(test)] omit_processor_count: bool,
+    ) -> Result<Self, Error> {
         ensure_hypervisor_present()?;
 
-        let partition = raw::create_partition().map_err(|hr| Error::CreatePartition(status(hr)))?;
-
-        let inner = VmInner { partition };
+        let inner = VmInner::new()?;
         if options.processor_count == 0 {
             drop(inner);
             return Err(Error::EmptyProcessorCount);
         }
 
-        let setup_result = inner
-            .set_processor_count(options.processor_count)
-            .and_then(|()| {
-                if options.hyperv_enlightenments {
-                    inner.set_hyperv_enlightenments()?;
-                    inner.set_hyperv_cpuid_results()?;
-                }
-                if options.local_apic {
-                    inner.set_local_apic_emulation()?;
-                }
-                inner.setup()
-            });
+        let setup_result = (|| {
+            // The native invalid-configuration fixture omits this required
+            // property and must observe WHvSetupPartition's actual error.
+            #[cfg(test)]
+            if !omit_processor_count {
+                inner.set_processor_count(options.processor_count)?;
+            }
+            #[cfg(not(test))]
+            inner.set_processor_count(options.processor_count)?;
+            if options.hyperv_enlightenments {
+                inner.set_hyperv_enlightenments()?;
+                inner.set_hyperv_cpuid_results()?;
+            }
+            if options.local_apic {
+                inner.set_local_apic_emulation()?;
+            }
+            inner.setup()
+        })();
         if let Err(err) = setup_result {
             drop(inner);
             return Err(err);
         }
 
         Ok(Self {
-            regions: Vec::new(),
-            memory: None,
             inner: Arc::new(inner),
         })
     }
@@ -206,48 +250,27 @@ impl Vm {
     }
 
     pub(crate) fn set_memory(&mut self, memory: GuestMemoryMmap) -> Result<(), Error> {
-        self.regions.clear();
-        for region in memory.iter() {
-            let base = region.start_addr().raw_value();
-            let size = region.len();
-            let host_addr = memory
-                .get_host_address(region.start_addr())
-                .map_err(|source| Error::GuestMemoryHostAddress { gpa: base, source })?;
-            if let Err(hr) = raw::map_gpa_range(self.inner.partition, host_addr.cast(), base, size)
-            {
-                let end = base.saturating_add(size);
-                self.regions.clear();
-                return Err(Error::MapGpa {
-                    gpa: base,
-                    end,
-                    hr: status(hr),
-                });
-            }
-            self.regions.push(Region {
-                base,
-                size,
-                partition: self.inner.partition,
-            });
-        }
-        self.memory = Some(memory);
-        Ok(())
+        self.inner.set_memory(memory)
     }
 
     pub(crate) fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Error> {
-        let memory = self.memory.as_ref().ok_or(Error::UnmappedGuestAddr(gpa))?;
-        memory
+        self.guest_memory()?
             .write_slice(data, GuestAddress(gpa))
-            .map_err(|source| Error::WriteGuest { gpa, source })?;
-        Ok(())
+            .map_err(|source| Error::WriteGuest { gpa, source })
     }
 
     pub(crate) fn guest_memory(&self) -> Result<GuestMemoryMmap, Error> {
-        self.memory.clone().ok_or(Error::UnmappedGuestAddr(0))
+        self.inner.guest_memory()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allocation_probe(&self, index: usize) -> memory_tests::AllocationProbe {
+        memory_tests::AllocationProbe::new(&self.guest_memory().unwrap(), index)
     }
 
     #[cfg(test)]
     pub(crate) fn region_mappings(&self) -> Vec<(u64, u64, u64)> {
-        let Some(memory) = &self.memory else {
+        let Ok(memory) = self.guest_memory() else {
             return Vec::new();
         };
         memory
@@ -260,15 +283,17 @@ impl Vm {
             .collect()
     }
 
-    pub(crate) fn cpu_creator(&self) -> CpuCreator {
-        CpuCreator {
+    pub(crate) fn cpu_creator(&self) -> Result<CpuCreator, Error> {
+        self.inner.require_memory()?;
+        Ok(CpuCreator {
             inner: Arc::clone(&self.inner),
-        }
+        })
     }
 
     #[cfg(test)]
     pub(crate) fn create_vcpu(&self, idx: u32, cpu_profile: &str) -> Result<Vcpu, Error> {
-        self.cpu_creator().create(idx, cpu_profile)
+        // Register-only native tests deliberately need no guest RAM.
+        self.inner.create_vcpu(idx, cpu_profile)
     }
 
     pub(crate) fn interrupt_controller(&self) -> InterruptController {
@@ -284,17 +309,7 @@ pub(crate) struct CpuCreator {
 }
 impl CpuCreator {
     pub(crate) fn create(self, idx: u32, cpu_profile: &str) -> Result<Vcpu, Error> {
-        validate_cpu_profile(cpu_profile)?;
-        raw::create_virtual_processor(self.inner.partition, idx).map_err(|hr| {
-            Error::CreateVcpu {
-                idx,
-                hr: status(hr),
-            }
-        })?;
-        Ok(Vcpu {
-            partition: self.inner,
-            idx,
-        })
+        self.inner.create_vcpu(idx, cpu_profile)
     }
 }
 
@@ -316,7 +331,7 @@ pub(crate) fn guest_address_bits() -> Result<u32, Error> {
     // The probe uses the launch partition policy, but never maps RAM or runs.
     // Vcpu and Vm drops release the probe even when a query fails.
     let vm = Vm::new_x86_64_with_local_apic_count(1)?;
-    let vcpu = vm.cpu_creator().create(0, "x86-64-v1")?;
+    let vcpu = vm.inner.create_vcpu(0, "x86-64-v1")?;
     let physical = raw::guest_physical_bits(vcpu.partition.partition, vcpu.idx)
         .map_err(|hr| Error::AddressSpace(status(hr)))?;
     if !(32..=52).contains(&physical) {
@@ -360,20 +375,90 @@ impl InterruptController {
     }
 }
 
-#[derive(Debug)]
-struct Region {
-    base: u64,
-    size: u64,
-    partition: raw::PartitionHandle,
-}
-
-impl Drop for Region {
-    fn drop(&mut self) {
-        raw::unmap_gpa_range(self.partition, self.base, self.size);
-    }
-}
-
 impl VmInner {
+    fn new() -> Result<Self, Error> {
+        let partition = raw::create_partition().map_err(|hr| Error::CreatePartition(status(hr)))?;
+        Ok(Self {
+            partition,
+            memory: Mutex::new(RamRegistration::Empty),
+            #[cfg(test)]
+            fail_map_at: Mutex::new(None),
+            #[cfg(test)]
+            fail_delete: false,
+        })
+    }
+
+    fn require_memory(&self) -> Result<(), Error> {
+        self.memory
+            .lock()
+            .expect("WHP RAM registration poisoned")
+            .ready()
+            .map(|_| ())
+    }
+
+    fn guest_memory(&self) -> Result<GuestMemoryMmap, Error> {
+        self.memory
+            .lock()
+            .expect("WHP RAM registration poisoned")
+            .ready()
+            .cloned()
+    }
+
+    fn set_memory(&self, memory: GuestMemoryMmap) -> Result<(), Error> {
+        let mut registration = self.memory.lock().expect("WHP RAM registration poisoned");
+        if !matches!(*registration, RamRegistration::Empty) {
+            return Err(Error::MemoryAlreadyRegistered);
+        }
+        if memory.num_regions() == 0 {
+            return Err(Error::EmptyMemoryRegion);
+        }
+        // Publish the actual allocation before the first native mapping. Any
+        // attempted range remains backed until this partition is destroyed.
+        *registration = RamRegistration::Attempted {
+            memory: memory.clone(),
+            attempts: 0,
+        };
+        for (index, region) in memory.iter().enumerate() {
+            let base = region.start_addr().raw_value();
+            let size = region.len();
+            let host = memory
+                .get_host_address(region.start_addr())
+                .map_err(|source| Error::GuestMemoryHostAddress { gpa: base, source })?;
+            if let RamRegistration::Attempted { attempts, .. } = &mut *registration {
+                *attempts = index + 1;
+            }
+            #[cfg(test)]
+            if *self.fail_map_at.lock().unwrap() == Some(index) {
+                return Err(Error::MapGpa {
+                    gpa: base,
+                    end: base.saturating_add(size),
+                    hr: "injected map failure".into(),
+                });
+            }
+            raw::map_gpa_range(self.partition, host.cast(), base, size).map_err(|hr| {
+                Error::MapGpa {
+                    gpa: base,
+                    end: base.saturating_add(size),
+                    hr: status(hr),
+                }
+            })?;
+        }
+        *registration = RamRegistration::Ready(memory);
+        Ok(())
+    }
+
+    fn create_vcpu(self: &Arc<Self>, idx: u32, cpu_profile: &str) -> Result<Vcpu, Error> {
+        validate_cpu_profile(cpu_profile)?;
+        raw::create_virtual_processor(self.partition, idx).map_err(|hr| Error::CreateVcpu {
+            idx,
+            hr: status(hr),
+        })?;
+        Ok(Vcpu {
+            partition: Arc::clone(self),
+            idx,
+        })
+    }
+
     fn set_processor_count(&self, count: u32) -> Result<(), Error> {
         raw::set_processor_count(self.partition, count)
             .map_err(|hr| Error::SetProcessorCount(status(hr)))
@@ -475,7 +560,17 @@ fn hyperv_leaf1_cpuid(
 
 impl Drop for VmInner {
     fn drop(&mut self) {
-        raw::delete_partition(self.partition);
+        // Whole-partition deletion retires every GPA registration. Native
+        // failure cannot authorize dropping the still-accessible RAM fields.
+        if raw::delete_partition(
+            self.partition,
+            #[cfg(test)]
+            self.fail_delete,
+        )
+        .is_err()
+        {
+            std::process::abort();
+        }
     }
 }
 
@@ -715,7 +810,7 @@ mod raw {
         WHvRunVirtualProcessor, WHvRunVpExitReasonCanceled, WHvRunVpExitReasonMemoryAccess,
         WHvRunVpExitReasonUnrecoverableException, WHvRunVpExitReasonX64Cpuid,
         WHvRunVpExitReasonX64Halt, WHvRunVpExitReasonX64IoPortAccess, WHvSetPartitionProperty,
-        WHvSetVirtualProcessorRegisters, WHvSetupPartition, WHvTranslateGva, WHvUnmapGpaRange,
+        WHvSetVirtualProcessorRegisters, WHvSetupPartition, WHvTranslateGva,
         WHvX64InterruptDestinationModePhysical, WHvX64InterruptTriggerModeEdge,
         WHvX64InterruptTypeFixed, WHvX64LocalApicEmulationModeXApic, WHvX64RegisterRax,
         WHvX64RegisterRbx, WHvX64RegisterRcx, WHvX64RegisterRdx, WHvX64RegisterRip,
@@ -792,11 +887,27 @@ mod raw {
         Ok(partition)
     }
 
-    pub(super) fn delete_partition(partition: PartitionHandle) {
-        if partition != 0 {
-            // SAFETY: best-effort cleanup of an owned WHP partition handle.
-            let _ = unsafe { WHvDeletePartition(partition) };
+    #[cfg(test)]
+    std::thread_local! {
+        pub(super) static DELETED_PARTITIONS: std::cell::RefCell<Vec<PartitionHandle>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn delete_partition(
+        partition: PartitionHandle,
+        #[cfg(test)] inject_failure: bool,
+    ) -> Result<(), HResult> {
+        #[cfg(test)]
+        if inject_failure {
+            return Err(HResult(E_FAIL));
         }
+        // SAFETY: deletes this owned partition, including every GPA mapping.
+        let hr = unsafe { WHvDeletePartition(partition) };
+        if failed(hr) {
+            return Err(HResult(hr));
+        }
+        #[cfg(test)]
+        DELETED_PARTITIONS.with(|deleted| deleted.borrow_mut().push(partition));
+        Ok(())
     }
 
     pub(super) fn set_processor_count(
@@ -1486,19 +1597,13 @@ mod raw {
         size: u64,
     ) -> Result<(), HResult> {
         let flags = WHvMapGpaRangeFlagRead | WHvMapGpaRangeFlagWrite | WHvMapGpaRangeFlagExecute;
-        // SAFETY: `host` points into the live GuestMemoryMmap kept by `Vm`
-        // for at least as long as the GPA mapping.
+        // SAFETY: the partition owner has already retained this actual
+        // GuestMemoryMmap through successful whole-partition destruction.
         let hr = unsafe { WHvMapGpaRange(partition, host.cast_const(), gpa, size, flags) };
         if failed(hr) {
             return Err(HResult(hr));
         }
         Ok(())
-    }
-
-    pub(super) fn unmap_gpa_range(partition: PartitionHandle, gpa: u64, size: u64) {
-        // SAFETY: best-effort cleanup of a GPA range that was previously
-        // mapped on this partition.
-        let _ = unsafe { WHvUnmapGpaRange(partition, gpa, size) };
     }
 
     fn get_capability_u32(code: WHV_CAPABILITY_CODE) -> Result<u32, HResult> {
@@ -1948,7 +2053,11 @@ mod tests {
                 .expect("read native register")
         }
 
-        fn initialize_test_real_mode(&mut self, code_base: u64, rax: u64) -> Result<(), Error> {
+        pub(crate) fn initialize_test_real_mode(
+            &mut self,
+            code_base: u64,
+            rax: u64,
+        ) -> Result<(), Error> {
             self.initialize_bsp()?;
             let mut registers = Vec::new();
             for (name, value) in [
@@ -2005,5 +2114,290 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .expect("WHP test lock poisoned")
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod memory_tests {
+    use std::sync::atomic::AtomicBool;
+
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_FREE, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, VirtualQuery,
+    };
+
+    use super::*;
+
+    /// Observes the kernel's allocation base, type, extent and state without
+    /// retaining the allocation or dereferencing an address after reclamation.
+    pub(crate) struct AllocationProbe {
+        address: usize,
+        size: usize,
+        original: std::sync::Weak<vm_memory::mmap::MmapRegion<()>>,
+    }
+
+    impl AllocationProbe {
+        pub(crate) fn new(memory: &GuestMemoryMmap, index: usize) -> Self {
+            let region = memory.iter().nth(index).unwrap();
+            let probe = Self {
+                address: memory.get_host_address(region.start_addr()).unwrap() as usize,
+                size: region.len() as usize,
+                original: Arc::downgrade(&region.get_mmap()),
+            };
+            probe.assert_retained();
+            probe
+        }
+
+        fn query(&self) -> MEMORY_BASIC_INFORMATION {
+            let mut information = MEMORY_BASIC_INFORMATION::default();
+            // SAFETY: query only, with a writable SDK-sized output buffer. This
+            // does not dereference the queried address or rely on its liveness.
+            #[allow(unsafe_code)]
+            let count = unsafe {
+                VirtualQuery(
+                    self.address as *const _,
+                    &raw mut information,
+                    std::mem::size_of_val(&information),
+                )
+            };
+            assert_eq!(
+                count,
+                std::mem::size_of_val(&information),
+                "VirtualQuery failed: {}",
+                std::io::Error::last_os_error()
+            );
+            assert!(information.BaseAddress as usize <= self.address);
+            assert!(
+                self.size
+                    <= information.RegionSize - (self.address - information.BaseAddress as usize)
+            );
+            information
+        }
+
+        pub(crate) fn assert_retained(&self) {
+            let original = self
+                .original
+                .upgrade()
+                .expect("original mapping owner was released");
+            assert_eq!(original.as_ptr() as usize, self.address);
+            let information = self.query();
+            assert_eq!(information.State, MEM_COMMIT);
+            assert_eq!(information.Type, MEM_PRIVATE);
+            assert_eq!(information.AllocationBase as usize, self.address);
+        }
+
+        pub(crate) fn assert_reclaimed(&self) {
+            // A failed query, MEM_RESERVE or another live allocation never counts
+            // as reclamation. AllocationBase/Type are undefined for MEM_FREE.
+            // https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualquery
+            assert!(
+                self.original.upgrade().is_none(),
+                "original mapping still has a live owner"
+            );
+            assert_eq!(self.query().State, MEM_FREE);
+        }
+    }
+
+    #[test]
+    fn whp_replacement_refuses_before_mapping_and_preserves_guest_access() {
+        let _guard = whp_test_lock();
+        if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
+            NativeMemoryTest::spawn("hypervisor::memory_tests::whp_replacement_refuses_before_mapping_and_preserves_guest_access").verify();
+            return;
+        }
+        let mut vm = Vm::new().expect("native WHP is required");
+        vm.add_memory(0x10000, 0x1000).unwrap();
+        // Read a byte from mapped data, store it next door, then halt.
+        vm.write_guest(
+            0x10000,
+            &[
+                0xb8, 0x00, 0x10, 0x8e, 0xd8, 0xa0, 0x00, 0x01, 0xa2, 0x01, 0x01, 0xf4,
+            ],
+        )
+        .unwrap();
+        vm.write_guest(0x10100, &[0x5a, 0, 0xee]).unwrap();
+        let probe = vm.allocation_probe(0);
+        let candidate = GuestMemoryMmap::from_ranges(&[(GuestAddress(0x10000), 0x1000)]).unwrap();
+        assert!(matches!(
+            vm.set_memory(candidate),
+            Err(Error::MemoryAlreadyRegistered)
+        ));
+        let mut cpu = vm.create_vcpu(0, "x86-64-v1").unwrap();
+        cpu.initialize_test_real_mode(0x10000, 0).unwrap();
+        let exit = cpu
+            .run(|_, _| 0, |_, _| false, &AtomicBool::new(false))
+            .unwrap();
+        assert!(matches!(exit, VmExit::Halted), "{exit:?}");
+        let mut bytes = [0; 3];
+        vm.guest_memory()
+            .unwrap()
+            .read_slice(&mut bytes, GuestAddress(0x10100))
+            .unwrap();
+        assert_eq!(bytes, [0x5a, 0x5a, 0xee]);
+        drop(vm);
+        probe.assert_retained();
+        drop(cpu);
+        probe.assert_reclaimed();
+    }
+
+    #[test]
+    fn whp_partial_mapping_retains_every_attempted_allocation() {
+        let _guard = whp_test_lock();
+        if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
+            NativeMemoryTest::spawn(
+                "hypervisor::memory_tests::whp_partial_mapping_retains_every_attempted_allocation",
+            )
+            .verify();
+            return;
+        }
+        let mut vm = Vm::new().expect("native WHP is required");
+        let memory = GuestMemoryMmap::from_ranges(&[
+            (GuestAddress(0x10000), 0x1000),
+            (GuestAddress(0x20000), 0x1000),
+        ])
+        .unwrap();
+        memory.write_slice(&[0xf4], GuestAddress(0x10000)).unwrap();
+        let first = AllocationProbe::new(&memory, 0);
+        let second = AllocationProbe::new(&memory, 1);
+        *vm.inner.fail_map_at.lock().unwrap() = Some(1);
+        assert!(matches!(
+            vm.set_memory(memory),
+            Err(Error::MapGpa { gpa: 0x20000, .. })
+        ));
+        assert!(matches!(
+            vm.guest_memory(),
+            Err(Error::MemoryRegistrationFailed {
+                attempts: 2,
+                regions: 2
+            })
+        ));
+        assert!(
+            vm.cpu_creator().is_err(),
+            "normal CPU preparation must not escape failed registration"
+        );
+        assert!(matches!(
+            vm.add_memory(0x30000, 0x1000),
+            Err(Error::MemoryAlreadyRegistered)
+        ));
+        first.assert_retained();
+        second.assert_retained();
+        // Only this native test bypasses normal readiness: prove the real first
+        // map is still usable after the injected second map failure.
+        let mut cpu = vm.create_vcpu(0, "x86-64-v1").unwrap();
+        cpu.initialize_test_real_mode(0x10000, 0).unwrap();
+        let exit = cpu
+            .run(|_, _| 0, |_, _| false, &AtomicBool::new(false))
+            .unwrap();
+        assert!(matches!(exit, VmExit::Halted), "{exit:?}");
+        let service = vm.interrupt_controller();
+        drop(vm);
+        drop(cpu);
+        first.assert_retained();
+        second.assert_retained();
+        drop(service);
+        first.assert_reclaimed();
+        second.assert_reclaimed();
+    }
+
+    #[test]
+    fn whp_constructor_rollback_deletes_the_created_partition() {
+        let _guard = whp_test_lock();
+        if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
+            NativeMemoryTest::spawn(
+                "hypervisor::memory_tests::whp_constructor_rollback_deletes_the_created_partition",
+            )
+            .verify();
+            return;
+        }
+        let before = raw::DELETED_PARTITIONS.with(|deleted| deleted.borrow().len());
+        // This reaches the constructor's real native setup-error branch,
+        // rather than its earlier Rust processor-count validation. Native CI
+        // must establish that this incomplete configuration is rejected.
+        let failure = Vm::new_with_options(PartitionOptions::default(), true);
+        assert!(
+            matches!(failure, Err(Error::SetupPartition(_))),
+            "{failure:?}"
+        );
+        assert_eq!(
+            raw::DELETED_PARTITIONS.with(|deleted| deleted.borrow().len()),
+            before + 1,
+            "successful native delete must precede constructor failure return"
+        );
+        let vm = Vm::new().expect("native reconstruction is required");
+        drop(vm);
+        assert_eq!(
+            raw::DELETED_PARTITIONS.with(|deleted| deleted.borrow().len()),
+            before + 2
+        );
+    }
+
+    /// Owns/reaps isolated native assertions, including failure children, on unwind.
+    pub(crate) struct NativeMemoryTest {
+        child: std::process::Child,
+    }
+
+    impl NativeMemoryTest {
+        pub(crate) fn spawn(name: &str) -> Self {
+            Self {
+                child: std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([name, "--exact", "--nocapture", "--test-threads=1"])
+                    .env("DILLO_WHP_MEMORY_CHILD", "1")
+                    .spawn()
+                    .unwrap(),
+            }
+        }
+
+        fn finish(&mut self) -> std::process::ExitStatus {
+            use wait_timeout::ChildExt;
+            self.child
+                .wait_timeout(std::time::Duration::from_secs(30))
+                .unwrap()
+                .expect("native memory assertion child exceeded 30 seconds")
+        }
+
+        pub(crate) fn verify(mut self) {
+            let status = self.finish();
+            assert!(
+                status.success(),
+                "native WHP memory assertions failed: {status}"
+            );
+        }
+
+        fn verify_abort(mut self) {
+            let status = self.finish();
+            // Rust's Windows abort uses __fastfail(FAST_FAIL_FATAL_APP_EXIT).
+            // https://learn.microsoft.com/en-us/cpp/intrinsics/fastfail
+            assert_eq!(
+                status.code().map(|code| code as u32),
+                Some(0xc000_0409),
+                "{status}"
+            );
+        }
+    }
+
+    impl Drop for NativeMemoryTest {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    #[test]
+    fn whp_failed_partition_delete_aborts_before_ram_release() {
+        let _guard = whp_test_lock();
+        if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
+            NativeMemoryTest::spawn(
+                "hypervisor::memory_tests::whp_failed_partition_delete_aborts_before_ram_release",
+            )
+            .verify_abort();
+            return;
+        }
+        let mut vm = Vm::new().expect("native WHP is required");
+        vm.add_memory(0x10000, 0x1000).unwrap();
+        vm.allocation_probe(0).assert_retained();
+        // Inject only the existing native deletion boundary's error result. The
+        // actual partition and its GPA mapping still exist when Drop must abort.
+        Arc::get_mut(&mut vm.inner).unwrap().fail_delete = true;
+        drop(vm);
+        panic!("failed native partition destruction must not continue to RAM cleanup");
     }
 }

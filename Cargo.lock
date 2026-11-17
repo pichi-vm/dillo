@@ -597,6 +597,7 @@ dependencies = [
  "pmi",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
+ "wait-timeout",
  "windows-sys 0.61.2",
 ]
 

@@ -221,9 +221,8 @@ mod imp {
             Ok(CpuPreparation {
                 index,
                 cpu_profile,
-                creator: self.inner.cpu_creator(),
+                creator: self.inner.cpu_creator()?,
                 mmio_bus: Arc::clone(&self.mmio_bus),
-                memory: self.guest_memory()?,
                 interrupt: CpuInterrupt {
                     target: Arc::new(Mutex::new(None)),
                 },
@@ -376,7 +375,6 @@ mod imp {
         cpu_profile: dillo_machine::CpuProfile,
         creator: crate::hypervisor::CpuCreator,
         mmio_bus: Arc<Mutex<MmioBus>>,
-        memory: GuestMemoryMmap,
         interrupt: CpuInterrupt,
     }
     impl dillo_machine::CpuPreparation for CpuPreparation {
@@ -398,7 +396,6 @@ mod imp {
             Ok(CpuRunner {
                 _binding: binding,
                 vcpu,
-                _memory: self.memory,
                 _owner: std::marker::PhantomData,
             })
         }
@@ -456,7 +453,6 @@ mod imp {
         // Drop clears the wake target under its call lock before native deletion.
         _binding: InterruptBinding,
         vcpu: Vcpu,
-        _memory: GuestMemoryMmap,
         _owner: std::marker::PhantomData<std::rc::Rc<()>>,
     }
     impl dillo_machine::CpuRunner for CpuRunner {
@@ -882,6 +878,269 @@ mod imp {
             CpuInterrupt as _, CpuPreparation as _, CpuRunner as _, Machine as _, Memory as _,
         };
         use std::thread;
+
+        #[test]
+        fn native_ram_exports_preserve_old_allocation_across_fresh_partitions() {
+            use crate::hypervisor::memory_tests::NativeMemoryTest;
+            use vm_memory::Bytes;
+            let _guard = crate::hypervisor::whp_test_lock();
+            if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
+                NativeMemoryTest::spawn("imp::owner_tests::native_ram_exports_preserve_old_allocation_across_fresh_partitions").verify();
+                return;
+            }
+            let mut vm = Vm::new_x86_64(1, None).expect("native WHP is required");
+            vm.attach(
+                Memory::from_ranges(&[RamRange {
+                    gpa: 0x10000,
+                    size: 0x1000,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            vm.write_guest(0x10100, &[0x11, 0x22]).unwrap();
+            let original = vm.inner.allocation_probe(0);
+            let export = vm.shared_memory[0]
+                .region(dillo_mmio::SharedRange {
+                    gpa: 0x10000,
+                    size: 0x1000,
+                    access: dillo_mmio::SharedAccess::ReadWrite,
+                })
+                .unwrap();
+            drop(vm);
+            original.assert_retained();
+            let mut replacement = Vm::new_x86_64(1, None).unwrap();
+            replacement
+                .attach(
+                    Memory::from_ranges(&[RamRange {
+                        gpa: 0x10000,
+                        size: 0x1000,
+                    }])
+                    .unwrap(),
+                )
+                .unwrap();
+            replacement.write_guest(0x10100, &[0x33, 0x44]).unwrap();
+            let fresh = replacement.inner.allocation_probe(0);
+            let mut bytes = [0; 2];
+            export.read(0x100, &mut bytes).unwrap();
+            assert_eq!(bytes, [0x11, 0x22]);
+            export.write(0x100, &[0x55, 0x66]).unwrap();
+            replacement
+                .guest_memory()
+                .unwrap()
+                .read_slice(&mut bytes, GuestAddress(0x10100))
+                .unwrap();
+            assert_eq!(bytes, [0x33, 0x44]);
+            drop(export);
+            original.assert_reclaimed();
+            fresh.assert_retained();
+            drop(replacement);
+            fresh.assert_reclaimed();
+        }
+
+        #[test]
+        fn native_preparation_runner_and_cancel_retain_registered_ram() {
+            use crate::hypervisor::memory_tests::NativeMemoryTest;
+            let _guard = crate::hypervisor::whp_test_lock();
+            if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
+                NativeMemoryTest::spawn(
+                    "imp::owner_tests::native_preparation_runner_and_cancel_retain_registered_ram",
+                )
+                .verify();
+                return;
+            }
+            let mut vm = Vm::new_x86_64(1, None).expect("native WHP is required");
+            let profile = dillo_machine::CpuProfile::X86_64(pmi::x86_64::Profile::V1);
+            assert!(matches!(
+                vm.cpu_preparation(0, profile),
+                Err(Error::MemoryNotReady)
+            ));
+            vm.attach(
+                Memory::from_ranges(&[RamRange {
+                    gpa: 0x10000,
+                    size: 0x1000,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            // Native progress marker, followed by an infinite guest loop.
+            vm.write_guest(0x10000, &[0xe6, 0x42, 0xeb, 0xfe]).unwrap();
+            let original = vm.inner.allocation_probe(0);
+            let input = vm.cpu_preparation(0, profile).unwrap();
+            let interrupt = input.interrupt();
+            drop(vm);
+            original.assert_retained();
+            let (progress, observed_progress) = std::sync::mpsc::channel();
+            let (completed, observed_completion) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let termination = Arc::new(AtomicBool::new(false));
+            thread::scope(|scope| {
+                let token = Arc::clone(&termination);
+                let worker = scope.spawn(move || {
+                    let mut runner = input.prepare().unwrap();
+                    runner
+                        .vcpu
+                        .inner
+                        .initialize_test_real_mode(0x10000, 0x5a)
+                        .unwrap();
+                    let marker = runner
+                        .vcpu
+                        .inner
+                        .run(|_, _| 0, |_, _| false, token.as_ref())
+                        .unwrap();
+                    assert!(
+                        matches!(
+                            marker,
+                            VmExit::PioWrite {
+                                port: 0x42,
+                                data: [0x5a, ..],
+                                size: 1
+                            }
+                        ),
+                        "{marker:?}"
+                    );
+                    progress.send(()).unwrap();
+                    let exit = runner
+                        .vcpu
+                        .inner
+                        .run(|_, _| 0, |_, _| false, token.as_ref())
+                        .unwrap();
+                    assert!(matches!(exit, VmExit::Interrupted), "{exit:?}");
+                    assert!(
+                        !token.load(Ordering::Acquire),
+                        "live cancellation must precede fallback termination"
+                    );
+                    completed.send(()).unwrap();
+                    released
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                });
+                let progress = observed_progress.recv_timeout(std::time::Duration::from_secs(5));
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let mut cancellation = None;
+                let mut wake_error = None;
+                // WHP only guarantees cancelling an active call. Repeated
+                // native requests close the progress-marker/next-entry race.
+                while progress.is_ok() && std::time::Instant::now() < deadline {
+                    if let Err(error) = interrupt.interrupt() {
+                        wake_error = Some(error);
+                        break;
+                    }
+                    match observed_completion.recv_timeout(std::time::Duration::from_millis(1)) {
+                        Ok(()) => {
+                            cancellation = Some(());
+                            break;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                if cancellation.is_some() {
+                    original.assert_retained();
+                    assert!(interrupt.target.lock().unwrap().is_some());
+                }
+                // Cleanup cannot turn a failed live-cancel assertion into a
+                // pass. The receipt above was required while the token=false.
+                termination.store(true, Ordering::Release);
+                let _ = release.send(());
+                let cleanup_deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !worker.is_finished() && std::time::Instant::now() < cleanup_deadline {
+                    let _ = interrupt.interrupt();
+                    std::thread::yield_now();
+                }
+                let result = worker.join();
+                assert!(
+                    progress.is_ok(),
+                    "actual guest progress must precede cancellation: {progress:?}"
+                );
+                assert!(wake_error.is_none(), "native wake failed: {wake_error:?}");
+                assert!(
+                    cancellation.is_some(),
+                    "live native cancellation must complete before fallback"
+                );
+                result.unwrap();
+            });
+            assert!(interrupt.target.lock().unwrap().is_none());
+            interrupt.interrupt().expect("retired wake is harmless");
+            original.assert_reclaimed();
+        }
+
+        #[test]
+        fn native_line_and_msi_services_retain_their_partition_ram() {
+            use crate::hypervisor::memory_tests::NativeMemoryTest;
+            let _guard = crate::hypervisor::whp_test_lock();
+            if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
+                NativeMemoryTest::spawn(
+                    "imp::owner_tests::native_line_and_msi_services_retain_their_partition_ram",
+                )
+                .verify();
+                return;
+            }
+            let window = MmioWindow {
+                base: 0xfec0_0000,
+                size: 0x1000,
+            };
+            let mut vm =
+                Vm::new_x86_64(1, Some(IoApic::new(window))).expect("native WHP is required");
+            vm.attach(
+                Memory::from_ranges(&[RamRange {
+                    gpa: 0x10000,
+                    size: 0x1000,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            let original = vm.inner.allocation_probe(0);
+            let ioapic = Arc::clone(vm.ioapic.as_ref().unwrap());
+            ioapic.write(window, 0, &0x10u32.to_le_bytes()).unwrap();
+            ioapic.write(window, 0x10, &0x40u32.to_le_bytes()).unwrap();
+            let line = vm.create_line_interrupt(0).unwrap();
+            let cpu = vm.inner.create_vcpu(0, "x86-64-v1").unwrap();
+            drop(vm);
+            line.set_level(true)
+                .expect("native interrupt uses original partition");
+            drop(cpu);
+            original.assert_retained();
+            drop(line);
+            original.assert_reclaimed();
+
+            let mut vm = Vm::new_x86_64(1, None).unwrap();
+            vm.attach(
+                Memory::from_ranges(&[RamRange {
+                    gpa: 0x10000,
+                    size: 0x1000,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            let original = vm.inner.allocation_probe(0);
+            let domain = FixedMessageInterruptDomain::new(vm.fixed_interrupt_requester(), 1);
+            domain
+                .update(
+                    0,
+                    MessageInterrupt {
+                        address: 0xfee0_0000,
+                        data: 0x41,
+                        masked: false,
+                    },
+                )
+                .unwrap();
+            domain.enabled(0, true).unwrap();
+            let msi = domain.interrupt(0).unwrap();
+            let cpu = vm.inner.create_vcpu(0, "x86-64-v1").unwrap();
+            drop(vm);
+            domain
+                .inner
+                .fixed_interrupts
+                .request_fixed_interrupt(0, 0x41)
+                .expect("native MSI requester uses original partition");
+            drop(domain);
+            msi.signal();
+            drop(cpu);
+            original.assert_retained();
+            drop(msi);
+            original.assert_reclaimed();
+        }
 
         #[test]
         fn native_owner_wake_binding_retires_before_processor_replacement() {
