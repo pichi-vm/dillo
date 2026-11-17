@@ -19,5 +19,6 @@ thiserror.workspace = true
 workspace = true
 
 [dev-dependencies]
+dillo-virtio = { workspace = true, features = ["test-support"] }
 imago.workspace = true
 tempfile.workspace = true

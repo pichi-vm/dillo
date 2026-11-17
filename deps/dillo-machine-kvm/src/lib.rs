@@ -1123,7 +1123,7 @@ mod imp {
                 }
             }
 
-            for panics in [false, true] {
+            for outcome in 0..6 {
                 let (mut vm, profile, base) = machine_fixture();
                 let observer = vm.device_failures();
                 let probe = memory::MappingProbe::from_view(&vm.inner.guest_memory().unwrap());
@@ -1157,6 +1157,9 @@ mod imp {
                         entered,
                     }))
                     .unwrap();
+                let queue_memory: Arc<dyn dillo_virtio::QueueMemory> = Arc::new(
+                    dillo_virtio::SharedQueueMemory::new(vm.shared_memory.clone()),
+                );
                 let worker = attachment
                     .spawn(
                         "native failing worker".into(),
@@ -1166,7 +1169,23 @@ mod imp {
                                 .map_err(|error| {
                                     JoinError::Host(format!("guest progress missing: {error}"))
                                 })?;
-                            assert!(!panics, "injected native attached worker panic");
+                            if outcome >= 2 {
+                                let failed_write = outcome - 2;
+                                let memory = dillo_virtio::test_support::FaultQueueMemory::new(
+                                    queue_memory,
+                                    failed_write,
+                                );
+                                let mut queue = dillo_virtio::queue::Queue::new(8);
+                                queue.uses_notif_suppression = true;
+                                queue.used_ring = vm_memory::GuestAddress(base + 0x200);
+                                queue.next_avail = std::num::Wrapping(1);
+                                let error = queue.add_used(&memory, 3, 4).unwrap_err();
+                                assert_eq!(memory.attempts(), failed_write + 1);
+                                assert_eq!(queue.next_used.0, u16::from(failed_write == 3));
+                                assert_eq!(error.is_published(), failed_write == 3);
+                                return Err(JoinError::Host(error.to_string()));
+                            }
+                            assert!(outcome != 1, "injected native attached worker panic");
                             Err(JoinError::Host(
                                 "injected native attached worker error".into(),
                             ))
@@ -1196,6 +1215,23 @@ mod imp {
                 let error = result.unwrap_err().to_string();
                 assert!(error.contains("native failing worker"), "{error}");
                 assert!(!error.contains("guest progress missing"), "{error}");
+                if outcome >= 2 {
+                    assert!(error.contains("used-ring"), "{error}");
+                    let failed_write = outcome - 2;
+                    assert_eq!(
+                        retained.load_u32_le(0x204).unwrap(),
+                        if failed_write > 0 { 3 } else { 0 }
+                    );
+                    assert_eq!(
+                        retained.load_u32_le(0x208).unwrap(),
+                        if failed_write > 1 { 4 } else { 0 }
+                    );
+                    assert_eq!(
+                        retained.load_u16_le(0x202).unwrap(),
+                        u16::from(failed_write == 3)
+                    );
+                    assert_eq!(retained.load_u16_le(0x244).unwrap(), 0);
+                }
                 assert!(joined.is_err());
                 assert!(observer.check().is_err());
                 assert!(probe.mappings() > 0);

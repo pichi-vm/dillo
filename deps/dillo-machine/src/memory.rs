@@ -135,6 +135,8 @@ pub enum SharedMemoryError {
 /// and little-endian encoding. They reject permission, range and native alignment
 /// failures before a store, without a byte-copy fallback. Protocol ordering is the
 /// caller's responsibility; multiple scalar accesses are not a transaction.
+/// Every scalar store returning Err leaves that scalar unchanged. Earlier stores
+/// in the caller's operation are not rolled back.
 pub trait SharedRegionAccess: Send + Sync + std::fmt::Debug {
     fn read(&self, offset: u64, data: &mut [u8]) -> Result<(), SharedMemoryError>;
 

@@ -46,6 +46,9 @@ impl VirtioActivate {
     #[must_use]
     pub fn with_negotiated_features(mut self, features: u64) -> Self {
         self.negotiated_features = features;
+        for queue in &mut self.queues {
+            queue.uses_notif_suppression = features & crate::VIRTIO_F_RING_EVENT_IDX != 0;
+        }
         self
     }
     pub fn negotiated_features(&self) -> u64 {
@@ -471,7 +474,7 @@ mod tests {
             activation
                 .queue_memory()
                 .write_u16(GuestAddress(0x1000), 7)
-                .is_none()
+                .is_err()
         );
         assert!(
             activation

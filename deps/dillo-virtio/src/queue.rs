@@ -12,7 +12,9 @@ use std::num::Wrapping;
 use std::sync::Arc;
 use std::sync::atomic::{Ordering, fence};
 
-use dillo_machine::memory::{SharedAccess, SharedMemory, SharedRange, SharedRegion};
+use dillo_machine::memory::{
+    SharedAccess, SharedMemory, SharedMemoryError, SharedRange, SharedRegion,
+};
 use vm_memory::{Address, GuestAddress};
 
 /// Descriptor flag: buffer continues via `next` field.
@@ -64,7 +66,8 @@ impl DescriptorChain {
 /// Memory access needed by split virtqueue metadata.
 ///
 /// Successful scalar operations are indivisible little-endian accesses with
-/// relaxed ordering. The queue supplies the protocol's publication barriers.
+/// relaxed ordering. A failed scalar store leaves that scalar unchanged.
+/// The queue supplies the protocol's publication barriers.
 pub trait QueueMemory: Send + Sync {
     fn read_u16(&self, addr: GuestAddress) -> Option<u16>;
 
@@ -72,9 +75,9 @@ pub trait QueueMemory: Send + Sync {
 
     fn read_u64(&self, addr: GuestAddress) -> Option<u64>;
 
-    fn write_u16(&self, addr: GuestAddress, value: u16) -> Option<()>;
+    fn write_u16(&self, addr: GuestAddress, value: u16) -> Result<(), SharedMemoryError>;
 
-    fn write_u32(&self, addr: GuestAddress, value: u32) -> Option<()>;
+    fn write_u32(&self, addr: GuestAddress, value: u32) -> Result<(), SharedMemoryError>;
 }
 
 /// Fail-closed virtqueue metadata memory used when no backend capability exists.
@@ -94,12 +97,12 @@ impl QueueMemory for NullQueueMemory {
         None
     }
 
-    fn write_u16(&self, _addr: GuestAddress, _value: u16) -> Option<()> {
-        None
+    fn write_u16(&self, _addr: GuestAddress, _value: u16) -> Result<(), SharedMemoryError> {
+        Err(SharedMemoryError::Unsupported)
     }
 
-    fn write_u32(&self, _addr: GuestAddress, _value: u32) -> Option<()> {
-        None
+    fn write_u32(&self, _addr: GuestAddress, _value: u32) -> Result<(), SharedMemoryError> {
+        Err(SharedMemoryError::Unsupported)
     }
 }
 
@@ -116,11 +119,11 @@ impl<T: QueueMemory + ?Sized> QueueMemory for Arc<T> {
         (**self).read_u64(addr)
     }
 
-    fn write_u16(&self, addr: GuestAddress, value: u16) -> Option<()> {
+    fn write_u16(&self, addr: GuestAddress, value: u16) -> Result<(), SharedMemoryError> {
         (**self).write_u16(addr, value)
     }
 
-    fn write_u32(&self, addr: GuestAddress, value: u32) -> Option<()> {
+    fn write_u32(&self, addr: GuestAddress, value: u32) -> Result<(), SharedMemoryError> {
         (**self).write_u32(addr, value)
     }
 }
@@ -144,48 +147,109 @@ impl SharedQueueMemory {
         Self { capabilities }
     }
 
-    fn region(&self, addr: GuestAddress, size: u64, access: SharedAccess) -> Option<SharedRegion> {
+    fn read_region(&self, addr: GuestAddress, size: u64) -> Option<SharedRegion> {
         self.capabilities.iter().find_map(|capability| {
             capability
                 .region(SharedRange {
                     gpa: addr.raw_value(),
                     size,
-                    access,
+                    access: SharedAccess::ReadOnly,
                 })
                 .ok()
         })
+    }
+
+    fn write_region(
+        &self,
+        addr: GuestAddress,
+        size: u64,
+    ) -> Result<SharedRegion, SharedMemoryError> {
+        let mut refusal = None;
+        for capability in &self.capabilities {
+            match capability.region(SharedRange {
+                gpa: addr.raw_value(),
+                size,
+                access: SharedAccess::WriteOnly,
+            }) {
+                Ok(region) => return Ok(region),
+                Err(
+                    error @ (SharedMemoryError::OutOfLimits
+                    | SharedMemoryError::AccessDenied
+                    | SharedMemoryError::NotShared),
+                ) => {
+                    // Capabilities may cover different ranges/access rights.
+                    // Retain the first refusal if none admits this access.
+                    refusal.get_or_insert(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(refusal.unwrap_or(SharedMemoryError::Unsupported))
     }
 }
 
 impl QueueMemory for SharedQueueMemory {
     fn read_u16(&self, addr: GuestAddress) -> Option<u16> {
-        self.region(addr, 2, SharedAccess::ReadOnly)?
-            .load_u16_le(0)
-            .ok()
+        self.read_region(addr, 2)?.load_u16_le(0).ok()
     }
 
     fn read_u32(&self, addr: GuestAddress) -> Option<u32> {
-        self.region(addr, 4, SharedAccess::ReadOnly)?
-            .load_u32_le(0)
-            .ok()
+        self.read_region(addr, 4)?.load_u32_le(0).ok()
     }
 
     fn read_u64(&self, addr: GuestAddress) -> Option<u64> {
-        self.region(addr, 8, SharedAccess::ReadOnly)?
-            .load_u64_le(0)
-            .ok()
+        self.read_region(addr, 8)?.load_u64_le(0).ok()
     }
 
-    fn write_u16(&self, addr: GuestAddress, value: u16) -> Option<()> {
-        self.region(addr, 2, SharedAccess::WriteOnly)?
-            .store_u16_le(0, value)
-            .ok()
+    fn write_u16(&self, addr: GuestAddress, value: u16) -> Result<(), SharedMemoryError> {
+        self.write_region(addr, 2)?.store_u16_le(0, value)
     }
 
-    fn write_u32(&self, addr: GuestAddress, value: u32) -> Option<()> {
-        self.region(addr, 4, SharedAccess::WriteOnly)?
-            .store_u32_le(0, value)
-            .ok()
+    fn write_u32(&self, addr: GuestAddress, value: u32) -> Result<(), SharedMemoryError> {
+        self.write_region(addr, 4)?.store_u32_le(0, value)
+    }
+}
+
+/// Scalar write whose failure ended a used-ring publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationStage {
+    Id,
+    Length,
+    Index,
+    AvailEvent,
+}
+
+/// Publication can fail after external I/O or earlier scalar writes committed.
+/// This error never authorizes retrying the original device operation.
+#[derive(Debug, thiserror::Error)]
+pub enum PublicationError {
+    #[error("invalid used-ring publication geometry: {0}")]
+    Geometry(&'static str),
+    #[error("used-ring {stage:?} write at {address:#x} failed: {source}")]
+    Write {
+        stage: PublicationStage,
+        address: u64,
+        #[source]
+        source: SharedMemoryError,
+    },
+}
+
+impl PublicationError {
+    /// The used index committed before the following event write failed.
+    pub fn is_published(&self) -> bool {
+        matches!(
+            self,
+            Self::Write {
+                stage: PublicationStage::AvailEvent,
+                ..
+            }
+        )
+    }
+}
+
+impl From<PublicationError> for std::io::Error {
+    fn from(error: PublicationError) -> Self {
+        Self::other(error)
     }
 }
 
@@ -318,34 +382,51 @@ impl Queue {
         })
     }
 
-    /// Write a completed descriptor back to the used ring.
-    pub fn add_used<M: QueueMemory>(&mut self, mem: &M, desc_index: u16, len: u32) {
-        // Used ring layout: flags(2) + idx(2) + ring[size](id(4)+len(4)) + avail_event(2).
-        // Each used element is 8 bytes: id (u32) + len (u32).
-        let ring_offset = 4 + 8 * (self.next_used.0 % self.size) as u64;
-        let elem_addr = self.used_ring.unchecked_add(ring_offset);
-
-        // Write used element: id then len.
-        let _ = mem.write_u32(elem_addr, desc_index as u32);
-        let _ = mem.write_u32(elem_addr.unchecked_add(4), len);
-
-        self.next_used += Wrapping(1);
-
-        // Publish buffer and used-entry writes before the driver observes used_idx.
+    /// Publish completion, preserving the exact successful scalar-write prefix.
+    pub fn add_used<M: QueueMemory>(
+        &mut self,
+        mem: &M,
+        desc_index: u16,
+        len: u32,
+    ) -> Result<(), PublicationError> {
+        if self.size == 0 || !self.size.is_power_of_two() || self.size > self.max_size {
+            return Err(PublicationError::Geometry("invalid queue size"));
+        }
+        if !self.used_ring.raw_value().is_multiple_of(4) {
+            return Err(PublicationError::Geometry(
+                "used ring is not four-byte aligned",
+            ));
+        }
+        let base = self.used_ring.raw_value();
+        let event_offset = 4 + 8 * u64::from(self.size);
+        let extent = event_offset + if self.uses_notif_suppression { 2 } else { 0 };
+        base.checked_add(extent)
+            .ok_or(PublicationError::Geometry("used ring address overflows"))?;
+        let element = base + 4 + 8 * u64::from(self.next_used.0 % self.size);
+        let failure = |stage, address, source| PublicationError::Write {
+            stage,
+            address,
+            source,
+        };
+        mem.write_u32(GuestAddress(element), u32::from(desc_index))
+            .map_err(|error| failure(PublicationStage::Id, element, error))?;
+        mem.write_u32(GuestAddress(element + 4), len)
+            .map_err(|error| failure(PublicationStage::Length, element + 4, error))?;
+        let next_used = self.next_used + Wrapping(1);
+        // Publish payload and used element before the driver observes used_idx.
         fence(Ordering::Release);
-        let _ = mem.write_u16(self.used_ring.unchecked_add(2), self.next_used.0);
-
-        // Update avail_event: tell the driver to notify us when it adds more
-        // descriptors past what we've already seen. Without this, drivers using
-        // VIRTIO_F_RING_EVENT_IDX suppress kicks after the first descriptor.
-        let avail_event_offset = 4 + 8 * self.size as u64;
-        let _ = mem.write_u16(
-            self.used_ring.unchecked_add(avail_event_offset),
-            self.next_avail.0,
-        );
-
-        // Order avail_event before the next avail_idx read to avoid a lost kick.
+        mem.write_u16(GuestAddress(base + 2), next_used.0)
+            .map_err(|error| failure(PublicationStage::Index, base + 2, error))?;
+        self.next_used = next_used;
+        if self.uses_notif_suppression {
+            mem.write_u16(GuestAddress(base + event_offset), self.next_avail.0)
+                .map_err(|error| {
+                    failure(PublicationStage::AvailEvent, base + event_offset, error)
+                })?;
+        }
+        // Order event rearming before the next avail_idx read (lost-kick race).
         fence(Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -396,6 +477,199 @@ mod tests {
     // --- Queue::new tests ---
 
     #[test]
+    fn publication_failure_preserves_exact_prefix_cursor_and_effect() {
+        use crate::test_support::FaultQueueMemory;
+        for initial in [0, u16::MAX] {
+            for fail in 0..4 {
+                let (mem, _, _, _) = setup_queue_memory(16);
+                let shared: Arc<dyn QueueMemory> =
+                    Arc::new(SharedQueueMemory::new(vec![Arc::new(
+                        MappedSharedMemory::for_guest_memory(mem.clone(), SharedAccess::ReadWrite),
+                    )]));
+                let fault = FaultQueueMemory::new(shared, fail);
+                let mut queue = make_valid_queue(16);
+                queue.uses_notif_suppression = true;
+                queue.next_used = Wrapping(initial);
+                queue.next_avail = Wrapping(7);
+                let element = queue
+                    .used_ring
+                    .unchecked_add(4 + 8 * u64::from(initial % 16));
+                let error = queue.add_used(&fault, 3, 77).unwrap_err();
+                let expected = [
+                    PublicationStage::Id,
+                    PublicationStage::Length,
+                    PublicationStage::Index,
+                    PublicationStage::AvailEvent,
+                ][fail];
+                assert!(
+                    matches!(&error, PublicationError::Write { stage, source: SharedMemoryError::Backing(_), .. } if *stage == expected)
+                );
+                assert_eq!(fault.attempts(), fail + 1, "no write after the failure");
+                assert_eq!(
+                    queue.next_used,
+                    Wrapping(initial) + Wrapping(u16::from(fail == 3))
+                );
+                assert_eq!(queue.next_avail, Wrapping(7));
+                assert_eq!(error.is_published(), fail == 3);
+                assert_eq!(
+                    mem.read_obj::<u32>(element).unwrap(),
+                    if fail > 0 { 3 } else { 0 }
+                );
+                assert_eq!(
+                    mem.read_obj::<u32>(element.unchecked_add(4)).unwrap(),
+                    if fail > 1 { 77 } else { 0 }
+                );
+                assert_eq!(
+                    mem.read_obj::<u16>(queue.used_ring.unchecked_add(2))
+                        .unwrap(),
+                    if fail == 3 {
+                        initial.wrapping_add(1)
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(
+                    mem.read_obj::<u16>(queue.used_ring.unchecked_add(4 + 8 * 16))
+                        .unwrap(),
+                    0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn publication_without_event_idx_only_accesses_the_used_metadata_grant() {
+        use crate::test_support::FaultQueueMemory;
+        // RAM includes the reserved trailing bytes, but the write capability
+        // grants only the flags, index and elements used without EVENT_IDX.
+        let (mem, _, _, used) = setup_queue_memory(16);
+        let event = used.unchecked_add(4 + 8 * 16);
+        mem.write_obj::<u16>(0xbeef, event).unwrap();
+        let memory: Arc<dyn QueueMemory> =
+            Arc::new(shared_queue_memory(&mem, used.raw_value(), 4 + 8 * 16));
+        let fault = FaultQueueMemory::new(memory, usize::MAX);
+        let mut queue = make_valid_queue(16);
+        queue.next_avail = Wrapping(7);
+        queue.uses_notif_suppression = true;
+        let mut queue = crate::device::VirtioActivate::new(vec![queue], vec![])
+            .with_negotiated_features(crate::VIRTIO_F_VERSION_1)
+            .take_queues()
+            .pop()
+            .unwrap();
+        queue.add_used(&fault, 3, 77).unwrap();
+        assert_eq!(fault.attempts(), 3);
+        assert_eq!(queue.next_used, Wrapping(1));
+        assert_eq!(mem.read_obj::<u16>(used.unchecked_add(2)).unwrap(), 1);
+        assert_eq!(mem.read_obj::<u32>(used.unchecked_add(4)).unwrap(), 3);
+        assert_eq!(mem.read_obj::<u32>(used.unchecked_add(8)).unwrap(), 77);
+        assert_eq!(mem.read_obj::<u16>(event).unwrap(), 0xbeef);
+
+        let mut queue = crate::device::VirtioActivate::new(vec![queue], vec![])
+            .with_negotiated_features(crate::VIRTIO_F_VERSION_1 | crate::VIRTIO_F_RING_EVENT_IDX)
+            .take_queues()
+            .pop()
+            .unwrap();
+        let error = queue.add_used(&fault, 4, 88).unwrap_err();
+        assert!(matches!(
+            error,
+            PublicationError::Write {
+                stage: PublicationStage::AvailEvent,
+                source: SharedMemoryError::OutOfLimits,
+                ..
+            }
+        ));
+        assert!(error.is_published());
+        assert_eq!(fault.attempts(), 7);
+        assert_eq!(queue.next_used, Wrapping(2));
+        assert_eq!(mem.read_obj::<u16>(event).unwrap(), 0xbeef);
+    }
+
+    #[test]
+    fn read_admission_preserves_fallback_after_provider_errors() {
+        struct Refused(bool);
+        impl SharedMemory for Refused {
+            fn region(&self, _: SharedRange) -> Result<SharedRegion, SharedMemoryError> {
+                Err(if self.0 {
+                    SharedMemoryError::Unsupported
+                } else {
+                    SharedMemoryError::Backing("lost backing".into())
+                })
+            }
+        }
+        let (mem, _, _, _) = setup_queue_memory(16);
+        mem.write_obj::<u64>(0x1234, GuestAddress(0x2000)).unwrap();
+        for unsupported in [false, true] {
+            let memory = SharedQueueMemory::new(vec![
+                Arc::new(Refused(unsupported)),
+                Arc::new(MappedSharedMemory::for_guest_memory(
+                    mem.clone(),
+                    SharedAccess::ReadWrite,
+                )),
+            ]);
+            assert_eq!(memory.read_u16(GuestAddress(0x2000)), Some(0x1234));
+            assert_eq!(memory.read_u32(GuestAddress(0x2000)), Some(0x1234));
+            assert_eq!(memory.read_u64(GuestAddress(0x2000)), Some(0x1234));
+            assert!(memory.write_u16(GuestAddress(0x2000), 9).is_err());
+            assert_eq!(mem.read_obj::<u64>(GuestAddress(0x2000)).unwrap(), 0x1234);
+        }
+    }
+
+    #[test]
+    fn invalid_publication_geometry_is_rejected_before_any_store() {
+        use crate::test_support::FaultQueueMemory;
+        for (size, base) in [
+            (0, 0x2000),
+            (3, 0x2000),
+            (32, 0x2000),
+            (16, 0x2002),
+            (16, u64::MAX - 3),
+        ] {
+            let fault = FaultQueueMemory::new(Arc::new(NullQueueMemory), 0);
+            let mut queue = make_valid_queue(16);
+            queue.size = size;
+            queue.used_ring = GuestAddress(base);
+            assert!(matches!(
+                queue.add_used(&fault, 0, 0),
+                Err(PublicationError::Geometry(_))
+            ));
+            assert_eq!(fault.attempts(), 0);
+            assert_eq!(queue.next_used, Wrapping(0));
+        }
+    }
+
+    #[test]
+    fn write_admission_does_not_hide_backing_failure_behind_another_capability() {
+        struct FailedBacking;
+        impl SharedMemory for FailedBacking {
+            fn region(&self, _: SharedRange) -> Result<SharedRegion, SharedMemoryError> {
+                Err(SharedMemoryError::Backing("lost backing".into()))
+            }
+        }
+        let (mem, _, _, _) = setup_queue_memory(16);
+        let healthy: Arc<dyn SharedMemory> = Arc::new(MappedSharedMemory::for_guest_memory(
+            mem.clone(),
+            SharedAccess::ReadWrite,
+        ));
+        let memory = SharedQueueMemory::new(vec![Arc::new(FailedBacking), healthy]);
+        assert!(
+            matches!(memory.write_u32(GuestAddress(0x2004), 99), Err(SharedMemoryError::Backing(message)) if message == "lost backing")
+        );
+        assert_eq!(mem.read_obj::<u32>(GuestAddress(0x2004)).unwrap(), 0);
+        let denied = SharedQueueMemory::new(vec![Arc::new(MappedSharedMemory::for_guest_memory(
+            mem.clone(),
+            SharedAccess::ReadOnly,
+        ))]);
+        assert!(matches!(
+            denied.write_u16(GuestAddress(0x2002), 1),
+            Err(SharedMemoryError::AccessDenied)
+        ));
+        assert!(matches!(
+            SharedQueueMemory::new(vec![]).write_u16(GuestAddress(0x2002), 1),
+            Err(SharedMemoryError::Unsupported)
+        ));
+    }
+
+    #[test]
     fn shared_queue_scalars_use_atomic_service_and_refuse_misalignment() {
         let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
         memory
@@ -409,13 +683,11 @@ mod tests {
             )
             .unwrap();
         let queue_memory = shared_queue_memory(&memory, 0, 0x1000);
-        assert_eq!(
-            queue_memory.write_u16(GuestAddress(0x102), 0x00ff),
-            Some(())
-        );
-        assert_eq!(
-            queue_memory.write_u32(GuestAddress(0x104), 0x89ab_cdef),
-            Some(())
+        assert!(queue_memory.write_u16(GuestAddress(0x102), 0x00ff).is_ok());
+        assert!(
+            queue_memory
+                .write_u32(GuestAddress(0x104), 0x89ab_cdef)
+                .is_ok()
         );
         assert_eq!(queue_memory.read_u16(GuestAddress(0x102)), Some(0x00ff));
         assert_eq!(
@@ -426,8 +698,8 @@ mod tests {
             queue_memory.read_u64(GuestAddress(0x110)),
             Some(0x8877_6655_4433_2211)
         );
-        assert_eq!(queue_memory.write_u16(GuestAddress(0x101), 0), None);
-        assert_eq!(queue_memory.write_u32(GuestAddress(0x106), 0), None);
+        assert!(queue_memory.write_u16(GuestAddress(0x101), 0).is_err());
+        assert!(queue_memory.write_u32(GuestAddress(0x106), 0).is_err());
         assert_eq!(queue_memory.read_u16(GuestAddress(0x101)), None);
         assert_eq!(queue_memory.read_u32(GuestAddress(0x106)), None);
         assert_eq!(queue_memory.read_u64(GuestAddress(0x114)), None);
@@ -633,7 +905,7 @@ mod tests {
         q.used_ring = used;
 
         let shared = shared_queue_memory(&mem, 0x2000, 0x1000);
-        q.add_used(&shared, 0, 64);
+        q.add_used(&shared, 0, 64).unwrap();
 
         // used ring layout: flags(2) + idx(2) + ring[](id(4)+len(4))
         // After add_used: used_idx should be 1
@@ -667,7 +939,7 @@ mod tests {
         q.avail_ring = avail;
         q.used_ring = used;
 
-        q.add_used(&shared, 0, 64);
+        q.add_used(&shared, 0, 64).unwrap();
 
         let used_idx: u16 = mem.read_obj(used.unchecked_add(2)).unwrap();
         let ring_id: u32 = mem.read_obj(used.unchecked_add(4)).unwrap();

@@ -39,6 +39,7 @@ mod linux_fd;
 #[cfg(target_os = "linux")]
 mod macvtap;
 
+use dillo_virtio::queue::PublicationError;
 use std::sync::{Arc, Mutex};
 
 use dillo_machine::interrupt::Interrupt;
@@ -341,7 +342,7 @@ fn tx_worker(
         if token.is_shutdown_requested() {
             return Ok(dillo_virtio::DeviceExit::Cancelled);
         }
-        drain_tx(backend, queue_memory, buffer_memory, &queue, interrupt);
+        drain_tx(backend, queue_memory, buffer_memory, &queue, interrupt)?;
     }
 }
 
@@ -352,24 +353,30 @@ fn drain_tx(
     buffer_memory: &Arc<dyn VirtioMemory>,
     queue: &Mutex<Queue>,
     interrupt: Option<&Interrupt>,
-) {
+) -> Result<(), PublicationError> {
     let mut q = queue.lock().expect("virtio-net TX queue mutex");
     let mut signaled = false;
-    while let Some(head) = q.pop(queue_memory) {
-        let head_index = head.index;
-        if let Some(frame) = read_tx_frame(queue_memory, buffer_memory, head)
-            && let Err(e) = backend.send(&frame)
-        {
-            log::warn!("virtio-net TX: backend send ({} bytes): {e}", frame.len());
+    let result: Result<(), PublicationError> = (|| {
+        while let Some(head) = q.pop(queue_memory) {
+            let head_index = head.index;
+            if let Some(frame) = read_tx_frame(queue_memory, buffer_memory, head)
+                && let Err(e) = backend.send(&frame)
+            {
+                log::warn!("virtio-net TX: backend send ({} bytes): {e}", frame.len());
+            }
+            // TX descriptors are device-readable; nothing is written back.
+            q.add_used(queue_memory, head_index, 0)?;
+            signaled = true;
         }
-        // TX descriptors are device-readable; nothing is written back.
-        q.add_used(queue_memory, head_index, 0);
-        signaled = true;
-    }
+        Ok(())
+    })();
     drop(q);
-    if signaled && let Some(intr) = interrupt {
+    if (signaled || result.as_ref().is_err_and(PublicationError::is_published))
+        && let Some(intr) = interrupt
+    {
         intr.signal();
     }
+    result
 }
 
 /// Read one guest TX descriptor chain into a raw Ethernet frame, stripping the
@@ -430,14 +437,16 @@ fn rx_worker(
             },
         };
         let mut q = queue.lock().expect("virtio-net RX queue mutex");
-        if write_rx_frame(queue_memory, buffer_memory, &mut q, &frame) {
-            drop(q);
-            if let Some(intr) = interrupt {
-                intr.signal();
-            }
-        } else {
-            // No guest RX buffer available; hold the frame and retry.
-            drop(q);
+        let result = write_rx_frame(queue_memory, buffer_memory, &mut q, &frame);
+        drop(q);
+        if (matches!(&result, Ok(true))
+            || result.as_ref().is_err_and(PublicationError::is_published))
+            && let Some(intr) = interrupt
+        {
+            intr.signal();
+        }
+        if !result? {
+            // Only an empty queue retains the frame for retry.
             pending = Some(frame);
             std::thread::sleep(RECV_POLL);
         }
@@ -452,9 +461,9 @@ fn write_rx_frame(
     buffer_memory: &Arc<dyn VirtioMemory>,
     queue: &mut Queue,
     frame: &[u8],
-) -> bool {
+) -> Result<bool, PublicationError> {
     let Some(head) = queue.pop(queue_memory) else {
-        return false;
+        return Ok(false);
     };
     let head_index = head.index;
 
@@ -491,8 +500,8 @@ fn write_rx_frame(
         current = desc.next_desc(queue_memory);
     }
 
-    queue.add_used(queue_memory, head_index, written);
-    true
+    queue.add_used(queue_memory, head_index, written)?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -535,6 +544,88 @@ mod tests {
                 None => Ok(None),
             }
         }
+    }
+
+    #[test]
+    fn tx_publication_error_preserves_earlier_completions_without_resending() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for fail in 0..8 {
+            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let mut queue = ready_queue(0x100, 0x1000, 0x2000);
+            queue.uses_notif_suppression = true;
+            mem.write_obj::<u64>(0x5000, queue.desc_table).unwrap();
+            mem.write_obj::<u32>((NET_HDR_LEN + 1) as u32, queue.desc_table.unchecked_add(8))
+                .unwrap();
+            mem.write_obj::<u16>(3, GuestAddress(0x1002)).unwrap();
+            mem.write_obj::<u8>(42, GuestAddress(0x5000 + NET_HDR_LEN as u64))
+                .unwrap();
+            let qmem: Arc<dyn QueueMemory> =
+                Arc::new(dillo_virtio::test_support::FaultQueueMemory::new(
+                    Arc::new(SharedQueueMemory::new(vec![shared(&mem, 0, 0x4000)])),
+                    fail,
+                ));
+            let bmem: Arc<dyn VirtioMemory> =
+                Arc::new(SharedVirtioMemory::new(vec![shared(&mem, 0x5000, 0x1000)]));
+            let backend = Arc::new(MockBackend::default());
+            let net: Arc<dyn NetBackend> = backend.clone();
+            let notifications = Arc::new(AtomicUsize::new(0));
+            let count = Arc::clone(&notifications);
+            let interrupt = Interrupt::from_fn(move || {
+                count.fetch_add(1, Ordering::Relaxed);
+            });
+            let queue = Mutex::new(queue);
+            let error = drain_tx(&net, &qmem, &bmem, &queue, Some(&interrupt)).unwrap_err();
+            assert_eq!(backend.sent.lock().unwrap().len(), fail / 4 + 1);
+            assert!(
+                backend
+                    .sent
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|frame| frame == &[42])
+            );
+            assert_eq!(queue.lock().unwrap().next_avail.0 as usize, fail / 4 + 1);
+            assert_eq!(
+                queue.lock().unwrap().next_used.0 as usize,
+                fail / 4 + usize::from(fail % 4 == 3)
+            );
+            assert_eq!(
+                notifications.load(Ordering::Relaxed),
+                usize::from(fail >= 3)
+            );
+            assert_eq!(error.is_published(), fail % 4 == 3);
+        }
+    }
+
+    #[test]
+    fn rx_publication_error_is_not_empty_or_retryable() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mut queue = ready_queue(0x100, 0x1000, 0x2000);
+        queue.uses_notif_suppression = true;
+        mem.write_obj::<u64>(0x5000, queue.desc_table).unwrap();
+        mem.write_obj::<u32>(128, queue.desc_table.unchecked_add(8))
+            .unwrap();
+        mem.write_obj::<u16>(VIRTQ_DESC_F_WRITE, queue.desc_table.unchecked_add(12))
+            .unwrap();
+        mem.write_obj::<u16>(1, GuestAddress(0x1002)).unwrap();
+        let qmem: Arc<dyn QueueMemory> =
+            Arc::new(dillo_virtio::test_support::FaultQueueMemory::new(
+                Arc::new(SharedQueueMemory::new(vec![shared(&mem, 0, 0x4000)])),
+                3,
+            ));
+        let bmem: Arc<dyn VirtioMemory> =
+            Arc::new(SharedVirtioMemory::new(vec![shared(&mem, 0x5000, 0x1000)]));
+        assert!(
+            write_rx_frame(&qmem, &bmem, &mut queue, b"received")
+                .unwrap_err()
+                .is_published()
+        );
+        assert_eq!(queue.next_avail.0, 1);
+        assert_eq!(queue.next_used.0, 1);
+        let mut data = [0; 8];
+        mem.read_slice(&mut data, GuestAddress(0x5000 + NET_HDR_LEN as u64))
+            .unwrap();
+        assert_eq!(&data, b"received");
     }
 
     #[test]
@@ -703,7 +794,7 @@ mod tests {
             Arc::new(SharedVirtioMemory::new(vec![shared(&mem, 0x5000, 0x1000)]));
 
         let payload = b"inbound-eth-frame";
-        assert!(write_rx_frame(&qmem, &bmem, &mut q, payload));
+        assert!(write_rx_frame(&qmem, &bmem, &mut q, payload).unwrap());
 
         // Header is zeroed except num_buffers = 1, then the frame follows.
         let mut hdr = [0u8; NET_HDR_LEN];
@@ -739,6 +830,6 @@ mod tests {
             Arc::new(SharedQueueMemory::new(vec![shared(&mem, 0, 0x4000)]));
         let bmem: Arc<dyn VirtioMemory> =
             Arc::new(SharedVirtioMemory::new(vec![shared(&mem, 0x5000, 0x1000)]));
-        assert!(!write_rx_frame(&qmem, &bmem, &mut q, b"x"));
+        assert!(!write_rx_frame(&qmem, &bmem, &mut q, b"x").unwrap());
     }
 }

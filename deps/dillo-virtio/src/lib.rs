@@ -41,3 +41,7 @@ pub use memory::{SharedVirtioMemory, VirtioMemory, VirtioMemoryError};
 pub use queue::{
     DescriptorChain, Queue, QueueMemory, SharedQueueMemory, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
 };
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support;

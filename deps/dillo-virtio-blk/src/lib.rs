@@ -12,6 +12,7 @@
 //! advertised by the backing. Process isolation and confinement are host-backend
 //! responsibilities; see the repository's design rules and qualification gates.
 
+use dillo_virtio::queue::PublicationError;
 use std::fs::File;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -449,7 +450,7 @@ fn request_worker(
             backing.as_ref(),
             read_only,
             negotiated,
-        );
+        )?;
     }
 }
 
@@ -464,76 +465,83 @@ fn drain_requests(
     backing: &dyn BlockBacking,
     read_only: bool,
     negotiated: u64,
-) {
+) -> Result<(), PublicationError> {
     let mut q = queue.lock().expect("virtio-blk queue mutex");
     let mut signaled = false;
-    while let Some(head) = q.pop(queue_memory) {
-        let head_index = head.index;
+    let result: Result<(), PublicationError> = (|| {
+        while let Some(head) = q.pop(queue_memory) {
+            let head_index = head.index;
 
-        // Split the chain into device-readable and device-writable descriptors.
-        let mut readable: Vec<Desc> = Vec::new();
-        let mut writable: Vec<Desc> = Vec::new();
-        let mut current = Some(head);
-        let mut count = 0usize;
-        let mut malformed = false;
-        while let Some(desc) = current {
-            count += 1;
-            if count > q.size as usize {
-                malformed = true;
-                break;
+            // Split the chain into device-readable and device-writable descriptors.
+            let mut readable: Vec<Desc> = Vec::new();
+            let mut writable: Vec<Desc> = Vec::new();
+            let mut current = Some(head);
+            let mut count = 0usize;
+            let mut malformed = false;
+            while let Some(desc) = current {
+                count += 1;
+                if count > q.size as usize {
+                    malformed = true;
+                    break;
+                }
+                if desc.flags & VIRTQ_DESC_F_WRITE == 0 && !writable.is_empty() {
+                    malformed = true;
+                    break;
+                }
+                if desc.flags & VIRTQ_DESC_F_WRITE != 0 {
+                    writable.push((desc.addr, desc.len));
+                } else {
+                    readable.push((desc.addr, desc.len));
+                }
+                let has_next = desc.flags & dillo_virtio::queue::VIRTQ_DESC_F_NEXT != 0;
+                if desc.flags & !3 != 0 {
+                    malformed = true;
+                    break;
+                }
+                current = desc.next_desc(queue_memory);
+                if has_next && current.is_none() {
+                    malformed = true;
+                    break;
+                }
             }
-            if desc.flags & VIRTQ_DESC_F_WRITE == 0 && !writable.is_empty() {
-                malformed = true;
-                break;
-            }
-            if desc.flags & VIRTQ_DESC_F_WRITE != 0 {
-                writable.push((desc.addr, desc.len));
-            } else {
-                readable.push((desc.addr, desc.len));
-            }
-            let has_next = desc.flags & dillo_virtio::queue::VIRTQ_DESC_F_NEXT != 0;
-            if desc.flags & !3 != 0 {
-                malformed = true;
-                break;
-            }
-            current = desc.next_desc(queue_memory);
-            if has_next && current.is_none() {
-                malformed = true;
-                break;
-            }
-        }
 
-        if malformed || readable.is_empty() || writable.is_empty() {
-            log::warn!("virtio-blk: malformed descriptor chain (no readable or writable)");
-            q.add_used(queue_memory, head_index, 0);
+            if malformed || readable.is_empty() || writable.is_empty() {
+                log::warn!("virtio-blk: malformed descriptor chain (no readable or writable)");
+                q.add_used(queue_memory, head_index, 0)?;
+                signaled = true;
+                continue;
+            }
+
+            let (status, used_len) = process_request(
+                buffer_memory,
+                &readable,
+                &writable,
+                backing,
+                read_only,
+                negotiated,
+            );
+
+            let (status_addr, status_len) = writable[writable.len() - 1];
+            let status_written = status_len
+                .checked_sub(1)
+                .and_then(|n| status_addr.checked_add(u64::from(n)))
+                .is_some_and(|addr| buffer_memory.write(addr, &[status]).is_ok());
+            q.add_used(
+                queue_memory,
+                head_index,
+                used_len + u32::from(status_written),
+            )?;
             signaled = true;
-            continue;
         }
-
-        let (status, used_len) = process_request(
-            buffer_memory,
-            &readable,
-            &writable,
-            backing,
-            read_only,
-            negotiated,
-        );
-
-        let (status_addr, status_len) = writable[writable.len() - 1];
-        let status_written = status_len
-            .checked_sub(1)
-            .and_then(|n| status_addr.checked_add(u64::from(n)))
-            .is_some_and(|addr| buffer_memory.write(addr, &[status]).is_ok());
-        q.add_used(
-            queue_memory,
-            head_index,
-            used_len + u32::from(status_written),
-        );
-        signaled = true;
-    }
-    if signaled && let Some(intr) = call_interrupt {
+        Ok(())
+    })();
+    drop(q);
+    if (signaled || result.as_ref().is_err_and(PublicationError::is_published))
+        && let Some(intr) = call_interrupt
+    {
         intr.signal();
     }
+    result
 }
 
 /// Read/write a bounded scatter/gather stream, allowing fields to cross descriptors.
@@ -797,6 +805,70 @@ mod tests {
     }
 
     #[test]
+    fn failed_publication_does_not_repeat_backing_flush() {
+        struct Backing(std::sync::atomic::AtomicUsize);
+        impl BlockBacking for Backing {
+            fn len_bytes(&self) -> u64 {
+                512
+            }
+            fn read_at(&self, _: u64, _: &mut [u8]) -> std::io::Result<usize> {
+                unreachable!()
+            }
+            fn get_id(&self) -> [u8; 20] {
+                [0; 20]
+            }
+            fn is_read_only(&self) -> bool {
+                false
+            }
+            fn flush(&self) -> std::io::Result<()> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }
+        }
+        for fail in 0..4 {
+            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let shared = Arc::new(MappedSharedMemory::for_guest_memory(
+                mem.clone(),
+                SharedAccess::ReadWrite,
+            ));
+            let fault = Arc::new(dillo_virtio::test_support::FaultQueueMemory::new(
+                Arc::new(SharedQueueMemory::new(vec![shared.clone()])),
+                fail,
+            ));
+            let qmem: Arc<dyn QueueMemory> = fault.clone();
+            let bmem: Arc<dyn VirtioMemory> = Arc::new(SharedVirtioMemory::new(vec![shared]));
+            let mut queue = Queue::new(16);
+            queue.uses_notif_suppression = true;
+            queue.ready = true;
+            queue.desc_table = GuestAddress(0x100);
+            queue.avail_ring = GuestAddress(0x1000);
+            queue.used_ring = GuestAddress(0x2000);
+            mem.write_obj::<u16>(2, GuestAddress(0x1002)).unwrap();
+            mem.write_obj::<u32>(VIRTIO_BLK_T_FLUSH, GuestAddress(0x5000))
+                .unwrap();
+            write_desc(&mem, queue.desc_table, 0, 0x5000, 16, VIRTQ_DESC_F_NEXT, 1);
+            write_desc(&mem, queue.desc_table, 1, 0x6000, 1, VIRTQ_DESC_F_WRITE, 0);
+            let queue = Arc::new(Mutex::new(queue));
+            let backing = Backing(std::sync::atomic::AtomicUsize::new(0));
+            let error = drain_requests(
+                &qmem,
+                &bmem,
+                &queue,
+                None,
+                &backing,
+                false,
+                VIRTIO_BLK_F_FLUSH,
+            )
+            .unwrap_err();
+            assert_eq!(backing.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(queue.lock().unwrap().next_avail.0, 1);
+            assert_eq!(queue.lock().unwrap().next_used.0, u16::from(fail == 3));
+            assert_eq!(error.is_published(), fail == 3);
+            assert_eq!(fault.attempts(), fail + 1);
+        }
+    }
+
+    #[test]
     fn features_default_backing_minimal() {
         let blk = blk_from(1024 * 1024, 512, 512, None, false);
         let expected = VIRTIO_F_VERSION_1 | VIRTIO_BLK_F_FLUSH | VIRTIO_BLK_F_BLK_SIZE;
@@ -925,7 +997,8 @@ mod tests {
             &backing,
             false,
             VIRTIO_BLK_F_FLUSH,
-        );
+        )
+        .unwrap();
 
         // Guest data buffer filled with backing bytes.
         let mut out = [0u8; 512];

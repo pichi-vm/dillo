@@ -557,6 +557,7 @@ dependencies = [
  "dillo-machine",
  "dillo-mmio",
  "dillo-runtime",
+ "dillo-virtio",
  "libc",
  "log",
  "pmi",
@@ -598,6 +599,7 @@ dependencies = [
  "dillo-machine",
  "dillo-mmio",
  "dillo-runtime",
+ "dillo-virtio",
  "log",
  "pmi",
  "thiserror 2.0.18",
@@ -764,6 +766,7 @@ dependencies = [
  "dillo-machine",
  "dillo-virtio",
  "log",
+ "vm-memory 0.17.2",
 ]
 
 [[package]]

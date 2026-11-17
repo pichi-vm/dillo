@@ -20,6 +20,7 @@ smoltcp = { workspace = true }
 mio = { workspace = true }
 
 [dev-dependencies]
+dillo-virtio = { workspace = true, features = ["test-support"] }
 # The frontend's queue marshalling is unit-tested against a real guest-memory
 # mmap, exactly like dillo-virtio-console.
 vm-memory = { workspace = true }

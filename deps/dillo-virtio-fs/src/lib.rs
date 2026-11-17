@@ -22,6 +22,7 @@
 mod backend;
 mod fuse;
 
+use dillo_virtio::queue::PublicationError;
 use std::sync::{Arc, Mutex};
 
 use dillo_machine::interrupt::Interrupt;
@@ -280,7 +281,7 @@ fn queue_worker(
             call_interrupt.as_ref(),
             &state,
             backend.as_ref(),
-        );
+        )?;
     }
 }
 
@@ -294,57 +295,64 @@ fn drain_requests(
     call_interrupt: Option<&Interrupt>,
     state: &Arc<Mutex<FsState>>,
     backend: &dyn FsBackend,
-) {
+) -> Result<(), PublicationError> {
     let mut q = queue.lock().expect("virtio-fs queue mutex");
     let mut signaled = false;
-    while let Some(head) = q.pop(queue_memory) {
-        let head_index = head.index;
+    let result: Result<(), PublicationError> = (|| {
+        while let Some(head) = q.pop(queue_memory) {
+            let head_index = head.index;
 
-        // Split the chain: device-readable = request, device-writable = reply.
-        let mut readable: Vec<Desc> = Vec::new();
-        let mut writable: Vec<Desc> = Vec::new();
-        let mut current = Some(head);
-        while let Some(desc) = current {
-            if desc.flags & VIRTQ_DESC_F_WRITE != 0 {
-                writable.push((desc.addr, desc.len));
-            } else {
-                readable.push((desc.addr, desc.len));
+            // Split the chain: device-readable = request, device-writable = reply.
+            let mut readable: Vec<Desc> = Vec::new();
+            let mut writable: Vec<Desc> = Vec::new();
+            let mut current = Some(head);
+            while let Some(desc) = current {
+                if desc.flags & VIRTQ_DESC_F_WRITE != 0 {
+                    writable.push((desc.addr, desc.len));
+                } else {
+                    readable.push((desc.addr, desc.len));
+                }
+                current = desc.next_desc(queue_memory);
             }
-            current = desc.next_desc(queue_memory);
-        }
 
-        // Gather the request bytes.
-        let mut input = Vec::new();
-        for &(addr, len) in &readable {
-            if input.len() >= MAX_REQUEST {
-                break;
-            }
-            let take = (len as usize).min(MAX_REQUEST - input.len());
-            let mut buf = vec![0u8; take];
-            match buffer_memory.read(addr, &mut buf) {
-                Ok(n) => input.extend_from_slice(&buf[..n]),
-                Err(e) => {
-                    log::warn!("virtio-fs: request read at {:#x}+{len}: {e:?}", addr.0);
+            // Gather the request bytes.
+            let mut input = Vec::new();
+            for &(addr, len) in &readable {
+                if input.len() >= MAX_REQUEST {
                     break;
                 }
+                let take = (len as usize).min(MAX_REQUEST - input.len());
+                let mut buf = vec![0u8; take];
+                match buffer_memory.read(addr, &mut buf) {
+                    Ok(n) => input.extend_from_slice(&buf[..n]),
+                    Err(e) => {
+                        log::warn!("virtio-fs: request read at {:#x}+{len}: {e:?}", addr.0);
+                        break;
+                    }
+                }
             }
+
+            let reply = {
+                let mut st = state.lock().expect("virtio-fs state mutex");
+                fuse::dispatch(&mut st, backend, &input)
+            };
+
+            let written = match reply {
+                Some(reply) => scatter_write(buffer_memory, &writable, &reply),
+                None => 0, // replyless op (FORGET / INTERRUPT): return desc, len 0.
+            };
+            q.add_used(queue_memory, head_index, written)?;
+            signaled = true;
         }
-
-        let reply = {
-            let mut st = state.lock().expect("virtio-fs state mutex");
-            fuse::dispatch(&mut st, backend, &input)
-        };
-
-        let written = match reply {
-            Some(reply) => scatter_write(buffer_memory, &writable, &reply),
-            None => 0, // replyless op (FORGET / INTERRUPT): return desc, len 0.
-        };
-        q.add_used(queue_memory, head_index, written);
-        signaled = true;
-    }
-    if signaled && let Some(intr) = call_interrupt {
+        Ok(())
+    })();
+    drop(q);
+    if (signaled || result.as_ref().is_err_and(PublicationError::is_published))
+        && let Some(intr) = call_interrupt
+    {
         intr.signal();
     }
+    result
 }
 
 /// Write `reply` across the device-writable descriptors in order. Returns the
@@ -383,6 +391,75 @@ mod tests {
     use dillo_virtio::queue::VIRTQ_DESC_F_NEXT;
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
     use vm_memory::{Address, Bytes, GuestMemoryMmap};
+
+    #[test]
+    fn failed_publication_does_not_repeat_filesystem_mutation() {
+        struct Backend(std::sync::atomic::AtomicUsize, MapFs);
+        impl FsBackend for Backend {
+            fn stat(&self, path: &std::path::Path) -> std::io::Result<backend::Attr> {
+                self.1.stat(path)
+            }
+            fn readdir(&self, _: &std::path::Path) -> std::io::Result<Vec<backend::DirEntry>> {
+                unreachable!()
+            }
+            fn read(&self, _: &std::path::Path, _: u64, _: u32) -> std::io::Result<Vec<u8>> {
+                unreachable!()
+            }
+            fn readlink(&self, _: &std::path::Path) -> std::io::Result<Vec<u8>> {
+                unreachable!()
+            }
+            fn mkdir(&self, _: &std::path::Path, _: u32) -> std::io::Result<backend::Attr> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.1.stat(std::path::Path::new(""))
+            }
+        }
+        for fail in 0..4 {
+            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let shared = Arc::new(MappedSharedMemory::for_guest_memory(
+                mem.clone(),
+                SharedAccess::ReadWrite,
+            ));
+            let fault = Arc::new(dillo_virtio::test_support::FaultQueueMemory::new(
+                Arc::new(SharedQueueMemory::new(vec![shared.clone()])),
+                fail,
+            ));
+            let qmem: Arc<dyn QueueMemory> = fault.clone();
+            let bmem: Arc<dyn VirtioMemory> = Arc::new(SharedVirtioMemory::new(vec![shared]));
+            let mut queue = Queue::new(16);
+            queue.uses_notif_suppression = true;
+            queue.ready = true;
+            queue.desc_table = GuestAddress(0x100);
+            queue.avail_ring = GuestAddress(0x1000);
+            queue.used_ring = GuestAddress(0x2000);
+            mem.write_obj::<u16>(2, GuestAddress(0x1002)).unwrap();
+            let mut request = vec![0u8; 50];
+            request[0..4].copy_from_slice(&50u32.to_le_bytes());
+            request[4..8].copy_from_slice(&9u32.to_le_bytes()); // FUSE_MKDIR
+            request[8..16].copy_from_slice(&1u64.to_le_bytes());
+            request[16..24].copy_from_slice(&1u64.to_le_bytes()); // root inode
+            request[40..44].copy_from_slice(&0o755u32.to_le_bytes());
+            request[48] = b'x';
+            mem.write_slice(&request, GuestAddress(0x5000)).unwrap();
+            write_desc(&mem, queue.desc_table, 0, 0x5000, 50, VIRTQ_DESC_F_NEXT, 1);
+            write_desc(
+                &mem,
+                queue.desc_table,
+                1,
+                0x6000,
+                256,
+                VIRTQ_DESC_F_WRITE,
+                0,
+            );
+            let queue = Arc::new(Mutex::new(queue));
+            let state = Arc::new(Mutex::new(FsState::new(false)));
+            let backend = Backend(std::sync::atomic::AtomicUsize::new(0), MapFs::new());
+            let error = drain_requests(&qmem, &bmem, &queue, None, &state, &backend).unwrap_err();
+            assert_eq!(backend.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(queue.lock().unwrap().next_avail.0, 1);
+            assert_eq!(error.is_published(), fail == 3);
+            assert_eq!(fault.attempts(), fail + 1);
+        }
+    }
 
     #[test]
     fn later_spawn_failure_wakes_and_joins_the_first_queue_worker() {
@@ -617,7 +694,8 @@ mod tests {
             None,
             &state,
             backend.as_ref(),
-        );
+        )
+        .unwrap();
 
         // Reply: out_header (len, error=0, unique=1) + fuse_init_out.
         let reply_len: u32 = mem.read_obj(reply_buf).unwrap();

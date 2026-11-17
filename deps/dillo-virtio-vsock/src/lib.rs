@@ -26,6 +26,7 @@ mod packet;
 #[cfg(unix)]
 mod uds;
 
+use dillo_virtio::queue::PublicationError;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -297,22 +298,28 @@ fn tx_worker(
         }
         let mut q = queue.lock().expect("virtio-vsock TX queue mutex");
         let mut signaled = false;
-        while let Some(head) = q.pop(queue_memory) {
-            let head_index = head.index;
-            if let Some(pkt) = read_tx_packet(queue_memory, buffer_memory, head) {
-                conn_mgr
-                    .lock()
-                    .expect("virtio-vsock conn_mgr mutex")
-                    .process_tx_pkt(pkt);
+        let result: Result<(), PublicationError> = (|| {
+            while let Some(head) = q.pop(queue_memory) {
+                let head_index = head.index;
+                if let Some(pkt) = read_tx_packet(queue_memory, buffer_memory, head) {
+                    conn_mgr
+                        .lock()
+                        .expect("virtio-vsock conn_mgr mutex")
+                        .process_tx_pkt(pkt);
+                }
+                // TX descriptors are device-readable; nothing is written back.
+                q.add_used(queue_memory, head_index, 0)?;
+                signaled = true;
             }
-            // TX descriptors are device-readable; nothing is written back.
-            q.add_used(queue_memory, head_index, 0);
-            signaled = true;
-        }
+            Ok(())
+        })();
         drop(q);
-        if signaled && let Some(intr) = interrupt {
+        if (signaled || result.as_ref().is_err_and(PublicationError::is_published))
+            && let Some(intr) = interrupt
+        {
             intr.signal();
         }
+        result?;
     }
 }
 
@@ -347,14 +354,16 @@ fn rx_worker(
             continue;
         };
         let mut q = queue.lock().expect("virtio-vsock RX queue mutex");
-        if let Some(_written) = write_rx_packet(queue_memory, buffer_memory, &mut q, &pkt) {
-            drop(q);
-            if let Some(intr) = interrupt {
-                intr.signal();
-            }
-        } else {
-            // No guest RX buffer available; hold the packet and retry.
-            drop(q);
+        let result = write_rx_packet(queue_memory, buffer_memory, &mut q, &pkt);
+        drop(q);
+        if (matches!(&result, Ok(Some(_)))
+            || result.as_ref().is_err_and(PublicationError::is_published))
+            && let Some(intr) = interrupt
+        {
+            intr.signal();
+        }
+        if result?.is_none() {
+            // Only an empty queue retains the packet for retry.
             pending = Some(pkt);
             std::thread::sleep(RX_POLL);
         }
@@ -404,8 +413,10 @@ fn write_rx_packet(
     buffer_memory: &Arc<dyn VirtioMemory>,
     queue: &mut Queue,
     pkt: &VsockPacket,
-) -> Option<u32> {
-    let head = queue.pop(queue_memory)?;
+) -> Result<Option<u32>, PublicationError> {
+    let Some(head) = queue.pop(queue_memory) else {
+        return Ok(None);
+    };
     let head_index = head.index;
 
     let mut out = pkt.header_bytes().to_vec();
@@ -437,8 +448,8 @@ fn write_rx_packet(
         current = desc.next_desc(queue_memory);
     }
 
-    queue.add_used(queue_memory, head_index, written);
-    Some(written)
+    queue.add_used(queue_memory, head_index, written)?;
+    Ok(Some(written))
 }
 
 #[cfg(test)]
@@ -477,6 +488,87 @@ mod tests {
         }
         fn has_data(&self) -> bool {
             self.buffers.values().any(|b| !b.is_empty())
+        }
+    }
+
+    #[test]
+    fn publication_failure_keeps_vsock_connection_effects_once_and_rx_consumed() {
+        use dillo_machine::memory::{MappedSharedMemory, SharedAccess};
+        use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryMmap};
+        struct Backend(Arc<AtomicUsize>);
+        impl VsockBackend for Backend {
+            fn on_connection_request(&mut self, _: u32, _: u32) -> bool {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            fn on_data_received(&mut self, _: u32, _: u32, _: &[u8]) {}
+            fn on_connection_closed(&mut self, _: u32, _: u32) {}
+            fn poll_data(&mut self) -> Option<(u32, u32, Vec<u8>)> {
+                None
+            }
+            fn has_data(&self) -> bool {
+                false
+            }
+        }
+        for fail in 0..4 {
+            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let shared = Arc::new(MappedSharedMemory::for_guest_memory(
+                mem.clone(),
+                SharedAccess::ReadWrite,
+            ));
+            let qmem: Arc<dyn QueueMemory> =
+                Arc::new(dillo_virtio::test_support::FaultQueueMemory::new(
+                    Arc::new(SharedQueueMemory::new(vec![shared.clone()])),
+                    fail,
+                ));
+            let bmem: Arc<dyn VirtioMemory> = Arc::new(SharedVirtioMemory::new(vec![shared]));
+            let mut queue = Queue::new(16);
+            queue.uses_notif_suppression = true;
+            queue.ready = true;
+            queue.desc_table = GuestAddress(0x100);
+            queue.avail_ring = GuestAddress(0x1000);
+            queue.used_ring = GuestAddress(0x2000);
+            mem.write_obj::<u64>(0x5000, queue.desc_table).unwrap();
+            mem.write_obj::<u32>(VSOCK_HEADER_LEN as u32, queue.desc_table.unchecked_add(8))
+                .unwrap();
+            mem.write_obj::<u16>(2, GuestAddress(0x1002)).unwrap();
+            let mut request =
+                VsockPacket::new_reply(VSOCK_OP_REQUEST, 3, VSOCK_HOST_CID, 1234, 5678);
+            request.buf_alloc = 65536;
+            mem.write_slice(&request.header_bytes(), GuestAddress(0x5000))
+                .unwrap();
+            let count = Arc::new(AtomicUsize::new(0));
+            let device = VirtioVsock::new_with_backend(3, Box::new(Backend(Arc::clone(&count))));
+            let kick = Kick::new().unwrap();
+            kick.write(1).unwrap();
+            let error = tx_worker(
+                &device.conn_mgr,
+                &qmem,
+                &bmem,
+                queue.clone(),
+                &kick,
+                None,
+                &VirtioRunToken::from_fn(|| false),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("used-ring"));
+            assert_eq!(count.load(Ordering::Relaxed), 1);
+            // The response has already been produced by the connection manager.
+            let response = device.conn_mgr.lock().unwrap().produce_rx_pkt().unwrap();
+            assert!(device.conn_mgr.lock().unwrap().produce_rx_pkt().is_none());
+            mem.write_obj::<u16>(VIRTQ_DESC_F_WRITE, queue.desc_table.unchecked_add(12))
+                .unwrap();
+            let healthy: Arc<dyn QueueMemory> = Arc::new(SharedQueueMemory::new(vec![Arc::new(
+                MappedSharedMemory::for_guest_memory(mem.clone(), SharedAccess::ReadWrite),
+            )]));
+            let rx: Arc<dyn QueueMemory> = Arc::new(
+                dillo_virtio::test_support::FaultQueueMemory::new(healthy, fail),
+            );
+            assert!(write_rx_packet(&rx, &bmem, &mut queue, &response).is_err());
+            assert_eq!(queue.next_avail.0, 1);
+            assert_eq!(queue.next_used.0, u16::from(fail == 3));
         }
     }
 
