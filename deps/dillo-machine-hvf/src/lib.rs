@@ -4,6 +4,9 @@
 #![cfg(target_os = "macos")]
 
 mod hypervisor;
+mod launch_input;
+
+pub use launch_input::CapturedLaunchInput;
 
 use applevisor::prelude::VcpuHandle;
 
@@ -42,9 +45,9 @@ mod imp {
     use vm_memory::{GuestAddress, GuestMemoryMmap, GuestRegionMmap};
 
     use crate::VcpuHandle;
-    use crate::VmExit;
     pub use crate::hypervisor::Error;
     use crate::hypervisor::force_vcpus_exit;
+    use crate::{CapturedLaunchInput, VmExit};
 
     fn install_signal_watchers(_supervisor_shutdown: &'static AtomicBool) {}
 
@@ -245,6 +248,7 @@ mod imp {
 
     impl Host for Vm {
         type RawStdioGuard = RawStdio;
+        type LaunchInput = CapturedLaunchInput;
 
         const ARCH: HostArchitecture = HostArchitecture::Aarch64;
 

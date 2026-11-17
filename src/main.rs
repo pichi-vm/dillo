@@ -181,7 +181,6 @@ fn main() {
         merged_dtb,
         memory: memory_plan,
         recipe,
-        pmi: pmi_image,
     } = launch;
     boot_trace::mark("launch_read");
 
@@ -210,7 +209,6 @@ fn main() {
         }),
         recipe,
         placements,
-        pmi_image,
     );
     boot_trace::mark("preflight");
 
@@ -1490,134 +1488,49 @@ mod launch {
     #[cfg(test)]
     mod delegation_tests;
 
-    // The PMI File (fd) is held for the VM lifetime so the mapping — and any
-    // reboot re-map — is pinned to that inode, not re-resolved by path. Read/Seek
-    // are only used by the non-Linux read_to_end fallback (Linux mmaps the fd).
     use std::fs::File;
-    #[cfg(not(target_os = "linux"))]
-    use std::io::{Read, Seek};
     use std::path::Path;
 
     use dillo_devtree::platform::{Arch, Machine as PlatformMachine, SurveyError};
-    use dillo_machine::HostArchitecture;
+    use dillo_machine::{HostArchitecture, LaunchInput};
     use thiserror::Error;
 
     use crate::placement::{self, MemoryPlan};
     use dillo::pmi_parse::{ActionKind, FillKind, HostArch, ParseOptions};
 
-    /// The PMI byte source. Raw section loads are copied straight from it into
-    /// guest RAM (one copy) instead of being staged into owned `Vec`s (two
-    /// copies). On Linux the backing is an mmap; elsewhere a `read_to_end`
-    /// buffer. The backing is resident only while sections are being copied:
-    /// after the initial load the caller [`release`](Pmi::release)s it so
-    /// the mapping does not stay resident for the VM's lifetime, and the rare
-    /// guest-reboot replay [`remap`](Pmi::remap)s it from `path`.
-    pub(crate) struct Pmi {
-        /// Held open for the VM lifetime: the mapping and any reboot re-map are
-        /// pinned to this fd's inode, so a replay is always the exact bytes that
-        /// were loaded and measured — never whatever the path resolves to later.
-        file: File,
-        /// Retained for error messages only; never used to re-open the file.
+    type SelectedInput = <crate::machine::Vm as dillo_machine::Host>::LaunchInput;
+
+    /// Captured, unvalidated PMI bytes. Validation consumes this owner and puts
+    /// it inside the resulting recipe, so source identity cannot be replaced.
+    #[derive(Debug)]
+    struct Pmi<S: LaunchInput> {
+        source: S,
         path: std::path::PathBuf,
-        backing: Option<PmiBacking>,
     }
 
-    enum PmiBacking {
-        #[cfg(target_os = "linux")]
-        Mapped(mmarinus::Map<mmarinus::perms::Read>),
-        #[cfg(not(target_os = "linux"))]
-        Owned(Vec<u8>),
-    }
-
-    impl Pmi {
-        /// Open the PMI at `path`, hold the fd, and map (Linux) / read (other) it
-        /// resident.
-        pub(crate) fn open(path: &Path) -> Result<Self, LaunchError> {
-            let file = File::open(path).map_err(|source| LaunchError::ReadPmi {
+    impl<S: LaunchInput> Pmi<S> {
+        fn open(path: &Path) -> Result<Self, LaunchError> {
+            let read_error = |source| LaunchError::ReadPmi {
                 path: path.display().to_string(),
                 source,
-            })?;
-            let mut img = Pmi {
-                file,
-                path: path.to_path_buf(),
-                backing: None,
             };
-            img.remap()?;
-            Ok(img)
+            let source = S::capture(File::open(path).map_err(read_error)?).map_err(read_error)?;
+            Ok(Self {
+                source,
+                path: path.to_path_buf(),
+            })
         }
 
-        /// (Re-)acquire the backing store from the held fd. Used for the initial
-        /// load and to replay launch writes on guest reboot after a [`release`].
-        pub(crate) fn remap(&mut self) -> Result<(), LaunchError> {
-            // Owned label up front so the error path doesn't borrow `self` while
-            // we mutably borrow `self.file` for the mapping.
-            let path = self.path.display().to_string();
-            #[cfg(target_os = "linux")]
-            {
-                let len = self
-                    .file
-                    .metadata()
-                    .map_err(|source| LaunchError::ReadPmi {
-                        path: path.clone(),
-                        source,
-                    })?
-                    .len() as usize;
-                let m = mmarinus::Map::bytes(len)
-                    .anywhere()
-                    .from(&mut self.file, 0)
-                    .with(mmarinus::perms::Read)
-                    .map_err(|e| LaunchError::ReadPmi {
-                        path: path.clone(),
-                        source: std::io::Error::other(format!("mmap: {e:?}")),
-                    })?;
-                self.backing = Some(PmiBacking::Mapped(m));
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                self.file.rewind().map_err(|source| LaunchError::ReadPmi {
-                    path: path.clone(),
-                    source,
-                })?;
-                let mut b = Vec::new();
-                self.file
-                    .read_to_end(&mut b)
-                    .map_err(|source| LaunchError::ReadPmi {
-                        path: path.clone(),
-                        source,
-                    })?;
-                self.backing = Some(PmiBacking::Owned(b));
-            }
-            Ok(())
-        }
-
-        /// Drop the backing store (munmap on Linux), freeing its resident pages
-        /// while keeping the fd open for a possible reboot re-map. Safe to call
-        /// once sections have been copied into guest RAM.
-        pub(crate) fn release(&mut self) {
-            self.backing = None;
-        }
-
-        pub(crate) fn bytes(&self) -> &[u8] {
-            match self.backing.as_ref().expect("PMI backing released") {
-                #[cfg(target_os = "linux")]
-                PmiBacking::Mapped(m) => &m[..],
-                #[cfg(not(target_os = "linux"))]
-                PmiBacking::Owned(v) => v,
-            }
-        }
-    }
-
-    impl std::fmt::Debug for Pmi {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match &self.backing {
-                Some(_) => write!(f, "Pmi({} bytes, resident)", self.bytes().len()),
-                None => write!(f, "Pmi(released)"),
-            }
+        fn view(&self) -> Result<S::View<'_>, LaunchError> {
+            self.source.view().map_err(|source| LaunchError::ReadPmi {
+                path: self.path.display().to_string(),
+                source,
+            })
         }
     }
 
     /// One operation's contents: retained derived bytes, an image range copied
-    /// directly from [`Pmi`], or an explicit zero extent.
+    /// directly from the retained PMI capture, or an explicit zero extent.
     #[derive(Debug, Clone)]
     pub(crate) enum WriteSrc {
         Owned(Vec<u8>),
@@ -1637,13 +1550,12 @@ mod launch {
 
     /// Target-neutral launch facts derived before backend construction.
     #[derive(Debug)]
-    pub(crate) struct LaunchPlan {
+    pub(crate) struct LaunchPlan<S: LaunchInput = SelectedInput> {
         pub(crate) parsed: dillo::pmi_parse::ParsedPmi,
         pub(crate) merged_dtb: Vec<u8>,
         pub(crate) platform: PlatformMachine,
         pub(crate) memory: MemoryPlan,
-        pub(crate) recipe: LaunchRecipe,
-        pub(crate) pmi: Pmi,
+        pub(crate) recipe: LaunchRecipe<S>,
     }
 
     /// One launch-time write into guest RAM.
@@ -1654,7 +1566,7 @@ mod launch {
         pub(crate) data: WriteSrc,
     }
 
-    impl LaunchPlan {
+    impl LaunchPlan<SelectedInput> {
         /// Read a PMI file, validate target-neutral launch facts, and compute RAM
         /// placement from the DTB-declared platform.
         #[allow(clippy::too_many_arguments)]
@@ -1668,17 +1580,32 @@ mod launch {
             base_dtb_path: Option<&Path>,
             bootconfig_path: Option<&Path>,
         ) -> Result<Self, LaunchError> {
-            // Map the PMI read-only rather than reading it whole. The PMI
-            // granularity spec places sections at aligned offsets precisely so a
-            // VMM can map the file and touch only the section bytes; a 70MB PMI is
-            // mostly 2M zero padding that read_to_end would copy needlessly. On
-            // Linux we mmap via mmarinus (safe wrapper — no caller unsafe, so the
-            // workspace unsafe_code=deny lint still holds); other hosts fall back
-            // to read_to_end. `bytes` borrows the backing store, which lives for
-            // the rest of this function (its data is copied into owned buffers by
-            // parse/guest_writes before we return), so nothing escapes the map.
-            let pmi = Pmi::open(pmi_path)?;
-            let bytes: &[u8] = pmi.bytes();
+            Pmi::<SelectedInput>::open(pmi_path)?.validate(
+                host_arch,
+                cpu_compatible,
+                address_bits,
+                memory_mib,
+                vcpus,
+                base_dtb_path,
+                bootconfig_path,
+            )
+        }
+    }
+
+    impl<S: LaunchInput> Pmi<S> {
+        #[allow(clippy::too_many_arguments)]
+        fn validate(
+            self,
+            host_arch: HostArchitecture,
+            cpu_compatible: Option<&str>,
+            address_bits: impl FnOnce() -> anyhow::Result<u32>,
+            memory_mib: u32,
+            vcpus: u32,
+            base_dtb_path: Option<&Path>,
+            bootconfig_path: Option<&Path>,
+        ) -> Result<LaunchPlan<S>, LaunchError> {
+            let view = self.view()?;
+            let bytes = view.as_ref();
 
             crate::boot_trace::mark("pmi_read");
             let pmi_arch = pmi_arch(host_arch);
@@ -1760,7 +1687,7 @@ mod launch {
                 memory_mib,
                 platform.placement_regions(),
             )?;
-            let recipe = LaunchRecipe::resolve(
+            let operations = LaunchRecipe::<S>::resolve(
                 bytes,
                 &parsed,
                 &memory,
@@ -1774,16 +1701,16 @@ mod launch {
             )?;
             crate::boot_trace::mark("guest_writes_built");
 
-            // `bytes` (a borrow of `pmi`) is unused past here, so `pmi` can move
-            // into the plan: raw section loads reference it by offset and are
-            // copied straight from it into guest RAM at apply time (single copy).
-            Ok(Self {
+            drop(view);
+            Ok(LaunchPlan {
                 parsed,
                 merged_dtb: dtb,
                 platform,
                 memory,
-                recipe,
-                pmi,
+                recipe: LaunchRecipe {
+                    pmi: self,
+                    operations,
+                },
             })
         }
     }
@@ -1897,11 +1824,12 @@ mod launch {
 
     /// A retained, ordered recipe of complete guest-memory operations.
     #[derive(Debug)]
-    pub(crate) struct LaunchRecipe {
+    pub(crate) struct LaunchRecipe<S: LaunchInput = SelectedInput> {
+        pmi: Pmi<S>,
         operations: Vec<GuestWrite>,
     }
 
-    impl LaunchRecipe {
+    impl<S: LaunchInput> LaunchRecipe<S> {
         fn resolve(
             bytes: &[u8],
             parsed: &dillo::pmi_parse::ParsedPmi,
@@ -1910,7 +1838,7 @@ mod launch {
             cpu_compatible: Option<&str>,
             vcpus: u32,
             inputs: FillInputs<'_>,
-        ) -> Result<Self, LaunchError> {
+        ) -> Result<Vec<GuestWrite>, LaunchError> {
             let mut operations = Vec::new();
             for action in &parsed.actions {
                 let source = action.source();
@@ -1968,14 +1896,15 @@ mod launch {
                     });
                 }
             }
-            Ok(Self { operations })
+            Ok(operations)
         }
 
         pub(crate) fn apply<M: dillo_machine::Machine>(
             &self,
             machine: &mut M,
-            image: &[u8],
         ) -> anyhow::Result<()> {
+            let view = self.pmi.view()?;
+            let image = view.as_ref();
             for operation in &self.operations {
                 match &operation.data {
                     WriteSrc::Zero { len } => machine.zero_guest(operation.gpa, *len)?,
@@ -2222,18 +2151,17 @@ mod machine_select {
 
         /// Target-neutral launch facts already derived by `dillo`.
         #[derive(Debug)]
-        pub(crate) struct Preflight {
+        pub(crate) struct Preflight<S: dillo_machine::LaunchInput = <selected_machine::Vm as dillo_machine::Host>::LaunchInput> {
             parsed: dillo::pmi_parse::ParsedPmi,
             platform: PlatformMachine,
             dtb: Vec<u8>,
             memslots: Vec<RunRegion>,
             memory_nodes: Vec<RunRegion>,
-            recipe: crate::launch::LaunchRecipe,
+            recipe: crate::launch::LaunchRecipe<S>,
             placements: Vec<DevicePlacement>,
-            pmi: crate::launch::Pmi,
         }
 
-        impl Preflight {
+        impl<S: dillo_machine::LaunchInput> Preflight<S> {
             // Aggregates the target-neutral launch facts; the fields are
             // genuinely distinct inputs, so a builder would add noise here.
             #[allow(clippy::too_many_arguments)]
@@ -2243,9 +2171,8 @@ mod machine_select {
                 dtb: Vec<u8>,
                 memslots: impl IntoIterator<Item = RunRegion>,
                 memory_nodes: impl IntoIterator<Item = RunRegion>,
-                recipe: crate::launch::LaunchRecipe,
+                recipe: crate::launch::LaunchRecipe<S>,
                 placements: Vec<DevicePlacement>,
-                pmi: crate::launch::Pmi,
             ) -> Self {
                 Self {
                     parsed,
@@ -2255,7 +2182,6 @@ mod machine_select {
                     memory_nodes: memory_nodes.into_iter().collect(),
                     recipe,
                     placements,
-                    pmi,
                 }
             }
 
@@ -2266,9 +2192,8 @@ mod machine_select {
                 PlatformMachine,
                 Vec<u8>,
                 RunMemoryPlan,
-                crate::launch::LaunchRecipe,
+                crate::launch::LaunchRecipe<S>,
                 Vec<DevicePlacement>,
-                crate::launch::Pmi,
             ) {
                 (
                     self.parsed,
@@ -2280,7 +2205,6 @@ mod machine_select {
                     },
                     self.recipe,
                     self.placements,
-                    self.pmi,
                 )
             }
         }
@@ -2636,13 +2560,13 @@ mod machine_select {
         }
 
         fn run_selected<M, E>(
-            preflight: Preflight,
+            preflight: Preflight<M::LaunchInput>,
             vcpus: u32,
             supervisor_shutdown: &'static AtomicBool,
         ) -> Result<i32, RunError>
         where
             E: std::error::Error + Send + Sync + 'static,
-            M: Machine<Error = E>,
+            M: Machine<Error = E> + dillo_machine::Host,
             M: Attach<M::Memory, Error = E, Output = ()>,
             M: Attach<M::CpuState, Error = E, Output = Arc<M::Cpu>>,
             M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn MmioAttachment>>,
@@ -2655,7 +2579,7 @@ mod machine_select {
             M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn MmioAttachment>>,
             M: Attach<Arc<syscon::SysconDevice>, Error = E>,
         {
-            let (parsed, platform, dtb, plan, recipe, placements, mut pmi) = preflight.into_parts();
+            let (parsed, platform, dtb, plan, recipe, placements) = preflight.into_parts();
             log::debug!(
                 "PMI parsed: arch={:?}, {} actions, dt:dtb source={:?}",
                 parsed.arch,
@@ -2695,11 +2619,8 @@ mod machine_select {
             Attach::attach(&mut vm, memory).map_err(RunError::machine)?;
             crate::boot_trace::mark("mem_attached");
             recipe
-                .apply(&mut vm, pmi.bytes())
+                .apply(&mut vm)
                 .map_err(|error| RunError::Machine(error.to_string()))?;
-            // Sections are now in guest RAM; drop the PMI backing so it does not
-            // stay resident for the VM's lifetime. A guest reboot re-maps it.
-            pmi.release();
             crate::boot_trace::mark("sections_loaded");
 
             attach_uart(&mut vm, &platform)?;
@@ -2715,13 +2636,9 @@ mod machine_select {
             while matches!(outcome, VcpuStop::GuestReset) {
                 log::info!("guest requested reboot - replaying launch writes");
                 vm.reset_for_reboot().map_err(RunError::machine)?;
-                // Re-map the PMI just to replay the raw section loads, then drop
-                // it again — it is not held resident between boots.
-                pmi.remap().map_err(RunError::machine)?;
                 recipe
-                    .apply(&mut vm, pmi.bytes())
+                    .apply(&mut vm)
                     .map_err(|error| RunError::Machine(error.to_string()))?;
-                pmi.release();
                 let control = Arc::new(SupervisorControl {
                     supervisor_shutdown,
                 });

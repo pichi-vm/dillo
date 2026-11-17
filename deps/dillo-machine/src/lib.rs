@@ -85,6 +85,7 @@ pub fn aarch64_pa_bits(mmfr0: u64) -> Option<u32> {
 /// Host-level services exposed by the selected machine backend.
 pub trait Host {
     type RawStdioGuard: 'static;
+    type LaunchInput: LaunchInput;
 
     const ARCH: HostArchitecture;
 
@@ -99,6 +100,27 @@ pub trait Host {
     fn install_panic_terminal_restore();
 
     fn install_signal_watchers(supervisor_shutdown: &'static AtomicBool);
+}
+
+/// An immutable, privately owned capture of a launch file.
+///
+/// Capture completes before validation. Later source-file writes, truncation or
+/// pathname replacement must not change any view, and writable guest memory must
+/// never alias this backing. Native implementations belong to the selected host
+/// family; construction does not require a live machine.
+pub trait LaunchInput: std::fmt::Debug + Sized + 'static {
+    type View<'a>: AsRef<[u8]>
+    where
+        Self: 'a;
+
+    /// Consume an opened file and capture its contents from offset zero. Capture
+    /// may observe concurrent source changes, but its completed bytes must be
+    /// immutable before returning. Partial capture is an error.
+    fn capture(source: std::fs::File) -> std::io::Result<Self>;
+
+    /// Borrow the same captured bytes on every call. Dropping a view may release
+    /// its mapping; it must not discard or reread the retained source contents.
+    fn view(&self) -> std::io::Result<Self::View<'_>>;
 }
 
 /// Backend-owned memory input constructed from DTB-derived RAM ranges.

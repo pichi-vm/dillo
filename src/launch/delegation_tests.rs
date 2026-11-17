@@ -254,7 +254,12 @@ fn invalid_image_does_not_require_a_hypervisor() {
 
 // Use a non-arma section name and a 4 KiB capacity. Action GPAs remain the
 // authority even though the PE section's VirtualAddress is deliberately zero.
-fn with_bootconfig(mut bytes: Vec<u8>, gpas: &[u64], capacity: u32, raw_size: u32) -> Vec<u8> {
+pub(super) fn with_bootconfig(
+    mut bytes: Vec<u8>,
+    gpas: &[u64],
+    capacity: u32,
+    raw_size: u32,
+) -> Vec<u8> {
     let mut manifest: serde_json::Value = ciborium::from_reader(&bytes[0x1000..0x2000]).unwrap();
     for gpa in gpas {
         manifest["actions"].as_array_mut().unwrap().push(json!({

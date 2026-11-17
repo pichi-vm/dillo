@@ -8,6 +8,9 @@ mod amd_tsc;
 #[cfg(target_arch = "x86_64")]
 mod cpuid_x86;
 mod hypervisor;
+mod launch_input;
+
+pub use launch_input::CapturedLaunchInput;
 #[cfg(target_arch = "x86_64")]
 mod intc_x86;
 mod irq;
@@ -46,12 +49,12 @@ mod imp {
     };
     use vmm_sys_util::eventfd::EventFd;
 
-    use crate::VmExit;
     pub use crate::hypervisor::Error;
     use crate::irq::IrqManager;
     use crate::memory;
     pub use crate::memory::set_preallocate;
     use crate::msi::KvmMessageInterruptDomain;
+    use crate::{CapturedLaunchInput, VmExit};
 
     const VCPU_KICK_SIGNAL: nix::sys::signal::Signal = nix::sys::signal::Signal::SIGUSR1;
 
@@ -221,6 +224,7 @@ mod imp {
 
     impl Host for Vm {
         type RawStdioGuard = RawStdio;
+        type LaunchInput = CapturedLaunchInput;
 
         #[cfg(target_arch = "x86_64")]
         const ARCH: HostArchitecture = HostArchitecture::X86_64;

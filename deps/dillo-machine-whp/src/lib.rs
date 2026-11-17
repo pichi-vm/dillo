@@ -5,6 +5,9 @@
 
 mod cpuid_x86;
 mod hypervisor;
+mod launch_input;
+
+pub use launch_input::CapturedLaunchInput;
 mod ioapic;
 
 /// Reasons a WHP vCPU run returned to backend code.
@@ -37,10 +40,10 @@ mod imp {
     };
     use vm_memory::{GuestAddress, GuestMemoryMmap};
 
-    use crate::VmExit;
     pub use crate::hypervisor::Error;
     use crate::hypervisor::InterruptController;
     use crate::ioapic::IoApic;
+    use crate::{CapturedLaunchInput, VmExit};
 
     fn install_signal_watchers(_supervisor_shutdown: &'static AtomicBool) {}
 
@@ -73,6 +76,7 @@ mod imp {
 
     impl Host for Vm {
         type RawStdioGuard = RawStdio;
+        type LaunchInput = CapturedLaunchInput;
 
         const ARCH: HostArchitecture = HostArchitecture::X86_64;
 

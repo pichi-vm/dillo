@@ -223,7 +223,7 @@ fn repeated_sources_keep_order_full_contents_and_neighbor_bytes_on_fresh_machine
         padded[..3].copy_from_slice(&[4, 5, 6]);
         for dirty in [0xa5, 0x5a] {
             let mut machine = RecordingMachine::dirty(dirty);
-            plan.recipe.apply(&mut machine, plan.pmi.bytes()).unwrap();
+            plan.recipe.apply(&mut machine).unwrap();
             let emitted: Vec<_> = machine
                 .operations
                 .into_iter()
@@ -281,7 +281,7 @@ fn repeated_fills_use_each_destination_and_zero_the_complete_reservation() {
     }
     let plan = image.plan(48).unwrap();
     let mut machine = RecordingMachine::dirty(0xcc);
-    plan.recipe.apply(&mut machine, plan.pmi.bytes()).unwrap();
+    plan.recipe.apply(&mut machine).unwrap();
     for (source, destinations) in [
         (0x20_0000, [0x30_0000, 0x30_2000]),
         (0x20_1000, [0x30_4000, 0x30_6000]),
@@ -425,7 +425,7 @@ fn failed_write_or_zero_ends_recipe_before_subsequent_operations() {
         machine.fail_at = Some(fail_at);
         assert!(
             plan.recipe
-                .apply(&mut machine, plan.pmi.bytes())
+                .apply(&mut machine)
                 .unwrap_err()
                 .to_string()
                 .contains("injected memory operation failure")
@@ -437,4 +437,219 @@ fn failed_write_or_zero_ends_recipe_before_subsequent_operations() {
         );
         assert_eq!(machine.bytes[0x20_0000], 0xa5, "later action must not run");
     }
+}
+
+#[test]
+fn captured_bytes_survive_original_changes_before_validation() {
+    for arch in [HostArchitecture::X86_64, HostArchitecture::Aarch64] {
+        let mut image = ActionImage::new(arch);
+        image.load(".data", 0x30_0000);
+        let path = image.directory.path().join("image.pmi");
+        std::fs::write(&path, image.bytes()).unwrap();
+        let captured = Pmi::<SelectedInput>::open(&path).unwrap();
+        std::fs::write(&path, b"the original is no longer a PMI").unwrap();
+        let plan = captured
+            .validate(arch, None, || Ok(48), 4, 1, None, None)
+            .unwrap();
+        let mut machine = RecordingMachine::dirty(0xa5);
+        plan.recipe.apply(&mut machine).unwrap();
+        assert_eq!(&machine.bytes[0x30_0000..0x30_0003], &[1, 2, 3]);
+    }
+}
+
+#[test]
+fn source_truncation_between_validation_and_loading_cannot_replace_recipe_input() {
+    for arch in [HostArchitecture::X86_64, HostArchitecture::Aarch64] {
+        let mut image = ActionImage::new(arch);
+        image.load(".data", 0x30_0000);
+        let path = image.directory.path().join("image.pmi");
+        std::fs::write(&path, image.bytes()).unwrap();
+        let plan = LaunchPlan::read(
+            &path,
+            arch,
+            None,
+            || {
+                // This callback runs after parsing and DT survey, before the
+                // resolved recipe is applied to any guest memory.
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_len(0)
+                    .unwrap();
+                Ok(48)
+            },
+            4,
+            1,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut machine = RecordingMachine::dirty(0xa5);
+        plan.recipe.apply(&mut machine).unwrap();
+        assert_eq!(&machine.bytes[0x30_0000..0x30_0003], &[1, 2, 3]);
+    }
+}
+
+#[test]
+fn retained_recipe_survives_same_inode_writes_and_guest_memory_mutation() {
+    use std::io::{Seek, Write};
+
+    let mut image = ActionImage::new(HostArchitecture::X86_64);
+    image.load(".data", 0x30_0000);
+    image.load(".padded", 0x30_2000);
+    let plan = image.plan(48).unwrap();
+    let path = image.directory.path().join("image.pmi");
+    let mut writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let mut initial = RecordingMachine::dirty(0xa5);
+    plan.recipe.apply(&mut initial).unwrap();
+    let expected = std::mem::take(&mut initial.operations);
+
+    let start = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let start_ref = &start;
+        let writer = scope.spawn(move || {
+            start_ref.wait();
+            for _ in 0..64 {
+                writer.set_len(0).unwrap();
+                writer.rewind().unwrap();
+                writer.write_all(&[0xff; 8192]).unwrap();
+                std::thread::yield_now();
+            }
+        });
+        start.wait();
+        // Guest/debugger mutations affect only receiver-owned RAM. Replaying
+        // into the old receiver or fresh dirty memory must use retained bytes.
+        initial.bytes.fill(0x77);
+        plan.recipe.apply(&mut initial).unwrap();
+        assert_eq!(initial.operations, expected);
+        for _ in 0..4 {
+            let mut replacement = RecordingMachine::dirty(0x55);
+            plan.recipe.apply(&mut replacement).unwrap();
+            assert_eq!(replacement.operations, expected);
+        }
+        writer.join().unwrap();
+    });
+}
+
+#[test]
+fn pathname_replacement_does_not_change_retained_recipe() {
+    let mut image = ActionImage::new(HostArchitecture::X86_64);
+    image.load(".data", 0x30_0000);
+    let plan = image.plan(48).unwrap();
+    let path = image.directory.path().join("image.pmi");
+    let retired = image.directory.path().join("retired.pmi");
+    std::fs::rename(&path, &retired).unwrap();
+    let mut replacement = image.bytes();
+    replacement[0x4000..0x4200].fill(0x99);
+    std::fs::write(&path, replacement).unwrap();
+    std::fs::write(retired, b"old inode changed too").unwrap();
+    let mut machine = RecordingMachine::dirty(0xa5);
+    plan.recipe.apply(&mut machine).unwrap();
+    assert_eq!(&machine.bytes[0x30_0000..0x30_0003], &[1, 2, 3]);
+}
+
+#[test]
+fn external_dt_and_bootconfig_keep_their_captured_identity_for_replay() {
+    for arch in [HostArchitecture::X86_64, HostArchitecture::Aarch64] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("image.pmi");
+        let dtb_path = directory.path().join("base.dtb");
+        let config_path = directory.path().join("input.bconf");
+        let dtb = base(arch, false, false);
+        let bytes = super::delegation_tests::with_bootconfig(
+            image(arch, BaseChannel::Detached, &dtb, Some(4096)),
+            &[0x20_2000],
+            4096,
+            0,
+        );
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::write(&dtb_path, &dtb).unwrap();
+        std::fs::write(&config_path, b"launch.identity = retained;").unwrap();
+        let plan = LaunchPlan::read(
+            &path,
+            arch,
+            None,
+            || Ok(48),
+            4,
+            1,
+            Some(&dtb_path),
+            Some(&config_path),
+        )
+        .unwrap();
+        let mut initial = RecordingMachine::dirty(0xa5);
+        plan.recipe.apply(&mut initial).unwrap();
+        std::fs::write(&dtb_path, b"invalid replacement DT").unwrap();
+        std::fs::remove_file(&config_path).unwrap();
+        std::fs::write(&config_path, b"launch.identity = changed;").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(plan.merged_dtb, dtb);
+        let mut replacement = RecordingMachine::dirty(0x55);
+        plan.recipe.apply(&mut replacement).unwrap();
+        assert_eq!(replacement.operations, initial.operations);
+        assert_eq!(&replacement.bytes[0x20_0000..0x20_0000 + dtb.len()], dtb);
+        assert!(
+            replacement.bytes[0x20_2000..0x20_3000]
+                .windows(b"launch.identity = retained;".len())
+                .any(|bytes| bytes == b"launch.identity = retained;")
+        );
+    }
+}
+
+#[test]
+fn empty_captured_input_is_refused_by_the_parser() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("empty.pmi");
+    std::fs::write(&path, []).unwrap();
+    assert!(matches!(
+        LaunchPlan::read(
+            &path,
+            HostArchitecture::X86_64,
+            None,
+            || Ok(48),
+            4,
+            1,
+            None,
+            None
+        ),
+        Err(LaunchError::PmiParse(_))
+    ));
+}
+
+#[test]
+fn failed_retained_source_view_prevents_all_guest_writes() {
+    #[derive(Debug)]
+    struct RefusedView {
+        source: SelectedInput,
+        viewed: std::cell::Cell<bool>,
+    }
+    impl LaunchInput for RefusedView {
+        type View<'a> = <SelectedInput as LaunchInput>::View<'a>;
+
+        fn capture(source: std::fs::File) -> std::io::Result<Self> {
+            Ok(Self {
+                source: SelectedInput::capture(source)?,
+                viewed: std::cell::Cell::new(false),
+            })
+        }
+
+        fn view(&self) -> std::io::Result<Self::View<'_>> {
+            if self.viewed.replace(true) {
+                return Err(std::io::Error::other("injected retained-view refusal"));
+            }
+            self.source.view()
+        }
+    }
+    let image = ActionImage::new(HostArchitecture::X86_64);
+    let path = image.directory.path().join("image.pmi");
+    std::fs::write(&path, image.bytes()).unwrap();
+    let plan = Pmi::<RefusedView>::open(&path)
+        .unwrap()
+        .validate(image.arch, None, || Ok(48), 4, 1, None, None)
+        .unwrap();
+    let mut machine = RecordingMachine::dirty(0xa5);
+    let error = plan.recipe.apply(&mut machine).unwrap_err();
+    assert!(error.to_string().contains("injected retained-view refusal"));
+    assert!(machine.operations.is_empty());
+    assert!(machine.bytes.iter().all(|byte| *byte == 0xa5));
 }
