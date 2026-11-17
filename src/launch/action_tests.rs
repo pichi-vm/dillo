@@ -397,15 +397,56 @@ fn action_address_width_and_large_section_alignment_are_checked() {
 }
 
 #[test]
-fn malformed_fill_shapes_and_raw_data_larger_than_virtual_size_are_rejected() {
-    for kind in ["dt:dtb", "dt:dtbo", "lbc:bootconfig"] {
-        let mut image = ActionImage::new(HostArchitecture::X86_64);
-        image.fill(".data", 0x30_0000, kind);
-        assert!(matches!(
-            image.parse(),
-            Err(ParseError::InvalidSectionShape { .. })
-        ));
+fn every_fill_kind_requires_a_nonempty_zero_section() {
+    for arch in [HostArchitecture::X86_64, HostArchitecture::Aarch64] {
+        for (kind, expected) in [
+            ("dt:dtb", FillKind::DtDtb),
+            ("dt:dtbo", FillKind::DtDtbo),
+            ("lbc:bootconfig", FillKind::LbcBootconfig),
+        ] {
+            for section in [".data", ".padded", ".zero"] {
+                let mut image = ActionImage::new(arch);
+                if section == ".zero" {
+                    // Make the raw-empty .zero section have no capacity either.
+                    let size = 0x188 + 6 * 40 + 8;
+                    image.bytes[size..size + 4].copy_from_slice(&0u32.to_le_bytes());
+                }
+                image.fill(section, 0x30_0000, kind);
+                assert!(
+                    matches!(
+                        image.parse(),
+                        Err(ParseError::InvalidSectionShape {
+                            section: rejected,
+                            reason: "fill requires a nonempty Zero section",
+                        }) if rejected == section
+                    ),
+                    "{arch:?} {kind} must reject {section}"
+                );
+            }
+
+            let mut image = ActionImage::new(arch);
+            // A 4 KiB Zero reservation also meets the overlay minimum and native
+            // bootconfig framing alignment. Replace an existing fill of this
+            // kind so duplicate-kind rules cannot obscure shape acceptance.
+            let size = 0x188 + 6 * 40 + 8;
+            image.bytes[size..size + 4].copy_from_slice(&4096u32.to_le_bytes());
+            image.manifest["actions"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|action| action["kind"] != kind);
+            image.fill(".zero", 0x30_0000, kind);
+            let parsed = image.parse().unwrap_or_else(|error| {
+                panic!("{arch:?} {kind} must accept nonempty Zero: {error}")
+            });
+            let action = parsed.actions.last().unwrap();
+            assert_eq!(action.section(), ".zero");
+            assert_eq!(action.kind(), ActionKind::Fill(expected));
+        }
     }
+}
+
+#[test]
+fn raw_data_larger_than_virtual_size_is_rejected() {
     let mut image = ActionImage::new(HostArchitecture::X86_64);
     image.load(".data", 0x30_0000);
     let field = 0x188 + 5 * 40 + 8;
