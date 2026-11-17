@@ -26,5 +26,8 @@ tempfile.workspace = true
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 mmarinus = "0.4"
 
+[dev-dependencies]
+dillo-virtio.workspace = true
+
 [lints]
 workspace = true

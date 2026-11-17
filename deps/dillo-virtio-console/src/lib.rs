@@ -352,14 +352,12 @@ impl VirtioDevice for VirtioConsole {
         let mut queues: Vec<Option<Queue>> = queues.into_iter().map(Some).collect();
         let mut queue_evts: Vec<Option<Kick>> = queue_evts.into_iter().map(Some).collect();
 
-        // Workers, plus the kick each one may be blocked on at shutdown.
+        // Each worker owns its shutdown wake, including during rollback.
         let mut workers: Vec<VirtioDeviceHandle> = Vec::new();
-        let mut wakes: Vec<Kick> = Vec::new();
 
         // --- port 0: the unnamed console, identical with or without MULTIPORT
         let tx_queue = take(&mut queues[1], "port 0 TX queue")?;
         let tx_evt = take(&mut queue_evts[1], "port 0 TX kick")?;
-        wakes.push(tx_evt.try_clone()?);
         workers.push(spawn_tx_worker(
             Arc::clone(&host),
             Arc::clone(&queue_memory),
@@ -371,7 +369,6 @@ impl VirtioDevice for VirtioConsole {
 
         let rx_queue = take(&mut queues[0], "port 0 RX queue")?;
         let rx_evt = take(&mut queue_evts[0], "port 0 RX kick")?;
-        wakes.push(rx_evt.try_clone()?);
         workers.push(spawn_rx_worker(
             Arc::clone(&host),
             Arc::clone(&queue_memory),
@@ -482,10 +479,6 @@ impl VirtioDevice for VirtioConsole {
                 {
                     handle.shutdown();
                 }
-                // Release any worker parked in a blocking `Kick::read`.
-                for wake in &wakes {
-                    let _ = wake.write(1);
-                }
             },
             move || {
                 let drained: Vec<_> = std::mem::take(
@@ -544,6 +537,7 @@ fn spawn_tx_worker(
     kick: Kick,
     call_interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
+    let wake = kick.clone();
     host.spawn(Box::new(move |token| {
         tx_worker(
             queue_memory,
@@ -555,6 +549,7 @@ fn spawn_tx_worker(
         );
         Ok(())
     }))
+    .map(|handle| handle.with_shutdown_wake(wake))
 }
 
 fn spawn_rx_worker(
@@ -565,6 +560,7 @@ fn spawn_rx_worker(
     kick: Kick,
     call_interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
+    let wake = kick.clone();
     host.spawn(Box::new(move |token| {
         rx_worker(
             queue_memory,
@@ -576,6 +572,7 @@ fn spawn_rx_worker(
         );
         Ok(())
     }))
+    .map(|handle| handle.with_shutdown_wake(wake))
 }
 
 /// Take one indexed activation input, naming it if it is somehow already gone.

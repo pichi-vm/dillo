@@ -177,6 +177,54 @@ mod tests {
         assert_eq!(replacement.read().unwrap(), 1);
         drop(other);
     }
+
+    #[test]
+    fn queue_worker_drop_wakes_registered_eventfd() {
+        use dillo_virtio::kick::Kick;
+        use dillo_virtio::{DeviceJoinError, VirtioDeviceHandle};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let window = AddressRange {
+            base: 0x1000,
+            size: 0x1000,
+        };
+        let owner = authority(window);
+        let notification = owner
+            .register(window, 0x50, 0)
+            .unwrap()
+            .expect("native ioeventfd required");
+        let (entered, wait) = mpsc::channel();
+        let kick = Kick::from_notification(Arc::clone(&notification));
+        let wake = kick.clone();
+        let worker = std::thread::spawn(move || {
+            entered.send(()).unwrap();
+            kick.read().unwrap()
+        });
+        let handle = VirtioDeviceHandle::new(
+            || {},
+            move || {
+                assert_eq!(worker.join().map_err(|_| DeviceJoinError::Panicked)?, 1);
+                Ok(())
+            },
+        )
+        .with_shutdown_wake(wake);
+        let entered = wait.recv_timeout(Duration::from_secs(2));
+        let (finished, completion) = mpsc::channel();
+        let cleanup = std::thread::spawn(move || {
+            drop(handle);
+            finished.send(()).unwrap();
+        });
+        let completed = completion.recv_timeout(Duration::from_secs(2));
+        // Capture the failed assertion before rescuing a missing wake.
+        if completed.is_err() {
+            notification.write(1).unwrap();
+        }
+        cleanup.join().unwrap();
+        entered.expect("worker must reach the empty eventfd read");
+        completed.expect("handle drop must finish without rescue");
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn guest_writes_match_address_width_and_queue_value() {
