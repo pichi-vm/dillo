@@ -906,6 +906,13 @@ impl Pcie {
             prop: "reg",
             reason: "missing ECAM pair",
         })?;
+        if ecam_size == 0 {
+            return Err(SurveyError::BadProperty {
+                node: "/pcie",
+                prop: "reg",
+                reason: "ECAM window is empty",
+            });
+        }
         plan.declare_from(&reg, "/pcie", ecam_base, ecam_size, RegionKind::EcamWindow);
 
         let ranges = pci.require("ranges", "/pcie")?;
@@ -1782,6 +1789,30 @@ mod tests {
         );
         let err = Machine::survey(&dtb(root), Arch::Aarch64).unwrap_err();
         assert!(matches!(err, SurveyError::BaseHasCpus), "got {err:?}");
+    }
+
+    #[test]
+    fn empty_ecam_windows_are_rejected() {
+        for base in [ECAM_BASE, SERIAL_BASE + 0x100] {
+            let mut root = base_root();
+            root.child_mut("pcie@c000000")
+                .unwrap()
+                .property_mut("reg")
+                .unwrap()
+                .set_u32s(&reg2(base, 0));
+            let err = Machine::survey(&dtb(root), Arch::Aarch64).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    SurveyError::BadProperty {
+                        node: "/pcie",
+                        prop: "reg",
+                        reason: "ECAM window is empty",
+                    }
+                ),
+                "got {err:?}"
+            );
+        }
     }
 
     #[test]
