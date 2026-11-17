@@ -23,5 +23,8 @@ libc = "0.2"
 nix.workspace = true
 vmm-sys-util.workspace = true
 
+[dev-dependencies]
+dillo-virtio.workspace = true
+
 [lints]
 workspace = true

@@ -262,6 +262,20 @@ impl VirtioDeviceHandle {
         Self::new(|| {}, || Ok(()))
     }
 
+    /// Wake a queue worker after requesting its shutdown, including on drop.
+    /// Install this before a later activation step can fail and drop the handle.
+    #[must_use]
+    pub fn with_shutdown_wake(mut self, kick: Kick) -> Self {
+        let shutdown = self.shutdown.take();
+        self.shutdown = Some(Box::new(move || {
+            if let Some(shutdown) = shutdown {
+                shutdown();
+            }
+            let _ = kick.write(1);
+        }));
+        self
+    }
+
     pub fn shutdown(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
             shutdown();
@@ -377,6 +391,47 @@ mod tests {
         handle.shutdown();
         assert!(stopped.load(Ordering::Acquire));
         handle.join().expect("joined");
+    }
+
+    #[test]
+    fn shutdown_wake_follows_cancellation_and_runs_once() {
+        use std::sync::Mutex;
+
+        #[derive(Debug)]
+        struct Wake(Arc<Mutex<Vec<&'static str>>>);
+        impl dillo_mmio::WriteNotification for Wake {
+            fn read(&self) -> std::io::Result<u64> {
+                unreachable!("only the shutdown wake is used")
+            }
+            fn write(&self, count: u64) -> std::io::Result<()> {
+                assert_eq!(count, 1);
+                self.0.lock().unwrap().push("wake");
+                Ok(())
+            }
+        }
+        for exit in 0..3 {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let shutdown_events = Arc::clone(&events);
+            let join_events = Arc::clone(&events);
+            let mut handle = VirtioDeviceHandle::new(
+                move || shutdown_events.lock().unwrap().push("cancel"),
+                move || {
+                    join_events.lock().unwrap().push("join");
+                    Ok(())
+                },
+            )
+            .with_shutdown_wake(Kick::from_notification(Arc::new(Wake(Arc::clone(&events)))));
+            match exit {
+                0 => {
+                    handle.shutdown();
+                    handle.shutdown();
+                    handle.join().unwrap();
+                }
+                1 => handle.join().unwrap(),
+                _ => drop(handle),
+            }
+            assert_eq!(*events.lock().unwrap(), ["cancel", "wake", "join"]);
+        }
     }
 
     #[test]
