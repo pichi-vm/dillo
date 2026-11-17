@@ -1465,10 +1465,10 @@ fn boots_with_named_console_ports() {
     let cmdline = format!(
         "console=hvc0 dillo.console_port=build dillo.console_port_read={} \
          dillo.console_port_write={FROM_GUEST} \
-         sysctl.debug.exception-trace=1 print-fatal-signals=1 loglevel=8",
+         sysctl.debug.exception-trace=1 print-fatal-signals=1 loglevel=8 keep_bootcon",
         TO_GUEST.len()
     );
-    let pmi = build_pmi_from_path(tmp.path(), &kernel, host::CONFIG, &cmdline, false);
+    let pmi = build_pmi_from_path(tmp.path(), &kernel, host::CONFIG, &cmdline, true);
 
     // dillo names the ends by the descriptor numbers it inherits, so the
     // numbers must survive exec: hand over the raw fds with CLOEXEC cleared.
