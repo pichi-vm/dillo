@@ -44,7 +44,7 @@ use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dillo_mmio::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
@@ -52,6 +52,7 @@ use dillo_virtio::{
     ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
     VirtioMemory, VirtioRunToken,
 };
+use vm_memory::{Address, GuestAddress};
 
 /// VIRTIO_F_VERSION_1 from the virtio 1.x spec.
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
@@ -664,6 +665,38 @@ fn spawn_port_tx_worker(
     }))
 }
 
+struct ControlUsedEventObservation {
+    address: GuestAddress,
+    queue_size: u16,
+    console_port_used_idx: u16,
+    start: Instant,
+}
+
+impl ControlUsedEventObservation {
+    fn new(queue: &Queue) -> Option<Self> {
+        // The split-ring used_event field follows the guest's avail entries.
+        let address = queue
+            .avail_ring
+            .checked_add(4 + 2 * u64::from(queue.size))?;
+        address.checked_add(1)?;
+        Some(Self {
+            address,
+            queue_size: queue.size,
+            console_port_used_idx: queue.next_used.0,
+            start: Instant::now(),
+        })
+    }
+
+    fn sample(&self, memory: &dyn QueueMemory, late: bool) {
+        let raw = memory.read_u16(self.address);
+        log::debug!(
+            "virtio-console: control RX guest used_event={raw:?} console_port_used_idx={} queue_size={} late={late}",
+            self.console_port_used_idx,
+            self.queue_size
+        );
+    }
+}
+
 /// Drive the control plane until shutdown.
 ///
 /// Poll-driven rather than kick-driven: the worker has two queues to watch and
@@ -684,6 +717,9 @@ fn control_worker(
 ) {
     let rx_queue = Arc::new(Mutex::new(rx_queue));
     let tx_queue = Arc::new(Mutex::new(tx_queue));
+    let mut blocked_dispatch = None;
+    let mut used_event_observation = None;
+    let mut observed_console_port = false;
     while !token.is_shutdown_requested() {
         let mut progress = false;
         if let Some(receiver) = &mut resize {
@@ -704,7 +740,15 @@ fn control_worker(
         for buf in drain_tx_buffers(queue_memory, buffer_memory, &tx_queue, tx_call_interrupt) {
             progress = true;
             match control::ControlMessage::decode(&buf) {
-                Some(msg) => plane.handle(&msg),
+                Some(msg) => {
+                    log::debug!(
+                        "virtio-console: received control event {} for port {} value={}",
+                        msg.event,
+                        msg.id,
+                        msg.value
+                    );
+                    plane.handle(&msg);
+                }
                 None => log::warn!(
                     "virtio-console: control message of {} byte(s) is too short",
                     buf.len()
@@ -715,14 +759,64 @@ fn control_worker(
         // Device → guest: whatever the state machine (or a disconnecting port)
         // has queued, one message per descriptor chain.
         while let Some(msg) = plane.pop_outbound() {
-            if push_to_queue(
+            // Requeue retries the same event or restores a coalesced resize.
+            // A different event or a consumed buffer is visible at DEBUG.
+            let dispatch = (msg.event, msg.id, msg.value);
+            let attempt_level = if blocked_dispatch == Some(dispatch) {
+                log::Level::Trace
+            } else {
+                log::Level::Debug
+            };
+            log::log!(
+                attempt_level,
+                "virtio-console: dispatching control event {} for port {} value={} interrupt_present={}",
+                msg.event,
+                msg.id,
+                msg.value,
+                rx_call_interrupt.is_some()
+            );
+            let consumed_buffer = push_to_queue(
                 queue_memory,
                 buffer_memory,
                 &rx_queue,
-                &msg.encode(),
+                &msg,
                 rx_call_interrupt,
-            ) {
+            );
+            log::log!(
+                if consumed_buffer {
+                    log::Level::Debug
+                } else {
+                    attempt_level
+                },
+                "virtio-console: control dispatch returned for event {} port {} value={} consumed_buffer={consumed_buffer}",
+                msg.event,
+                msg.id,
+                msg.value
+            );
+            blocked_dispatch = (!consumed_buffer).then_some(dispatch);
+            if consumed_buffer {
                 progress = true;
+                if !observed_console_port
+                    && msg.event == control::event::CONSOLE_PORT
+                    && msg.id == 0
+                    && log::log_enabled!(log::Level::Debug)
+                {
+                    // For the pinned Linux probe, used_event tracks dequeue in
+                    // the initial boot handshake before reset or index wrap.
+                    observed_console_port = true;
+                    let observation = {
+                        let q = rx_queue
+                            .lock()
+                            .expect("virtio-console control RX queue mutex");
+                        ControlUsedEventObservation::new(&q)
+                    };
+                    if let Some(observation) = observation {
+                        observation.sample(queue_memory.as_ref(), false);
+                        used_event_observation = Some(observation);
+                    } else {
+                        log::debug!("virtio-console: control RX used_event address overflow");
+                    }
+                }
             } else {
                 // No guest buffer right now; keep the message and retry.
                 plane.requeue(msg);
@@ -730,6 +824,12 @@ fn control_worker(
             }
         }
 
+        if let Some(observation) = &used_event_observation
+            && observation.start.elapsed() >= Duration::from_secs(1)
+        {
+            observation.sample(queue_memory.as_ref(), true);
+            used_event_observation = None;
+        }
         if !progress {
             thread::sleep(PIPE_POLL);
         }
@@ -1057,7 +1157,7 @@ fn drain_tx_buffers(
     out
 }
 
-/// Write `payload` into one guest-provided writable chain on `queue`.
+/// Write a control message into one guest-provided writable chain on `queue`.
 ///
 /// Returns `false` (having consumed nothing) when the guest has posted no
 /// buffer, so the caller can hold the message and retry. A chain too small for
@@ -1067,16 +1167,17 @@ fn push_to_queue(
     queue_memory: &Arc<dyn QueueMemory>,
     buffer_memory: &Arc<dyn VirtioMemory>,
     queue: &Arc<Mutex<Queue>>,
-    payload: &[u8],
+    message: &control::ControlMessage,
     call_interrupt: Option<&Interrupt>,
 ) -> bool {
+    let payload = message.encode();
     let mut q = queue.lock().expect("virtio-console queue mutex");
     let Some(head) = q.pop(queue_memory) else {
         return false;
     };
     let head_index = head.index;
     let mut written: u32 = 0;
-    let mut remaining = payload;
+    let mut remaining = payload.as_slice();
     let mut current = Some(head);
     while let Some(desc) = current {
         if remaining.is_empty() {
@@ -1111,6 +1212,22 @@ fn push_to_queue(
     q.add_used(queue_memory, head_index, written);
     if let Some(intr) = call_interrupt {
         intr.signal();
+    }
+    if message.event == control::event::CONSOLE_PORT
+        && message.id == 0
+        && log::log_enabled!(log::Level::Debug)
+    {
+        // Inspect the split-ring entry just published by add_used. The readback
+        // observes the host mapping and does not establish guest visibility.
+        let expected_idx = q.next_used.0;
+        let slot = expected_idx.wrapping_sub(1) % q.size;
+        let entry = q.used_ring.unchecked_add(4 + 8 * u64::from(slot));
+        let actual_idx = queue_memory.read_u16(q.used_ring.unchecked_add(2));
+        let actual_id = queue_memory.read_u32(entry);
+        let actual_len = queue_memory.read_u32(entry.unchecked_add(4));
+        log::debug!(
+            "virtio-console: CONSOLE_PORT(0) used ring readback idx={actual_idx:?} id={actual_id:?} len={actual_len:?} expected_idx={expected_idx} expected_id={head_index} expected_len={written}"
+        );
     }
     true
 }
@@ -1590,7 +1707,7 @@ mod tests {
     #[test]
     fn push_to_queue_writes_one_message_per_chain() {
         let tq = TestQueue::new(2, 16, true);
-        let first = ControlMessage::port_name(1, "build").encode();
+        let first = ControlMessage::port_name(1, "build");
         assert!(push_to_queue(
             &tq.queue_memory,
             &tq.buffer_memory,
@@ -1598,10 +1715,11 @@ mod tests {
             &first,
             None
         ));
-        assert_eq!(tq.get(0, first.len()), first);
+        let first_bytes = first.encode();
+        assert_eq!(tq.get(0, first_bytes.len()), first_bytes);
         assert_eq!(tq.used_idx(), 1);
 
-        let second = ControlMessage::new(1, control::event::PORT_OPEN, 1).encode();
+        let second = ControlMessage::new(1, control::event::PORT_OPEN, 1);
         assert!(push_to_queue(
             &tq.queue_memory,
             &tq.buffer_memory,
@@ -1609,7 +1727,8 @@ mod tests {
             &second,
             None
         ));
-        assert_eq!(tq.get(1, second.len()), second);
+        let second_bytes = second.encode();
+        assert_eq!(tq.get(1, second_bytes.len()), second_bytes);
         assert_eq!(tq.used_idx(), 2);
 
         // Third message, no buffer left: the caller keeps it and retries.
@@ -1642,7 +1761,7 @@ mod tests {
             &tq.queue_memory,
             &tq.buffer_memory,
             &tq.queue,
-            &msg.encode(),
+            &msg,
             None
         ));
         plane.requeue(msg.clone());
