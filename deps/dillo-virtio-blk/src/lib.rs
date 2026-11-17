@@ -398,20 +398,23 @@ fn spawn_request_worker(
     negotiated: u64,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
     let wake = kick.clone();
-    host.spawn(Box::new(move |token| {
-        request_worker(
-            queue_memory,
-            buffer_memory,
-            queue,
-            kick,
-            call_interrupt,
-            backing,
-            read_only,
-            negotiated,
-            token,
-        )
-        .map_err(|e| dillo_virtio::DeviceJoinError::Worker(e.to_string()))
-    }))
+    host.spawn(
+        "blk request".into(),
+        Box::new(move |token| {
+            request_worker(
+                queue_memory,
+                buffer_memory,
+                queue,
+                kick,
+                call_interrupt,
+                backing,
+                read_only,
+                negotiated,
+                token,
+            )
+            .map_err(|e| dillo_virtio::DeviceJoinError::Worker(e.to_string()))
+        }),
+    )
     .map(|handle| handle.with_shutdown_wake(wake))
 }
 
@@ -426,7 +429,7 @@ fn request_worker(
     read_only: bool,
     negotiated: u64,
     token: VirtioRunToken,
-) -> std::io::Result<()> {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Arc::new(Mutex::new(queue));
     loop {
         if let Err(e) = kick.read() {
@@ -434,7 +437,9 @@ fn request_worker(
             return Err(e);
         }
         if token.is_shutdown_requested() {
-            return backing.flush();
+            return backing
+                .flush()
+                .map(|()| dillo_virtio::DeviceExit::Cancelled);
         }
         drain_requests(
             &queue_memory,

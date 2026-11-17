@@ -2035,6 +2035,13 @@ mod machine_select {
                 #[error("machine: {0}")]
                 Machine(String),
 
+                #[error("{failure}")]
+                DeviceFailure {
+                    #[source]
+                    source: Box<Self>,
+                    failure: dillo_machine::execution::DeviceFailure,
+                },
+
                 #[error("write load section `{section}` to GPA {gpa:#x}: {source}")]
                 SectionWrite {
                     section: String,
@@ -2067,6 +2074,21 @@ mod machine_select {
                     Self::Machine(source.to_string())
                 }
 
+                pub(crate) fn with_device_failure(
+                    self,
+                    failure: dillo_machine::execution::DeviceFailure,
+                ) -> Self {
+                    // CPU arbitration may already include this sticky failure.
+                    if self.to_string().contains(&failure.to_string()) {
+                        self
+                    } else {
+                        Self::DeviceFailure {
+                            source: Box::new(self),
+                            failure,
+                        }
+                    }
+                }
+
                 /// Map to the documented exit code from ARCH §13.4.
                 #[must_use]
                 pub(crate) fn exit_code(&self) -> i32 {
@@ -2080,6 +2102,7 @@ mod machine_select {
                         | Self::DtboWrite { .. } => 11,
                         Self::Machine(_) | Self::SectionWrite { .. } => 12,
                         Self::HostRam { .. } | Self::Placement { .. } => 13,
+                        Self::DeviceFailure { source, .. } => source.exit_code(),
                     }
                 }
             }
@@ -2525,41 +2548,54 @@ mod machine_select {
                 ),
             })
             .map_err(RunError::machine)?;
-            crate::boot_trace::mark("vm_created");
-            let memory = M::Memory::from_ranges(&plan.ram_ranges()).map_err(RunError::machine)?;
-            Attach::attach(&mut vm, memory).map_err(RunError::machine)?;
-            crate::boot_trace::mark("mem_attached");
-            recipe
-                .apply(&mut vm)
-                .map_err(|error| RunError::Machine(error.to_string()))?;
-            crate::boot_trace::mark("sections_loaded");
-
-            attach_uart(&mut vm, &platform)?;
-            attach_syscon(&mut vm, &platform)?;
-            attach_devices(&mut vm, &platform, placements)?;
-
-            let control = Arc::new(SupervisorControl {
-                supervisor_shutdown,
-            });
-            let cpu_profile = parsed.cpu_profile;
-            crate::boot_trace::mark("guest_loaded");
-            let mut outcome = run_vcpus::<M, E>(&mut vm, vcpus, cpu_profile, control)?;
-            while matches!(outcome, VcpuStop::GuestReset) {
-                log::info!("guest requested reboot - replaying launch writes");
-                vm.reset_for_reboot().map_err(RunError::machine)?;
+            let failures = vm.device_failures();
+            let result = (|| {
+                crate::boot_trace::mark("vm_created");
+                let memory =
+                    M::Memory::from_ranges(&plan.ram_ranges()).map_err(RunError::machine)?;
+                Attach::attach(&mut vm, memory).map_err(RunError::machine)?;
+                crate::boot_trace::mark("mem_attached");
                 recipe
                     .apply(&mut vm)
                     .map_err(|error| RunError::Machine(error.to_string()))?;
+                crate::boot_trace::mark("sections_loaded");
+
+                attach_uart(&mut vm, &platform)?;
+                attach_syscon(&mut vm, &platform)?;
+                attach_devices(&mut vm, &platform, placements)?;
+
                 let control = Arc::new(SupervisorControl {
                     supervisor_shutdown,
                 });
-                outcome = run_vcpus::<M, E>(&mut vm, vcpus, cpu_profile, control)?;
-            }
+                let cpu_profile = parsed.cpu_profile;
+                crate::boot_trace::mark("guest_loaded");
+                let mut outcome = run_vcpus::<M, E>(&mut vm, vcpus, cpu_profile, control)?;
+                while matches!(outcome, VcpuStop::GuestReset) {
+                    failures.check().map_err(RunError::machine)?;
+                    log::info!("guest requested reboot - replaying launch writes");
+                    vm.reset_for_reboot().map_err(RunError::machine)?;
+                    recipe
+                        .apply(&mut vm)
+                        .map_err(|error| RunError::Machine(error.to_string()))?;
+                    let control = Arc::new(SupervisorControl {
+                        supervisor_shutdown,
+                    });
+                    outcome = run_vcpus::<M, E>(&mut vm, vcpus, cpu_profile, control)?;
+                }
 
-            if matches!(outcome, VcpuStop::GuestPoweroff) {
-                dillo_virtio_console::flush_output();
+                if matches!(outcome, VcpuStop::GuestPoweroff) {
+                    dillo_virtio_console::flush_output();
+                }
+                Ok(0)
+            })();
+            drop(vm);
+            match failures.check() {
+                Ok(()) => result,
+                Err(failure) => Err(match result {
+                    Ok(_) => RunError::machine(failure),
+                    Err(error) => error.with_device_failure(failure),
+                }),
             }
-            Ok(0)
         }
 
         /// Top-level VM-child entry point for the selected host machine.
@@ -2581,6 +2617,26 @@ mod machine_select {
             use dillo_devtree::devtree::{OwnedNode, OwnedProperty, OwnedTree};
             use dillo_devtree::platform::Arch;
             use dillo_mmio::{MmioBus, MmioDevice, MmioWriteOutcome};
+
+            #[test]
+            fn late_device_failure_preserves_prior_diagnostics_without_duplication() {
+                let failure = dillo_machine::execution::DeviceFailure {
+                    participant: "blk request".into(),
+                    cause: dillo_machine::execution::JoinError::Host("late flush failure".into()),
+                };
+                let error = RunError::Machine("CPU owner failed; native interrupt failed".into())
+                    .with_device_failure(failure.clone())
+                    .with_device_failure(failure.clone());
+                let text = error.to_string();
+                let source = std::error::Error::source(&error).unwrap().to_string();
+                assert!(source.contains("CPU owner failed"));
+                assert!(source.contains("native interrupt failed"));
+                assert!(!text.contains("CPU owner failed"));
+                assert_eq!(text.matches("late flush failure").count(), 1);
+                assert_eq!(error.exit_code(), 12);
+                let error = RunError::MissingRequiredDevice("uart").with_device_failure(failure);
+                assert_eq!(error.exit_code(), 11, "retain the original error category");
+            }
 
             struct RefusedCpu;
             struct RefusedCpuInput;
@@ -2624,6 +2680,9 @@ mod machine_select {
                 }
             }
             impl Machine for RefusedMachine {
+                fn device_failures(&self) -> dillo_machine::execution::DeviceFailureObserver {
+                    dillo_machine::execution::DeviceFailureReporter::default().observer()
+                }
                 type Error = std::io::Error;
                 type CpuPreparation = RefusedCpuInput;
                 fn cpu_preparation(

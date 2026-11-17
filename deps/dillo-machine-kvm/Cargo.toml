@@ -27,6 +27,7 @@ rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 mmarinus = "0.4"
 
 [dev-dependencies]
+dillo-runtime.workspace = true
 dillo-virtio.workspace = true
 
 [lints]

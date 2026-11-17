@@ -5,6 +5,7 @@
 
 //! VirtioDevice trait defining the device contract for transport layers.
 
+pub use dillo_machine::execution::DeviceExit;
 use dillo_machine::interrupt::Interrupt;
 use dillo_machine::memory::SharedMemory;
 
@@ -231,7 +232,8 @@ pub trait VirtioDeviceHost: Send + Sync + std::fmt::Debug {
 
     fn spawn(
         &self,
-        run: Box<dyn FnOnce(VirtioRunToken) -> Result<(), DeviceJoinError> + Send>,
+        name: String,
+        run: Box<dyn FnOnce(VirtioRunToken) -> Result<DeviceExit, DeviceJoinError> + Send>,
     ) -> Result<VirtioDeviceHandle, ActivateError>;
 }
 
@@ -361,12 +363,13 @@ mod tests {
     impl VirtioDeviceHost for TestDeviceHost {
         fn spawn(
             &self,
-            run: Box<dyn FnOnce(VirtioRunToken) -> Result<(), DeviceJoinError> + Send>,
+            _name: String,
+            run: Box<dyn FnOnce(VirtioRunToken) -> Result<DeviceExit, DeviceJoinError> + Send>,
         ) -> Result<VirtioDeviceHandle, ActivateError> {
             let shutdown = Arc::new(AtomicBool::new(false));
             let token_shutdown = Arc::clone(&shutdown);
             let token = VirtioRunToken::from_fn(move || token_shutdown.load(Ordering::Acquire));
-            let join = std::thread::spawn(move || run(token));
+            let join = std::thread::spawn(move || run(token).map(|_| ()));
             Ok(VirtioDeviceHandle::new(
                 move || shutdown.store(true, Ordering::Release),
                 move || match join.join() {
@@ -445,12 +448,15 @@ mod tests {
     fn thread_host_reports_shutdown_to_worker() {
         let host = TestDeviceHost;
         let handle = host
-            .spawn(Box::new(|token| {
-                while !token.is_shutdown_requested() {
-                    std::thread::yield_now();
-                }
-                Ok(())
-            }))
+            .spawn(
+                "test".into(),
+                Box::new(|token| {
+                    while !token.is_shutdown_requested() {
+                        std::thread::yield_now();
+                    }
+                    Ok(DeviceExit::Cancelled)
+                }),
+            )
             .expect("spawned");
         let mut handle = handle;
         handle.shutdown();

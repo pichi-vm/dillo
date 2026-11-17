@@ -206,6 +206,7 @@ mod imp {
         inner: crate::hypervisor::Vm,
         mmio_bus: Arc<Mutex<MmioBus>>,
         shared_memory: Vec<Arc<dyn SharedMemory>>,
+        device_failures: dillo_machine::execution::DeviceFailureReporter,
         irq_manager: Arc<Mutex<IrqManager>>,
     }
 
@@ -215,6 +216,7 @@ mod imp {
                 .field("inner", &self.inner)
                 .field("mmio_bus", &self.mmio_bus)
                 .field("shared_memory", &self.shared_memory.len())
+                .field("device_failures", &self.device_failures)
                 .field("irq_manager", &"<backend-owned>")
                 .finish()
         }
@@ -465,6 +467,7 @@ mod imp {
                 inner,
                 mmio_bus: Arc::new(Mutex::new(MmioBus::new())),
                 shared_memory: Vec::new(),
+                device_failures: dillo_machine::execution::DeviceFailureReporter::default(),
                 irq_manager,
             })
         }
@@ -566,6 +569,10 @@ mod imp {
     }
 
     impl dillo_machine::Machine for Vm {
+        fn device_failures(&self) -> dillo_machine::execution::DeviceFailureObserver {
+            self.device_failures.observer()
+        }
+
         type Error = Error;
         type CpuPreparation = CpuPreparation;
         type Memory = Memory;
@@ -782,6 +789,9 @@ mod imp {
                 )));
             }
             let interrupts = self.resolve_interrupts(item.interrupts())?;
+            let device_failures = self
+                .device_failures
+                .scoped(format!("MMIO {:?}", item.windows()));
             let notifications = crate::notification::Notifications::new(
                 self.inner.clone(),
                 item.windows().to_vec(),
@@ -794,6 +804,7 @@ mod imp {
                 notifications,
                 interrupts,
                 shared_memory: self.shared_memory.clone(),
+                device_failures,
             }))
         }
     }
@@ -802,6 +813,7 @@ mod imp {
         notifications: crate::notification::Notifications,
         interrupts: Vec<InterruptResource>,
         shared_memory: Vec<Arc<dyn SharedMemory>>,
+        device_failures: dillo_machine::execution::DeviceFailureReporter,
     }
 
     impl std::fmt::Debug for MachineMmioAttachment {
@@ -834,12 +846,22 @@ mod imp {
 
         fn spawn(
             self: Arc<Self>,
+            name: String,
             run: dillo_machine::execution::DeviceRun,
         ) -> Result<DeviceHandle, SpawnError> {
             let shutdown = Arc::new(AtomicBool::new(false));
             let token_shutdown = Arc::clone(&shutdown);
             let token = RunToken::from_fn(move || token_shutdown.load(Ordering::Acquire));
-            let join = thread::spawn(move || run(token));
+            let reporter = self.device_failures.scoped(name);
+            let worker_reporter = reporter.clone();
+            let join = std::thread::Builder::new()
+                .spawn(move || worker_reporter.run(run, token))
+                .map_err(|error| {
+                    reporter.report(dillo_machine::execution::JoinError::Spawn(
+                        error.to_string(),
+                    ));
+                    SpawnError
+                })?;
             Ok(DeviceHandle::new(
                 move || {
                     shutdown.store(true, Ordering::Release);
@@ -1070,6 +1092,126 @@ mod imp {
     mod owner_tests {
         use super::*;
         use dillo_machine::{CpuInterrupt as _, CpuPreparation as _, CpuRunner as _, Machine as _};
+
+        #[test]
+        fn attached_worker_failure_stops_native_cpus_and_preserves_retained_ram() {
+            use dillo_machine::execution::JoinError;
+            use dillo_machine::memory::{AddressRange, SharedAccess, SharedRange};
+            use dillo_mmio::{MmioError, MmioWriteOutcome};
+            use std::sync::mpsc;
+
+            struct Progress {
+                window: [AddressRange; 1],
+                entered: mpsc::Sender<()>,
+            }
+            impl MmioDevice for Progress {
+                fn windows(&self) -> &[AddressRange] {
+                    &self.window
+                }
+                fn read(&self, _: AddressRange, _: u64, data: &mut [u8]) -> Result<(), MmioError> {
+                    data.fill(0);
+                    Ok(())
+                }
+                fn write(
+                    &self,
+                    _: AddressRange,
+                    _: u64,
+                    _: &[u8],
+                ) -> Result<MmioWriteOutcome, MmioError> {
+                    let _ = self.entered.send(());
+                    Ok(MmioWriteOutcome::Continue)
+                }
+            }
+
+            for panics in [false, true] {
+                let (mut vm, profile, base) = machine_fixture();
+                let observer = vm.device_failures();
+                let probe = memory::MappingProbe::from_view(&vm.inner.guest_memory().unwrap());
+                let retained = vm.shared_memory[0]
+                    .region(SharedRange {
+                        gpa: base,
+                        size: 0x1000,
+                        access: SharedAccess::ReadWrite,
+                    })
+                    .unwrap();
+                // Write an actual MMIO progress marker, then spin without guest exits.
+                #[cfg(target_arch = "x86_64")]
+                vm.write_guest(0xffff_fff0, &[0xc6, 0x05, 0, 0, 0, 0x0b, 1, 0xeb, 0xfe])
+                    .unwrap();
+                #[cfg(target_arch = "aarch64")]
+                vm.write_guest(
+                    0,
+                    &[0xd2a1_6000u32, 0x5280_0021, 0xb900_0001, 0x1400_0000]
+                        .into_iter()
+                        .flat_map(u32::to_le_bytes)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+                let (entered, progress) = mpsc::channel();
+                let attachment = vm
+                    .attach(Arc::new(Progress {
+                        window: [AddressRange {
+                            base: 0x0b00_0000,
+                            size: 0x1000,
+                        }],
+                        entered,
+                    }))
+                    .unwrap();
+                let worker = attachment
+                    .spawn(
+                        "native failing worker".into(),
+                        Box::new(move |_| {
+                            progress
+                                .recv_timeout(Duration::from_secs(3))
+                                .map_err(|error| {
+                                    JoinError::Host(format!("guest progress missing: {error}"))
+                                })?;
+                            assert!(!panics, "injected native attached worker panic");
+                            Err(JoinError::Host(
+                                "injected native attached worker error".into(),
+                            ))
+                        }),
+                    )
+                    .unwrap();
+                let shutdown = Arc::new(AtomicBool::new(false));
+                let rescue_shutdown = Arc::clone(&shutdown);
+                let (done, completed) = mpsc::channel();
+                let rescue = thread::spawn(move || {
+                    let rescued = completed.recv_timeout(Duration::from_secs(5)).is_err();
+                    if rescued {
+                        rescue_shutdown.store(true, Ordering::Release);
+                    }
+                    rescued
+                });
+                let result = dillo_runtime::PreparingCpus::spawn(&mut vm, 2, profile)
+                    .and_then(|cpus| cpus.prepare(shutdown.as_ref()))
+                    .and_then(|cpus| cpus.run(shutdown.as_ref()));
+                let _ = done.send(());
+                let rescued = rescue.join().unwrap();
+                let joined = worker.join();
+                assert!(
+                    !rescued,
+                    "runtime required operator rescue after attached failure"
+                );
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("native failing worker"), "{error}");
+                assert!(!error.contains("guest progress missing"), "{error}");
+                assert!(joined.is_err());
+                assert!(observer.check().is_err());
+                assert!(probe.mappings() > 0);
+                drop(vm);
+                assert!(
+                    probe.mappings() > 0,
+                    "export retains original RAM after CPU and device retirement"
+                );
+                retained.write(0x80, b"retained").unwrap();
+                let mut bytes = [0; 8];
+                retained.read(0x80, &mut bytes).unwrap();
+                assert_eq!(&bytes, b"retained");
+                drop(retained);
+                assert_eq!(probe.mappings(), 0, "failure observer does not retain RAM");
+            }
+        }
 
         #[test]
         fn exported_region_outlives_machine_and_then_reclaims_mapping() {

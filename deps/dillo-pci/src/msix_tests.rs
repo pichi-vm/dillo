@@ -96,7 +96,7 @@ impl DeviceAttachment for TestAttachment {
         &[]
     }
 
-    fn spawn(self: Arc<Self>, _run: DeviceRun) -> Result<DeviceHandle, SpawnError> {
+    fn spawn(self: Arc<Self>, _name: String, _run: DeviceRun) -> Result<DeviceHandle, SpawnError> {
         Ok(DeviceHandle::noop())
     }
 }
@@ -210,4 +210,66 @@ fn shared_domain_keeps_function_enable_and_masks_independent() {
     control(2, 0xC000);
     control(2, 0x8000);
     assert_delivery(&domain, &handles, &[10, 11, 20]);
+}
+
+#[test]
+fn worker_failure_keeps_the_actual_sparse_pci_slot_and_task_role() {
+    use dillo_machine::execution::{DeviceFailureReporter, JoinError, RunToken};
+
+    #[derive(Debug)]
+    struct FailingAttachment(DeviceFailureReporter);
+    impl DeviceAttachment for FailingAttachment {
+        fn interrupts(&self) -> &[InterruptResource] {
+            &[]
+        }
+        fn shared_memory(&self) -> &[Arc<dyn SharedMemory>] {
+            &[]
+        }
+        fn spawn(
+            self: Arc<Self>,
+            name: String,
+            run: DeviceRun,
+        ) -> Result<DeviceHandle, SpawnError> {
+            assert!(
+                self.0
+                    .scoped(name)
+                    .run(run, RunToken::from_fn(|| false))
+                    .is_err()
+            );
+            Ok(DeviceHandle::noop())
+        }
+    }
+    #[derive(Debug)]
+    struct Function;
+    impl PciDevice for Function {
+        fn config_read(&self, _: usize) -> u32 {
+            0
+        }
+        fn config_write(&self, _: usize, _: u64, _: &[u8]) -> Result<(), PciError> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "virtio-net"
+        }
+        fn set_host(&self, host: Arc<dyn PciDeviceHost>) {
+            host.spawn(
+                "net tx".into(),
+                Box::new(|_| Err(JoinError::Host("injected worker error".into()))),
+            )
+            .unwrap()
+            .join()
+            .unwrap();
+        }
+    }
+    let failures = DeviceFailureReporter::default();
+    let reporter = failures.scoped("MMIO root");
+    let observer = failures.observer();
+    let mut root = PciRoot::new(AddressRange {
+        base: 0,
+        size: 0x1000_0000,
+    });
+    root.register(7, Box::new(Function));
+    root.set_attachment(Arc::new(FailingAttachment(reporter)));
+    let failure = observer.check().unwrap_err();
+    assert_eq!(failure.participant, "MMIO root/PCI slot 7/net tx");
 }

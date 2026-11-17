@@ -124,6 +124,7 @@ struct Input {
     index: usize,
     behavior: Behavior,
     trace: Arc<Trace>,
+    failure_on_retirement: Option<dillo_machine::execution::DeviceFailureReporter>,
 }
 impl CpuPreparation for Input {
     type Error = std::io::Error;
@@ -213,6 +214,7 @@ impl CpuPreparation for Input {
             behavior: self.behavior,
             trace: self.trace,
             _owner: PhantomData,
+            failure_on_retirement: self.failure_on_retirement,
         })
     }
 }
@@ -221,6 +223,7 @@ struct Runner {
     behavior: Behavior,
     trace: Arc<Trace>,
     _owner: PhantomData<Rc<()>>,
+    failure_on_retirement: Option<dillo_machine::execution::DeviceFailureReporter>,
 }
 impl CpuRunner for Runner {
     type Error = std::io::Error;
@@ -287,6 +290,11 @@ impl CpuRunner for Runner {
 }
 impl Drop for Runner {
     fn drop(&mut self) {
+        if let Some(reporter) = &self.failure_on_retirement {
+            reporter.report(dillo_machine::execution::JoinError::Host(
+                "late worker failure".into(),
+            ));
+        }
         self.trace
             .record(Event::Destroyed(self.index, thread::current().id()));
     }
@@ -298,27 +306,39 @@ impl Memory for TestMemory {
         Ok(Self)
     }
 }
+enum DeviceFailurePhase {
+    None,
+    MachinePreparation,
+    Retirement,
+}
 struct TestMachine {
+    device_failures: dillo_machine::execution::DeviceFailureReporter,
     trace: Arc<Trace>,
     behaviors: Vec<Behavior>,
     construction_error: Option<usize>,
     machine_error: bool,
     machine_panic: bool,
     construction_panic: Option<usize>,
+    device_failure_phase: DeviceFailurePhase,
 }
 impl TestMachine {
     fn new(behaviors: Vec<Behavior>) -> Self {
         Self {
+            device_failures: dillo_machine::execution::DeviceFailureReporter::default(),
             trace: Trace::new(),
             behaviors,
             construction_error: None,
             machine_error: false,
             machine_panic: false,
             construction_panic: None,
+            device_failure_phase: DeviceFailurePhase::None,
         }
     }
 }
 impl Machine for TestMachine {
+    fn device_failures(&self) -> dillo_machine::execution::DeviceFailureObserver {
+        self.device_failures.observer()
+    }
     type Error = std::io::Error;
     type CpuPreparation = Input;
     type Memory = TestMemory;
@@ -337,6 +357,11 @@ impl Machine for TestMachine {
             index: index as usize,
             behavior: self.behaviors[index as usize],
             trace: Arc::clone(&self.trace),
+            failure_on_retirement: matches!(
+                self.device_failure_phase,
+                DeviceFailurePhase::Retirement
+            )
+            .then(|| self.device_failures.scoped("retiring worker")),
         })
     }
     fn guest_address_bits() -> Result<u32, Self::Error> {
@@ -354,6 +379,14 @@ impl Machine for TestMachine {
     fn prepare_vcpu_run(&mut self) -> Result<(), Self::Error> {
         self.trace.assert_no_entry();
         self.trace.record(Event::MachinePrepared);
+        if matches!(
+            self.device_failure_phase,
+            DeviceFailurePhase::MachinePreparation
+        ) {
+            self.device_failures.scoped("preparing worker").report(
+                dillo_machine::execution::JoinError::Host("preparation worker failure".into()),
+            );
+        }
         assert!(!self.machine_panic, "injected machine preparation panic");
         if self.machine_error {
             Err(std::io::Error::other("injected machine preparation error"))
@@ -657,5 +690,119 @@ fn architectural_admission_failure_cannot_release_a_prepared_peer() {
             .unwrap_err();
         assert!(error.to_string().contains(diagnostic), "{error}");
         trace.assert_no_entry_and_owners_destroyed();
+    }
+}
+
+#[test]
+fn attached_failure_before_prepare_during_prepare_and_before_release_never_enters_guest() {
+    for phase in 0..4 {
+        let mut machine = TestMachine::new(vec![Behavior::Wait, Behavior::Wait]);
+        let trace = Arc::clone(&machine.trace);
+        let reporter = machine
+            .device_failures
+            .scoped("MMIO test/PCI slot 3/net tx");
+        let report = || {
+            reporter.report(dillo_machine::execution::JoinError::Host(
+                "attached worker failed".into(),
+            ));
+        };
+        if phase == 0 {
+            report();
+        }
+        if phase == 2 {
+            machine.device_failure_phase = DeviceFailurePhase::MachinePreparation;
+        }
+        let result = PreparingCpus::spawn(&mut machine, 2, PROFILE).and_then(|preparing| {
+            if phase == 1 {
+                report();
+            }
+            preparing
+                .prepare(&AtomicBool::new(false))
+                .and_then(|prepared| {
+                    if phase == 3 {
+                        report();
+                    }
+                    prepared.run(&AtomicBool::new(false))
+                })
+        });
+        assert!(result.unwrap_err().to_string().contains("worker fail"));
+        trace.assert_no_entry_and_owners_destroyed();
+        // A later execution attempt on the same machine cannot forget failure.
+        assert!(PreparingCpus::spawn(&mut machine, 2, PROFILE).is_err());
+    }
+}
+
+#[test]
+fn live_attached_error_panic_and_unjustified_exit_terminate_and_join_cpu_owners() {
+    use dillo_machine::execution::{DeviceExit, JoinError, RunToken};
+    for outcome in 0..3 {
+        let mut machine = TestMachine::new(vec![Behavior::Wait, Behavior::Wait]);
+        let trace = Arc::clone(&machine.trace);
+        let reporter = machine.device_failures.scoped("MMIO test/fs queue 1");
+        let worker_trace = Arc::clone(&trace);
+        let worker = thread::spawn(move || {
+            worker_trace.wait(|events| {
+                (0..2).all(|index| {
+                    events
+                        .iter()
+                        .any(|event| matches!(event, Event::Entered(i) if *i == index))
+                })
+            });
+            reporter.run(
+                Box::new(move |_| match outcome {
+                    0 => Err(JoinError::Host("live failure".into())),
+                    1 => panic!("live panic"),
+                    _ => Ok(DeviceExit::Cancelled),
+                }),
+                RunToken::from_fn(|| false),
+            )
+        });
+        let error = PreparingCpus::spawn(&mut machine, 2, PROFILE)
+            .unwrap()
+            .prepare(trace.as_ref())
+            .unwrap()
+            .run(trace.as_ref())
+            .unwrap_err();
+        assert!(worker.join().unwrap().is_err());
+        assert!(error.to_string().contains("MMIO test/fs queue 1"));
+        assert!(trace.kicks.load(Ordering::Acquire) > 0);
+        let events = trace.events.lock().unwrap();
+        for index in 0..2 {
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, Event::Destroyed(i, _) if *i == index))
+            );
+        }
+    }
+}
+
+#[test]
+fn failure_reported_during_owner_retirement_outranks_every_normal_candidate() {
+    for outcome in [
+        Outcome::Poweroff,
+        Outcome::Reset,
+        Outcome::OperatorTermination,
+    ] {
+        let mut machine = TestMachine::new(vec![Behavior::CoObserved(outcome); 2]);
+        machine.device_failure_phase = DeviceFailurePhase::Retirement;
+        let trace = Arc::clone(&machine.trace);
+        let error = PreparingCpus::spawn(&mut machine, 2, PROFILE)
+            .unwrap()
+            .prepare(trace.as_ref())
+            .unwrap()
+            .run(trace.as_ref())
+            .unwrap_err();
+        assert!(error.to_string().contains("late worker failure"), "{error}");
+        assert_eq!(
+            trace
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(event, Event::Destroyed(_, _)))
+                .count(),
+            2
+        );
     }
 }

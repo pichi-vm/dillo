@@ -736,16 +736,22 @@ impl VirtioDeviceHost for PciVirtioHost {
 
     fn spawn(
         &self,
-        run: Box<dyn FnOnce(VirtioRunToken) -> Result<(), DeviceJoinError> + Send>,
+        name: String,
+        run: Box<
+            dyn FnOnce(VirtioRunToken) -> Result<dillo_virtio::DeviceExit, DeviceJoinError> + Send,
+        >,
     ) -> Result<VirtioDeviceHandle, ActivateError> {
         let handle = self
             .host
-            .spawn(Box::new(move |token| {
-                run(VirtioRunToken::from_fn(move || {
-                    token.is_shutdown_requested()
-                }))
-                .map_err(|e| JoinError::Host(e.to_string()))
-            }))
+            .spawn(
+                name,
+                Box::new(move |token| {
+                    run(VirtioRunToken::from_fn(move || {
+                        token.is_shutdown_requested()
+                    }))
+                    .map_err(|e| JoinError::Host(e.to_string()))
+                }),
+            )
             .map_err(|e| ActivateError::InvalidConfig(format!("spawn virtio worker: {e}")))?;
         let handle = Arc::new(Mutex::new(Some(handle)));
         let shutdown_handle = Arc::clone(&handle);

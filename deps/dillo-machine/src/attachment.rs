@@ -35,5 +35,5 @@ pub trait DeviceAttachment: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
-    fn spawn(self: Arc<Self>, run: DeviceRun) -> Result<DeviceHandle, SpawnError>;
+    fn spawn(self: Arc<Self>, name: String, run: DeviceRun) -> Result<DeviceHandle, SpawnError>;
 }

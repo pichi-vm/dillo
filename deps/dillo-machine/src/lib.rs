@@ -186,6 +186,9 @@ pub trait Machine: Sized + 'static {
     type CpuPreparation: CpuPreparation<Error = Self::Error>;
     type Memory: Memory<Error = Self::Error>;
 
+    /// Observe the sticky device-failure record belonging to this machine.
+    fn device_failures(&self) -> execution::DeviceFailureObserver;
+
     /// Bind one CPU input to this machine without creating its native runner.
     fn cpu_preparation(
         &mut self,
@@ -317,6 +320,9 @@ mod tests {
     }
 
     impl Machine for TestMachine {
+        fn device_failures(&self) -> execution::DeviceFailureObserver {
+            execution::DeviceFailureReporter::default().observer()
+        }
         type Error = TestError;
         type CpuPreparation = TestCpuState;
         fn cpu_preparation(&mut self, _: u32, _: CpuProfile) -> Result<TestCpuState, Self::Error> {

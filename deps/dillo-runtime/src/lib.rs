@@ -132,6 +132,7 @@ impl<I: CpuInterrupt> Worker<I> {
 /// unwinding path keeps repeating native interruption while it joins owners.
 struct Owners<'vm, M: Machine> {
     machine: &'vm mut M,
+    device_failures: dillo_machine::execution::DeviceFailureObserver,
     workers: Vec<Worker<InterruptOf<M>>>,
     ready: mpsc::Receiver<usize>,
     gate: Arc<InitialGate>,
@@ -139,6 +140,9 @@ struct Owners<'vm, M: Machine> {
     wake_errors: BTreeMap<usize, String>,
 }
 impl<M: Machine> Owners<'_, M> {
+    fn device_failed(&self) -> bool {
+        self.device_failures.check().is_err()
+    }
     fn poll(&mut self) {
         self.workers = std::mem::take(&mut self.workers)
             .into_iter()
@@ -197,6 +201,9 @@ impl<M: Machine> Owners<'_, M> {
             })
             .collect();
         errors.extend(self.wake_errors.values().cloned());
+        if let Err(failure) = self.device_failures.check() {
+            errors.insert(0, failure.to_string());
+        }
         errors
     }
     fn fail(&mut self, error: impl Into<String>) -> CpuError {
@@ -285,6 +292,7 @@ impl<'vm, M: Machine> PreparingCpus<'vm, M> {
     ) -> Result<Self, CpuError> {
         let (ready, receiver) = mpsc::channel();
         let mut owners = Owners {
+            device_failures: machine.device_failures(),
             machine,
             workers: Vec::new(),
             ready: receiver,
@@ -296,6 +304,9 @@ impl<'vm, M: Machine> PreparingCpus<'vm, M> {
             return Err(owners.fail("a CPU set requires a BSP"));
         }
         for index in 0..count {
+            if owners.device_failed() {
+                return Err(owners.fail("device failed during CPU construction"));
+            }
             let input = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 owners.machine.cpu_preparation(index, profile)
             })) {
@@ -350,6 +361,9 @@ impl<'vm, M: Machine> PreparingCpus<'vm, M> {
     ) -> Result<PreparedCpus<'vm, M>, CpuError> {
         loop {
             self.owners.poll();
+            if self.owners.device_failed() {
+                return Err(self.owners.fail("device failed during CPU preparation"));
+            }
             if shutdown.is_requested() {
                 return Err(self.owners.fail("CPU preparation terminated"));
             }
@@ -392,7 +406,8 @@ impl<'vm, M: Machine> PreparingCpus<'vm, M> {
             Err(_) => return Err(self.owners.fail("machine CPU preparation panicked")),
         }
         self.owners.poll();
-        if shutdown.is_requested()
+        if self.owners.device_failed()
+            || shutdown.is_requested()
             || self
                 .owners
                 .workers
@@ -420,7 +435,8 @@ impl<'vm, M: Machine> PreparingCpus<'vm, M> {
 impl<M: Machine> PreparedCpus<'_, M> {
     pub fn run(mut self, shutdown: &dyn CpuTermination) -> Result<VcpuStop, CpuError> {
         self.owners.poll();
-        if shutdown.is_requested()
+        if self.owners.device_failed()
+            || shutdown.is_requested()
             || self
                 .owners
                 .workers
@@ -445,7 +461,8 @@ impl<M: Machine> RunningCpus<'_, M> {
     pub fn wait(mut self, shutdown: &dyn CpuTermination) -> Result<VcpuStop, CpuError> {
         loop {
             self.owners.poll();
-            if shutdown.is_requested()
+            if self.owners.device_failed()
+                || shutdown.is_requested()
                 || self
                     .owners
                     .workers

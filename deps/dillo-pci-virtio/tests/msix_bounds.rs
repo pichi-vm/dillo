@@ -56,7 +56,7 @@ impl DeviceAttachment for Attachment {
         &[]
     }
 
-    fn spawn(self: Arc<Self>, _run: DeviceRun) -> Result<DeviceHandle, SpawnError> {
+    fn spawn(self: Arc<Self>, _name: String, _run: DeviceRun) -> Result<DeviceHandle, SpawnError> {
         Ok(DeviceHandle::noop())
     }
 }

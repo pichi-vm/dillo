@@ -171,6 +171,9 @@ impl Memory for UnusedMemory {
     }
 }
 impl Machine for RecordingMachine {
+    fn device_failures(&self) -> dillo_machine::execution::DeviceFailureObserver {
+        dillo_machine::execution::DeviceFailureReporter::default().observer()
+    }
     type Error = std::io::Error;
     type CpuPreparation = UnusedCpuInput;
     fn cpu_preparation(&mut self, _: u32, _: CpuProfile) -> Result<UnusedCpuInput, Self::Error> {

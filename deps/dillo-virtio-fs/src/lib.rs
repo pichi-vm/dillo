@@ -181,6 +181,7 @@ impl VirtioDevice for VirtioFs {
                 Arc::clone(&host),
                 Arc::clone(&queue_memory),
                 Arc::clone(&buffer_memory),
+                index,
                 queue,
                 evt,
                 call_interrupt,
@@ -225,6 +226,7 @@ fn spawn_queue_worker(
     host: Arc<dyn VirtioDeviceHost>,
     queue_memory: Arc<dyn QueueMemory>,
     buffer_memory: Arc<dyn VirtioMemory>,
+    queue_index: usize,
     queue: Queue,
     kick: Kick,
     call_interrupt: Option<Interrupt>,
@@ -232,19 +234,22 @@ fn spawn_queue_worker(
     backend: Arc<dyn FsBackend>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
     let wake = kick.clone();
-    host.spawn(Box::new(move |token| {
-        queue_worker(
-            queue_memory,
-            buffer_memory,
-            queue,
-            kick,
-            call_interrupt,
-            state,
-            backend,
-            token,
-        );
-        Ok(())
-    }))
+    host.spawn(
+        format!("fs queue {queue_index}"),
+        Box::new(move |token| {
+            queue_worker(
+                queue_memory,
+                buffer_memory,
+                queue,
+                kick,
+                call_interrupt,
+                state,
+                backend,
+                token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
     .map(|handle| handle.with_shutdown_wake(wake))
 }
 
@@ -258,15 +263,15 @@ fn queue_worker(
     state: Arc<Mutex<FsState>>,
     backend: Arc<dyn FsBackend>,
     token: VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Arc::new(Mutex::new(queue));
     loop {
         if let Err(e) = kick.read() {
             log::error!("virtio-fs: kick read error: {e}");
-            return;
+            return Err(e);
         }
         if token.is_shutdown_requested() {
-            return;
+            return Ok(dillo_virtio::DeviceExit::Cancelled);
         }
         drain_requests(
             &queue_memory,
@@ -417,7 +422,11 @@ mod tests {
         impl VirtioDeviceHost for FailSecondSpawn {
             fn spawn(
                 &self,
-                run: Box<dyn FnOnce(VirtioRunToken) -> Result<(), DeviceJoinError> + Send>,
+                _name: String,
+                run: Box<
+                    dyn FnOnce(VirtioRunToken) -> Result<dillo_virtio::DeviceExit, DeviceJoinError>
+                        + Send,
+                >,
             ) -> Result<VirtioDeviceHandle, ActivateError> {
                 if self.spawned.fetch_add(1, Ordering::Relaxed) == 1 {
                     self.entered
@@ -441,7 +450,10 @@ mod tests {
                     move || shutdown.store(true, Ordering::Release),
                     move || {
                         joined.fetch_add(1, Ordering::Relaxed);
-                        worker.join().map_err(|_| DeviceJoinError::Panicked)?
+                        worker
+                            .join()
+                            .map_err(|_| DeviceJoinError::Panicked)?
+                            .map(|_| ())
                     },
                 ))
             }

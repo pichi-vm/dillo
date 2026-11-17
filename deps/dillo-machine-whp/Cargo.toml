@@ -22,5 +22,8 @@ windows-sys.workspace = true
 windows-sys = { workspace = true, features = ["Win32_System_Memory"] }
 wait-timeout = "0.2"
 
+[dev-dependencies]
+dillo-runtime.workspace = true
+
 [lints]
 workspace = true

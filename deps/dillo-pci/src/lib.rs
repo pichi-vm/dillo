@@ -112,7 +112,7 @@ pub trait PciDeviceHost: Send + Sync + std::fmt::Debug {
         None
     }
 
-    fn spawn(&self, run: DeviceRun) -> Result<DeviceHandle, SpawnError>;
+    fn spawn(&self, name: String, run: DeviceRun) -> Result<DeviceHandle, SpawnError>;
 }
 
 /// PCI MSI-X table adapter backed by a machine-owned message-interrupt domain.
@@ -240,13 +240,19 @@ impl PciBus {
         // alias in that pool. Wrap zero-vector functions too, so they cannot
         // access vectors belonging to other functions.
         let mut base: u16 = 0;
-        for device in self.slots.iter().flatten() {
+        for (slot, device) in self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, device)| device.as_ref().map(|device| (slot, device)))
+        {
             let n = device.msix_vectors();
             let next_base = base
                 .checked_add(n)
                 .expect("PCI MSI-X vector count exceeds shared domain capacity");
             device.set_host(Arc::new(OffsetPciDeviceHost {
                 inner: Arc::clone(&host),
+                slot,
                 vector_base: base,
                 vector_count: n,
             }));
@@ -491,8 +497,8 @@ impl PciDeviceHost for PciRootHost {
             })
     }
 
-    fn spawn(&self, run: DeviceRun) -> Result<DeviceHandle, SpawnError> {
-        Arc::clone(&self.attachment).spawn(run)
+    fn spawn(&self, name: String, run: DeviceRun) -> Result<DeviceHandle, SpawnError> {
+        Arc::clone(&self.attachment).spawn(name, run)
     }
 }
 
@@ -505,6 +511,7 @@ const MSI_NO_VECTOR: u16 = 0xFFFF;
 /// slot dimension; this extends the same per-slot isolation to MSI-X.
 #[derive(Debug)]
 struct OffsetPciDeviceHost {
+    slot: usize,
     inner: Arc<dyn PciDeviceHost>,
     vector_base: u16,
     vector_count: u16,
@@ -525,8 +532,9 @@ impl PciDeviceHost for OffsetPciDeviceHost {
         })
     }
 
-    fn spawn(&self, run: DeviceRun) -> Result<DeviceHandle, SpawnError> {
-        self.inner.spawn(run)
+    fn spawn(&self, name: String, run: DeviceRun) -> Result<DeviceHandle, SpawnError> {
+        self.inner
+            .spawn(format!("PCI slot {}/{}", self.slot, name), run)
     }
 }
 
@@ -859,6 +867,7 @@ mod tests {
 
             fn spawn(
                 self: Arc<Self>,
+                _name: String,
                 _run: dillo_machine::execution::DeviceRun,
             ) -> Result<DeviceHandle, SpawnError> {
                 Ok(DeviceHandle::noop())
@@ -955,6 +964,7 @@ mod tests {
             }
             fn spawn(
                 self: Arc<Self>,
+                _name: String,
                 _run: dillo_machine::execution::DeviceRun,
             ) -> Result<DeviceHandle, SpawnError> {
                 Ok(DeviceHandle::noop())
