@@ -204,7 +204,6 @@ mod imp {
         inner: crate::hypervisor::Vm,
         mmio_bus: Arc<Mutex<MmioBus>>,
         shared_memory: Vec<Arc<dyn SharedMemory>>,
-        mapped_memory: Option<Arc<memory::MappedMemory>>,
         irq_manager: Arc<Mutex<IrqManager>>,
     }
 
@@ -214,7 +213,6 @@ mod imp {
                 .field("inner", &self.inner)
                 .field("mmio_bus", &self.mmio_bus)
                 .field("shared_memory", &self.shared_memory.len())
-                .field("mapped_memory", &self.mapped_memory.is_some())
                 .field("irq_manager", &"<backend-owned>")
                 .finish()
         }
@@ -322,36 +320,23 @@ mod imp {
     }
 
     impl Vm {
-        fn add_memslot(&self, slot: u32, gpa: u64, host_addr: u64, size: u64) -> Result<(), Error> {
-            self.inner.add_memslot(slot, gpa, host_addr, size)
-        }
-
         fn attach_mapped_memory(&mut self, mapped: Arc<memory::MappedMemory>) -> Result<(), Error> {
-            for (slot_idx, region) in mapped.regions().iter().enumerate() {
-                log::info!(
-                    "registering KVM memslot {}: [{:#x}..{:#x}) host={:#x}",
-                    slot_idx,
-                    region.gpa(),
-                    region.gpa() + region.size(),
-                    region.host_addr()
-                );
-                self.add_memslot(
-                    slot_idx as u32,
-                    region.gpa(),
-                    region.host_addr(),
-                    region.size(),
-                )?;
-            }
+            self.inner.attach_memory(mapped)?;
             self.shared_memory = vec![Arc::new(dillo_mmio::MappedSharedMemory::for_guest_memory(
-                mapped.guest_memory(),
+                self.inner.guest_memory()?,
                 dillo_mmio::SharedAccess::ReadWrite,
             ))];
-            self.mapped_memory = Some(mapped);
             Ok(())
         }
 
         #[cfg(all(test, target_arch = "x86_64"))]
         fn create_vcpu_inner(&self, idx: u32, cpu_profile: &str) -> Result<Vcpu, Error> {
+            if self.inner.guest_memory().is_err() {
+                self.inner.attach_memory(Arc::new(
+                    memory::MappedMemory::test_backing(&[(0, 0x1000)])
+                        .map_err(Error::AllocateMemory)?,
+                ))?;
+            }
             Ok(Vcpu {
                 inner: self.inner.create_vcpu(idx, cpu_profile)?,
                 mmio_bus: Arc::clone(&self.mmio_bus),
@@ -467,13 +452,12 @@ mod imp {
                 crate::hypervisor::Vm::new_with_gic(&substrate)?
             };
             let irq_manager = Arc::new(Mutex::new(
-                IrqManager::new(inner.vm_fd_arc()).map_err(|e| Error::Irq(e.to_string()))?,
+                IrqManager::new(inner.clone()).map_err(|e| Error::Irq(e.to_string()))?,
             ));
             Ok(Self {
                 inner,
                 mmio_bus: Arc::new(Mutex::new(MmioBus::new())),
                 shared_memory: Vec::new(),
-                mapped_memory: None,
                 irq_manager,
             })
         }
@@ -593,14 +577,12 @@ mod imp {
                     "CPU profile architecture mismatch".into(),
                 ));
             }
+            self.inner.guest_memory()?;
             Ok(CpuPreparation {
                 index,
                 cpu_profile,
                 vm: self.inner.clone(),
                 mmio_bus: Arc::clone(&self.mmio_bus),
-                memory: self.mapped_memory.clone().ok_or_else(|| {
-                    Error::UnhandledExit("CPU preparation requires attached RAM".into())
-                })?,
                 interrupt: CpuInterrupt::new(),
             })
         }
@@ -622,14 +604,7 @@ mod imp {
         }
 
         fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Self::Error> {
-            let memory = self
-                .mapped_memory
-                .as_ref()
-                .ok_or_else(|| Error::UnhandledExit("guest RAM is not attached".to_string()))?;
-            memory
-                .gpa_map()
-                .write(gpa, data)
-                .map_err(|e| Error::UnhandledExit(e.to_string()))
+            self.inner.write_guest(gpa, data)
         }
 
         fn zero_guest(&mut self, mut gpa: u64, mut len: u64) -> Result<(), Self::Error> {
@@ -694,7 +669,6 @@ mod imp {
         cpu_profile: dillo_machine::CpuProfile,
         vm: crate::hypervisor::Vm,
         mmio_bus: Arc<Mutex<MmioBus>>,
-        memory: Arc<memory::MappedMemory>,
         interrupt: CpuInterrupt,
     }
     impl dillo_machine::CpuPreparation for CpuPreparation {
@@ -715,7 +689,6 @@ mod imp {
             }
             Ok(CpuRunner {
                 vcpu,
-                _memory: self.memory,
                 _owner: std::marker::PhantomData,
             })
         }
@@ -731,7 +704,6 @@ mod imp {
     #[derive(Debug)]
     pub struct CpuRunner {
         vcpu: Vcpu,
-        _memory: Arc<memory::MappedMemory>,
         _owner: std::marker::PhantomData<std::rc::Rc<()>>,
     }
     impl dillo_machine::CpuRunner for CpuRunner {
@@ -791,7 +763,7 @@ mod imp {
             }
             let interrupts = self.resolve_interrupts(item.interrupts())?;
             let notifications = crate::notification::Notifications::new(
-                self.inner.vm_fd_arc(),
+                self.inner.clone(),
                 item.windows().to_vec(),
             );
             self.mmio_bus
@@ -1079,7 +1051,88 @@ mod imp {
         use dillo_machine::{CpuInterrupt as _, CpuPreparation as _, CpuRunner as _, Machine as _};
 
         #[test]
-        fn native_owners_keep_ap_parked_and_pure_interrupts_do_not_terminate() {
+        fn exported_region_outlives_machine_and_then_reclaims_mapping() {
+            let (vm, _, base) = machine_fixture();
+            let probe = memory::MappingProbe::from_view(&vm.inner.guest_memory().unwrap());
+            let region = vm.shared_memory[0]
+                .region(dillo_mmio::SharedRange {
+                    gpa: base,
+                    size: 0x1000,
+                    access: dillo_mmio::SharedAccess::ReadWrite,
+                })
+                .unwrap();
+            drop(vm);
+            assert!(probe.mappings() > 0);
+            region.write(0x80, b"retained export").unwrap();
+            let mut data = [0; 15];
+            region.read(0x80, &mut data).unwrap();
+            assert_eq!(&data, b"retained export");
+            drop(region);
+            assert_eq!(probe.mappings(), 0);
+        }
+
+        #[test]
+        fn standalone_preparation_and_native_runner_retain_machine_ram() {
+            let (mut vm, profile, _) = machine_fixture();
+            let probe = memory::MappingProbe::from_view(&vm.inner.guest_memory().unwrap());
+            let input = vm.cpu_preparation(0, profile).unwrap();
+            drop(vm);
+            assert!(
+                probe.mappings() > 0,
+                "unconsumed preparation retains the native context"
+            );
+            let (ready, prepared) = std::sync::mpsc::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let owner = thread::spawn(move || {
+                let mut runner = input.prepare()?;
+                let _ = ready.send(());
+                let _ = wait.recv();
+                runner.run(&AtomicBool::new(true))
+            });
+            let prepared = prepared.recv_timeout(Duration::from_secs(2));
+            let retained = probe.mappings() > 0;
+            let _ = release.send(());
+            let result = owner.join();
+            assert!(prepared.is_ok(), "standalone native owner must prepare");
+            assert!(retained, "native runner retains real RAM mappings");
+            assert_eq!(result.unwrap().unwrap(), VcpuStop::Stopped);
+            assert_eq!(probe.mappings(), 0);
+        }
+
+        #[test]
+        fn irq_and_notification_services_each_retain_registered_ram() {
+            for notification_last in [true, false] {
+                let (vm, _, _) = machine_fixture();
+                let probe = memory::MappingProbe::from_view(&vm.inner.guest_memory().unwrap());
+                let irq = Arc::clone(&vm.irq_manager);
+                let window = dillo_mmio::MmioWindow {
+                    base: 0x0b00_0000,
+                    size: 0x1000,
+                };
+                let registrar =
+                    crate::notification::Notifications::new(vm.inner.clone(), vec![window]);
+                let notification = registrar
+                    .register(window, 0x50, 0)
+                    .unwrap()
+                    .expect("native ioeventfd is required");
+                drop(registrar);
+                drop(vm);
+                if notification_last {
+                    drop(irq);
+                    notification.write(5).unwrap();
+                    assert_eq!(notification.read().unwrap(), 5);
+                    assert!(probe.mappings() > 0);
+                    drop(notification);
+                } else {
+                    drop(notification);
+                    assert!(probe.mappings() > 0);
+                    drop(irq);
+                }
+                assert_eq!(probe.mappings(), 0);
+            }
+        }
+
+        fn machine_fixture() -> (Vm, dillo_machine::CpuProfile, u64) {
             #[cfg(target_arch = "x86_64")]
             let (tree, profile, base, entry, code) = (
                 crate::intc_x86::tests::tree(0xfee0_0000, 0x1000, 0xfec0_0000, 0x1000),
@@ -1135,6 +1188,12 @@ mod imp {
             .unwrap();
             // Spin at PMI's fixed BSP entry; AP gets no guest startup request.
             vm.write_guest(entry, &code).unwrap();
+            (vm, profile, base)
+        }
+
+        #[test]
+        fn native_owners_keep_ap_parked_and_pure_interrupts_do_not_terminate() {
+            let (mut vm, profile, _) = machine_fixture();
             let termination = Arc::new(AtomicBool::new(false));
             let mut owners = Vec::new();
             let mut releases = Vec::new();
