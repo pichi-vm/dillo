@@ -2406,7 +2406,6 @@ mod machine_select {
         ) -> Result<(), RunError>
         where
             E: std::error::Error + Send + Sync + 'static,
-            M: Machine<Error = E>,
             M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn MmioAttachment>>,
             M: Attach<Arc<dillo_mmio_virtio::EmptySlot>, Error = E>,
             M: Attach<
@@ -2420,8 +2419,8 @@ mod machine_select {
             let (mut pci, mmio): (Vec<DevicePlacement>, Vec<DevicePlacement>) =
                 placements.into_iter().partition(|p| p.bus == Bus::Pci);
 
-            // --- PCI: one root, one function per placement ---
-            if !pci.is_empty() {
+            // Realize the declared root even when it has no attached endpoints.
+            if platform.has_pcie {
                 // Each virtio function uses BAR 0 (4 KiB cfg) + BAR 2 (4 KiB
                 // MSI-X) — one 0x2000 stride in the PCI MMIO window. Strides are
                 // packed in registration order; the PCI device number is the
@@ -2434,8 +2433,8 @@ mod machine_select {
                     base: platform.pcie.ecam_base,
                     size: platform.pcie.ecam_size,
                 };
-                // PciRoot recomputes the MSI-X domain size from registered
-                // devices, so the seed vector count here is irrelevant.
+                // An empty root needs no message vectors. Registering endpoints
+                // grows the domain to their combined MSI-X table size.
                 let mut pci_root = PciRoot::with_interrupt_requirement(
                     ecam,
                     optional_message_requirement(platform.pcie.msi.as_ref(), 0),
@@ -2849,6 +2848,161 @@ mod machine_select {
                     (size >> 32) as u32,
                     size as u32,
                 ])
+            }
+
+            #[derive(Default)]
+            struct AttachedDevices {
+                bus: MmioBus,
+                requirements: Vec<MmioInterruptRequirement>,
+            }
+
+            #[derive(Debug)]
+            struct InactiveAttachment;
+
+            impl MmioAttachment for InactiveAttachment {
+                fn interrupts(&self) -> &[dillo_mmio::MmioInterrupt] {
+                    &[]
+                }
+
+                fn shared_memory(&self) -> &[Arc<dyn dillo_mmio::SharedMemory>] {
+                    &[]
+                }
+
+                fn spawn(
+                    self: Arc<Self>,
+                    _: dillo_mmio::MmioDeviceRun,
+                ) -> Result<dillo_mmio::MmioDeviceHandle, dillo_mmio::MmioSpawnError>
+                {
+                    panic!("configuration reads must not activate a device")
+                }
+            }
+
+            impl<D: MmioDevice + 'static> Attach<Arc<D>> for AttachedDevices {
+                type Error = std::io::Error;
+                type Output = Arc<dyn MmioAttachment>;
+
+                fn attach(&mut self, device: Arc<D>) -> Result<Self::Output, Self::Error> {
+                    self.requirements.extend_from_slice(device.interrupts());
+                    self.bus.register_device(device);
+                    Ok(Arc::new(InactiveAttachment))
+                }
+            }
+
+            #[test]
+            fn pci_root_realization_follows_declaration_not_population() {
+                use dillo_config::Bus;
+                use dillo_devtree::platform::{
+                    ControllerKind, InterruptControllerRef, MsiControllerRef, Pcie, ResourcePlan,
+                    VirtioMmio,
+                };
+
+                const ECAM: u64 = 0x3000_0000;
+                const MMIO: u64 = 0xa00_0000;
+                for (declared, placed_bus) in [
+                    (true, None),
+                    (true, Some(Bus::Mmio)),
+                    (true, Some(Bus::Pci)),
+                    (false, Some(Bus::Mmio)),
+                ] {
+                    let platform = PlatformMachine {
+                        arch: Arch::Aarch64,
+                        has_pcie: declared,
+                        pcie: if declared {
+                            Pcie {
+                                ecam_base: ECAM,
+                                ecam_size: 0x10_0000,
+                                bus_min: 0,
+                                bus_max: 0,
+                                mmio_base: 0x4000_0000,
+                                mmio_size: 0x100_0000,
+                                msi: Some(MsiParentage {
+                                    node: "/pcie@30000000".into(),
+                                    controller: MsiControllerRef {
+                                        node: "/msi-controller@a100000".into(),
+                                        phandle: 3,
+                                        kind: ControllerKind::GicV2mFrame,
+                                    },
+                                }),
+                            }
+                        } else {
+                            Pcie::ZEROED
+                        },
+                        plan: ResourcePlan::default(),
+                        uart: None,
+                        virtio_mmio: vec![VirtioMmio {
+                            base: MMIO,
+                            size: 0x200,
+                            irq: 16,
+                            interrupt: WiredInterrupt {
+                                node: "/virtio_mmio@a000000".into(),
+                                controller: InterruptControllerRef {
+                                    node: "/interrupt-controller@8000000".into(),
+                                    phandle: 1,
+                                    kind: ControllerKind::GicV3,
+                                    interrupt_cells: 3,
+                                },
+                                cells: vec![0, 16, 1],
+                                irq: 16,
+                            },
+                        }],
+                        poweroff: None,
+                        reboot: None,
+                    };
+                    let placements = placed_bus
+                        .into_iter()
+                        .map(|bus| DevicePlacement {
+                            bus,
+                            index: u32::from(bus == Bus::Pci),
+                            msix_vectors: 3,
+                            name: "console",
+                            device: Box::new(dillo_virtio_console::VirtioConsole::new()),
+                        })
+                        .collect();
+                    let mut attached = AttachedDevices::default();
+                    let result = attach_devices(&mut attached, &platform, placements);
+                    result.expect("realize declared devices");
+                    let mut value = [0; 4];
+                    assert_eq!(attached.bus.read(ECAM, &mut value), declared);
+                    if declared {
+                        assert_eq!(value, [0x86, 0x80, 0x37, 0x12]);
+                        assert!(attached.bus.read(ECAM + (1 << 15), &mut value));
+                        if placed_bus == Some(Bus::Pci) {
+                            assert_eq!(u16::from_le_bytes([value[0], value[1]]), 0x1af4);
+                        } else {
+                            assert_eq!(value, [0xff; 4]);
+                        }
+                        assert!(attached.bus.read(ECAM + (2 << 15), &mut value));
+                        assert_eq!(value, [0xff; 4]);
+                        assert!(!attached.bus.read(ECAM - 4, &mut value));
+                        assert!(
+                            !attached
+                                .bus
+                                .read(ECAM + platform.pcie.ecam_size, &mut value)
+                        );
+                    }
+                    let domains: Vec<_> = attached
+                        .requirements
+                        .iter()
+                        .filter(|requirement| {
+                            matches!(requirement, MmioInterruptRequirement::MessageDomain { .. })
+                        })
+                        .copied()
+                        .collect();
+                    let expected_domains = if declared {
+                        vec![MmioInterruptRequirement::MessageDomain {
+                            source: Some(MessageInterruptSource { controller: 3 }),
+                            vectors: if placed_bus == Some(Bus::Pci) { 3 } else { 0 },
+                        }]
+                    } else {
+                        vec![]
+                    };
+                    assert_eq!(domains, expected_domains);
+                    assert!(attached.bus.read(MMIO + 8, &mut value));
+                    assert_eq!(
+                        u32::from_le_bytes(value),
+                        if placed_bus == Some(Bus::Mmio) { 3 } else { 0 }
+                    );
+                }
             }
 
             #[test]
