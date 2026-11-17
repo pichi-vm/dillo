@@ -391,18 +391,6 @@ mod imp {
     }
 }
 
-/// Serializes tests that reason about descriptor *numbers*.
-///
-/// The fd table is process-wide, so a freed number is immediately reusable by
-/// any other test thread. Every test that creates a pipe holds this lock, so
-/// the one assertion about a specific number cannot race a recycler.
-#[cfg(all(test, unix))]
-pub(crate) fn fd_table_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -421,7 +409,6 @@ mod tests {
 
     #[test]
     fn rx_reads_then_reports_eof() {
-        let _fds = super::fd_table_lock();
         let (read_end, write_end) = parent_pipe();
         let rx = adopt(read_end, Direction::Rx);
 
@@ -439,7 +426,6 @@ mod tests {
 
     #[test]
     fn tx_writes_then_reports_epipe() {
-        let _fds = super::fd_table_lock();
         let (read_end, write_end) = parent_pipe();
         let tx = adopt(write_end, Direction::Tx);
 
@@ -463,30 +449,23 @@ mod tests {
 
     #[test]
     fn adopting_closes_the_inherited_number() {
-        let _fds = super::fd_table_lock();
-        let (read_end, _write_end) = parent_pipe();
+        let (read_end, write_end) = parent_pipe();
         let number = read_end.as_raw_fd();
         let adopted = adopt(read_end, Direction::Rx);
-        // The owned copy is a different descriptor, and the number the parent
-        // passed in is no longer open in this process.
+        // The owned copy differs from the inherited descriptor. Once it closes,
+        // EPIPE proves no inherited reader remains, even if another test has
+        // already reused the original descriptor number for an unrelated file.
         assert_ne!(adopted.inner.raw(), number);
-        assert!(
-            nix::fcntl::fcntl(
-                // SAFETY: borrowing a possibly-closed number only to probe it.
-                #[allow(unsafe_code)]
-                unsafe {
-                    std::os::fd::BorrowedFd::borrow_raw(number)
-                },
-                nix::fcntl::FcntlArg::F_GETFD
-            )
-            .is_err(),
-            "the inherited descriptor should have been closed after dup"
+        drop(adopted);
+        assert_eq!(
+            nix::unistd::write(&write_end, b"x"),
+            Err(nix::errno::Errno::EPIPE),
+            "the inherited reader should have been closed after dup"
         );
     }
 
     #[test]
     fn nonblocking_is_not_set_on_the_caller_end() {
-        let _fds = super::fd_table_lock();
         // The parent's own end keeps its original flags: dillo sets O_NONBLOCK
         // on its dup'd copy, which has its own open file description flags…
         // except that O_NONBLOCK lives on the *description*, shared by dup. So
