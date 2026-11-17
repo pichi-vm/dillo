@@ -1464,7 +1464,8 @@ fn boots_with_named_console_ports() {
 
     let cmdline = format!(
         "console=hvc0 dillo.console_port=build dillo.console_port_read={} \
-         dillo.console_port_write={FROM_GUEST}",
+         dillo.console_port_write={FROM_GUEST} \
+         sysctl.debug.exception-trace=1 print-fatal-signals=1 loglevel=8",
         TO_GUEST.len()
     );
     let pmi = build_pmi_from_path(tmp.path(), &kernel, host::CONFIG, &cmdline, false);
@@ -1541,6 +1542,16 @@ fn boots_with_named_console_ports() {
     {
         let _ = child.kill();
         let _ = child.wait();
+        // Preserve the exact guest executable for symbolizing fatal signals.
+        let evidence = Path::new("target/boot-evidence");
+        if let Err(error) = std::fs::create_dir_all(evidence).and_then(|()| {
+            std::fs::copy(
+                env!("CARGO_BIN_FILE_SNUFFLER_snuffler"),
+                evidence.join("named-console-snuffler"),
+            )
+        }) {
+            eprintln!("cannot retain named-console guest executable: {error}");
+        }
         let mut output = std::fs::read(&out_path).unwrap_or_default();
         output.extend_from_slice(&std::fs::read(&err_path).unwrap_or_default());
         panic!(

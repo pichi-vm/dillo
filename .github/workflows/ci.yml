@@ -234,3 +234,10 @@ jobs:
         with:
           name: memory-evidence-${{ matrix.name }}
           path: target/memory-evidence
+
+      - name: Upload failed-boot guest executables
+        if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: boot-evidence-${{ matrix.name }}
+          path: target/boot-evidence
