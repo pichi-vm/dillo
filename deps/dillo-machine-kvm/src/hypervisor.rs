@@ -372,7 +372,7 @@ impl Vm {
             // resets `IA32_APIC_BASE` to its own default when the vCPU is
             // created, so the contract's base is applied here — before the
             // vCPU can run, and before any PMI boot state is written, which
-            // `set_x86_64_state` layers on top of this same sregs block.
+            // `initialize_bsp` layers on top of this same sregs block.
             set_lapic_base(&fd, idx, self.inner.intc.lapic_base())?;
         }
 
@@ -396,7 +396,13 @@ impl Vm {
                 .map_err(|e| Error::CreateVcpu(idx, io(e)))?;
         }
 
-        Ok(Vcpu { fd, idx })
+        Ok(Vcpu {
+            fd,
+            idx,
+            #[cfg(target_arch = "x86_64")]
+            xsave_size: (self.inner.vm.check_extension_int(Cap::Xsave2) as usize)
+                .max(std::mem::size_of::<kvm_bindings::kvm_xsave>()),
+        })
     }
 }
 
@@ -405,135 +411,138 @@ impl Vm {
 pub(crate) struct Vcpu {
     fd: VcpuFd,
     idx: u32,
+    #[cfg(target_arch = "x86_64")]
+    xsave_size: usize,
 }
 
 impl Vcpu {
-    /// Apply boot-vCPU register state from a `pmi::vm::vcpu::x86_64::CpuState`.
+    /// Apply PMI's fixed vm BSP state. APs retain native guest-startup state.
     #[cfg(target_arch = "x86_64")]
-    pub(crate) fn set_x86_64_state(
-        &mut self,
-        state: &pmi::vm::vcpu::x86_64::CpuState,
-    ) -> Result<(), Error> {
-        let regs = kvm_regs {
-            rip: state.rip,
-            rsp: state.rsp,
-            rflags: if state.rflags.get() == 0 {
-                0x2
-            } else {
-                state.rflags.get()
-            },
-            rax: state.rax,
-            rbx: state.rbx,
-            rcx: state.rcx,
-            rdx: state.rdx,
-            rsi: state.rsi,
-            rdi: state.rdi,
-            rbp: state.rbp,
-            r8: state.r8,
-            r9: state.r9,
-            r10: state.r10,
-            r11: state.r11,
-            r12: state.r12,
-            r13: state.r13,
-            r14: state.r14,
-            r15: state.r15,
-        };
+    pub(crate) fn initialize_bsp(&mut self) -> Result<(), Error> {
+        use kvm_bindings::{Msrs, kvm_debugregs, kvm_msr_entry, kvm_xcr, kvm_xcrs};
         self.fd
-            .set_regs(&regs)
+            .set_regs(&kvm_regs {
+                rip: 0xffff_fff0,
+                rflags: 2,
+                ..Default::default()
+            })
             .map_err(|e| Error::SetRegs(self.idx, io(e)))?;
-
         let mut sregs = self
             .fd
             .get_sregs()
             .map_err(|e| Error::SetSregs(self.idx, io(e)))?;
-        sregs.cr0 = state.cr0;
-        sregs.cr3 = state.cr3;
-        sregs.cr4 = state.cr4;
-        sregs.efer = state.efer;
-        sregs.cs = seg_from_pmi(&state.cs);
-        sregs.ds = seg_from_pmi(&state.ds);
-        sregs.es = seg_from_pmi(&state.es);
-        sregs.fs = seg_from_pmi(&state.fs);
-        sregs.gs = seg_from_pmi(&state.gs);
-        sregs.ss = seg_from_pmi(&state.ss);
-        sregs.gdt.base = state.gdtr.base;
-        sregs.gdt.limit = state.gdtr.limit;
-        sregs.idt.base = state.idtr.base;
-        sregs.idt.limit = state.idtr.limit;
-
-        // TR + LDTR: arma's vm:vcpu doesn't set these. VMX entry
-        // requires TR to be a present 64-bit TSS in long mode; an
-        // all-zero TR fails the VM-entry control check. Initialize
-        // both with default-valid descriptors. See task P12.
-        sregs.tr = kvm_segment {
-            base: 0,
-            limit: 0xFFFF,
-            selector: 0,
-            type_: 0xB,
+        sregs.cr0 = 0x21;
+        sregs.cr3 = 0;
+        sregs.cr4 = 0x40;
+        sregs.efer = 0x901;
+        let data = kvm_segment {
+            limit: u32::MAX,
+            type_: 3,
             present: 1,
-            dpl: 0,
-            db: 0,
-            s: 0,
-            l: 0,
-            g: 0,
-            avl: 0,
-            unusable: 0,
-            padding: 0,
+            s: 1,
+            db: 1,
+            g: 1,
+            ..Default::default()
+        };
+        sregs.cs = kvm_segment { type_: 0xb, ..data };
+        sregs.ds = data;
+        sregs.es = data;
+        sregs.fs = data;
+        sregs.gs = data;
+        sregs.ss = data;
+        sregs.tr = kvm_segment {
+            limit: 0xffff,
+            type_: 0xb,
+            present: 1,
+            ..Default::default()
         };
         sregs.ldt = kvm_segment {
-            base: 0,
-            limit: 0xFFFF,
-            selector: 0,
-            type_: 0x2,
-            present: 1,
-            dpl: 0,
-            db: 0,
-            s: 0,
-            l: 0,
-            g: 0,
-            avl: 0,
-            unusable: 0,
-            padding: 0,
+            unusable: 1,
+            ..Default::default()
         };
-
+        sregs.gdt = kvm_bindings::kvm_dtable {
+            base: 0,
+            limit: 0xffff,
+            ..Default::default()
+        };
+        sregs.idt = kvm_bindings::kvm_dtable::default();
         self.fd
             .set_sregs(&sregs)
             .map_err(|e| Error::SetSregs(self.idx, io(e)))?;
+        self.fd
+            .set_debug_regs(&kvm_debugregs {
+                dr6: 0xffff_0ff0,
+                dr7: 0x400,
+                ..Default::default()
+            })
+            .map_err(|e| Error::SetRegs(self.idx, io(e)))?;
+        let pat = Msrs::from_entries(&[kvm_msr_entry {
+            index: 0x277,
+            data: 0x0007_0406_0007_0406,
+            ..Default::default()
+        }])
+        .map_err(|e| Error::UnhandledExit(format!("construct BSP PAT: {e}")))?;
+        let written = self
+            .fd
+            .set_msrs(&pat)
+            .map_err(|e| Error::SetRegs(self.idx, io(e)))?;
+        if written != 1 {
+            return Err(Error::UnhandledExit(
+                "KVM did not write BSP IA32_PAT".into(),
+            ));
+        }
+        let mut xcrs = kvm_xcrs {
+            nr_xcrs: 1,
+            ..Default::default()
+        };
+        xcrs.xcrs[0] = kvm_xcr {
+            xcr: 0,
+            value: 1,
+            ..Default::default()
+        };
+        self.fd
+            .set_xcrs(&xcrs)
+            .map_err(|e| Error::SetRegs(self.idx, io(e)))?;
+        // KVM_SET_FPU does not write MXCSR on current kernels. Use the
+        // standard XSAVE layout to initialize both x87 and SSE explicitly.
+        let extra = self
+            .xsave_size
+            .saturating_sub(std::mem::size_of::<kvm_bindings::kvm_xsave>())
+            .div_ceil(4);
+        let mut xsave = kvm_bindings::Xsave::new(extra)
+            .map_err(|e| Error::UnhandledExit(format!("allocate BSP XSAVE: {e}")))?;
+        // SAFETY: only fixed-size fields are mutated; the allocation's FAM
+        // length and layout remain unchanged.
+        #[allow(unsafe_code)]
+        let state = unsafe { xsave.as_mut_fam_struct() };
+        state.xsave.region[0] = 0x37f; // FCW, FSW=0
+        state.xsave.region[6] = 0x1f80; // MXCSR
+        state.xsave.region[128] = 3; // x87 and SSE components are present
+        // SAFETY: the allocation covers KVM_CAP_XSAVE2 (or the legacy 4 KiB
+        // size). Dillo never dynamically enables additional XSTATE features.
+        #[allow(unsafe_code)]
+        unsafe { self.fd.set_xsave2(&xsave) }.map_err(|e| Error::SetRegs(self.idx, io(e)))?;
         Ok(())
     }
 
     #[cfg(target_arch = "aarch64")]
-    pub(crate) fn set_aarch64_state(
-        &mut self,
-        state: &pmi::vm::vcpu::aarch64::CpuState,
-    ) -> Result<(), Error> {
-        let gprs = [
-            state.x0, state.x1, state.x2, state.x3, state.x4, state.x5, state.x6, state.x7,
-            state.x8, state.x9, state.x10, state.x11, state.x12, state.x13, state.x14, state.x15,
-            state.x16, state.x17, state.x18, state.x19, state.x20, state.x21, state.x22, state.x23,
-            state.x24, state.x25, state.x26, state.x27, state.x28, state.x29, state.x30,
-        ];
-        for (idx, value) in gprs.into_iter().enumerate() {
-            self.set_one_u64(core_reg(idx as u64), value)?;
+    pub(crate) fn initialize_bsp(&mut self) -> Result<(), Error> {
+        for idx in 0..=31 {
+            // X0..X30 and SP_EL0
+            self.set_one_u64(core_reg(idx), 0)?;
         }
-        self.set_one_u64(core_reg(32), state.pc)?;
+        self.set_one_u64(core_reg(32), 0)?;
+        self.set_one_u64(core_reg(33), 0x3c5)?;
+        self.set_one_u64(core_reg(34), 0)?; // SP_EL1
+        let sctlr = sys_reg(3, 0, 1, 0, 0);
+        let mut raw = [0; 8];
+        self.fd
+            .get_one_reg(sctlr, &mut raw)
+            .map_err(|e| Error::SetRegs(self.idx, io(e)))?;
         self.set_one_u64(
-            core_reg(33),
-            if state.pstate.get() == 0 {
-                0x3c5
-            } else {
-                state.pstate.get()
-            },
-        )?;
-        self.set_one_u64(core_reg(34), state.sp_el1)?;
-        self.set_one_u64(sys_reg(3, 0, 1, 0, 0), state.sctlr_el1)?;
-        self.set_one_u64(sys_reg(3, 0, 1, 0, 2), state.cpacr_el1)?;
-        self.set_one_u64(sys_reg(3, 0, 2, 0, 2), state.tcr_el1)?;
-        self.set_one_u64(sys_reg(3, 0, 2, 0, 0), state.ttbr0_el1)?;
-        self.set_one_u64(sys_reg(3, 0, 2, 0, 1), state.ttbr1_el1)?;
-        self.set_one_u64(sys_reg(3, 0, 10, 2, 0), state.mair_el1)?;
-        self.set_one_u64(sys_reg(3, 0, 12, 0, 0), state.vbar_el1)?;
-        Ok(())
+            sctlr,
+            u64::from_le_bytes(raw) & !((1 << 0) | (1 << 2) | (1 << 12) | (1 << 25)),
+        )
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -759,42 +768,6 @@ fn sys_reg(op0: u64, op1: u64, crn: u64, crm: u64, op2: u64) -> u64 {
         | (op2 << KVM_REG_ARM64_SYSREG_OP2_SHIFT)
 }
 
-#[cfg(target_arch = "x86_64")]
-fn seg_from_pmi(s: &pmi::vm::vcpu::x86_64::SegReg) -> kvm_segment {
-    // TEMPORARY: this translation matches what arma + tatu actually emit
-    // (Intel VMCS access-rights layout, bits 12-15 for AVL/L/DB/G),
-    // which diverges from `pmi/spec/vm.md` §2 (bits 8-11). See dillo
-    // task P11: the spec MUST be the source of truth and either the
-    // spec or the implementations need to change to agree. Revert this
-    // translation to follow the spec text directly once that's resolved.
-    //   bits 3:0  = type
-    //   bit  4    = s
-    //   bits 6:5  = dpl
-    //   bit  7    = present
-    //   bit  12   = avl
-    //   bit  13   = l   (64-bit code segment)
-    //   bit  14   = db
-    //   bit  15   = g   (4 KiB granularity)
-    // vm.md segment-attribute encoding: type[0:3], S[4], DPL[5:6], P[7],
-    // AVL[8], L[9], D/B[10], G[11].
-    let attr = s.attributes.get();
-    kvm_segment {
-        base: s.base,
-        limit: s.limit,
-        selector: s.selector,
-        type_: (attr & 0xF) as u8,
-        s: ((attr >> 4) & 0x1) as u8,
-        dpl: ((attr >> 5) & 0x3) as u8,
-        present: ((attr >> 7) & 0x1) as u8,
-        avl: ((attr >> 8) & 0x1) as u8,
-        l: ((attr >> 9) & 0x1) as u8,
-        db: ((attr >> 10) & 0x1) as u8,
-        g: ((attr >> 11) & 0x1) as u8,
-        unusable: 0,
-        padding: 0,
-    }
-}
-
 fn translate_exit(exit: VcpuExit<'_>) -> VmExit {
     match exit {
         VcpuExit::IoIn(port, data) => VmExit::PioRead {
@@ -898,5 +871,194 @@ impl Drop for KickSignalMask {
         self.previous
             .thread_set_mask()
             .expect("restore vCPU signal mask");
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod bsp_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_bsp_state_is_written_and_ap_remains_uninitialized() {
+        use vm_memory::{Bytes, GuestAddress, GuestMemory};
+        let memory = vm_memory::GuestMemoryMmap::<()>::from_ranges(&[
+            (GuestAddress(0x1000), 0x1000),
+            (GuestAddress(0xffff_f000), 0x1000),
+        ])
+        .unwrap();
+        let intc = crate::intc_x86::X86Intc::new(0xfee0_0000, 0x1000, 0xfec0_0000, 0x1000).unwrap();
+        let vm = Vm::new_with_intc(intc).unwrap();
+        for (slot, base) in [0x1000, 0xffff_f000].into_iter().enumerate() {
+            vm.add_memslot(
+                slot as u32,
+                base,
+                memory.get_host_address(GuestAddress(base)).unwrap() as u64,
+                0x1000,
+            )
+            .unwrap();
+        }
+        // Reset-vector jump, then guest enables OSFXSR and stores its initial
+        // MXCSR before any firmware can overwrite it. XCR0 stays at PMI's 1.
+        memory
+            .write_slice(&[0xe9, 0x0b, 0xf0, 0xff, 0xff], GuestAddress(0xffff_fff0))
+            .unwrap();
+        memory
+            .write_slice(
+                &[
+                    0x0f, 0x20, 0xe0, 0x0d, 0x00, 0x02, 0x00, 0x00, 0x0f, 0x22, 0xe0, 0x0f, 0xae,
+                    0x1d, 0x00, 0x10, 0x00, 0x00, 0xe6, 0x42, 0xf4,
+                ],
+                GuestAddress(0xffff_f000),
+            )
+            .unwrap();
+        let mut bsp = vm.create_vcpu(0, "x86-64-v1").unwrap();
+        let ap = vm.create_vcpu(1, "x86-64-v1").unwrap();
+        let ap_before = ap.fd.get_sregs().unwrap();
+        bsp.initialize_bsp().unwrap();
+        let regs = bsp.fd.get_regs().unwrap();
+        assert_eq!(regs.rip, 0xffff_fff0);
+        assert_eq!(regs.rflags, 2);
+        let s = bsp.fd.get_sregs().unwrap();
+        assert_eq!(s.cr0 & !0x10, 0x21); // ET is architectural read-as-one.
+        assert_eq!((s.cr3, s.cr4, s.efer), (0, 0x40, 0x901));
+        for (segment, kind) in [
+            (s.cs, 0xb),
+            (s.ds, 3),
+            (s.es, 3),
+            (s.fs, 3),
+            (s.gs, 3),
+            (s.ss, 3),
+        ] {
+            assert_eq!(
+                (segment.selector, segment.base, segment.limit),
+                (0, 0, u32::MAX)
+            );
+            assert_eq!(
+                (
+                    segment.type_,
+                    segment.present,
+                    segment.dpl,
+                    segment.db,
+                    segment.s,
+                    segment.g
+                ),
+                (kind, 1, 0, 1, 1, 1)
+            );
+            assert_eq!((segment.avl, segment.l, segment.unusable), (0, 0, 0));
+        }
+        assert_eq!(
+            (
+                s.tr.selector,
+                s.tr.base,
+                s.tr.limit,
+                s.tr.type_,
+                s.tr.present,
+                s.tr.s,
+                s.tr.g,
+                s.tr.db,
+                s.tr.avl,
+                s.tr.l
+            ),
+            (0, 0, 0xffff, 0xb, 1, 0, 0, 0, 0, 0)
+        );
+        assert_eq!(s.ldt.selector, 0);
+        assert_eq!(
+            (s.gdt.base, s.gdt.limit, s.idt.base, s.idt.limit),
+            (0, 0xffff, 0, 0)
+        );
+        let debug = bsp.fd.get_debug_regs().unwrap();
+        assert_eq!((debug.dr6, debug.dr7), (0xffff_0ff0, 0x400));
+        let mut pat = kvm_bindings::Msrs::from_entries(&[kvm_bindings::kvm_msr_entry {
+            index: 0x277,
+            ..Default::default()
+        }])
+        .unwrap();
+        assert_eq!(bsp.fd.get_msrs(&mut pat).unwrap(), 1);
+        assert_eq!(pat.as_slice()[0].data, 0x0007_0406_0007_0406);
+        let xcrs = bsp.fd.get_xcrs().unwrap();
+        assert_eq!(xcrs.xcrs.iter().find(|r| r.xcr == 0).unwrap().value, 1);
+        let fpu = bsp.fd.get_fpu().unwrap();
+        assert_eq!(
+            (
+                fpu.fcw,
+                fpu.fsw,
+                fpu.ftwx,
+                fpu.last_opcode,
+                fpu.last_ip,
+                fpu.last_dp
+            ),
+            (0x37f, 0, 0, 0, 0, 0)
+        );
+        assert_eq!(bsp.fd.get_xsave().unwrap().region[6], 0x1f80);
+        assert_eq!(fpu.fpr, [[0; 16]; 8]);
+        assert_eq!(fpu.xmm, [[0; 16]; 16]);
+        let exit = bsp.run(|_, _| 0, |_, _| false).unwrap();
+        assert!(
+            matches!(exit, VmExit::PioWrite { port: 0x42, .. }),
+            "{exit:?}"
+        );
+        assert_eq!(
+            memory.read_obj::<u32>(GuestAddress(0x1000)).unwrap(),
+            0x1f80
+        );
+        assert_eq!(ap.fd.get_sregs().unwrap(), ap_before);
+        assert_eq!(
+            ap.fd.get_mp_state().unwrap().mp_state,
+            kvm_bindings::KVM_MP_STATE_UNINITIALIZED
+        );
+    }
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod arm_bsp_tests {
+    use super::*;
+
+    #[test]
+    fn arm_fixed_bsp_state_matches_pmi_and_preserves_powered_off_ap() {
+        let kvm = Kvm::new().expect("/dev/kvm is required for this native test");
+        let vm = kvm.create_vm().expect("create ARM VM");
+        let mut init = kvm_vcpu_init::default();
+        vm.get_preferred_target(&mut init)
+            .expect("preferred ARM CPU");
+        init.features[0] |= 1 << KVM_ARM_VCPU_PSCI_0_2;
+        let fd = vm.create_vcpu(0).expect("create BSP");
+        fd.vcpu_init(&init).expect("initialize BSP");
+        let mut bsp = Vcpu { fd, idx: 0 };
+        init.features[0] |= 1 << KVM_ARM_VCPU_POWER_OFF;
+        let ap = vm.create_vcpu(1).expect("create AP");
+        ap.vcpu_init(&init).expect("initialize powered-off AP");
+        for index in 0..=32 {
+            bsp.set_one_u64(core_reg(index), 0x8000 + index * 16)
+                .unwrap();
+        }
+        bsp.set_one_u64(core_reg(34), 0x9000).unwrap();
+        let sctlr = sys_reg(3, 0, 1, 0, 0);
+        let initial_sctlr = bsp.native_register(sctlr);
+        bsp.set_one_u64(sctlr, initial_sctlr | 0x0200_1005).unwrap();
+        let ap_before = ap.get_mp_state().expect("read AP power state");
+        bsp.initialize_bsp()
+            .expect("program complete fixed ARM BSP state");
+        for index in 0..=32 {
+            assert_eq!(
+                bsp.native_register(core_reg(index)),
+                0,
+                "core register {index}"
+            );
+        }
+        assert_eq!(bsp.native_register(core_reg(33)), 0x3c5);
+        assert_eq!(bsp.native_register(core_reg(34)), 0);
+        assert_eq!(bsp.native_register(sctlr) & 0x0200_1005, 0);
+        assert_eq!(ap_before.mp_state, kvm_bindings::KVM_MP_STATE_STOPPED);
+        assert_eq!(ap.get_mp_state().unwrap(), ap_before);
+    }
+
+    impl Vcpu {
+        fn native_register(&self, id: u64) -> u64 {
+            let mut bytes = [0; 8];
+            self.fd
+                .get_one_reg(id, &mut bytes)
+                .expect("read native ARM register");
+            u64::from_le_bytes(bytes)
+        }
     }
 }

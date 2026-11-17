@@ -1681,7 +1681,6 @@ mod launch {
                     memory_mib,
                 },
             )?;
-            validate_cpu_profile(parsed.cpu_profile.as_str(), pmi_arch)?;
             if bootconfig_path.is_some()
                 && !parsed.actions.iter().any(|action| {
                     matches!(
@@ -1855,9 +1854,6 @@ mod launch {
         #[error("memory placement: {0}")]
         Placement(#[from] placement::PlanError),
 
-        #[error("unrecognized cpu:profile {0:?} for {1:?}")]
-        UnknownCpuProfile(String, HostArch),
-
         #[error("load section `{0}` lies outside the PMI file")]
         MalformedLoadSection(String),
 
@@ -1885,7 +1881,6 @@ mod launch {
                 | Self::DtboSynth(_)
                 | Self::Bootconfig(_) => 11,
                 Self::Placement(_) | Self::AddressSpace { .. } | Self::AddressSpaceProbe(_) => 13,
-                Self::UnknownCpuProfile(_, _) => 12,
             }
         }
     }
@@ -2027,50 +2022,9 @@ mod launch {
         bytes.get(start..end)
     }
 
-    /// Validate the `cpu:profile` name against the PMI machine architecture.
-    pub(crate) fn validate_cpu_profile(profile: &str, arch: HostArch) -> Result<(), LaunchError> {
-        let recognized = match arch {
-            HostArch::Aarch64 => parse_armv_profile(profile).is_some(),
-            HostArch::X86_64 => matches!(
-                profile,
-                "x86-64-v1" | "x86-64-v2" | "x86-64-v3" | "x86-64-v4"
-            ),
-        };
-        if recognized {
-            Ok(())
-        } else {
-            Err(LaunchError::UnknownCpuProfile(profile.to_string(), arch))
-        }
-    }
-
-    fn parse_armv_profile(s: &str) -> Option<(u32, u32)> {
-        let body = s.strip_prefix("armv")?.strip_suffix("-a")?;
-        let (major, minor) = body.split_once('.')?;
-        Some((major.parse().ok()?, minor.parse().ok()?))
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
-
-        #[test]
-        fn cpu_profile_validation_accepts_known_x86_levels() {
-            for profile in ["x86-64-v1", "x86-64-v2", "x86-64-v3", "x86-64-v4"] {
-                validate_cpu_profile(profile, HostArch::X86_64).expect(profile);
-            }
-        }
-
-        #[test]
-        fn cpu_profile_validation_accepts_armv_profiles() {
-            validate_cpu_profile("armv8.0-a", HostArch::Aarch64).expect("armv8.0-a");
-            validate_cpu_profile("armv9.2-a", HostArch::Aarch64).expect("armv9.2-a");
-        }
-
-        #[test]
-        fn cpu_profile_validation_rejects_arch_mismatch() {
-            assert!(validate_cpu_profile("armv8.0-a", HostArch::X86_64).is_err());
-            assert!(validate_cpu_profile("x86-64-v2", HostArch::Aarch64).is_err());
-        }
 
         #[test]
         fn read_section_checks_bounds() {
@@ -2198,7 +2152,7 @@ mod machine_select {
         use dillo_devtree::platform::Machine as PlatformMachine;
         use dillo_devtree::platform::{MsiParentage, WiredInterrupt};
         use dillo_machine::{
-            BootVcpuState, Cpu as MachineCpu, CpuState as MachineCpuState, LaunchConfig, Machine,
+            Cpu as MachineCpu, CpuState as MachineCpuState, LaunchConfig, Machine,
             Memory as MachineMemory, RamRange, VcpuStop,
         };
         use dillo_mmio::syscon;
@@ -2618,8 +2572,7 @@ mod machine_select {
         fn run_vcpus<M, E>(
             vm: &mut M,
             count: u32,
-            cpu_profile: &str,
-            boot_state: &dyn BootVcpuState,
+            cpu_profile: dillo_machine::CpuProfile,
             control: Arc<SupervisorControl>,
         ) -> Result<VcpuStop, RunError>
         where
@@ -2629,8 +2582,7 @@ mod machine_select {
         {
             let mut cpus = Vec::with_capacity(count as usize);
             for index in 0..count {
-                let state = M::CpuState::new(index, cpu_profile, Some(boot_state))
-                    .map_err(RunError::machine)?;
+                let state = M::CpuState::new(index, cpu_profile).map_err(RunError::machine)?;
                 cpus.push(Attach::attach(vm, state).map_err(RunError::machine)?);
             }
             vm.prepare_vcpu_run().map_err(RunError::machine)?;
@@ -2787,15 +2739,9 @@ mod machine_select {
             let control = Arc::new(SupervisorControl {
                 supervisor_shutdown,
             });
-            let cpu_profile = parsed.cpu_profile.as_str();
+            let cpu_profile = parsed.cpu_profile;
             crate::boot_trace::mark("guest_loaded");
-            let mut outcome = run_vcpus::<M, E>(
-                &mut vm,
-                vcpus,
-                cpu_profile,
-                &parsed.vcpu as &dyn BootVcpuState,
-                control,
-            )?;
+            let mut outcome = run_vcpus::<M, E>(&mut vm, vcpus, cpu_profile, control)?;
             while matches!(outcome, VcpuStop::GuestReset) {
                 log::info!("guest requested reboot - replaying launch writes");
                 vm.reset_for_reboot().map_err(RunError::machine)?;
@@ -2807,13 +2753,7 @@ mod machine_select {
                 let control = Arc::new(SupervisorControl {
                     supervisor_shutdown,
                 });
-                outcome = run_vcpus::<M, E>(
-                    &mut vm,
-                    vcpus,
-                    cpu_profile,
-                    &parsed.vcpu as &dyn BootVcpuState,
-                    control,
-                )?;
+                outcome = run_vcpus::<M, E>(&mut vm, vcpus, cpu_profile, control)?;
             }
 
             if matches!(outcome, VcpuStop::GuestPoweroff) {
@@ -2841,6 +2781,82 @@ mod machine_select {
             use dillo_devtree::devtree::{OwnedNode, OwnedProperty, OwnedTree};
             use dillo_devtree::platform::Arch;
             use dillo_mmio::{MmioBus, MmioDevice, MmioWriteOutcome};
+
+            struct RefusedCpu;
+            struct RefusedCpuInput;
+            struct RefusedMemory;
+            struct RefusedMachine {
+                prepared: usize,
+            }
+
+            impl dillo_machine::CpuState for RefusedCpuInput {
+                type Error = std::io::Error;
+                fn new(_: u32, _: dillo_machine::CpuProfile) -> Result<Self, Self::Error> {
+                    Ok(Self)
+                }
+            }
+            impl dillo_machine::Cpu for RefusedCpu {
+                type Error = std::io::Error;
+                fn run(&self) -> Result<VcpuStop, Self::Error> {
+                    panic!("failed launch executed a guest")
+                }
+                fn stop(&self) -> Result<(), Self::Error> {
+                    Ok(())
+                }
+            }
+            impl dillo_machine::Memory for RefusedMemory {
+                type Error = std::io::Error;
+                fn from_ranges(_: &[RamRange]) -> Result<Self, Self::Error> {
+                    Ok(Self)
+                }
+            }
+            impl Attach<RefusedCpuInput> for RefusedMachine {
+                type Error = std::io::Error;
+                type Output = Arc<RefusedCpu>;
+                fn attach(&mut self, _: RefusedCpuInput) -> Result<Self::Output, Self::Error> {
+                    self.prepared += 1;
+                    Ok(Arc::new(RefusedCpu))
+                }
+            }
+            impl Machine for RefusedMachine {
+                type Error = std::io::Error;
+                type Cpu = RefusedCpu;
+                type CpuState = RefusedCpuInput;
+                type Memory = RefusedMemory;
+                fn guest_address_bits() -> Result<u32, Self::Error> {
+                    Ok(48)
+                }
+                fn from_launch_config(_: LaunchConfig) -> Result<Self, Self::Error> {
+                    Ok(Self { prepared: 0 })
+                }
+                fn write_guest(&mut self, _: u64, _: &[u8]) -> Result<(), Self::Error> {
+                    Ok(())
+                }
+                fn prepare_vcpu_run(&mut self) -> Result<(), Self::Error> {
+                    Err(std::io::Error::other("injected native preparation refusal"))
+                }
+            }
+
+            #[test]
+            fn preparation_failure_never_runs_any_prepared_cpu() {
+                static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+                let mut machine = RefusedMachine { prepared: 0 };
+                let error = run_vcpus::<RefusedMachine, _>(
+                    &mut machine,
+                    2,
+                    dillo_machine::CpuProfile::X86_64(pmi::x86_64::Profile::V1),
+                    Arc::new(SupervisorControl {
+                        supervisor_shutdown: &SHUTDOWN,
+                    }),
+                )
+                .expect_err("preparation must fail");
+                assert_eq!(machine.prepared, 2);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("injected native preparation refusal")
+                );
+            }
 
             fn reg(base: u64, size: u64) -> OwnedProperty {
                 OwnedProperty::new("reg").with_u32s(&[

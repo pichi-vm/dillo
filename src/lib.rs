@@ -146,11 +146,6 @@ pub mod pmi_parse {
         #[error("CBOR decode failed: {0}")]
         CborDecode(String),
 
-        #[error(
-            "vm:vcpu variant ({variant}) does not match PE FileHeader.Machine ({machine:#06x})"
-        )]
-        VcpuVariantMismatch { variant: &'static str, machine: u16 },
-
         #[error("no base DTB: neither a dt:dtb attribute nor a dt:dtb fill is present")]
         NoBaseDtb,
 
@@ -175,11 +170,11 @@ pub mod pmi_parse {
     use std::collections::BTreeMap;
     use std::io::Cursor;
 
+    pub use dillo_machine::CpuProfile;
     use object::pe::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64};
     use object::read::pe::PeFile64;
     use object::{Object, ObjectSection, SectionFlags};
     use pmi::Target;
-    use pmi::vm::vcpu::{aarch64 as vcpu_aarch64, x86_64 as vcpu_x86_64};
     use pmi::vm::{Action as ManifestAction, FillKind as PmiFillKind, Spec};
 
     /// Host architecture selector. The PMI's PE Machine field MUST match.
@@ -205,29 +200,6 @@ pub mod pmi_parse {
         pub host_arch: HostArch,
         /// Guest memory in MiB. Used to compute the effective total-loaded cap.
         pub memory_mib: u32,
-    }
-
-    /// The boot vCPU register map, in the form selected by the PE Machine.
-    #[derive(Debug)]
-    pub enum VcpuState {
-        X86_64(vcpu_x86_64::CpuState),
-        Aarch64(vcpu_aarch64::CpuState),
-    }
-
-    impl dillo_machine::BootVcpuState for VcpuState {
-        fn x86_64(&self) -> Option<&vcpu_x86_64::CpuState> {
-            match self {
-                Self::X86_64(state) => Some(state),
-                Self::Aarch64(_) => None,
-            }
-        }
-
-        fn aarch64(&self) -> Option<&vcpu_aarch64::CpuState> {
-            match self {
-                Self::Aarch64(state) => Some(state),
-                Self::X86_64(_) => None,
-            }
-        }
     }
 
     /// Information about a PE section reachable from the active target.
@@ -271,12 +243,10 @@ pub mod pmi_parse {
     #[derive(Debug)]
     pub struct ParsedPmi {
         pub arch: HostArch,
-        pub vcpu: VcpuState,
         /// `cpu:profile` target attribute (per `pmi/spec/cpu.md`). The
-        /// raw profile name (e.g. `x86-64-v3`, `armv8.2-a`). The VMM
-        /// validates it against host capabilities; this crate only
-        /// carries the bytes faithfully.
-        pub cpu_profile: pmi::cpu::Profile,
+        /// architecture-typed baseline. Native CPU preparation must validate
+        /// guest-visible capabilities before execution.
+        pub cpu_profile: CpuProfile,
         pub actions: Vec<Action>,
         /// Every section placed in guest memory (named by a load or fill
         /// action). The bundled base named by `dt:dtb` is excluded — see
@@ -333,7 +303,7 @@ pub mod pmi_parse {
         let mut raw_sections = collect_sections(&pe, file_size, bytes)?;
 
         // Locate `.pmi.vm` (MVP — only `vm` target is supported).
-        let target_section_name = pmi::vm::Spec::<vcpu_x86_64::CpuState>::SECTION;
+        let target_section_name = pmi::vm::Spec::<pmi::x86_64::Profile>::SECTION;
         let target_section = raw_sections
             .get(target_section_name)
             .filter(|s| s.is_discardable)
@@ -350,8 +320,8 @@ pub mod pmi_parse {
             });
         }
 
-        // Strict CBOR decode (depth-limited) into the arch-correct Spec<V>.
-        let (vcpu, cpu_profile, actions_raw, merged_dtb) =
+        // Strict CBOR decode (depth-limited) into the arch-correct Spec<P>.
+        let (cpu_profile, actions_raw, merged_dtb) =
             decode_manifest_bytes(&target_section.body, opts.host_arch)?;
 
         // pmi spec f6be1eb: each load/fill action carries an explicit `gpa`;
@@ -510,7 +480,6 @@ pub mod pmi_parse {
 
         Ok(ParsedPmi {
             arch: opts.host_arch,
-            vcpu,
             cpu_profile,
             actions,
             sections,
@@ -627,19 +596,11 @@ pub mod pmi_parse {
     fn decode_manifest_bytes(
         bytes: &[u8],
         arch: HostArch,
-    ) -> Result<
-        (
-            VcpuState,
-            pmi::cpu::Profile,
-            Vec<ManifestActionOwned>,
-            Option<String>,
-        ),
-        Error,
-    > {
+    ) -> Result<(CpuProfile, Vec<ManifestActionOwned>, Option<String>), Error> {
         let cursor = Cursor::new(bytes);
         match arch {
             HostArch::X86_64 => {
-                let spec: Spec<vcpu_x86_64::CpuState> =
+                let spec: Spec<pmi::x86_64::Profile> =
                     ciborium::de::from_reader_with_recursion_limit(cursor, caps::CBOR_MAX_DEPTH)
                         .map_err(|e| Error::CborDecode(e.to_string()))?;
                 check_actions_len(&spec.actions)?;
@@ -648,15 +609,10 @@ pub mod pmi_parse {
                     .into_iter()
                     .map(ManifestActionOwned::from)
                     .collect();
-                Ok((
-                    VcpuState::X86_64(spec.vcpu),
-                    spec.cpu_profile,
-                    actions,
-                    spec.dt_dtb,
-                ))
+                Ok((CpuProfile::X86_64(spec.cpu_profile), actions, spec.dt_dtb))
             }
             HostArch::Aarch64 => {
-                let spec: Spec<vcpu_aarch64::CpuState> =
+                let spec: Spec<pmi::aarch64::Profile> =
                     ciborium::de::from_reader_with_recursion_limit(cursor, caps::CBOR_MAX_DEPTH)
                         .map_err(|e| Error::CborDecode(e.to_string()))?;
                 check_actions_len(&spec.actions)?;
@@ -665,12 +621,7 @@ pub mod pmi_parse {
                     .into_iter()
                     .map(ManifestActionOwned::from)
                     .collect();
-                Ok((
-                    VcpuState::Aarch64(spec.vcpu),
-                    spec.cpu_profile,
-                    actions,
-                    spec.dt_dtb,
-                ))
+                Ok((CpuProfile::Aarch64(spec.cpu_profile), actions, spec.dt_dtb))
             }
         }
     }
@@ -886,6 +837,4 @@ pub mod pmi_parse {
 
         Ok(())
     }
-
-    pub use pmi::cpu::Profile;
 }

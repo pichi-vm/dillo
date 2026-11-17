@@ -32,7 +32,7 @@ mod imp {
         CompatMismatch, FromDevTree, NodeExt, OwnedNodeExt, PropExt,
         devtree::{OwnedTree, Tree},
     };
-    use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
+    use dillo_machine::{Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
     use dillo_mmio::{
         Attach, Interrupt, InterruptError, InterruptLine, MessageInterrupt, MessageInterruptDomain,
         MmioAttachment, MmioBus, MmioDevice, MmioDeviceHandle, MmioInterrupt,
@@ -567,26 +567,17 @@ mod imp {
     #[derive(Debug)]
     pub struct CpuState {
         index: u32,
-        boot_state: Option<pmi::vm::vcpu::aarch64::CpuState>,
     }
 
     impl dillo_machine::CpuState for CpuState {
         type Error = Error;
 
-        fn new(
-            index: u32,
-            _cpu_profile: &str,
-            boot_state: Option<&dyn BootVcpuState>,
-        ) -> Result<Self, Self::Error> {
-            let boot_state = boot_state
-                .map(|state| {
-                    state
-                        .aarch64()
-                        .cloned()
-                        .ok_or_else(|| Error::Hv("boot vCPU state is not aarch64".to_string()))
-                })
-                .transpose()?;
-            Ok(Self { index, boot_state })
+        fn new(index: u32, cpu_profile: dillo_machine::CpuProfile) -> Result<Self, Self::Error> {
+            let matches = matches!(cpu_profile, dillo_machine::CpuProfile::Aarch64(_));
+            if !matches {
+                return Err(Error::Hv("CPU profile architecture mismatch".into()));
+            }
+            Ok(Self { index })
         }
     }
 
@@ -595,12 +586,8 @@ mod imp {
         type Output = Arc<Cpu>;
 
         fn attach(&mut self, item: CpuState) -> Result<Self::Output, Self::Error> {
-            let boot_state = item
-                .boot_state
-                .ok_or_else(|| Error::Hv("boot vCPU state is not aarch64".to_string()))?;
             Ok(Arc::new(Cpu {
                 index: item.index as usize,
-                boot_state,
                 mmio_bus: self.mmio_bus(),
                 runtime: self.cpu_runtime(),
             }))
@@ -610,7 +597,6 @@ mod imp {
     #[derive(Debug)]
     pub struct Cpu {
         index: usize,
-        boot_state: pmi::vm::vcpu::aarch64::CpuState,
         mmio_bus: Arc<Mutex<MmioBus>>,
         runtime: Arc<CpuRuntime>,
     }
@@ -712,8 +698,11 @@ mod imp {
     }
 
     impl Vcpu {
-        fn set_aarch64_state(&self, state: &pmi::vm::vcpu::aarch64::CpuState) -> Result<(), Error> {
-            self.inner.set_aarch64_state(state)
+        fn initialize_bsp(&self) -> Result<(), Error> {
+            self.inner.initialize_bsp()
+        }
+        fn initialize_secondary(&self, entry: u64, context: u64) -> Result<(), Error> {
+            self.inner.initialize_secondary(entry, context)
         }
 
         fn set_mpidr(&self, mpidr: u64) -> Result<(), Error> {
@@ -800,36 +789,30 @@ mod imp {
 
         fn run_cpu(&self, cpu: &Cpu) -> Result<VcpuStop, Error> {
             let idx = cpu.index;
-            let init = if idx == 0 {
-                self.slots[0].started.store(true, Ordering::SeqCst);
-                cpu.boot_state.clone()
-            } else {
-                match self.slots[idx].wait(&self.shutdown) {
-                    Some((entry, context)) => secondary_state(entry, context, &cpu.boot_state),
-                    None => return Ok(VcpuStop::Stopped),
-                }
-            };
             let vcpu = create_vcpu_current_thread(Arc::clone(&cpu.mmio_bus))?;
             vcpu.set_mpidr(mpidr_for(idx))?;
-            vcpu.set_aarch64_state(&init)?;
+            if idx == 0 {
+                vcpu.initialize_bsp()?;
+                self.slots[0].started.store(true, Ordering::SeqCst);
+            } else {
+                match self.slots[idx].wait(&self.shutdown) {
+                    Some((entry, context)) => vcpu.initialize_secondary(entry, context)?,
+                    None => return Ok(VcpuStop::Stopped),
+                }
+            }
             *self.handles[idx].lock().expect("handle poisoned") = Some(vcpu.handle());
             if idx != 0 {
-                log::info!("vCPU{idx} powered on: pc={:#x}", init.pc);
+                log::info!("vCPU{idx} powered on by guest");
             }
 
-            let result = self.run_vcpu_loop(idx, &vcpu, &cpu.boot_state);
+            let result = self.run_vcpu_loop(idx, &vcpu);
             self.shutdown.store(true, Ordering::SeqCst);
             self.wake_waiters();
             self.force_exit_live();
             result
         }
 
-        fn run_vcpu_loop(
-            &self,
-            idx: usize,
-            vcpu: &Vcpu,
-            boot_state: &pmi::vm::vcpu::aarch64::CpuState,
-        ) -> Result<VcpuStop, Error> {
+        fn run_vcpu_loop(&self, idx: usize, vcpu: &Vcpu) -> Result<VcpuStop, Error> {
             loop {
                 if self.shutdown.load(Ordering::SeqCst) {
                     return Ok(VcpuStop::Stopped);
@@ -852,8 +835,7 @@ mod imp {
                             self.slots[idx].started.store(false, Ordering::SeqCst);
                             match self.slots[idx].wait(&self.shutdown) {
                                 Some((entry, context)) => {
-                                    let st = secondary_state(entry, context, boot_state);
-                                    vcpu.set_aarch64_state(&st)?;
+                                    vcpu.initialize_secondary(entry, context)?;
                                 }
                                 None => return Ok(VcpuStop::Stopped),
                             }
@@ -965,59 +947,6 @@ mod imp {
                     .expect("cpu-slot poisoned");
                 g = ng;
             }
-        }
-    }
-
-    fn secondary_state(
-        entry: u64,
-        context: u64,
-        boot: &pmi::vm::vcpu::aarch64::CpuState,
-    ) -> pmi::vm::vcpu::aarch64::CpuState {
-        // aarch64 CpuState has no Default (PState is a validating newtype), so
-        // spell out the fresh secondary state: zeroed but for the entry pc, the
-        // context in x0, and the inherited pstate / cpacr_el1.
-        pmi::vm::vcpu::aarch64::CpuState {
-            pc: entry,
-            x0: context,
-            pstate: boot.pstate,
-            cpacr_el1: boot.cpacr_el1,
-            x1: 0,
-            x2: 0,
-            x3: 0,
-            x4: 0,
-            x5: 0,
-            x6: 0,
-            x7: 0,
-            x8: 0,
-            x9: 0,
-            x10: 0,
-            x11: 0,
-            x12: 0,
-            x13: 0,
-            x14: 0,
-            x15: 0,
-            x16: 0,
-            x17: 0,
-            x18: 0,
-            x19: 0,
-            x20: 0,
-            x21: 0,
-            x22: 0,
-            x23: 0,
-            x24: 0,
-            x25: 0,
-            x26: 0,
-            x27: 0,
-            x28: 0,
-            x29: 0,
-            x30: 0,
-            sp_el1: 0,
-            sctlr_el1: 0,
-            tcr_el1: 0,
-            ttbr0_el1: 0,
-            ttbr1_el1: 0,
-            mair_el1: 0,
-            vbar_el1: 0,
         }
     }
 

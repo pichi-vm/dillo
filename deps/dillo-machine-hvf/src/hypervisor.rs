@@ -222,31 +222,30 @@ pub(crate) struct Vcpu {
 }
 
 impl Vcpu {
-    /// Program the boot vCPU register state from the PMI `vm:vcpu` map.
-    pub(crate) fn set_aarch64_state(
-        &self,
-        state: &pmi::vm::vcpu::aarch64::CpuState,
-    ) -> Result<(), Error> {
-        // General-purpose registers x0..x30.
-        let gprs = [
-            state.x0, state.x1, state.x2, state.x3, state.x4, state.x5, state.x6, state.x7,
-            state.x8, state.x9, state.x10, state.x11, state.x12, state.x13, state.x14, state.x15,
-            state.x16, state.x17, state.x18, state.x19, state.x20, state.x21, state.x22, state.x23,
-            state.x24, state.x25, state.x26, state.x27, state.x28, state.x29, state.x30,
-        ];
-        for (n, &v) in gprs.iter().enumerate() {
-            self.inner.set_reg(gpr(n as u8), v)?;
+    /// Apply only the register values fixed by PMI's AArch64 vm contract.
+    pub(crate) fn initialize_bsp(&self) -> Result<(), Error> {
+        self.initialize_el1(0, 0)
+    }
+
+    /// PSCI CPU_ON supplies a guest-selected entry and context at EL1.
+    pub(crate) fn initialize_secondary(&self, entry: u64, context: u64) -> Result<(), Error> {
+        self.initialize_el1(entry, context)
+    }
+
+    fn initialize_el1(&self, entry: u64, context: u64) -> Result<(), Error> {
+        for n in 0..=30 {
+            self.inner
+                .set_reg(gpr(n), if n == 0 { context } else { 0 })?;
         }
-        self.inner.set_reg(Reg::PC, state.pc)?;
-        self.inner.set_reg(Reg::CPSR, state.pstate.get())?;
-        self.inner.set_sys_reg(SysReg::SP_EL1, state.sp_el1)?;
-        self.inner.set_sys_reg(SysReg::SCTLR_EL1, state.sctlr_el1)?;
-        self.inner.set_sys_reg(SysReg::VBAR_EL1, state.vbar_el1)?;
-        self.inner.set_sys_reg(SysReg::CPACR_EL1, state.cpacr_el1)?;
-        self.inner.set_sys_reg(SysReg::TCR_EL1, state.tcr_el1)?;
-        self.inner.set_sys_reg(SysReg::TTBR0_EL1, state.ttbr0_el1)?;
-        self.inner.set_sys_reg(SysReg::TTBR1_EL1, state.ttbr1_el1)?;
-        self.inner.set_sys_reg(SysReg::MAIR_EL1, state.mair_el1)?;
+        self.inner.set_reg(Reg::PC, entry)?;
+        self.inner.set_reg(Reg::CPSR, 0x3c5)?;
+        self.inner.set_sys_reg(SysReg::SP_EL0, 0)?;
+        self.inner.set_sys_reg(SysReg::SP_EL1, 0)?;
+        let sctlr = self.inner.get_sys_reg(SysReg::SCTLR_EL1)?;
+        self.inner.set_sys_reg(
+            SysReg::SCTLR_EL1,
+            sctlr & !((1 << 0) | (1 << 2) | (1 << 12) | (1 << 25)),
+        )?;
         Ok(())
     }
 
@@ -452,63 +451,174 @@ fn gpr(n: u8) -> Reg {
 mod tests {
     use super::*;
 
-    fn boot_state(pc: u64) -> pmi::vm::vcpu::aarch64::CpuState {
-        // aarch64 CpuState has no Default (PState is a validating newtype).
-        pmi::vm::vcpu::aarch64::CpuState {
-            pc,
-            pstate: pmi::vm::vcpu::aarch64::PState::new(0x3c5).unwrap(), // EL1h, DAIF masked
-            sctlr_el1: 0,                                                // MMU off → flat IPA=VA
-            x0: 0,
-            x1: 0,
-            x2: 0,
-            x3: 0,
-            x4: 0,
-            x5: 0,
-            x6: 0,
-            x7: 0,
-            x8: 0,
-            x9: 0,
-            x10: 0,
-            x11: 0,
-            x12: 0,
-            x13: 0,
-            x14: 0,
-            x15: 0,
-            x16: 0,
-            x17: 0,
-            x18: 0,
-            x19: 0,
-            x20: 0,
-            x21: 0,
-            x22: 0,
-            x23: 0,
-            x24: 0,
-            x25: 0,
-            x26: 0,
-            x27: 0,
-            x28: 0,
-            x29: 0,
-            x30: 0,
-            sp_el1: 0,
-            tcr_el1: 0,
-            ttbr0_el1: 0,
-            ttbr1_el1: 0,
-            mair_el1: 0,
-            vbar_el1: 0,
-            cpacr_el1: 0,
+    /// Each native test runs in its own entitled process because HVF owns a
+    /// process-wide VM singleton. The directory outlives the reaped child.
+    struct SignedNativeTest {
+        child: std::process::Child,
+        _directory: tempfile::TempDir,
+    }
+
+    impl SignedNativeTest {
+        fn spawn(name: &str) -> Self {
+            let directory = tempfile::tempdir().expect("create native-test directory");
+            let executable = directory.path().join("hvf-native-test");
+            std::fs::copy(
+                std::env::current_exe().expect("current test executable"),
+                &executable,
+            )
+            .expect("copy native test executable");
+            let entitlements = directory.path().join("hypervisor.plist");
+            std::fs::write(&entitlements, r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>com.apple.security.hypervisor</key><true/></dict></plist>"#)
+                .expect("write native test entitlements");
+            let signed = std::process::Command::new("codesign")
+                .args(["--force", "--sign", "-", "--entitlements"])
+                .arg(&entitlements)
+                .arg(&executable)
+                .status()
+                .expect("run codesign");
+            assert!(
+                signed.success(),
+                "HVF native tests require hypervisor entitlement signing"
+            );
+            let child = std::process::Command::new(&executable)
+                .args([name, "--exact", "--nocapture", "--test-threads=1"])
+                .env("DILLO_SIGNED_HVF_BSP_TEST", "1")
+                .spawn()
+                .expect("start entitled native test");
+            Self {
+                child,
+                _directory: directory,
+            }
+        }
+
+        fn verify(mut self) {
+            use wait_timeout::ChildExt;
+            let status = self
+                .child
+                .wait_timeout(std::time::Duration::from_secs(60))
+                .expect("wait for entitled native test")
+                .expect("HVF native test exceeded 60 seconds");
+            assert!(
+                status.success(),
+                "entitled HVF native state assertions failed: {status}"
+            );
         }
     }
 
-    /// Runtime verification: a tiny guest (HVC → faulting load → faulting
-    /// store) must produce the expected decoded `VmExit`s. This exercises
-    /// vCPU register programming (`set_aarch64_state`/`set_gpr`), the run
-    /// loop, ESR/ISS decoding, and MMIO write-data extraction.
-    ///
-    /// NB: WFI is intentionally NOT tested — with the in-kernel GIC enabled,
-    /// `WFI` waits for an interrupt instead of trapping, so `hv_vcpu_run`
-    /// blocks (correct arch behavior). PSCI SYSTEM_OFF uses HVC, not WFI.
-    ///
-    /// Requires a codesigned binary with `com.apple.security.hypervisor`.
+    impl Drop for SignedNativeTest {
+        fn drop(&mut self) {
+            // Child::drop does not retire a process. Kill and reap before the
+            // executable and entitlement directory can be reclaimed.
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    #[test]
+    fn hvf_fixed_bsp_state_matches_pmi_and_preserves_guest_ap() {
+        const GPRS: [Reg; 31] = [
+            Reg::X0,
+            Reg::X1,
+            Reg::X2,
+            Reg::X3,
+            Reg::X4,
+            Reg::X5,
+            Reg::X6,
+            Reg::X7,
+            Reg::X8,
+            Reg::X9,
+            Reg::X10,
+            Reg::X11,
+            Reg::X12,
+            Reg::X13,
+            Reg::X14,
+            Reg::X15,
+            Reg::X16,
+            Reg::X17,
+            Reg::X18,
+            Reg::X19,
+            Reg::X20,
+            Reg::X21,
+            Reg::X22,
+            Reg::X23,
+            Reg::X24,
+            Reg::X25,
+            Reg::X26,
+            Reg::X27,
+            Reg::X28,
+            Reg::X29,
+            Reg::X30,
+        ];
+        if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
+            SignedNativeTest::spawn(
+                "hypervisor::tests::hvf_fixed_bsp_state_matches_pmi_and_preserves_guest_ap",
+            )
+            .verify();
+            return;
+        }
+        let gic = GicParams {
+            dist_base: 0x0800_0000,
+            redist_base: 0x0810_0000,
+            msi_base: 0x0a10_0000,
+            msi_intid_base: 64,
+            msi_intid_count: 32,
+        };
+        let _vm = Vm::new(&gic, 36).expect("native HVF/GIC support is required");
+        std::thread::scope(|scope| {
+            // Hypervisor.framework permits only one vCPU per owner thread.
+            let (ready, prepared) = std::sync::mpsc::sync_channel(0);
+            let (release, finished) = std::sync::mpsc::sync_channel(0);
+            let ap_owner = scope.spawn(move || {
+                let ap = create_vcpu_current_thread().expect("create AP on its owner thread");
+                ap.initialize_secondary(0x4000_0000, 0x77)
+                    .expect("guest-directed PSCI entry");
+                ready.send(()).expect("announce AP prepared");
+                finished.recv().expect("BSP assertions completed");
+                assert_eq!(ap.inner.get_reg(Reg::PC).unwrap(), 0x4000_0000);
+                assert_eq!(ap.inner.get_reg(Reg::X0).unwrap(), 0x77);
+                assert_eq!(ap.inner.get_reg(Reg::CPSR).unwrap(), 0x3c5);
+            });
+            prepared.recv().expect("AP preparation succeeds");
+            let bsp = create_vcpu_current_thread().expect("create BSP on its owner thread");
+            for register in GPRS {
+                bsp.inner.set_reg(register, 0x55).expect("seed BSP GPR");
+            }
+            bsp.inner.set_reg(Reg::PC, 0x8000).expect("seed BSP PC");
+            bsp.inner
+                .set_reg(Reg::CPSR, 0xf000_03c5)
+                .expect("seed BSP PSTATE");
+            bsp.inner
+                .set_sys_reg(SysReg::SP_EL0, 0x1000)
+                .expect("seed SP_EL0");
+            bsp.inner
+                .set_sys_reg(SysReg::SP_EL1, 0x2000)
+                .expect("seed SP_EL1");
+            let sctlr = bsp
+                .inner
+                .get_sys_reg(SysReg::SCTLR_EL1)
+                .expect("read SCTLR");
+            bsp.inner
+                .set_sys_reg(SysReg::SCTLR_EL1, sctlr | 0x0200_1005)
+                .expect("seed SCTLR");
+            bsp.initialize_bsp().expect("program full fixed BSP state");
+            for register in GPRS {
+                assert_eq!(bsp.inner.get_reg(register).unwrap(), 0, "{register:?}");
+            }
+            assert_eq!(bsp.inner.get_reg(Reg::PC).unwrap(), 0);
+            assert_eq!(bsp.inner.get_reg(Reg::CPSR).unwrap(), 0x3c5);
+            assert_eq!(bsp.inner.get_sys_reg(SysReg::SP_EL0).unwrap(), 0);
+            assert_eq!(bsp.inner.get_sys_reg(SysReg::SP_EL1).unwrap(), 0);
+            assert_eq!(
+                bsp.inner.get_sys_reg(SysReg::SCTLR_EL1).unwrap() & 0x0200_1005,
+                0
+            );
+            release.send(()).expect("release AP readback");
+            ap_owner.join().expect("AP native state preserved");
+        });
+    }
+
     #[test]
     #[ignore = "requires a codesigned binary with com.apple.security.hypervisor; run via the codesigned harness with --ignored"]
     fn hvf_exit_decoding_roundtrip() {
@@ -535,14 +645,13 @@ mod tests {
         let vcpu = create_vcpu_current_thread().expect("create_vcpu");
 
         // 1) HVC.
-        vcpu.set_aarch64_state(&boot_state(base)).expect("state");
+        vcpu.initialize_secondary(base, 0).expect("state");
         let e = vcpu.run().expect("run hvc");
         eprintln!("exit 1 (expect Hvc): {e:?}");
         assert!(matches!(e, VmExit::Hvc { .. }), "expected Hvc, got {e:?}");
 
         // 2) Faulting load from an unmapped IPA → MmioRead (64-bit → size 8).
-        vcpu.set_aarch64_state(&boot_state(base + 4))
-            .expect("state");
+        vcpu.initialize_secondary(base + 4, 0).expect("state");
         vcpu.set_gpr(2, mmio).expect("x2");
         let e = vcpu.run().expect("run ldr");
         eprintln!("exit 2 (expect MmioRead): {e:?}");
@@ -556,8 +665,7 @@ mod tests {
         vcpu.complete_mmio_read(0).expect("complete read");
 
         // 3) Faulting store → MmioWrite carrying the source register's value.
-        vcpu.set_aarch64_state(&boot_state(base + 8))
-            .expect("state");
+        vcpu.initialize_secondary(base + 8, 0).expect("state");
         vcpu.set_gpr(1, 0xDEAD_BEEF_u64).expect("x1");
         vcpu.set_gpr(2, mmio).expect("x2");
         let e = vcpu.run().expect("run str");

@@ -12,16 +12,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
-use windows_sys::Win32::System::Hypervisor::{
-    WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_X64_SEGMENT_REGISTER, WHV_X64_SEGMENT_REGISTER_0,
-    WHV_X64_TABLE_REGISTER, WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4,
-    WHvX64RegisterCs, WHvX64RegisterDs, WHvX64RegisterEfer, WHvX64RegisterEs, WHvX64RegisterFs,
-    WHvX64RegisterGdtr, WHvX64RegisterGs, WHvX64RegisterIdtr, WHvX64RegisterLdtr, WHvX64RegisterR8,
-    WHvX64RegisterR9, WHvX64RegisterR10, WHvX64RegisterR11, WHvX64RegisterR12, WHvX64RegisterR13,
-    WHvX64RegisterR14, WHvX64RegisterR15, WHvX64RegisterRax, WHvX64RegisterRbp, WHvX64RegisterRbx,
-    WHvX64RegisterRcx, WHvX64RegisterRdi, WHvX64RegisterRdx, WHvX64RegisterRflags,
-    WHvX64RegisterRip, WHvX64RegisterRsi, WHvX64RegisterRsp, WHvX64RegisterSs, WHvX64RegisterTr,
-};
+use windows_sys::Win32::System::Hypervisor::{WHV_REGISTER_NAME, WHV_REGISTER_VALUE};
 
 use crate::VmExit;
 use crate::cpuid_x86;
@@ -485,62 +476,104 @@ impl Vcpu {
         }
     }
 
-    pub(crate) fn set_x86_64_state(
-        &mut self,
-        state: &pmi::vm::vcpu::x86_64::CpuState,
-    ) -> Result<(), Error> {
-        let mut registers = Vec::with_capacity(34);
-
-        push_reg64(&mut registers, WHvX64RegisterRip, state.rip);
-        push_reg64(&mut registers, WHvX64RegisterRsp, state.rsp);
-        push_reg64(
-            &mut registers,
-            WHvX64RegisterRflags,
-            if state.rflags.get() == 0 {
-                0x2
-            } else {
-                state.rflags.get()
+    /// Program every register fixed by PMI's x86 vm BSP contract.
+    pub(crate) fn initialize_bsp(&mut self) -> Result<(), Error> {
+        use windows_sys::Win32::System::Hypervisor::*;
+        let mut registers = Vec::new();
+        push_reg64(&mut registers, WHvX64RegisterRip, 0xffff_fff0);
+        push_reg64(&mut registers, WHvX64RegisterRflags, 2);
+        push_reg64(&mut registers, WHvX64RegisterCr0, 0x21);
+        push_reg64(&mut registers, WHvX64RegisterCr3, 0);
+        push_reg64(&mut registers, WHvX64RegisterCr4, 0x40);
+        push_reg64(&mut registers, WHvX64RegisterEfer, 0x901);
+        push_reg64(&mut registers, WHvX64RegisterDr6, 0xffff_0ff0);
+        push_reg64(&mut registers, WHvX64RegisterDr7, 0x400);
+        push_reg64(&mut registers, WHvX64RegisterPat, 0x0007_0406_0007_0406);
+        push_reg64(&mut registers, WHvX64RegisterXCr0, 1);
+        push_reg64(&mut registers, WHvX64RegisterRax, 0);
+        push_reg64(&mut registers, WHvX64RegisterRbx, 0);
+        push_reg64(&mut registers, WHvX64RegisterRcx, 0);
+        push_reg64(&mut registers, WHvX64RegisterRdx, 0);
+        push_reg64(&mut registers, WHvX64RegisterRsi, 0);
+        push_reg64(&mut registers, WHvX64RegisterRdi, 0);
+        push_reg64(&mut registers, WHvX64RegisterRbp, 0);
+        push_reg64(&mut registers, WHvX64RegisterRsp, 0);
+        push_reg64(&mut registers, WHvX64RegisterR8, 0);
+        push_reg64(&mut registers, WHvX64RegisterR9, 0);
+        push_reg64(&mut registers, WHvX64RegisterR10, 0);
+        push_reg64(&mut registers, WHvX64RegisterR11, 0);
+        push_reg64(&mut registers, WHvX64RegisterR12, 0);
+        push_reg64(&mut registers, WHvX64RegisterR13, 0);
+        push_reg64(&mut registers, WHvX64RegisterR14, 0);
+        push_reg64(&mut registers, WHvX64RegisterR15, 0);
+        for (name, attributes, limit) in [
+            (WHvX64RegisterCs, 0xc09b, u32::MAX),
+            (WHvX64RegisterDs, 0xc093, u32::MAX),
+            (WHvX64RegisterEs, 0xc093, u32::MAX),
+            (WHvX64RegisterFs, 0xc093, u32::MAX),
+            (WHvX64RegisterGs, 0xc093, u32::MAX),
+            (WHvX64RegisterSs, 0xc093, u32::MAX),
+            (WHvX64RegisterTr, 0x008b, 0xffff),
+            (WHvX64RegisterLdtr, 0, 0),
+        ] {
+            registers.push((
+                name,
+                WHV_REGISTER_VALUE {
+                    Segment: WHV_X64_SEGMENT_REGISTER {
+                        Base: 0,
+                        Limit: limit,
+                        Selector: 0,
+                        Anonymous: WHV_X64_SEGMENT_REGISTER_0 {
+                            Attributes: attributes,
+                        },
+                    },
+                },
+            ));
+        }
+        for (name, limit) in [(WHvX64RegisterGdtr, 0xffff), (WHvX64RegisterIdtr, 0)] {
+            registers.push((
+                name,
+                WHV_REGISTER_VALUE {
+                    Table: WHV_X64_TABLE_REGISTER {
+                        Pad: [0; 3],
+                        Limit: limit,
+                        Base: 0,
+                    },
+                },
+            ));
+        }
+        // WHP exposes all eight x87/MMX and sixteen SSE registers individually.
+        for name in WHvX64RegisterXmm0..=WHvX64RegisterFpMmx7 {
+            registers.push((name, WHV_REGISTER_VALUE::default()));
+        }
+        registers.push((
+            WHvX64RegisterFpControlStatus,
+            WHV_REGISTER_VALUE {
+                FpControlStatus: WHV_X64_FP_CONTROL_STATUS_REGISTER {
+                    Anonymous: WHV_X64_FP_CONTROL_STATUS_REGISTER_0 {
+                        FpControl: 0x37f,
+                        ..Default::default()
+                    },
+                },
             },
-        );
-        push_reg64(&mut registers, WHvX64RegisterRax, state.rax);
-        push_reg64(&mut registers, WHvX64RegisterRbx, state.rbx);
-        push_reg64(&mut registers, WHvX64RegisterRcx, state.rcx);
-        push_reg64(&mut registers, WHvX64RegisterRdx, state.rdx);
-        push_reg64(&mut registers, WHvX64RegisterRsi, state.rsi);
-        push_reg64(&mut registers, WHvX64RegisterRdi, state.rdi);
-        push_reg64(&mut registers, WHvX64RegisterRbp, state.rbp);
-        push_reg64(&mut registers, WHvX64RegisterR8, state.r8);
-        push_reg64(&mut registers, WHvX64RegisterR9, state.r9);
-        push_reg64(&mut registers, WHvX64RegisterR10, state.r10);
-        push_reg64(&mut registers, WHvX64RegisterR11, state.r11);
-        push_reg64(&mut registers, WHvX64RegisterR12, state.r12);
-        push_reg64(&mut registers, WHvX64RegisterR13, state.r13);
-        push_reg64(&mut registers, WHvX64RegisterR14, state.r14);
-        push_reg64(&mut registers, WHvX64RegisterR15, state.r15);
-        push_reg64(&mut registers, WHvX64RegisterCr0, state.cr0);
-        push_reg64(&mut registers, WHvX64RegisterCr3, state.cr3);
-        push_reg64(&mut registers, WHvX64RegisterCr4, state.cr4);
-        push_reg64(&mut registers, WHvX64RegisterEfer, state.efer);
-
-        push_segment(&mut registers, WHvX64RegisterCs, &state.cs);
-        push_segment(&mut registers, WHvX64RegisterDs, &state.ds);
-        push_segment(&mut registers, WHvX64RegisterEs, &state.es);
-        push_segment(&mut registers, WHvX64RegisterFs, &state.fs);
-        push_segment(&mut registers, WHvX64RegisterGs, &state.gs);
-        push_segment(&mut registers, WHvX64RegisterSs, &state.ss);
-        push_table(&mut registers, WHvX64RegisterGdtr, &state.gdtr);
-        push_table(&mut registers, WHvX64RegisterIdtr, &state.idtr);
-
-        push_whp_segment(&mut registers, WHvX64RegisterTr, default_tr());
-        push_whp_segment(&mut registers, WHvX64RegisterLdtr, default_ldtr());
-
+        ));
+        registers.push((
+            WHvX64RegisterXmmControlStatus,
+            WHV_REGISTER_VALUE {
+                XmmControlStatus: WHV_X64_XMM_CONTROL_STATUS_REGISTER {
+                    Anonymous: WHV_X64_XMM_CONTROL_STATUS_REGISTER_0 {
+                        XmmStatusControl: 0x1f80,
+                        ..Default::default()
+                    },
+                },
+            },
+        ));
         let (names, values): (Vec<_>, Vec<_>) = registers.into_iter().unzip();
         raw::set_virtual_processor_registers(self.partition.partition, self.idx, &names, &values)
             .map_err(|hr| Error::SetRegisters {
-            idx: self.idx,
-            hr: status(hr),
-        })?;
-        Ok(())
+                idx: self.idx,
+                hr: status(hr),
+            })
     }
 
     pub(crate) fn run(
@@ -608,73 +641,6 @@ fn push_reg64(
     value: u64,
 ) {
     registers.push((name, WHV_REGISTER_VALUE { Reg64: value }));
-}
-
-fn push_segment(
-    registers: &mut Vec<(WHV_REGISTER_NAME, WHV_REGISTER_VALUE)>,
-    name: WHV_REGISTER_NAME,
-    segment: &pmi::vm::vcpu::x86_64::SegReg,
-) {
-    // vm.md packs the AVL/L/D-B/G flags at bits 8-11; WHV_X64_SEGMENT_REGISTER
-    // expects them at bits 12-15 (Available/Long/Default/Granularity), with
-    // 8-11 reserved. Shift the flag nibble up while keeping type/S/DPL/P.
-    let pmi_attr = segment.attributes.get();
-    let whv_attr = (pmi_attr & 0x00FF) | ((pmi_attr & 0x0F00) << 4);
-    push_whp_segment(
-        registers,
-        name,
-        WHV_X64_SEGMENT_REGISTER {
-            Base: segment.base,
-            Limit: segment.limit,
-            Selector: segment.selector,
-            Anonymous: WHV_X64_SEGMENT_REGISTER_0 {
-                Attributes: whv_attr,
-            },
-        },
-    );
-}
-
-fn push_whp_segment(
-    registers: &mut Vec<(WHV_REGISTER_NAME, WHV_REGISTER_VALUE)>,
-    name: WHV_REGISTER_NAME,
-    segment: WHV_X64_SEGMENT_REGISTER,
-) {
-    registers.push((name, WHV_REGISTER_VALUE { Segment: segment }));
-}
-
-fn push_table(
-    registers: &mut Vec<(WHV_REGISTER_NAME, WHV_REGISTER_VALUE)>,
-    name: WHV_REGISTER_NAME,
-    table: &pmi::vm::vcpu::x86_64::Dtr,
-) {
-    registers.push((
-        name,
-        WHV_REGISTER_VALUE {
-            Table: WHV_X64_TABLE_REGISTER {
-                Pad: [0; 3],
-                Limit: table.limit,
-                Base: table.base,
-            },
-        },
-    ));
-}
-
-fn default_tr() -> WHV_X64_SEGMENT_REGISTER {
-    WHV_X64_SEGMENT_REGISTER {
-        Base: 0,
-        Limit: 0xFFFF,
-        Selector: 0,
-        Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0x8B },
-    }
-}
-
-fn default_ldtr() -> WHV_X64_SEGMENT_REGISTER {
-    WHV_X64_SEGMENT_REGISTER {
-        Base: 0,
-        Limit: 0xFFFF,
-        Selector: 0,
-        Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0x82 },
-    }
 }
 
 mod raw {
@@ -1442,30 +1408,22 @@ mod raw {
     }
 
     #[cfg(test)]
-    pub(super) fn get_virtual_processor_register_u64(
+    pub(super) fn get_virtual_processor_register_words(
         partition: PartitionHandle,
         idx: u32,
         name: WHV_REGISTER_NAME,
-    ) -> Result<u64, HResult> {
+    ) -> Result<[u32; 4], HResult> {
         let names = [name];
         let mut values = [WHV_REGISTER_VALUE::default()];
-        // SAFETY: `names` and `values` point to one initialized register
-        // name/value slot, and WHP writes the result before returning.
+        // SAFETY: WHP writes exactly one 16-byte register union into the
+        // initialized output. Reading its integer words preserves all bits.
         let hr = unsafe {
-            WHvGetVirtualProcessorRegisters(
-                partition,
-                idx,
-                names.as_ptr(),
-                names.len() as u32,
-                values.as_mut_ptr(),
-            )
+            WHvGetVirtualProcessorRegisters(partition, idx, names.as_ptr(), 1, values.as_mut_ptr())
         };
         if failed(hr) {
             return Err(HResult(hr));
         }
-        // SAFETY: caller requests only scalar u64 registers through this test
-        // helper, so the Reg64 union member is the expected interpretation.
-        Ok(unsafe { values[0].Reg64 })
+        Ok(unsafe { values[0].Reg128.Dword })
     }
 
     pub(super) fn map_gpa_range(
@@ -1525,13 +1483,11 @@ mod raw {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, Vm, raw};
+    use super::{Error, Vcpu, Vm, push_reg64, raw, status};
     use crate::VmExit;
     use std::collections::BTreeMap;
     use std::sync::{Mutex, MutexGuard, OnceLock};
-    use windows_sys::Win32::System::Hypervisor::{
-        WHvX64RegisterRax, WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterRsp,
-    };
+    use windows_sys::Win32::System::Hypervisor::*;
 
     #[test]
     fn hyperv_cpuid_does_not_expose_root_partition_privileges() {
@@ -1742,54 +1698,79 @@ mod tests {
     }
 
     #[test]
-    fn whp_sets_pmi_x86_64_scalar_registers() {
+    fn whp_fixed_bsp_state_matches_pmi_and_preserves_ap() {
         let _guard = whp_test_lock();
-        let vm = Vm::new().expect("create WHP partition");
-        let mut vcpu = vm.create_vcpu(0, "x86-64-v2").expect("create WHP vCPU");
-        let state = pmi::vm::vcpu::x86_64::CpuState {
-            rip: 0x1000,
-            rsp: 0x8000,
-            rax: 0x55AA,
-            ..Default::default()
-        };
-
-        vcpu.set_x86_64_state(&state).expect("set WHP registers");
-
+        let vm = Vm::new_x86_64_with_local_apic_count(2).expect("WHP is required for this test");
+        let mut bsp = vm.create_vcpu(0, "x86-64-v1").expect("create BSP");
+        let ap = vm.create_vcpu(1, "x86-64-v1").expect("create AP");
+        let ap_before = ap.native_register_words(WHvX64RegisterRip);
+        bsp.initialize_bsp().expect("prepare fixed BSP state");
+        for (name, expected) in [
+            (WHvX64RegisterRip, 0xffff_fff0),
+            (WHvX64RegisterRflags, 2),
+            (WHvX64RegisterCr0, 0x21),
+            (WHvX64RegisterCr3, 0),
+            (WHvX64RegisterCr4, 0x40),
+            (WHvX64RegisterEfer, 0x901),
+            (WHvX64RegisterDr6, 0xffff_0ff0),
+            (WHvX64RegisterDr7, 0x400),
+            (WHvX64RegisterPat, 0x0007_0406_0007_0406),
+            (WHvX64RegisterXCr0, 1),
+        ] {
+            let words = bsp.native_register_words(name);
+            let actual = u64::from(words[0]) | (u64::from(words[1]) << 32);
+            if name == WHvX64RegisterCr0 {
+                assert_eq!(
+                    actual & !0x10,
+                    expected,
+                    "CR0 allows architectural ET normalization"
+                );
+            } else {
+                assert_eq!(actual, expected, "register {name:#x}");
+            }
+        }
+        for (name, attributes, limit) in [
+            (WHvX64RegisterCs, 0xc09b_u32, u32::MAX),
+            (WHvX64RegisterDs, 0xc093, u32::MAX),
+            (WHvX64RegisterEs, 0xc093, u32::MAX),
+            (WHvX64RegisterFs, 0xc093, u32::MAX),
+            (WHvX64RegisterGs, 0xc093, u32::MAX),
+            (WHvX64RegisterSs, 0xc093, u32::MAX),
+            (WHvX64RegisterTr, 0x8b, 0xffff),
+        ] {
+            // Native layout: base[63:0], limit[31:0], selector[15:0], attributes[15:0].
+            assert_eq!(
+                bsp.native_register_words(name),
+                [0, 0, limit, attributes << 16],
+                "segment {name:#x}"
+            );
+        }
+        assert_eq!(bsp.native_register_words(WHvX64RegisterLdtr)[3] & 0xffff, 0);
         assert_eq!(
-            raw::get_virtual_processor_register_u64(
-                vcpu.partition.partition,
-                vcpu.idx,
-                WHvX64RegisterRip,
-            )
-            .expect("read rip"),
-            0x1000
+            bsp.native_register_words(WHvX64RegisterGdtr),
+            [0, 0xffff_0000, 0, 0]
         );
+        assert_eq!(bsp.native_register_words(WHvX64RegisterIdtr), [0; 4]);
         assert_eq!(
-            raw::get_virtual_processor_register_u64(
-                vcpu.partition.partition,
-                vcpu.idx,
-                WHvX64RegisterRsp,
-            )
-            .expect("read rsp"),
-            0x8000
+            bsp.native_register_words(WHvX64RegisterFpControlStatus),
+            [0x37f, 0, 0, 0]
         );
-        assert_eq!(
-            raw::get_virtual_processor_register_u64(
-                vcpu.partition.partition,
-                vcpu.idx,
-                WHvX64RegisterRax,
-            )
-            .expect("read rax"),
-            0x55AA
-        );
-        assert_eq!(
-            raw::get_virtual_processor_register_u64(
-                vcpu.partition.partition,
-                vcpu.idx,
-                WHvX64RegisterRflags,
-            )
-            .expect("read rflags"),
-            0x2
+        // XMM control contains the native read-only mask in its last word;
+        // PMI fixes MXCSR and the last-data pointer, which occupy words0..3.
+        let xmm_control = bsp.native_register_words(WHvX64RegisterXmmControlStatus);
+        assert_eq!(&xmm_control[..3], &[0, 0, 0x1f80]);
+        for name in WHvX64RegisterXmm0..=WHvX64RegisterFpMmx7 {
+            assert_eq!(
+                bsp.native_register_words(name),
+                [0; 4],
+                "FP/SSE register {name:#x}"
+            );
+        }
+        assert_eq!(ap.native_register_words(WHvX64RegisterRip), ap_before);
+        assert_ne!(
+            ap.native_register_words(WHvX64RegisterRip),
+            [0xffff_fff0, 0, 0, 0],
+            "AP keeps its reset state until guest startup"
         );
     }
 
@@ -1802,7 +1783,7 @@ mod tests {
         vm.write_guest(code_base, &[0xF4]).expect("write hlt");
 
         let mut vcpu = vm.create_vcpu(0, "x86-64-v2").expect("create WHP vCPU");
-        vcpu.set_x86_64_state(&real_mode_state(code_base, 0))
+        vcpu.initialize_test_real_mode(code_base, 0)
             .expect("set real-mode state");
 
         let exit = vcpu.run(|_, _| 0, |_, _| false).expect("run vCPU");
@@ -1820,9 +1801,8 @@ mod tests {
             .expect("write code");
 
         let mut vcpu = vm.create_vcpu(0, "x86-64-v2").expect("create WHP vCPU");
-        let mut state = real_mode_state(code_base, 0);
-        state.rax = 0x5A;
-        vcpu.set_x86_64_state(&state).expect("set real-mode state");
+        vcpu.initialize_test_real_mode(code_base, 0x5A)
+            .expect("set real-mode state");
 
         let exit = vcpu.run(|_, _| 0, |_, _| false).expect("run out");
         match exit {
@@ -1850,9 +1830,8 @@ mod tests {
             .expect("write code");
 
         let mut vcpu = vm.create_vcpu(0, "x86-64-v2").expect("create WHP vCPU");
-        let mut state = real_mode_state(code_base, 0);
-        state.rax = 0xA5;
-        vcpu.set_x86_64_state(&state).expect("set real-mode state");
+        vcpu.initialize_test_real_mode(code_base, 0xA5)
+            .expect("set real-mode state");
 
         let exit = vcpu.run(|_, _| 0, |_, _| false).expect("run mmio write");
         match exit {
@@ -1868,30 +1847,61 @@ mod tests {
         assert!(matches!(exit, VmExit::Halted), "expected HLT, got {exit:?}");
     }
 
-    fn real_mode_state(code_base: u64, rip: u64) -> pmi::vm::vcpu::x86_64::CpuState {
-        let code = pmi::vm::vcpu::x86_64::SegReg {
-            selector: 0,
-            attributes: pmi::vm::vcpu::x86_64::SegAttributes::new(0x9B).unwrap(),
-            limit: 0xFFFF,
-            base: code_base,
-        };
-        let data = pmi::vm::vcpu::x86_64::SegReg {
-            selector: 0,
-            attributes: pmi::vm::vcpu::x86_64::SegAttributes::new(0x93).unwrap(),
-            limit: 0xFFFF,
-            base: 0,
-        };
-        pmi::vm::vcpu::x86_64::CpuState {
-            rip,
-            rflags: pmi::vm::vcpu::x86_64::RFlags::new(0x2).unwrap(),
-            cr0: 0x10,
-            cs: code,
-            ds: data.clone(),
-            es: data.clone(),
-            fs: data.clone(),
-            gs: data.clone(),
-            ss: data,
-            ..Default::default()
+    impl Vcpu {
+        fn native_register_words(&self, name: WHV_REGISTER_NAME) -> [u32; 4] {
+            raw::get_virtual_processor_register_words(self.partition.partition, self.idx, name)
+                .expect("read native register")
+        }
+
+        fn initialize_test_real_mode(&mut self, code_base: u64, rax: u64) -> Result<(), Error> {
+            self.initialize_bsp()?;
+            let mut registers = Vec::new();
+            for (name, value) in [
+                (WHvX64RegisterCr0, 0x10),
+                (WHvX64RegisterCr4, 0),
+                (WHvX64RegisterEfer, 0),
+                (WHvX64RegisterRip, 0),
+                (WHvX64RegisterRax, rax),
+            ] {
+                push_reg64(&mut registers, name, value);
+            }
+            for name in [
+                WHvX64RegisterCs,
+                WHvX64RegisterDs,
+                WHvX64RegisterEs,
+                WHvX64RegisterFs,
+                WHvX64RegisterGs,
+                WHvX64RegisterSs,
+            ] {
+                registers.push((
+                    name,
+                    WHV_REGISTER_VALUE {
+                        Segment: WHV_X64_SEGMENT_REGISTER {
+                            Base: if name == WHvX64RegisterCs {
+                                code_base
+                            } else {
+                                0
+                            },
+                            Limit: 0xffff,
+                            Selector: 0,
+                            Anonymous: WHV_X64_SEGMENT_REGISTER_0 {
+                                Attributes: if name == WHvX64RegisterCs { 0x9b } else { 0x93 },
+                            },
+                        },
+                    },
+                ));
+            }
+            let (names, values): (Vec<_>, Vec<_>) = registers.into_iter().unzip();
+            raw::set_virtual_processor_registers(
+                self.partition.partition,
+                self.idx,
+                &names,
+                &values,
+            )
+            .map_err(|hr| Error::SetRegisters {
+                idx: self.idx,
+                hr: status(hr),
+            })
         }
     }
 

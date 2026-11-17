@@ -29,17 +29,40 @@ pub struct RamRange {
     pub size: u64,
 }
 
-/// Arch-erased view of the PMI boot vCPU state.
-///
-/// Backends pick the arm they support; dillo never constructs backend-specific
-/// CPU input structs directly.
-pub trait BootVcpuState {
-    fn x86_64(&self) -> Option<&pmi::vm::vcpu::x86_64::CpuState> {
-        None
-    }
+/// Architecture-typed ISA baseline selected by the PMI manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuProfile {
+    X86_64(pmi::x86_64::Profile),
+    Aarch64(pmi::aarch64::Profile),
+}
 
-    fn aarch64(&self) -> Option<&pmi::vm::vcpu::aarch64::CpuState> {
-        None
+impl CpuProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::X86_64(pmi::x86_64::Profile::V1) => "x86-64-v1",
+            Self::X86_64(pmi::x86_64::Profile::V2) => "x86-64-v2",
+            Self::X86_64(pmi::x86_64::Profile::V3) => "x86-64-v3",
+            Self::X86_64(pmi::x86_64::Profile::V4) => "x86-64-v4",
+            Self::Aarch64(pmi::aarch64::Profile::V8_0) => "armv8.0-a",
+            Self::Aarch64(pmi::aarch64::Profile::V8_1) => "armv8.1-a",
+            Self::Aarch64(pmi::aarch64::Profile::V8_2) => "armv8.2-a",
+            Self::Aarch64(pmi::aarch64::Profile::V8_3) => "armv8.3-a",
+            Self::Aarch64(pmi::aarch64::Profile::V8_4) => "armv8.4-a",
+            Self::Aarch64(pmi::aarch64::Profile::V8_5) => "armv8.5-a",
+            Self::Aarch64(pmi::aarch64::Profile::V8_6) => "armv8.6-a",
+            Self::Aarch64(pmi::aarch64::Profile::V8_7) => "armv8.7-a",
+            Self::Aarch64(pmi::aarch64::Profile::V8_8) => "armv8.8-a",
+            Self::Aarch64(pmi::aarch64::Profile::V8_9) => "armv8.9-a",
+            Self::Aarch64(pmi::aarch64::Profile::V9_0) => "armv9.0-a",
+            Self::Aarch64(pmi::aarch64::Profile::V9_1) => "armv9.1-a",
+            Self::Aarch64(pmi::aarch64::Profile::V9_2) => "armv9.2-a",
+            Self::Aarch64(pmi::aarch64::Profile::V9_3) => "armv9.3-a",
+            Self::Aarch64(pmi::aarch64::Profile::V9_4) => "armv9.4-a",
+            Self::Aarch64(pmi::aarch64::Profile::V9_5) => "armv9.5-a",
+            Self::Aarch64(pmi::aarch64::Profile::V9_6) => "armv9.6-a",
+            Self::Aarch64(pmi::aarch64::Profile::V9_7) => "armv9.7-a",
+            Self::Aarch64(pmi::aarch64::Profile::V9_8) => "armv9.8-a",
+        }
     }
 }
 
@@ -91,11 +114,7 @@ pub trait Memory: 'static {
 pub trait CpuState: Send + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
 
-    fn new(
-        index: u32,
-        cpu_profile: &str,
-        boot_state: Option<&dyn BootVcpuState>,
-    ) -> Result<Self, Self::Error>
+    fn new(index: u32, cpu_profile: CpuProfile) -> Result<Self, Self::Error>
     where
         Self: Sized;
 }
@@ -187,11 +206,7 @@ mod tests {
     impl CpuState for TestCpuState {
         type Error = TestError;
 
-        fn new(
-            _index: u32,
-            _cpu_profile: &str,
-            _boot_state: Option<&dyn BootVcpuState>,
-        ) -> Result<Self, Self::Error> {
+        fn new(_index: u32, _cpu_profile: CpuProfile) -> Result<Self, Self::Error> {
             Ok(Self)
         }
     }
@@ -275,7 +290,8 @@ mod tests {
         machine
             .write_guest(0x1000, b"boot")
             .expect("guest write accepted");
-        let state = TestCpuState::new(0, "test-profile", None).expect("CPU state constructed");
+        let state = TestCpuState::new(0, CpuProfile::X86_64(pmi::x86_64::Profile::V1))
+            .expect("CPU state constructed");
         let cpu = Attach::attach(&mut machine, state).expect("CPU attached");
 
         cpu.stop().expect("CPU stopped");

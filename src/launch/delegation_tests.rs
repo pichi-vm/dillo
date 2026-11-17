@@ -131,12 +131,11 @@ fn image(
         actions
             .push(json!({"type": "fill", "section": ".dtbo", "gpa": 0x20_1000, "kind": "dt:dtbo"}));
     }
-    let (machine, profile, vcpu) = match arch {
-        HostArchitecture::X86_64 => (0x8664u16, "x86-64-v1", json!({})),
-        HostArchitecture::Aarch64 => (0xaa64, "armv8.0-a", json!({"pstate": 5})),
+    let (machine, profile) = match arch {
+        HostArchitecture::X86_64 => (0x8664u16, "x86-64-v1"),
+        HostArchitecture::Aarch64 => (0xaa64, "armv8.0-a"),
     };
-    let mut manifest =
-        json!({"version": 1, "actions": actions, "vm:vcpu": vcpu, "cpu:profile": profile});
+    let mut manifest = json!({"version": 1, "actions": actions, "cpu:profile": profile});
     if !matches!(channel, BaseChannel::Detached) {
         manifest["dt:dtb"] = json!(".base");
     }

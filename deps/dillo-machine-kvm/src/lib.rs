@@ -38,7 +38,7 @@ mod imp {
     use dillo_devtree::devtree::{OwnedTree, Tree};
     #[cfg(target_arch = "aarch64")]
     use dillo_devtree::{CompatMismatch, FromDevTree, NodeExt, OwnedNodeExt, PropExt};
-    use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
+    use dillo_machine::{Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
     use dillo_mmio::{
         Attach, InterruptError, InterruptLine, MmioAttachment, MmioBus, MmioDevice,
         MmioDeviceHandle, MmioInterrupt, MmioInterruptRequirement, MmioRunToken, MmioSpawnError,
@@ -656,47 +656,23 @@ mod imp {
     #[derive(Debug)]
     pub struct CpuState {
         index: u32,
-        cpu_profile: String,
-        #[cfg(target_arch = "x86_64")]
-        boot_state: Option<pmi::vm::vcpu::x86_64::CpuState>,
-        #[cfg(target_arch = "aarch64")]
-        boot_state: Option<pmi::vm::vcpu::aarch64::CpuState>,
+        cpu_profile: dillo_machine::CpuProfile,
     }
 
     impl dillo_machine::CpuState for CpuState {
         type Error = Error;
 
-        fn new(
-            index: u32,
-            cpu_profile: &str,
-            boot_state: Option<&dyn BootVcpuState>,
-        ) -> Result<Self, Self::Error> {
+        fn new(index: u32, cpu_profile: dillo_machine::CpuProfile) -> Result<Self, Self::Error> {
             #[cfg(target_arch = "x86_64")]
-            let boot_state = (index == 0)
-                .then_some(boot_state)
-                .flatten()
-                .map(|state| {
-                    state
-                        .x86_64()
-                        .cloned()
-                        .ok_or_else(|| Error::UnhandledExit("boot vCPU state is not x86_64".into()))
-                })
-                .transpose()?;
+            let matches = matches!(cpu_profile, dillo_machine::CpuProfile::X86_64(_));
             #[cfg(target_arch = "aarch64")]
-            let boot_state = (index == 0)
-                .then_some(boot_state)
-                .flatten()
-                .map(|state| {
-                    state.aarch64().cloned().ok_or_else(|| {
-                        Error::UnhandledExit("boot vCPU state is not aarch64".into())
-                    })
-                })
-                .transpose()?;
-            Ok(Self {
-                index,
-                cpu_profile: cpu_profile.into(),
-                boot_state,
-            })
+            let matches = matches!(cpu_profile, dillo_machine::CpuProfile::Aarch64(_));
+            if !matches {
+                return Err(Error::UnhandledExit(
+                    "CPU profile architecture mismatch".into(),
+                ));
+            }
+            Ok(Self { index, cpu_profile })
         }
     }
 
@@ -705,14 +681,9 @@ mod imp {
         type Output = Arc<Cpu>;
 
         fn attach(&mut self, item: CpuState) -> Result<Self::Output, Self::Error> {
-            let mut vcpu = self.create_vcpu_inner(item.index, &item.cpu_profile)?;
-            #[cfg(target_arch = "x86_64")]
-            if let Some(state) = &item.boot_state {
-                vcpu.set_x86_64_state(state)?;
-            }
-            #[cfg(target_arch = "aarch64")]
-            if let Some(state) = &item.boot_state {
-                vcpu.set_aarch64_state(state)?;
+            let mut vcpu = self.create_vcpu_inner(item.index, item.cpu_profile.as_str())?;
+            if item.index == 0 {
+                vcpu.initialize_bsp()?;
             }
             let exit_requester = vcpu.exit_requester.clone();
             Ok(Arc::new(Cpu {
@@ -1098,20 +1069,8 @@ mod imp {
     }
 
     impl Vcpu {
-        #[cfg(target_arch = "x86_64")]
-        fn set_x86_64_state(
-            &mut self,
-            state: &pmi::vm::vcpu::x86_64::CpuState,
-        ) -> Result<(), Error> {
-            self.inner.set_x86_64_state(state)
-        }
-
-        #[cfg(target_arch = "aarch64")]
-        fn set_aarch64_state(
-            &mut self,
-            state: &pmi::vm::vcpu::aarch64::CpuState,
-        ) -> Result<(), Error> {
-            self.inner.set_aarch64_state(state)
+        fn initialize_bsp(&mut self) -> Result<(), Error> {
+            self.inner.initialize_bsp()
         }
 
         fn run(&mut self) -> Result<VcpuExit, Error> {

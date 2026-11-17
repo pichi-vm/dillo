@@ -28,7 +28,7 @@ mod imp {
         CompatMismatch, FromDevTree, NodeExt, OwnedNodeExt, PropExt,
         devtree::{OwnedTree, Tree},
     };
-    use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
+    use dillo_machine::{Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
     use dillo_mmio::{
         Attach, Interrupt, InterruptError, InterruptLine, MessageInterrupt, MessageInterruptDomain,
         MmioAttachment, MmioBus, MmioDevice, MmioDeviceHandle, MmioInterrupt,
@@ -344,33 +344,20 @@ mod imp {
     #[derive(Debug)]
     pub struct CpuState {
         index: u32,
-        cpu_profile: String,
-        boot_state: Option<pmi::vm::vcpu::x86_64::CpuState>,
+        cpu_profile: dillo_machine::CpuProfile,
     }
 
     impl dillo_machine::CpuState for CpuState {
         type Error = Error;
 
-        fn new(
-            index: u32,
-            cpu_profile: &str,
-            boot_state: Option<&dyn BootVcpuState>,
-        ) -> Result<Self, Self::Error> {
-            let boot_state = (index == 0)
-                .then_some(boot_state)
-                .flatten()
-                .map(|state| {
-                    state
-                        .x86_64()
-                        .cloned()
-                        .ok_or_else(|| Error::UnhandledExit("boot vCPU state is not x86_64".into()))
-                })
-                .transpose()?;
-            Ok(Self {
-                index,
-                cpu_profile: cpu_profile.into(),
-                boot_state,
-            })
+        fn new(index: u32, cpu_profile: dillo_machine::CpuProfile) -> Result<Self, Self::Error> {
+            let matches = matches!(cpu_profile, dillo_machine::CpuProfile::X86_64(_));
+            if !matches {
+                return Err(Error::UnhandledExit(
+                    "CPU profile architecture mismatch".into(),
+                ));
+            }
+            Ok(Self { index, cpu_profile })
         }
     }
 
@@ -379,9 +366,9 @@ mod imp {
         type Output = Arc<Cpu>;
 
         fn attach(&mut self, item: CpuState) -> Result<Self::Output, Self::Error> {
-            let mut vcpu = self.create_vcpu_inner(item.index, &item.cpu_profile)?;
-            if let Some(state) = &item.boot_state {
-                vcpu.set_x86_64_state(state)?;
+            let mut vcpu = self.create_vcpu_inner(item.index, item.cpu_profile.as_str())?;
+            if item.index == 0 {
+                vcpu.initialize_bsp()?;
             }
             let stop_requested = Arc::new(AtomicBool::new(false));
             vcpu.stop_requested = Arc::clone(&stop_requested);
@@ -740,11 +727,8 @@ mod imp {
     }
 
     impl Vcpu {
-        fn set_x86_64_state(
-            &mut self,
-            state: &pmi::vm::vcpu::x86_64::CpuState,
-        ) -> Result<(), Error> {
-            self.inner.set_x86_64_state(state)
+        fn initialize_bsp(&mut self) -> Result<(), Error> {
+            self.inner.initialize_bsp()
         }
 
         fn run(&mut self) -> Result<VcpuExit, Error> {
