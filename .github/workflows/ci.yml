@@ -166,7 +166,7 @@ jobs:
         shell: bash
         env:
           CARGO_BUILD_RUSTFLAGS: "-D warnings"
-        run: cargo test --workspace
+        run: cargo test --workspace -- --show-output
 
       - name: Test (Windows, workspace minus Unix-only crates)
         if: runner.os == 'Windows'
@@ -234,3 +234,10 @@ jobs:
         with:
           name: memory-evidence-${{ matrix.name }}
           path: target/memory-evidence
+
+      - name: Upload failed-boot guest executables
+        if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: boot-evidence-${{ matrix.name }}
+          path: target/boot-evidence

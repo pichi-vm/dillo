@@ -86,21 +86,25 @@ struct Entry {
 // Catalogued kernels, all published by their projects as plain downloads arma
 // accepts directly (raw `vmlinux`/`Image`, gzip/zstd EFI-zboot, or bzImage — no
 // unpacking), each paired with a published kconfig:
-//   * firecracker CI — raw image + a plain `.config`. All virtio built in;
-//     `RANDOMIZE_BASE` is on for x86 (relocation-based KASLR), off on arm64.
+//   * firecracker CI — raw `vmlinux`/`Image` or x86 bzImage + plain `.config`.
+//     The first x86 entry uses bzImage's appended KASLR relocation table.
+//     All virtio built in; `RANDOMIZE_BASE` is on for x86, off on arm64.
 //   * Alpine `vmlinuz-virt` — gzip EFI-zboot arma unwraps; `ACPI_SPCR_TABLE=y`
 //     for the SPCR earlycon test. Config is the version-stamped `config-*-virt`
 //     in the same netboot dir (wildcard-resolved).
 //   * Fedora pxeboot `vmlinuz` — zstd EFI-zboot arma unwraps; `RANDOMIZE_BASE=y`:
 //     the arm64 KASLR consumption kernel. Config is Fedora's published dist-git
 //     `kernel-aarch64-fedora.config`.
+// The first same-arch entries contain Linux fix 0d0eff39ceb3: broken virtqueues
+// must leave TX cleanup loops during shutdown. Keep image/config pairs from the
+// same published build; a newer version alone does not establish this fix.
 const KERNELS: &[Entry] = &[
     // ---- x86_64 ----
     Entry {
         arch: "x86_64",
-        url: "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155",
+        url: "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20261111-778a26c0594c-0/x86_64/bzImage-6.18.62",
         config: Some(
-            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155.config",
+            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20261111-778a26c0594c-0/x86_64/vmlinux-6.18.62.config",
         ),
         builtins: &[
             "PROC_PAGE_MONITOR",
@@ -159,9 +163,9 @@ const KERNELS: &[Entry] = &[
     // ---- aarch64 ----
     Entry {
         arch: "aarch64",
-        url: "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/aarch64/vmlinux-6.1.155",
+        url: "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20261111-778a26c0594c-0/aarch64/vmlinux-6.18.62",
         config: Some(
-            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/aarch64/vmlinux-6.1.155.config",
+            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20261111-778a26c0594c-0/aarch64/vmlinux-6.18.62.config",
         ),
         builtins: &[
             "PROC_PAGE_MONITOR",
@@ -398,13 +402,14 @@ fn build_pmi_from_path(
     cmdline: &str,
     serial: bool,
 ) -> PathBuf {
-    build_pmi_with_platform(dir, kernel, config, cmdline, serial, &[])
+    build_pmi_with_platform(dir, kernel, config, host::PROFILE, cmdline, serial, &[])
 }
 
 fn build_pmi_with_platform(
     dir: &Path,
     kernel: &Path,
     config: &str,
+    profile: &str,
     cmdline: &str,
     serial: bool,
     platform_args: &[&str],
@@ -416,7 +421,7 @@ fn build_pmi_with_platform(
     cmd.arg("build")
         .args(platform_args)
         .args(["--cmdline", cmdline])
-        .args(["--profile", host::PROFILE])
+        .args(["--profile", profile])
         .arg("--config")
         .arg(&cfg)
         .arg("--kernel")
@@ -540,6 +545,59 @@ fn boots_and_reports(#[values(256, 1024)] mem_mib: u32, #[values(1, 2)] cpus: u3
     );
 }
 
+#[cfg(target_arch = "aarch64")]
+#[rstest]
+fn boots_armv81_payload(#[values(1, 2)] cpus: u32) {
+    use dillo::pmi_parse::{HostArch, ParseOptions, parse};
+
+    assert!(
+        hypervisor_available(),
+        "Armv8.1 qualification requires a native hypervisor"
+    );
+    let kernel = require(&["PCI", "VIRTIO_PCI", "VIRTIO_BLK", "VIRTIO_CONSOLE"], &[])
+        .expect("kernel DB: no PCI + virtio-blk kernel available");
+    let tmp = TempDir::new().unwrap();
+    let pmi = build_pmi_with_platform(
+        tmp.path(),
+        &kernel,
+        host::CONFIG,
+        "armv8.1-a",
+        "console=hvc0",
+        false,
+        &[],
+    );
+    // Assert the producer selected this floor; a baseline-image fallback must
+    // not turn a successful ordinary boot into positive v8.1 qualification.
+    let image = std::fs::read(&pmi).unwrap();
+    let parsed = parse(
+        &image,
+        &ParseOptions {
+            host_arch: HostArch::Aarch64,
+            memory_mib: 256,
+        },
+    )
+    .expect("valid Armv8.1 PMI");
+    assert_eq!(parsed.cpu_profile.as_str(), "armv8.1-a");
+    let output = boot(&pmi, 256, cpus, tmp.path());
+    let report = parse_report(&output)
+        .unwrap_or_else(|| panic!("Armv8.1 payload did not report:\n{output}"));
+    assert_eq!(report.arch, host::ARCH, "guest architecture");
+    assert_eq!(
+        report.cpu.online_count, cpus as usize,
+        "online CPUs after profile admission"
+    );
+    assert!(
+        report
+            .consoles
+            .iter()
+            .any(|console| console.starts_with("hvc0"))
+    );
+    println!(
+        "armv8.1-a payload boot: {} online CPUs, guest flags {:?}",
+        report.cpu.online_count, report.cpu.flags
+    );
+}
+
 #[rstest]
 #[ignore = "requires a host provisioned for an 8 GiB guest; run explicitly in the memory CI lane"]
 fn boots_with_large_memory(#[values(4096, 8192)] mem_mib: u32) {
@@ -560,6 +618,7 @@ fn boots_with_large_memory(#[values(4096, 8192)] mem_mib: u32) {
         tmp.path(),
         &kernel,
         host::CONFIG,
+        host::PROFILE,
         "console=hvc0 dillo.memory_probe",
         false,
         &["--min-addr-space", "32", "--pci-window", "29"],
@@ -1404,8 +1463,9 @@ fn boots_with_named_console_ports() {
         .expect("host write to the rx pipe");
 
     let cmdline = format!(
-        "console=hvc0 dillo.console_port=build dillo.console_port_read={} \
-         dillo.console_port_write={FROM_GUEST}",
+        "console=hvc0 dillo.console_port=build dillo.console_port_expect=log dillo.console_port_read={} \
+         dillo.console_port_write={FROM_GUEST} \
+         sysctl.debug.exception-trace=1 print-fatal-signals=1 loglevel=8",
         TO_GUEST.len()
     );
     let pmi = build_pmi_from_path(tmp.path(), &kernel, host::CONFIG, &cmdline, false);
@@ -1429,6 +1489,13 @@ fn boots_with_named_console_ports() {
         .arg(&pmi)
         .args(["--memory", "256", "--cpus", "1"])
         .args(["--console", &console])
+        .env(
+            "RUST_LOG",
+            format!(
+                "info,dillo_virtio_console=debug,dillo_pci_virtio=debug,{}",
+                std::env::var("RUST_LOG").unwrap_or_default()
+            ),
+        )
         .stdin(std::process::Stdio::piped())
         .stdout(File::create(&out_path).unwrap())
         .stderr(File::create(&err_path).unwrap());
@@ -1475,7 +1542,22 @@ fn boots_with_named_console_ports() {
     {
         let _ = child.kill();
         let _ = child.wait();
-        panic!("dillo boot timed out");
+        // Preserve the exact guest executable for symbolizing fatal signals.
+        let evidence = Path::new("target/boot-evidence");
+        if let Err(error) = std::fs::create_dir_all(evidence).and_then(|()| {
+            std::fs::copy(
+                env!("CARGO_BIN_FILE_SNUFFLER_snuffler"),
+                evidence.join("named-console-snuffler"),
+            )
+        }) {
+            eprintln!("cannot retain named-console guest executable: {error}");
+        }
+        let mut output = std::fs::read(&out_path).unwrap_or_default();
+        output.extend_from_slice(&std::fs::read(&err_path).unwrap_or_default());
+        panic!(
+            "dillo boot timed out:\n{}",
+            String::from_utf8_lossy(&output)
+        );
     }
     // Drop the write end so the reader thread sees EOF rather than blocking.
     drop(host_tx);
@@ -1616,7 +1698,7 @@ fn boots_with_named_console_ports() {
         .expect("host write to the rx pipe");
 
     let cmdline = format!(
-        "console=hvc0 dillo.console_port=build dillo.console_port_read={} \
+        "console=hvc0 dillo.console_port=build dillo.console_port_expect=log dillo.console_port_read={} \
          dillo.console_port_write={FROM_GUEST}",
         TO_GUEST.len()
     );
@@ -1642,6 +1724,13 @@ fn boots_with_named_console_ports() {
         .arg(&pmi)
         .args(["--memory", "256", "--cpus", "1"])
         .args(["--console", &console])
+        .env(
+            "RUST_LOG",
+            format!(
+                "info,dillo_virtio_console=debug,dillo_pci_virtio=debug,{}",
+                std::env::var("RUST_LOG").unwrap_or_default()
+            ),
+        )
         .stdin(std::process::Stdio::piped())
         .stdout(File::create(&out_path).unwrap())
         .stderr(File::create(&err_path).unwrap())
@@ -1680,7 +1769,12 @@ fn boots_with_named_console_ports() {
     {
         let _ = child.kill();
         let _ = child.wait();
-        panic!("dillo boot timed out");
+        let mut output = std::fs::read(&out_path).unwrap_or_default();
+        output.extend_from_slice(&std::fs::read(&err_path).unwrap_or_default());
+        panic!(
+            "dillo boot timed out:\n{}",
+            String::from_utf8_lossy(&output)
+        );
     }
     drop(host_tx);
 
