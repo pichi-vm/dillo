@@ -1076,7 +1076,7 @@ pub(crate) mod tests {
         }
         assert_eq!(
             file_bytes, bytes,
-            "native guest writes reach an independent MAP_SHARED file mapping"
+            "native guest writes reach an independent MAP_SHARED object mapping"
         );
         for (index, (register, _)) in inputs.into_iter().enumerate() {
             let expected = admitted.value(register);
