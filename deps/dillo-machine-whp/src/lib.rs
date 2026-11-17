@@ -6,6 +6,9 @@
 mod cpuid_x86;
 mod hypervisor;
 mod launch_input;
+mod memory;
+
+pub use memory::Memory;
 
 pub use launch_input::CapturedLaunchInput;
 mod ioapic;
@@ -38,14 +41,16 @@ mod imp {
         MessageInterrupt, MessageInterruptDomain,
     };
     use dillo_machine::memory::{AddressRange, SharedMemory};
-    use dillo_machine::{Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
+    use dillo_machine::{Host, HostArchitecture, LaunchConfig, VcpuStop};
     use dillo_mmio::{MmioBus, MmioDevice, MmioWriteOutcome};
-    use vm_memory::{GuestAddress, GuestMemoryMmap};
+    #[cfg(test)]
+    use vm_memory::GuestAddress;
+    use vm_memory::GuestMemoryMmap;
 
     pub use crate::hypervisor::Error;
     use crate::hypervisor::InterruptController;
     use crate::ioapic::IoApic;
-    use crate::{CapturedLaunchInput, VmExit};
+    use crate::{CapturedLaunchInput, Memory, VmExit};
 
     fn install_signal_watchers(_supervisor_shutdown: &'static AtomicBool) {}
 
@@ -115,11 +120,11 @@ mod imp {
             })
         }
 
-        fn set_memory(&mut self, memory: GuestMemoryMmap) -> Result<(), Error> {
+        fn set_memory(&mut self, memory: Memory) -> Result<(), Error> {
             self.inner.set_memory(memory)
         }
 
-        fn attach_guest_memory(&mut self, memory: GuestMemoryMmap) -> Result<(), Error> {
+        fn attach_guest_memory(&mut self, memory: Memory) -> Result<(), Error> {
             self.set_memory(memory)?;
             let guest_mem = self.guest_memory()?;
             self.shared_memory = vec![Arc::new(
@@ -355,27 +360,12 @@ mod imp {
         }
     }
 
-    #[derive(Debug)]
-    pub struct Memory {
-        guest_memory: GuestMemoryMmap,
-    }
-
-    impl dillo_machine::Memory for Memory {
-        type Error = Error;
-
-        fn from_ranges(ranges: &[RamRange]) -> Result<Self, Self::Error> {
-            Ok(Self {
-                guest_memory: guest_memory_from_ranges(ranges.iter().copied())?,
-            })
-        }
-    }
-
     impl Attach<Memory> for Vm {
         type Error = Error;
         type Output = ();
 
         fn attach(&mut self, item: Memory) -> Result<Self::Output, Self::Error> {
-            self.attach_guest_memory(item.guest_memory)
+            self.attach_guest_memory(item)
         }
     }
 
@@ -473,16 +463,6 @@ mod imp {
         ) -> Result<VcpuStop, Error> {
             self.vcpu.run_to_stop(termination)
         }
-    }
-
-    fn guest_memory_from_ranges(
-        ranges: impl IntoIterator<Item = RamRange>,
-    ) -> Result<GuestMemoryMmap, Error> {
-        let ranges: Vec<(GuestAddress, usize)> = ranges
-            .into_iter()
-            .map(|range| (GuestAddress(range.gpa), range.size as usize))
-            .collect();
-        GuestMemoryMmap::from_ranges(&ranges).map_err(|e| Error::CreateGuestMemory(format!("{e}")))
     }
 
     impl<D> Attach<Arc<D>> for Vm
@@ -900,6 +880,7 @@ mod imp {
     #[cfg(test)]
     mod owner_tests {
         use super::*;
+        use dillo_machine::RamRange;
         use dillo_machine::{
             CpuInterrupt as _, CpuPreparation as _, CpuRunner as _, Machine as _, Memory as _,
         };
