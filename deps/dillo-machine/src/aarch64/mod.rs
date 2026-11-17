@@ -6,8 +6,10 @@
 //! A2.2.1 requires EL0, EL1 and IVIPT. Direct baseline conditions below use
 //! D24.2.92 (PFR0), D24.2.83 (ISAR0), D24.2.87 (MMFR0), D24.2.41 (CTR),
 //! D7.3 (endianness) and D24.1.3 (signed/unsigned ID interpretation).
-//! Native AArch64 execution supplies inseparable base instructions; configurable
-//! guest facts must come from the retained owner, including Dillo emulation.
+//! A2.2.2 adds the v8.1 floor and its direct conditions; MMFR1 is D24.2.88
+//! and DFR0 is D24.2.79. Native AArch64 execution supplies inseparable base
+//! instructions; configurable guest facts must come from the retained owner,
+//! including Dillo emulation.
 
 use std::fmt;
 
@@ -17,15 +19,17 @@ pub enum Register {
     Pfr0,
     Isar0,
     Mmfr0,
+    Mmfr1,
     Dfr0,
     Ctr,
     Sctlr,
 }
 impl Register {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Pfr0,
         Self::Isar0,
         Self::Mmfr0,
+        Self::Mmfr1,
         Self::Dfr0,
         Self::Ctr,
         Self::Sctlr,
@@ -36,6 +40,7 @@ impl Register {
             Self::Pfr0 => "ID_AA64PFR0_EL1",
             Self::Isar0 => "ID_AA64ISAR0_EL1",
             Self::Mmfr0 => "ID_AA64MMFR0_EL1",
+            Self::Mmfr1 => "ID_AA64MMFR1_EL1",
             Self::Dfr0 => "ID_AA64DFR0_EL1",
             Self::Ctr => "CTR_EL0",
             Self::Sctlr => "SCTLR_EL1",
@@ -47,6 +52,7 @@ impl Register {
             Self::Pfr0 => 0xc020,
             Self::Isar0 => 0xc030,
             Self::Mmfr0 => 0xc038,
+            Self::Mmfr1 => 0xc039,
             Self::Dfr0 => 0xc028,
             Self::Ctr => 0xd801,
             Self::Sctlr => 0xc080,
@@ -80,7 +86,7 @@ impl fmt::Display for AdmissionError {
                 "guest {} evidence unavailable: {reason}",
                 register.name()
             ),
-            Self::Missing(feature) => write!(f, "guest lacks required Armv8.0 property: {feature}"),
+            Self::Missing(feature) => write!(f, "guest lacks required Arm property: {feature}"),
             Self::Contradiction(rule) => write!(f, "contradictory guest Arm configuration: {rule}"),
             Self::Unevidenced(rule) => write!(f, "guest Arm condition is not evidenced: {rule}"),
         }
@@ -94,6 +100,7 @@ pub struct CpuSnapshot {
     pfr0: u64,
     isar0: u64,
     mmfr0: u64,
+    mmfr1: u64,
     dfr0: u64,
     ctr: u64,
     sctlr: u64,
@@ -106,6 +113,7 @@ impl CpuSnapshot {
             pfr0: read(Register::Pfr0)?,
             isar0: read(Register::Isar0)?,
             mmfr0: read(Register::Mmfr0)?,
+            mmfr1: read(Register::Mmfr1)?,
             dfr0: read(Register::Dfr0)?,
             ctr: read(Register::Ctr)?,
             sctlr: read(Register::Sctlr)?,
@@ -116,13 +124,17 @@ impl CpuSnapshot {
             Register::Pfr0 => self.pfr0,
             Register::Isar0 => self.isar0,
             Register::Mmfr0 => self.mmfr0,
+            Register::Mmfr1 => self.mmfr1,
             Register::Dfr0 => self.dfr0,
             Register::Ctr => self.ctr,
             Register::Sctlr => self.sctlr,
         }
     }
     pub fn admit(self, profile: pmi::aarch64::Profile) -> Result<AdmittedCpu, AdmissionError> {
-        if profile != pmi::aarch64::Profile::V8_0 {
+        if !matches!(
+            profile,
+            pmi::aarch64::Profile::V8_0 | pmi::aarch64::Profile::V8_1
+        ) {
             return Err(AdmissionError::UnsupportedProfile(profile));
         }
         // PFR0 standard unsigned IDs: >=1 provides AArch64, >=2 adds AArch32.
@@ -192,7 +204,72 @@ impl CpuSnapshot {
                 "FEAT_TRC_SR requires guest ETMv4 or ETE system-register realization",
             ));
         }
+        if profile == pmi::aarch64::Profile::V8_1 {
+            self.validate_v81()?;
+        }
         Ok(AdmittedCpu { snapshot: self })
+    }
+    fn validate_v81(&self) -> Result<(), AdmissionError> {
+        // A2.2.1 CRC32 and A2.2.2 HPDS/LOR/LSE/PAN become mandatory in
+        // v8.1. D24.1.3 permits monotonic standard unsigned ID thresholds.
+        if (self.isar0 >> 20) & 15 == 1 {
+            return Err(AdmissionError::Unevidenced(
+                "reserved ISAR0.Atomic encoding 1",
+            ));
+        }
+        for (value, minimum, feature) in [
+            ((self.isar0 >> 16) & 15, 1, "FEAT_CRC32"),
+            ((self.isar0 >> 20) & 15, 2, "FEAT_LSE"),
+            ((self.mmfr1 >> 12) & 15, 1, "FEAT_HPDS"),
+            ((self.mmfr1 >> 16) & 15, 1, "FEAT_LOR"),
+            ((self.mmfr1 >> 20) & 15, 1, "FEAT_PAN"),
+        ] {
+            if value < minimum {
+                return Err(AdmissionError::Missing(feature));
+            }
+        }
+        // Signed standard ID: zero provides SIMD, 0xf is absent. Neither
+        // SIMD nor FP16 becomes a mandatory feature merely by selecting v8.1.
+        let simd = (self.pfr0 >> 20) & 15;
+        let rdm = (self.isar0 >> 28) & 15;
+        if simd < 8 && rdm == 0 {
+            return Err(AdmissionError::Missing("FEAT_RDM when AdvSIMD is present"));
+        }
+        // D24.1.3.2: 0xf is architected PMU absence; every other value follows
+        // the unsigned scheme. 2/3 are reserved below the required p1 floor.
+        match (self.dfr0 >> 8) & 15 {
+            1 => {
+                return Err(AdmissionError::Missing(
+                    "FEAT_PMUv3p1 when PMUv3 is present",
+                ));
+            }
+            2 | 3 => {
+                return Err(AdmissionError::Unevidenced(
+                    "reserved DFR0.PMUVer below PMUv3p1",
+                ));
+            }
+            _ => {}
+        }
+        let el2 = (self.pfr0 >> 8) & 15 != 0;
+        let vhe = (self.mmfr1 >> 8) & 15 != 0;
+        if el2 && !vhe {
+            return Err(AdmissionError::Missing(
+                "FEAT_VHE when AArch64 EL2 is present",
+            ));
+        }
+        if vhe && !el2 {
+            return Err(AdmissionError::Contradiction(
+                "FEAT_VHE requires AArch64 EL2",
+            ));
+        }
+        // VHE implies LSE (already required above) and Debugv8p1. Debugv8p1
+        // remains optional when neither VHE nor EL2 is exposed.
+        if vhe && (self.dfr0 & 15) < 7 {
+            return Err(AdmissionError::Missing(
+                "FEAT_Debugv8p1 when VHE is present",
+            ));
+        }
+        Ok(())
     }
     fn validate_endianness(&self) -> Result<(), AdmissionError> {
         let mixed = (self.mmfr0 >> 8) & 15;

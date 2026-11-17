@@ -8,6 +8,7 @@ fn minimum() -> CpuSnapshot {
         pfr0: 0x00ff_0011,
         isar0: 0,
         mmfr0: 0,
+        mmfr1: 0,
         dfr0: 0,
         ctr: 3 << 14,
         sctlr: 0,
@@ -137,7 +138,6 @@ fn unresolved_context_and_higher_profiles_have_explicit_diagnostics() {
         Err(AdmissionError::Unevidenced(_))
     ));
     for profile in [
-        pmi::aarch64::Profile::V8_1,
         pmi::aarch64::Profile::V8_2,
         pmi::aarch64::Profile::V9_0,
         pmi::aarch64::Profile::V9_8,
@@ -147,6 +147,139 @@ fn unresolved_context_and_higher_profiles_have_explicit_diagnostics() {
             AdmissionError::UnsupportedProfile(profile)
         );
     }
+}
+
+fn minimum_v81() -> CpuSnapshot {
+    let mut snapshot = minimum();
+    snapshot.isar0 = (1 << 16) | (2 << 20);
+    snapshot.mmfr1 = (1 << 12) | (1 << 16) | (1 << 20);
+    snapshot
+}
+
+#[test]
+fn v81_minimum_keeps_simd_pmu_el2_and_table_extensions_optional() {
+    minimum_v81().admit(pmi::aarch64::Profile::V8_1).unwrap();
+    // In particular HAFDBS, VMIDBits, VHE, crypto and FP16 remain zero.
+    assert_eq!(minimum_v81().mmfr1 & 0xfff, 0);
+    let mut el3 = minimum_v81();
+    el3.pfr0 |= 1 << 12; // EL3 does not require guest EL2/VHE.
+    el3.mmfr0 |= 1 << 12; // Preserve the baseline Secure/Nonsecure condition.
+    el3.admit(pmi::aarch64::Profile::V8_1).unwrap();
+    let mut aarch32 = minimum_v81();
+    aarch32.pfr0 = (aarch32.pfr0 & !0xff) | 0x22;
+    aarch32.admit(pmi::aarch64::Profile::V8_1).unwrap();
+    let mut future = minimum_v81();
+    future.isar0 |= (15 << 16) | (15 << 20);
+    future.mmfr1 |= (15 << 12) | (15 << 16) | (15 << 20);
+    future.admit(pmi::aarch64::Profile::V8_1).unwrap();
+}
+
+#[test]
+fn v81_each_mandatory_delta_requires_independent_evidence() {
+    for (register, shift, feature) in [
+        (Register::Isar0, 16, "FEAT_CRC32"),
+        (Register::Isar0, 20, "FEAT_LSE"),
+        (Register::Mmfr1, 12, "FEAT_HPDS"),
+        (Register::Mmfr1, 16, "FEAT_LOR"),
+        (Register::Mmfr1, 20, "FEAT_PAN"),
+    ] {
+        let mut snapshot = minimum_v81();
+        match register {
+            Register::Isar0 => snapshot.isar0 &= !(15 << shift),
+            Register::Mmfr1 => snapshot.mmfr1 &= !(15 << shift),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            snapshot
+                .clone()
+                .admit(pmi::aarch64::Profile::V8_1)
+                .unwrap_err(),
+            AdmissionError::Missing(feature)
+        );
+        snapshot.admit(pmi::aarch64::Profile::V8_0).unwrap();
+    }
+    let mut reserved = minimum_v81();
+    reserved.isar0 = (reserved.isar0 & !(15 << 20)) | (1 << 20);
+    assert!(matches!(
+        reserved.admit(pmi::aarch64::Profile::V8_1),
+        Err(AdmissionError::Unevidenced(_))
+    ));
+}
+
+#[test]
+fn v81_signed_simd_presence_requires_rdm_without_requiring_fp16() {
+    for simd in [0, 1, 7, 15] {
+        let mut snapshot = minimum_v81();
+        snapshot.pfr0 = (simd << 16) | (simd << 20) | 0x11;
+        if simd == 15 {
+            snapshot.admit(pmi::aarch64::Profile::V8_1).unwrap();
+        } else {
+            assert_eq!(
+                snapshot
+                    .clone()
+                    .admit(pmi::aarch64::Profile::V8_1)
+                    .unwrap_err(),
+                AdmissionError::Missing("FEAT_RDM when AdvSIMD is present")
+            );
+            snapshot.isar0 |= 1 << 28;
+            snapshot.admit(pmi::aarch64::Profile::V8_1).unwrap();
+        }
+    }
+}
+
+#[test]
+fn v81_pmu_uses_architected_absence_and_monotonic_version_scheme() {
+    for version in [0, 4, 5, 9, 14, 15] {
+        let mut snapshot = minimum_v81();
+        snapshot.dfr0 = version << 8;
+        snapshot.admit(pmi::aarch64::Profile::V8_1).unwrap();
+    }
+    let mut old = minimum_v81();
+    old.dfr0 = 1 << 8;
+    assert_eq!(
+        old.admit(pmi::aarch64::Profile::V8_1).unwrap_err(),
+        AdmissionError::Missing("FEAT_PMUv3p1 when PMUv3 is present")
+    );
+    for version in [2, 3] {
+        let mut snapshot = minimum_v81();
+        snapshot.dfr0 = version << 8;
+        assert!(matches!(
+            snapshot.admit(pmi::aarch64::Profile::V8_1),
+            Err(AdmissionError::Unevidenced(_))
+        ));
+    }
+}
+
+#[test]
+fn v81_el2_vhe_and_debug_conditions_apply_only_when_exposed() {
+    let mut snapshot = minimum_v81();
+    snapshot.dfr0 = 6;
+    snapshot.clone().admit(pmi::aarch64::Profile::V8_1).unwrap();
+    snapshot.pfr0 |= 1 << 8;
+    assert_eq!(
+        snapshot
+            .clone()
+            .admit(pmi::aarch64::Profile::V8_1)
+            .unwrap_err(),
+        AdmissionError::Missing("FEAT_VHE when AArch64 EL2 is present")
+    );
+    snapshot.mmfr1 |= 1 << 8;
+    assert_eq!(
+        snapshot
+            .clone()
+            .admit(pmi::aarch64::Profile::V8_1)
+            .unwrap_err(),
+        AdmissionError::Missing("FEAT_Debugv8p1 when VHE is present")
+    );
+    for debug in [7, 8, 15] {
+        snapshot.dfr0 = debug;
+        snapshot.clone().admit(pmi::aarch64::Profile::V8_1).unwrap();
+    }
+    snapshot.pfr0 &= !(15 << 8);
+    assert_eq!(
+        snapshot.admit(pmi::aarch64::Profile::V8_1).unwrap_err(),
+        AdmissionError::Contradiction("FEAT_VHE requires AArch64 EL2")
+    );
 }
 
 #[test]

@@ -25,6 +25,8 @@ enum Behavior {
 enum AdmissionRefusal {
     MissingFeature,
     MissingEvidence,
+    V81MissingEvidence,
+    V81MissingFeature,
     Contradiction,
     UnsupportedProfile,
 }
@@ -146,11 +148,24 @@ impl CpuPreparation for Input {
                         .any(|event| matches!(event, Event::Prepared(0, _)))
                 });
                 let profile = if matches!(refusal, AdmissionRefusal::UnsupportedProfile) {
+                    pmi::aarch64::Profile::V8_2
+                } else if matches!(
+                    refusal,
+                    AdmissionRefusal::V81MissingEvidence | AdmissionRefusal::V81MissingFeature
+                ) {
                     pmi::aarch64::Profile::V8_1
                 } else {
                     pmi::aarch64::Profile::V8_0
                 };
                 let result = CpuSnapshot::capture(|register| {
+                    if register == Register::Mmfr1
+                        && matches!(refusal, AdmissionRefusal::V81MissingEvidence)
+                    {
+                        return Err(AdmissionError::Unavailable {
+                            register,
+                            reason: "injected missing MMFR1 selector".into(),
+                        });
+                    }
                     if register == Register::Ctr
                         && matches!(refusal, AdmissionRefusal::MissingEvidence)
                     {
@@ -168,6 +183,16 @@ impl CpuPreparation for Input {
                             1 << 14
                         }
                         Register::Ctr => 3 << 14,
+                        Register::Isar0
+                            if matches!(refusal, AdmissionRefusal::V81MissingFeature) =>
+                        {
+                            (1 << 16) | (2 << 20) | (1 << 28)
+                        }
+                        Register::Mmfr1
+                            if matches!(refusal, AdmissionRefusal::V81MissingFeature) =>
+                        {
+                            (1 << 12) | (1 << 20)
+                        }
                         _ => 0,
                     })
                 })
@@ -615,10 +640,12 @@ fn architectural_admission_failure_cannot_release_a_prepared_peer() {
     for (refusal, diagnostic) in [
         (AdmissionRefusal::MissingFeature, "FEAT_IVIPT"),
         (AdmissionRefusal::MissingEvidence, "native selector"),
+        (AdmissionRefusal::V81MissingEvidence, "MMFR1 selector"),
+        (AdmissionRefusal::V81MissingFeature, "FEAT_LOR"),
         (AdmissionRefusal::Contradiction, "FP and AdvSIMD"),
         (
             AdmissionRefusal::UnsupportedProfile,
-            "armv8.1-a admission is not implemented",
+            "armv8.2-a admission is not implemented",
         ),
     ] {
         let mut machine =

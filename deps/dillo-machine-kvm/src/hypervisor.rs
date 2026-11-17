@@ -520,7 +520,10 @@ impl Vcpu {
         profile: pmi::aarch64::Profile,
     ) -> Result<dillo_machine::aarch64::AdmittedCpu, Error> {
         use dillo_machine::aarch64::{AdmissionError, CpuSnapshot, Register};
-        if profile != pmi::aarch64::Profile::V8_0 {
+        if !matches!(
+            profile,
+            pmi::aarch64::Profile::V8_0 | pmi::aarch64::Profile::V8_1
+        ) {
             return Err(AdmissionError::UnsupportedProfile(profile).into());
         }
         let unavailable = |reason: String| AdmissionError::Unavailable {
@@ -1157,8 +1160,135 @@ mod bsp_tests {
 }
 
 #[cfg(all(test, target_arch = "aarch64"))]
+#[path = "../../dillo-machine/tests/fixtures/arm_v81.rs"]
+mod arm_v81;
+
+#[cfg(all(test, target_arch = "aarch64"))]
 mod arm_bsp_tests {
     use super::*;
+
+    #[test]
+    fn arm_v81_native_lor_and_owner_floor() {
+        use dillo_machine::aarch64::Register;
+        use vm_memory::{Bytes, GuestAddress};
+        let backing = Arc::new(crate::memory::MappedMemory::test_backing(&[(0, 0x4000)]).unwrap());
+        let memory = backing.guest_memory();
+        let vm = Vm::new_with_gic(&crate::imp::Aarch64Substrate {
+            dist_base: 0x0800_0000,
+            redist_base: 0x080a_0000,
+            spi_count: 64,
+        })
+        .expect("native ARM KVM is required");
+        vm.attach_memory(backing).unwrap();
+        for (base, instructions) in [(0, arm_v81::PROGRAM), (0xa00, arm_v81::SYNC_HANDLER)] {
+            for (index, instruction) in instructions.iter().enumerate() {
+                memory
+                    .write_obj(*instruction, GuestAddress(base + index as u64 * 4))
+                    .unwrap();
+            }
+        }
+        let (ready, prepared) = std::sync::mpsc::channel();
+        let mut owners = Vec::new();
+        let mut releases = Vec::new();
+        for index in 0..2 {
+            let vm = vm.clone();
+            let ready = ready.clone();
+            let (release, gate) = std::sync::mpsc::channel();
+            releases.push(release);
+            owners.push(std::thread::spawn(move || {
+                // This native instruction fixture starts both raw owners directly;
+                // it does not replace production's guest PSCI AP startup policy.
+                let mut cpu = vm.create_vcpu(index, "armv8.0-a").unwrap();
+                cpu.initialize_bsp().unwrap();
+                cpu.fd
+                    .set_mp_state(kvm_bindings::kvm_mp_state {
+                        mp_state: kvm_bindings::KVM_MP_STATE_RUNNABLE,
+                    })
+                    .unwrap();
+                cpu.set_one_u64(core_reg(0), u64::from(index)).unwrap();
+                let admitted = cpu.admit_arm_profile(pmi::aarch64::Profile::V8_0).unwrap();
+                for register in Register::ALL {
+                    eprintln!(
+                        "KVM owner {index} {}: native/default effective={:#x}",
+                        register.name(),
+                        admitted.value(register)
+                    );
+                }
+                let v81 = cpu.admit_arm_profile(pmi::aarch64::Profile::V8_1);
+                eprintln!("KVM owner {index} native v8.1 admission: {v81:?}");
+                ready.send(()).unwrap();
+                if gate.recv().is_err() {
+                    return None;
+                }
+                let exit = cpu.run(
+                    |_, _| 0,
+                    |_, _| false,
+                    &std::sync::atomic::AtomicBool::new(false),
+                );
+                Some((admitted.value(Register::Mmfr1), v81, exit))
+            }));
+        }
+        drop(ready);
+        let ready = (0..2)
+            .filter(|_| {
+                prepared
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .is_ok()
+            })
+            .count();
+        let gic = if ready == 2 {
+            vm.init_gic()
+        } else {
+            Err(Error::UnhandledExit(
+                "native owner preparation failed".into(),
+            ))
+        };
+        if gic.is_ok() {
+            for release in releases {
+                let _ = release.send(());
+            }
+        } else {
+            drop(releases);
+        }
+        let results: Vec<_> = owners
+            .into_iter()
+            .map(std::thread::JoinHandle::join)
+            .collect();
+        let observed: [[u64; arm_v81::RESULT_WORDS]; 2] = std::array::from_fn(|index| {
+            std::array::from_fn(|word| {
+                memory
+                    .read_obj(GuestAddress(
+                        arm_v81::RESULTS + index as u64 * arm_v81::RESULT_STRIDE + word as u64 * 8,
+                    ))
+                    .unwrap()
+            })
+        });
+        for (index, observed) in observed.iter().enumerate() {
+            eprintln!("KVM owner {index} guest LOR observations: {observed:#x?}");
+        }
+        gic.unwrap();
+        for (result, observed) in results.into_iter().zip(observed) {
+            let (mmfr1, v81, exit) = result.unwrap().expect("owner release");
+            assert!(matches!(
+                exit.unwrap(),
+                VmExit::MmioWrite {
+                    addr: 0x2_0000,
+                    size: 8,
+                    ..
+                }
+            ));
+            assert_eq!(
+                observed[2], mmfr1,
+                "guest MMFR1 versus actual owner/default effective view"
+            );
+            arm_v81::verify_lor(&observed);
+            if let Err(error) = v81 {
+                // Probe refusal is evidence, not positive v8.1 qualification.
+                assert!(matches!(error, Error::ArmAdmission(_)), "{error}");
+                eprintln!("positive KVM v8.1 qualification remains outstanding: {error}");
+            }
+        }
+    }
 
     #[test]
     fn arm_admitted_owner_matches_guest_mrs_reads() {
@@ -1178,6 +1308,7 @@ mod arm_bsp_tests {
             (Register::Pfr0, 0xd538_0400u32),
             (Register::Isar0, 0xd538_0600),
             (Register::Mmfr0, 0xd538_0700),
+            (Register::Mmfr1, 0xd538_0720),
             (Register::Dfr0, 0xd538_0500),
             (Register::Ctr, 0xd53b_0020),
             (Register::Sctlr, 0xd538_1000),
@@ -1216,13 +1347,13 @@ mod arm_bsp_tests {
                 ),
                 "{exit:?}"
             );
-            let observed: [u64; 6] = std::array::from_fn(|index| {
+            let observed: [u64; 7] = std::array::from_fn(|index| {
                 memory
                     .read_obj::<u64>(GuestAddress(0x1000 + index as u64 * 8))
                     .unwrap()
             });
             let saved_sctlr = cpu.native_register(sys_reg(3, 0, 1, 0, 0));
-            // Retain all six raw comparisons even if the first assertion fails.
+            // Retain every raw comparison even if the first assertion fails.
             for ((register, _), observed) in inputs.iter().zip(observed) {
                 let expected = admitted.value(*register);
                 eprintln!(
