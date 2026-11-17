@@ -86,21 +86,25 @@ struct Entry {
 // Catalogued kernels, all published by their projects as plain downloads arma
 // accepts directly (raw `vmlinux`/`Image`, gzip/zstd EFI-zboot, or bzImage — no
 // unpacking), each paired with a published kconfig:
-//   * firecracker CI — raw image + a plain `.config`. All virtio built in;
-//     `RANDOMIZE_BASE` is on for x86 (relocation-based KASLR), off on arm64.
+//   * firecracker CI — raw `vmlinux`/`Image` or x86 bzImage + plain `.config`.
+//     The first x86 entry uses bzImage's appended KASLR relocation table.
+//     All virtio built in; `RANDOMIZE_BASE` is on for x86, off on arm64.
 //   * Alpine `vmlinuz-virt` — gzip EFI-zboot arma unwraps; `ACPI_SPCR_TABLE=y`
 //     for the SPCR earlycon test. Config is the version-stamped `config-*-virt`
 //     in the same netboot dir (wildcard-resolved).
 //   * Fedora pxeboot `vmlinuz` — zstd EFI-zboot arma unwraps; `RANDOMIZE_BASE=y`:
 //     the arm64 KASLR consumption kernel. Config is Fedora's published dist-git
 //     `kernel-aarch64-fedora.config`.
+// The first same-arch entries contain Linux fix 0d0eff39ceb3: broken virtqueues
+// must leave TX cleanup loops during shutdown. Keep image/config pairs from the
+// same published build; a newer version alone does not establish this fix.
 const KERNELS: &[Entry] = &[
     // ---- x86_64 ----
     Entry {
         arch: "x86_64",
-        url: "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155",
+        url: "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20261111-778a26c0594c-0/x86_64/bzImage-6.18.62",
         config: Some(
-            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155.config",
+            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20261111-778a26c0594c-0/x86_64/vmlinux-6.18.62.config",
         ),
         builtins: &[
             "PROC_PAGE_MONITOR",
@@ -159,9 +163,9 @@ const KERNELS: &[Entry] = &[
     // ---- aarch64 ----
     Entry {
         arch: "aarch64",
-        url: "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/aarch64/vmlinux-6.1.155",
+        url: "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20261111-778a26c0594c-0/aarch64/vmlinux-6.18.62",
         config: Some(
-            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/aarch64/vmlinux-6.1.155.config",
+            "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20261111-778a26c0594c-0/aarch64/vmlinux-6.18.62.config",
         ),
         builtins: &[
             "PROC_PAGE_MONITOR",
