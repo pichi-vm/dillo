@@ -19,9 +19,9 @@ vm-memory.workspace = true
 applevisor.workspace = true
 applevisor-sys.workspace = true
 thiserror.workspace = true
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-tempfile = "3"
 wait-timeout = "0.2"
 
 [lints]

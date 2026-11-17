@@ -5,6 +5,7 @@
 
 mod hypervisor;
 mod launch_input;
+mod memory;
 
 pub use launch_input::CapturedLaunchInput;
 
@@ -42,8 +43,6 @@ mod imp {
         MmioAttachment, MmioBus, MmioDevice, MmioDeviceHandle, MmioInterrupt,
         MmioInterruptRequirement, MmioRunToken, MmioSpawnError, MmioWriteOutcome, SharedMemory,
     };
-    use vm_memory::mmap::MmapRegionBuilder;
-    use vm_memory::{GuestAddress, GuestMemoryMmap, GuestRegionMmap};
 
     use crate::VcpuHandle;
     pub use crate::hypervisor::Error;
@@ -163,14 +162,6 @@ mod imp {
             })
         }
 
-        fn add_memory(&mut self, base: u64, size: u64) -> Result<(), Error> {
-            self.inner.add_memory(base, size)
-        }
-
-        fn region_mappings(&self) -> Vec<(u64, u64, u64)> {
-            self.inner.region_mappings()
-        }
-
         fn mmio_bus(&self) -> Arc<Mutex<MmioBus>> {
             Arc::clone(&self.mmio_bus)
         }
@@ -179,36 +170,6 @@ mod imp {
             Arc::clone(&self.cpu_power)
         }
 
-        /// Build a `vm-memory` view over HVF-mapped guest RAM.
-        ///
-        /// The returned regions borrow the mappings owned by this VM; dropping
-        /// the `GuestMemoryMmap` must not unmap the backend-owned memory.
-        fn guest_memory(&self) -> Result<GuestMemoryMmap, Error> {
-            let mappings = self.region_mappings();
-            let mut built: Vec<GuestRegionMmap> = Vec::with_capacity(mappings.len());
-            for (gpa, host_addr, size) in mappings {
-                #[allow(unsafe_code)]
-                let region = unsafe {
-                    MmapRegionBuilder::new(size as usize)
-                        .with_raw_mmap_pointer(host_addr as *mut u8)
-                }
-                .build()
-                .map_err(|e| Error::Hv(format!("MmapRegionBuilder: {e}")))?;
-                let gr = GuestRegionMmap::new(region, GuestAddress(gpa)).ok_or_else(|| {
-                    Error::Hv(format!(
-                        "GuestRegionMmap: gpa+size overflow at {gpa:#x}+{size}"
-                    ))
-                })?;
-                built.push(gr);
-            }
-            GuestMemoryMmap::from_regions(built)
-                .map_err(|e| Error::Hv(format!("GuestMemoryMmap: {e:?}")))
-        }
-
-        // Mirrors the same method on the KVM/WHP backends (called as
-        // `self.resolve_interrupts(..)`); HVF's interrupt factories happen to be
-        // stateless, so `self` is unused here.
-        #[allow(clippy::unused_self)]
         fn resolve_interrupts(
             &self,
             requirements: &[MmioInterruptRequirement],
@@ -218,11 +179,11 @@ mod imp {
                 .map(|requirement| match requirement {
                     MmioInterruptRequirement::Line { source } => {
                         let irq = Self::wired_irq_from_cells(&source.cells, source.cell_count)?;
-                        Ok(MmioInterrupt::Line(Self::create_line_interrupt(irq)))
+                        Ok(MmioInterrupt::Line(self.create_line_interrupt(irq)))
                     }
                     MmioInterruptRequirement::MessageDomain { vectors, .. } => {
                         Ok(MmioInterrupt::MessageDomain(
-                            Self::create_message_interrupt_domain(*vectors),
+                            self.create_message_interrupt_domain(*vectors),
                         ))
                     }
                 })
@@ -239,16 +200,22 @@ mod imp {
             }
         }
 
-        fn create_line_interrupt(source: u32) -> Interrupt {
+        fn create_line_interrupt(&self, source: u32) -> Interrupt {
             // `source` is the DTB SPI number (0-based); hv_gic's gic_set_spi
             // wants the absolute GIC INTID (SPI + 32 — INTIDs 0..31 are SGI/PPI,
             // so a raw SPI number is rejected as an invalid argument). This
             // mirrors gic_send_msi, which already uses absolute INTIDs (64-95).
-            Interrupt::new(Arc::new(SpiInterruptLine { intid: source + 32 }))
+            Interrupt::new(Arc::new(SpiInterruptLine {
+                intid: source + 32,
+                native: self.inner.cpu_instance(),
+            }))
         }
 
-        fn create_message_interrupt_domain(vectors: u16) -> Arc<dyn MessageInterruptDomain> {
-            Arc::new(GicMessageInterruptDomain::new(vectors))
+        fn create_message_interrupt_domain(&self, vectors: u16) -> Arc<dyn MessageInterruptDomain> {
+            Arc::new(GicMessageInterruptDomain::new(
+                vectors,
+                self.inner.cpu_instance(),
+            ))
         }
     }
 
@@ -406,6 +373,7 @@ mod imp {
 
     #[derive(Debug)]
     struct SpiInterruptLine {
+        native: crate::hypervisor::NativeVm,
         intid: u32,
     }
 
@@ -425,7 +393,8 @@ mod imp {
         }
 
         fn set_level(&self, level: bool) -> Result<(), InterruptError> {
-            crate::hypervisor::set_spi(self.intid, level)
+            self.native
+                .set_spi(self.intid, level)
                 .map_err(|e| InterruptError::Delivery(e.to_string()))
         }
     }
@@ -443,13 +412,15 @@ mod imp {
 
     #[derive(Debug)]
     struct GicMessageInterruptDomainInner {
+        native: crate::hypervisor::NativeVm,
         vectors: Mutex<Vec<GicMessage>>,
     }
 
     impl GicMessageInterruptDomain {
-        fn new(count: u16) -> Self {
+        fn new(count: u16, native: crate::hypervisor::NativeVm) -> Self {
             Self {
                 inner: Arc::new(GicMessageInterruptDomainInner {
+                    native,
                     vectors: Mutex::new(vec![
                         GicMessage {
                             message: MessageInterrupt {
@@ -508,7 +479,7 @@ mod imp {
                 let Some(message) = domain.message_for(vector) else {
                     return;
                 };
-                if let Err(e) = crate::hypervisor::send_msi(message.address, message.data) {
+                if let Err(e) = domain.native.send_msi(message.address, message.data) {
                     log::warn!("HVF message interrupt inject (vector {vector}) failed: {e}");
                 }
             }))
@@ -528,6 +499,7 @@ mod imp {
             let dillo_machine::CpuProfile::Aarch64(profile) = profile else {
                 return Err(Error::Hv("CPU profile architecture mismatch".into()));
             };
+            self.inner.cpu_instance().require_ram()?;
             let index = index as usize;
             let slot = self.cpu_power.slots.get(index).ok_or_else(|| {
                 Error::Hv(format!("CPU index {index} exceeds declared CPU count"))
@@ -592,7 +564,7 @@ mod imp {
 
     #[derive(Debug, Clone)]
     pub struct Memory {
-        ranges: Vec<RamRange>,
+        backing: Arc<crate::memory::MappedMemory>,
     }
 
     impl dillo_machine::Memory for Memory {
@@ -600,7 +572,7 @@ mod imp {
 
         fn from_ranges(ranges: &[RamRange]) -> Result<Self, Self::Error> {
             Ok(Self {
-                ranges: ranges.to_vec(),
+                backing: Arc::new(crate::memory::MappedMemory::new(ranges)?),
             })
         }
     }
@@ -610,10 +582,8 @@ mod imp {
         type Output = ();
 
         fn attach(&mut self, item: Memory) -> Result<Self::Output, Self::Error> {
-            for range in item.ranges {
-                self.add_memory(range.gpa, range.size)?;
-            }
-            let guest_mem = self.guest_memory()?;
+            self.inner.attach(item.backing)?;
+            let guest_mem = self.inner.guest_memory()?;
             self.shared_memory = vec![Arc::new(dillo_mmio::MappedSharedMemory::for_guest_memory(
                 guest_mem,
                 dillo_mmio::SharedAccess::ReadWrite,
@@ -1188,10 +1158,261 @@ mod imp {
         use std::thread;
 
         use super::*;
+        use vm_memory::{Bytes, GuestAddress};
+
+        #[test]
+        fn hvf_host_exports_outlive_retirement_without_retargeting() {
+            use dillo_machine::Machine as _;
+            if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
+                crate::hypervisor::tests::SignedNativeTest::spawn(
+                    "imp::tests::hvf_host_exports_outlive_retirement_without_retargeting",
+                )
+                .verify();
+                return;
+            }
+            let gic = crate::hypervisor::GicParams {
+                dist_base: 0x0800_0000,
+                redist_base: 0x0810_0000,
+                msi_base: 0x0a10_0000,
+                msi_intid_base: 64,
+                msi_intid_count: 32,
+            };
+            let mut vm = Vm::new(&gic, 36, 1).unwrap();
+            vm.attach(
+                <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
+                    gpa: 0,
+                    size: 0x4000,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            let probe = vm.inner.mapping_probe(0);
+            let export = vm.shared_memory[0]
+                .region(dillo_mmio::SharedRange {
+                    gpa: 0,
+                    size: 0x4000,
+                    access: dillo_mmio::SharedAccess::ReadWrite,
+                })
+                .unwrap();
+            vm.write_guest(8, &[0x11, 0x22]).unwrap();
+            drop(vm);
+            assert!(
+                probe.is_mapped(),
+                "host export retains original allocation after native retirement"
+            );
+            let mut replacement =
+                Vm::new(&gic, 36, 1).expect("successful retirement reopens process slot");
+            replacement
+                .attach(
+                    <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
+                        gpa: 0,
+                        size: 0x4000,
+                    }])
+                    .unwrap(),
+                )
+                .unwrap();
+            let replacement_probe = replacement.inner.mapping_probe(0);
+            replacement.write_guest(8, &[0x33, 0x44]).unwrap();
+            let mut bytes = [0; 2];
+            export.read(8, &mut bytes).unwrap();
+            assert_eq!(bytes, [0x11, 0x22]);
+            export.write(8, &[0x55, 0x66]).unwrap();
+            replacement
+                .inner
+                .guest_memory()
+                .unwrap()
+                .read_slice(&mut bytes, GuestAddress(8))
+                .unwrap();
+            assert_eq!(
+                bytes,
+                [0x33, 0x44],
+                "old export never retargets a replacement VM"
+            );
+            drop(export);
+            assert!(!probe.is_mapped());
+            assert!(replacement_probe.is_mapped());
+            drop(replacement);
+            assert!(!replacement_probe.is_mapped());
+        }
+
+        #[test]
+        fn hvf_native_services_retain_their_original_vm() {
+            if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
+                crate::hypervisor::tests::SignedNativeTest::spawn(
+                    "imp::tests::hvf_native_services_retain_their_original_vm",
+                )
+                .verify();
+                return;
+            }
+            let gic = crate::hypervisor::GicParams {
+                dist_base: 0x0800_0000,
+                redist_base: 0x0810_0000,
+                msi_base: 0x0a10_0000,
+                msi_intid_base: 64,
+                msi_intid_count: 32,
+            };
+            let mut vm = Vm::new(&gic, 36, 1).unwrap();
+            vm.attach(
+                <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
+                    gpa: 0,
+                    size: 0x4000,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            let probe = vm.inner.mapping_probe(0);
+            let spi = vm.create_line_interrupt(8);
+            drop(vm);
+            assert!(Vm::new(&gic, 36, 1).is_err());
+            assert!(probe.is_mapped());
+            spi.set_level(true).unwrap();
+            spi.set_level(false).unwrap();
+            drop(spi);
+
+            assert!(!probe.is_mapped());
+
+            let mut vm = Vm::new(&gic, 36, 1).unwrap();
+            vm.attach(
+                <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
+                    gpa: 0,
+                    size: 0x4000,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            let probe = vm.inner.mapping_probe(0);
+            let domain = GicMessageInterruptDomain::new(1, vm.inner.cpu_instance());
+            domain
+                .update(
+                    0,
+                    MessageInterrupt {
+                        address: gic.msi_base,
+                        data: 64,
+                        masked: false,
+                    },
+                )
+                .unwrap();
+            domain.enabled(0, true).unwrap();
+            let msi = domain.interrupt(0).unwrap();
+            drop(domain);
+            drop(vm);
+            assert!(
+                Vm::new(&gic, 36, 1).is_err(),
+                "MSI closure alone retains native VM authority"
+            );
+            assert!(probe.is_mapped());
+            msi.signal();
+            drop(msi);
+            assert!(!probe.is_mapped());
+            drop(Vm::new(&gic, 36, 1).unwrap());
+        }
+
+        #[test]
+        fn hvf_preparation_runner_and_wake_own_registered_ram() {
+            use dillo_machine::{CpuPreparation as _, CpuRunner as _, Machine as _};
+            if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
+                crate::hypervisor::tests::SignedNativeTest::spawn(
+                    "imp::tests::hvf_preparation_runner_and_wake_own_registered_ram",
+                )
+                .verify();
+                return;
+            }
+            let gic = crate::hypervisor::GicParams {
+                dist_base: 0x0800_0000,
+                redist_base: 0x0810_0000,
+                msi_base: 0x0a10_0000,
+                msi_intid_base: 64,
+                msi_intid_count: 32,
+            };
+            let mut vm = Vm::new(&gic, 36, 1).unwrap();
+            let profile = dillo_machine::CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0);
+            assert!(
+                vm.cpu_preparation(0, profile).is_err(),
+                "RAM absence must not reserve a CPU slot"
+            );
+            vm.attach(
+                <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
+                    gpa: 0,
+                    size: 0x4000,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            let probe = vm.inner.mapping_probe(0);
+            let preparation = vm.cpu_preparation(0, profile).unwrap();
+            drop(vm);
+            assert!(probe.is_mapped());
+            assert!(
+                Vm::new(&gic, 36, 1).is_err(),
+                "unconsumed preparation alone owns native context"
+            );
+            let (ready, prepared) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let owner = thread::spawn(move || {
+                let mut runner = preparation
+                    .prepare()
+                    .expect("standalone preparation retains actual RAM");
+                ready.send(()).unwrap();
+                released.recv().unwrap();
+                assert_eq!(
+                    runner.run(&AtomicBool::new(true)).unwrap(),
+                    VcpuStop::Stopped
+                );
+            });
+            prepared.recv().unwrap();
+            let mapped = probe.is_mapped();
+            let busy = Vm::new(&gic, 36, 1).is_err();
+            release.send(()).unwrap();
+            owner.join().unwrap();
+            assert!(
+                mapped && busy,
+                "prepared native runner retains actual registration until owner-thread destruction"
+            );
+            assert!(!probe.is_mapped());
+
+            let mut vm = Vm::new(&gic, 36, 1).unwrap();
+            vm.attach(
+                <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
+                    gpa: 0,
+                    size: 0x4000,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            let probe = vm.inner.mapping_probe(0);
+            let preparation = vm.cpu_preparation(0, profile).unwrap();
+            let wake = preparation.interrupt();
+            drop(preparation);
+            drop(vm);
+            assert!(probe.is_mapped());
+            assert!(
+                Vm::new(&gic, 36, 1).is_err(),
+                "wake authority retains its original VM even without a live handle"
+            );
+            dillo_machine::CpuInterrupt::interrupt(&wake).unwrap();
+            drop(wake);
+            assert!(!probe.is_mapped());
+            drop(Vm::new(&gic, 36, 1).unwrap());
+        }
 
         #[test]
         fn message_vectors_keep_enable_and_mask_independent() {
-            let domain = GicMessageInterruptDomain::new(2);
+            if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
+                crate::hypervisor::tests::SignedNativeTest::spawn(
+                    "imp::tests::message_vectors_keep_enable_and_mask_independent",
+                )
+                .verify();
+                return;
+            }
+            let gic = crate::hypervisor::GicParams {
+                dist_base: 0x0800_0000,
+                redist_base: 0x0810_0000,
+                msi_base: 0x0a10_0000,
+                msi_intid_base: 64,
+                msi_intid_count: 32,
+            };
+            let vm = Vm::new(&gic, 36, 1).expect("native HVF/GIC required");
+            let domain = GicMessageInterruptDomain::new(2, vm.inner.cpu_instance());
             let message = MessageInterrupt {
                 address: 0x0808_0040,
                 data: 48,
@@ -1262,6 +1483,12 @@ mod imp {
                 msi_intid_count: 32,
             };
             let mut vm = Vm::new(&gic, 36, 2).expect("native HVF/GIC is required");
+            let memory = <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
+                gpa: 0,
+                size: 0x4000,
+            }])
+            .unwrap();
+            vm.attach(memory).unwrap();
             let profile = dillo_machine::CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0);
             let ap = vm.cpu_preparation(1, profile).unwrap();
             let bsp = vm.cpu_preparation(0, profile).unwrap();

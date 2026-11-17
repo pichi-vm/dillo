@@ -6,9 +6,9 @@
 //! Concrete `Vm` / `Vcpu` mirroring the KVM backend's role, built on the
 //! `applevisor` safe wrapper. HVF specifics (proven empirically in the Phase-0
 //! spike, see TODO.md):
-//!   - one VM per process (the `VirtualMachineStaticInstance` singleton);
+//!   - one live VM per process, with reusable native ownership;
 //!   - `hv_gic` must be configured before any vCPU is created — so
-//!     [`Vm::new`] does `init_with_gic`;
+//!     [`Vm::new`] constructs the VM and GIC together;
 //!   - in-kernel GICv3 with **message-based** MSI (no ITS): inject via
 //!     `gic_send_msi` (message interrupt) / `gic_set_spi` (wired, e.g. the serial UART);
 //!   - a vCPU is bound to its creating thread, so [`Vcpu::prepare`] creates
@@ -17,11 +17,11 @@
 //!     (HVC `0x16`, data-abort/MMIO `0x24`, WFI `0x01`).
 
 use std::cell::Cell;
+use std::sync::{Arc, Mutex};
 
 use applevisor::prelude::{
-    ExitReason, FeatureReg, GicConfig, GicEnabled, MemPerms, Memory, Reg, SysReg, Vcpu as AvVcpu,
-    VcpuConfig, VcpuExit, VcpuHandle, VirtualMachineConfig, VirtualMachineInstance,
-    VirtualMachineStaticInstance,
+    ExitReason, FeatureReg, GicConfig, GicEnabled, Reg, SysReg, Vcpu as AvVcpu, VcpuConfig,
+    VcpuExit, VcpuHandle, VirtualMachine, VirtualMachineConfig, VirtualMachineInstance,
 };
 
 use crate::VmExit;
@@ -59,8 +59,6 @@ pub enum Error {
         prop: &'static str,
         reason: &'static str,
     },
-    #[error("hvf: VM not initialized")]
-    NoVm,
     #[error("hvf: guest address {0:#x} not in any mapped region")]
     UnmappedGuestAddr(u64),
 }
@@ -79,33 +77,171 @@ pub(crate) fn guest_address_bits() -> Result<u32, Error> {
     Ok(ipa.min(physical))
 }
 
-/// The per-process HVF virtual machine. Owns the guest-memory mappings; the
-/// VM/GIC themselves live in the `applevisor` process-global singleton.
+/// A construction slot remains occupied until the native VM destructor returns.
+/// HVF addresses a process VM, so a replacement cannot overlap its predecessor.
+static PROCESS_OCCUPIED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+#[derive(Debug)]
+struct ProcessReservation;
+
+impl ProcessReservation {
+    fn acquire() -> Result<Self, Error> {
+        let mut occupied = PROCESS_OCCUPIED.lock().expect("HVF process slot poisoned");
+        if *occupied {
+            return Err(Error::Hv(
+                "HVF process already has a native VM owner".into(),
+            ));
+        }
+        *occupied = true;
+        Ok(Self)
+    }
+}
+
+impl Drop for ProcessReservation {
+    fn drop(&mut self) {
+        *PROCESS_OCCUPIED.lock().expect("HVF process slot poisoned") = false;
+    }
+}
+
+#[derive(Debug)]
+enum RamRegistration {
+    Empty,
+    Attempted {
+        backing: Arc<crate::memory::MappedMemory>,
+        attempts: usize,
+    },
+    Ready(Arc<crate::memory::MappedMemory>),
+}
+
+#[derive(Debug)]
+struct NativeVmOwner {
+    // applevisor aborts if native VM destruction fails. This field must be
+    // destroyed before registered RAM and before the process slot is reopened.
+    native: VirtualMachineInstance<GicEnabled>,
+    ram: Mutex<RamRegistration>,
+    #[cfg(test)]
+    fail_map_at: Mutex<Option<usize>>,
+    _reservation: ProcessReservation,
+}
+
+/// Retains the actual native VM and registrations, rather than only applevisor's guard.
+#[derive(Clone, Debug)]
+pub(crate) struct NativeVm(Arc<NativeVmOwner>);
+
+impl NativeVm {
+    fn create(config: VirtualMachineConfig, gic: GicConfig) -> Result<Self, Error> {
+        let reservation = ProcessReservation::acquire()?;
+        // with_gic rolls back partial construction through the same fail-closed
+        // native destructor before the process reservation can be released.
+        let native = VirtualMachine::with_gic(config, gic)?;
+        Ok(Self(Arc::new(NativeVmOwner {
+            native,
+            ram: Mutex::new(RamRegistration::Empty),
+            #[cfg(test)]
+            fail_map_at: Mutex::new(None),
+            _reservation: reservation,
+        })))
+    }
+
+    fn gic(&self) -> &VirtualMachineInstance<GicEnabled> {
+        &self.0.native
+    }
+
+    pub(crate) fn require_ram(&self) -> Result<(), Error> {
+        let ram = self.0.ram.lock().expect("HVF RAM registration poisoned");
+        match &*ram {
+            RamRegistration::Ready(_) => Ok(()),
+            RamRegistration::Empty => Err(Error::Hv(
+                "RAM must be attached before CPU preparation".into(),
+            )),
+            RamRegistration::Attempted { attempts, backing } => Err(Error::Hv(format!(
+                "RAM registration failed after {attempts}/{} attempted maps",
+                backing.regions().len()
+            ))),
+        }
+    }
+
+    fn attach(&self, backing: Arc<crate::memory::MappedMemory>) -> Result<(), Error> {
+        let mut ram = self.0.ram.lock().expect("HVF RAM registration poisoned");
+        if !matches!(*ram, RamRegistration::Empty) {
+            return Err(Error::Hv(
+                "RAM registration cannot be replaced or enlarged".into(),
+            ));
+        }
+        // Publish ownership before the first call, including failed/uncertain calls.
+        *ram = RamRegistration::Attempted {
+            backing: Arc::clone(&backing),
+            attempts: 0,
+        };
+        for (index, region) in backing.regions().iter().enumerate() {
+            if let RamRegistration::Attempted { attempts, .. } = &mut *ram {
+                *attempts = index + 1;
+            }
+            #[cfg(test)]
+            if *self.0.fail_map_at.lock().unwrap() == Some(index) {
+                return Err(Error::Hv("injected hv_vm_map failure".into()));
+            }
+            // SAFETY: backing owns this complete page-aligned host VM region;
+            // it remains in ram until the native VM destructor returns.
+            #[allow(unsafe_code)]
+            let result = unsafe {
+                applevisor_sys::hv_vm_map(
+                    region.address as *const libc::c_void,
+                    region.gpa,
+                    region.size as usize,
+                    applevisor_sys::HV_MEMORY_READ
+                        | applevisor_sys::HV_MEMORY_WRITE
+                        | applevisor_sys::HV_MEMORY_EXEC,
+                )
+            };
+            if result != 0 {
+                return Err(Error::Hv(format!(
+                    "hv_vm_map at {:#x}: {result:#x}",
+                    region.gpa
+                )));
+            }
+        }
+        *ram = RamRegistration::Ready(backing);
+        Ok(())
+    }
+
+    fn backing(&self) -> Result<Arc<crate::memory::MappedMemory>, Error> {
+        match &*self.0.ram.lock().expect("HVF RAM registration poisoned") {
+            RamRegistration::Ready(backing) => Ok(Arc::clone(backing)),
+            RamRegistration::Attempted { .. } => {
+                Err(Error::Hv("RAM registration is incomplete".into()))
+            }
+            RamRegistration::Empty => Err(Error::Hv("RAM is not attached".into())),
+        }
+    }
+
+    fn vcpu_with_config(&self, config: VcpuConfig) -> Result<AvVcpu, Error> {
+        self.require_ram()?;
+        Ok(self.gic().vcpu_with_config(config)?)
+    }
+
+    pub(crate) fn vcpus_exit(&self, handles: &[VcpuHandle]) -> Result<(), Error> {
+        Ok(self.gic().vcpus_exit(handles)?)
+    }
+
+    pub(crate) fn send_msi(&self, address: u64, intid: u32) -> Result<(), Error> {
+        Ok(self.gic().gic_send_msi(address, intid)?)
+    }
+
+    pub(crate) fn set_spi(&self, intid: u32, level: bool) -> Result<(), Error> {
+        Ok(self.gic().gic_set_spi(intid, level)?)
+    }
+}
+
+/// Native machine authority. Host-only exported mappings need not retain this owner.
 #[derive(Debug)]
 pub(crate) struct Vm {
     native: NativeVm,
-    /// Kept alive for the VM's lifetime; `Memory::drop` unmaps each region.
-    regions: Vec<Region>,
-}
-
-#[derive(Debug)]
-struct Region {
-    base: u64,
-    size: u64,
-    mem: Memory,
 }
 
 impl Vm {
-    /// Create the VM with the host's maximum IPA size and configure the
-    /// in-kernel GICv3 at the canonical platform addresses. Must be called
-    /// before any vCPU is created.
-    /// Create the VM and configure the in-kernel GICv3 from DTB-derived
-    /// placement (`gic`). `min_addr_space_bits` is the device-model watermark
-    /// `X` the image requires (F7): the host's max IPA must be ≥ `X` or the
-    /// image cannot run here. IPA is set to the host max (≥ `X`) so guest RAM
-    /// can still scale above `2^X` on wider hosts.
     pub(crate) fn new(gic: &GicParams, min_addr_space_bits: u32) -> Result<Self, Error> {
-        let mut vm_config = VirtualMachineConfig::new();
+        let mut config = VirtualMachineConfig::new();
         let max_ipa = VirtualMachineConfig::get_max_ipa_size()?;
         let available = guest_address_bits()?;
         if available < min_addr_space_bits {
@@ -113,18 +249,14 @@ impl Vm {
                 "launch requires {min_addr_space_bits} address bits; backend provides {available}"
             )));
         }
-        vm_config.set_ipa_size(max_ipa)?;
-
+        config.set_ipa_size(max_ipa)?;
         let mut g = GicConfig::new();
         g.set_distributor_base(gic.dist_base)?;
         g.set_redistributor_base(gic.redist_base)?;
         g.set_msi_region_base(gic.msi_base)?;
         g.set_msi_interrupt_range(gic.msi_intid_base, gic.msi_intid_count)?;
-
-        VirtualMachineStaticInstance::init_with_gic(vm_config, g)?;
         Ok(Self {
-            native: VirtualMachineStaticInstance::get_gic().ok_or(Error::NoVm)?,
-            regions: Vec::new(),
+            native: NativeVm::create(config, g)?,
         })
     }
 
@@ -132,67 +264,33 @@ impl Vm {
         self.native.clone()
     }
 
-    /// Allocate `size` bytes of guest RAM and map it at `base`.
+    pub(crate) fn attach(&self, backing: Arc<crate::memory::MappedMemory>) -> Result<(), Error> {
+        self.native.attach(backing)
+    }
+
+    #[cfg(test)]
     pub(crate) fn add_memory(&mut self, base: u64, size: u64) -> Result<(), Error> {
-        let vm = VirtualMachineStaticInstance::get_gic().ok_or(Error::NoVm)?;
-        let mut mem = vm.memory_create(size as usize)?;
-        mem.map(base, MemPerms::ReadWriteExec)?;
-        self.regions.push(Region { base, size, mem });
-        Ok(())
+        self.attach(Arc::new(crate::memory::MappedMemory::new(&[
+            dillo_machine::RamRange { gpa: base, size },
+        ])?))
     }
 
-    /// Copy `data` into guest memory at `gpa` (used to load PMI sections).
+    #[cfg(test)]
+    pub(crate) fn mapping_probe(&self, index: usize) -> crate::memory::MappingProbe {
+        crate::memory::MappingProbe::new(&self.native.backing().unwrap(), index)
+    }
+
+    pub(crate) fn guest_memory(&self) -> Result<vm_memory::GuestMemoryMmap, Error> {
+        Ok(self.native.backing()?.guest_memory())
+    }
+
     pub(crate) fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Error> {
-        let region = self
-            .regions
-            .iter_mut()
-            .find(|r| gpa >= r.base && gpa + data.len() as u64 <= r.base + r.size)
-            .ok_or(Error::UnmappedGuestAddr(gpa))?;
-        region.mem.write(gpa, data)?;
-        Ok(())
+        self.native.backing()?.write(gpa, data)
     }
 
-    /// `(gpa, host_addr, size)` for every mapped guest-RAM region — used to
-    /// build a `vm-memory` view so virtio-pci can walk queues/descriptors.
-    pub(crate) fn region_mappings(&self) -> Vec<(u64, u64, u64)> {
-        self.regions
-            .iter()
-            .map(|r| (r.base, r.mem.host_addr() as u64, r.size))
-            .collect()
-    }
-
-    /// Reset the in-kernel GIC to its initial state — used for a warm in-VM
-    /// reboot (Phase 2), so the new boot doesn't inherit pending IRQs /
-    /// distributor state from the previous run.
-    // Takes `&self` for API clarity (it resets *this* VM's GIC); the GIC lives
-    // in the process-global singleton, so the body reaches it directly.
-    #[allow(clippy::unused_self)]
     pub(crate) fn reset_gic(&self) -> Result<(), Error> {
-        let vm = VirtualMachineStaticInstance::get_gic().ok_or(Error::NoVm)?;
-        vm.gic_reset()?;
-        Ok(())
+        Ok(self.native.gic().gic_reset()?)
     }
-}
-
-/// A shareable keepalive for this exact VM, captured before owner dispatch.
-pub(crate) type NativeVm = VirtualMachineInstance<GicEnabled>;
-
-/// Inject a message-based MSI into the GIC without a `Vm` reference — uses the
-/// process-global singleton, so a device worker thread can call it (the message
-/// `Interrupt` closure). `address` is the guest-programmed MSI doorbell;
-/// `intid` is the message data (the MBI SPI number).
-pub(crate) fn send_msi(address: u64, intid: u32) -> Result<(), Error> {
-    let vm = VirtualMachineStaticInstance::get_gic().ok_or(Error::NoVm)?;
-    vm.gic_send_msi(address, intid)?;
-    Ok(())
-}
-
-/// Assert/deassert a wired SPI through the in-kernel GIC, from any thread (the
-/// virtio-mmio interrupt path). Mirrors [`send_msi`] for level-style wired IRQs.
-pub(crate) fn set_spi(intid: u32, level: bool) -> Result<(), Error> {
-    let vm = VirtualMachineStaticInstance::get_gic().ok_or(Error::NoVm)?;
-    vm.gic_set_spi(intid, level)?;
-    Ok(())
 }
 
 /// Decoded source/destination of an in-flight MMIO access, retained between a
@@ -208,6 +306,8 @@ struct PendingMmio {
 pub(crate) struct Vcpu {
     admitted: dillo_machine::aarch64::AdmittedCpu,
     inner: AvVcpu,
+    // Native CPU destruction precedes release of registered RAM and VM authority.
+    _native: NativeVm,
     pending_mmio: Cell<Option<PendingMmio>>,
 }
 
@@ -267,6 +367,7 @@ impl Vcpu {
         let admitted = snapshot.admit(profile)?;
         Ok(Self {
             inner,
+            _native: vm.clone(),
             pending_mmio: Cell::new(None),
             admitted,
         })
@@ -561,9 +662,10 @@ fn gpr(n: u8) -> Reg {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use vm_memory::{Bytes, GuestAddress, VolatileMemory};
 
     /// Each native test runs in its own entitled process because HVF owns a
-    /// process-wide VM singleton. The directory outlives the reaped child.
+    /// process-wide native VM. Each test can retire and reconstruct it. The directory outlives the reaped child.
     pub(crate) struct SignedNativeTest {
         child: std::process::Child,
         _directory: tempfile::TempDir,
@@ -628,6 +730,115 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn hvf_partial_registration_retains_ram_through_native_drop() {
+        if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
+            SignedNativeTest::spawn(
+                "hypervisor::tests::hvf_partial_registration_retains_ram_through_native_drop",
+            )
+            .verify();
+            return;
+        }
+        let gic = GicParams {
+            dist_base: 0x0800_0000,
+            redist_base: 0x0810_0000,
+            msi_base: 0x0a10_0000,
+            msi_intid_base: 64,
+            msi_intid_count: 32,
+        };
+        let vm = Vm::new(&gic, 36).unwrap();
+        let ram = Arc::new(
+            crate::memory::MappedMemory::new(&[
+                dillo_machine::RamRange {
+                    gpa: 0,
+                    size: 0x4000,
+                },
+                dillo_machine::RamRange {
+                    gpa: 0x10000,
+                    size: 0x4000,
+                },
+            ])
+            .unwrap(),
+        );
+        let first = crate::memory::MappingProbe::new(&ram, 0);
+        let second = crate::memory::MappingProbe::new(&ram, 1);
+        // A real guest store followed by HVC proves the first registration
+        // survives the later failure. Only this private test bypasses Ready.
+        ram.write(0, &[0x20, 0x00, 0x00, 0xf9, 0x02, 0x00, 0x00, 0xd4])
+            .unwrap();
+        *vm.native.0.fail_map_at.lock().unwrap() = Some(1);
+        assert!(
+            vm.attach(Arc::clone(&ram)).is_err(),
+            "real first map, injected second call failure"
+        );
+        assert!(vm.native.require_ram().is_err());
+        assert!(Vcpu::prepare(&vm.cpu_instance(), pmi::aarch64::Profile::V8_0).is_err());
+        assert!(
+            vm.attach(Arc::clone(&ram)).is_err(),
+            "no retry/replacement after partial registration"
+        );
+        {
+            let cpu = vm.native.gic().vcpu_with_config(VcpuConfig::new()).unwrap();
+            cpu.set_reg(Reg::PC, 0).unwrap();
+            cpu.set_reg(Reg::CPSR, 0x3c5).unwrap();
+            cpu.set_reg(Reg::X0, 0xa5).unwrap();
+            cpu.set_reg(Reg::X1, 0x1000).unwrap();
+            let sctlr = cpu.get_sys_reg(SysReg::SCTLR_EL1).unwrap();
+            cpu.set_sys_reg(SysReg::SCTLR_EL1, sctlr & !0x0200_1005)
+                .unwrap();
+            cpu.run().unwrap();
+            assert_eq!(cpu.get_exit_info().reason, ExitReason::EXCEPTION);
+            let syndrome = cpu.get_exit_info().exception.syndrome;
+            assert_eq!(syndrome >> 26, 0x16);
+            let value: u64 = ram.guest_memory().read_obj(GuestAddress(0x1000)).unwrap();
+            assert_eq!(
+                value, 0xa5,
+                "earlier real HVF map remains backed after partial failure"
+            );
+        }
+        drop(ram);
+        assert!(first.is_mapped());
+        assert!(second.is_mapped());
+        let authority = vm.cpu_instance();
+        drop(vm);
+        assert!(
+            first.is_mapped(),
+            "native authority retains earlier registration backing"
+        );
+        assert!(second.is_mapped());
+        assert!(
+            Vm::new(&gic, 36).is_err(),
+            "retained owner still occupies the process slot"
+        );
+        drop(authority);
+        assert!(!first.is_mapped());
+        assert!(!second.is_mapped());
+        drop(Vm::new(&gic, 36).unwrap());
+    }
+
+    #[test]
+    fn hvf_failed_gic_initialization_releases_plain_owner() {
+        if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
+            SignedNativeTest::spawn(
+                "hypervisor::tests::hvf_failed_gic_initialization_releases_plain_owner",
+            )
+            .verify();
+            return;
+        }
+        // Missing the required redistributor base reaches hv_gic_create after
+        // actual VM creation, rather than failing a configuration setter.
+        let error = NativeVm::create(VirtualMachineConfig::new(), GicConfig::new()).unwrap_err();
+        assert!(matches!(error, Error::Hv(_)), "{error}");
+        let valid = GicParams {
+            dist_base: 0x0800_0000,
+            redist_base: 0x0810_0000,
+            msi_base: 0x0a10_0000,
+            msi_intid_base: 64,
+            msi_intid_count: 32,
+        };
+        drop(Vm::new(&valid, 36).unwrap());
+    }
+
+    #[test]
     fn hvf_admitted_owner_matches_guest_mrs_and_trap_reads() {
         use dillo_machine::aarch64::Register;
         if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
@@ -646,6 +857,8 @@ pub(crate) mod tests {
         };
         let mut vm = Vm::new(&gic, 36).expect("native HVF/GIC is required");
         vm.add_memory(0, 0x4000).unwrap();
+        let probe = vm.mapping_probe(0);
+        let alias = probe.alias();
         let inputs = [
             (Register::Pfr0, 0xd538_0400u32),
             (Register::Isar0, 0xd538_0600),
@@ -711,7 +924,19 @@ pub(crate) mod tests {
         .join()
         .unwrap();
         let mut bytes = [0; 48];
-        vm.regions[0].mem.read(0x1000, &mut bytes).unwrap();
+        vm.guest_memory()
+            .unwrap()
+            .read_slice(&mut bytes, GuestAddress(0x1000))
+            .unwrap();
+        let mut file_bytes = [0; 48];
+        alias
+            .as_volatile_slice()
+            .read_slice(&mut file_bytes, 0x1000)
+            .unwrap();
+        assert_eq!(
+            file_bytes, bytes,
+            "native guest writes reach an independent MAP_SHARED file mapping"
+        );
         for (index, (register, _)) in inputs.into_iter().enumerate() {
             let value = u64::from_le_bytes(bytes[index * 8..index * 8 + 8].try_into().unwrap());
             // Admission uses only SCTLR's fixed-endian capability bits. BSP
@@ -779,7 +1004,9 @@ pub(crate) mod tests {
             msi_intid_base: 64,
             msi_intid_count: 32,
         };
-        let vm = Vm::new(&gic, 36).expect("native HVF/GIC support is required");
+        let mut vm = Vm::new(&gic, 36).expect("native HVF/GIC support is required");
+        vm.add_memory(0, 0x4000)
+            .expect("attach owning RAM before CPU creation");
         let ap_vm = vm.cpu_instance();
         std::thread::scope(|scope| {
             // Hypervisor.framework permits only one vCPU per owner thread.
