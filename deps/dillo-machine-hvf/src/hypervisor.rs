@@ -11,16 +11,17 @@
 //!     [`Vm::new`] does `init_with_gic`;
 //!   - in-kernel GICv3 with **message-based** MSI (no ITS): inject via
 //!     `gic_send_msi` (message interrupt) / `gic_set_spi` (wired, e.g. the serial UART);
-//!   - a vCPU is bound to its creating thread, so [`Vm::create_vcpu`] is
-//!     called from each vCPU thread;
+//!   - a vCPU is bound to its creating thread, so [`Vcpu::prepare`] creates
+//!     and retains it on each owner thread;
 //!   - exits arrive as synchronous exceptions; EC = `ESR >> 26`
 //!     (HVC `0x16`, data-abort/MMIO `0x24`, WFI `0x01`).
 
 use std::cell::Cell;
 
 use applevisor::prelude::{
-    ExitReason, FeatureReg, GicConfig, MemPerms, Memory, Reg, SysReg, Vcpu as AvVcpu, VcpuConfig,
-    VcpuExit, VcpuHandle, VirtualMachineConfig, VirtualMachineStaticInstance,
+    ExitReason, FeatureReg, GicConfig, GicEnabled, MemPerms, Memory, Reg, SysReg, Vcpu as AvVcpu,
+    VcpuConfig, VcpuExit, VcpuHandle, VirtualMachineConfig, VirtualMachineInstance,
+    VirtualMachineStaticInstance,
 };
 
 use crate::VmExit;
@@ -80,6 +81,7 @@ pub(crate) fn guest_address_bits() -> Result<u32, Error> {
 /// VM/GIC themselves live in the `applevisor` process-global singleton.
 #[derive(Debug)]
 pub(crate) struct Vm {
+    native: NativeVm,
     /// Kept alive for the VM's lifetime; `Memory::drop` unmaps each region.
     regions: Vec<Region>,
 }
@@ -119,8 +121,13 @@ impl Vm {
 
         VirtualMachineStaticInstance::init_with_gic(vm_config, g)?;
         Ok(Self {
+            native: VirtualMachineStaticInstance::get_gic().ok_or(Error::NoVm)?,
             regions: Vec::new(),
         })
+    }
+
+    pub(crate) fn cpu_instance(&self) -> NativeVm {
+        self.native.clone()
     }
 
     /// Allocate `size` bytes of guest RAM and map it at `base`.
@@ -165,28 +172,8 @@ impl Vm {
     }
 }
 
-/// Create a vCPU bound to the **current** thread, without borrowing the `Vm`.
-///
-/// A `Vcpu` is `!Send` (bound to its creating thread), so each vCPU thread must
-/// create its own. The VM + GIC live in the process-global singleton, so this
-/// needs no `Vm` reference — which lets the SMP launcher keep the (non-`Sync`)
-/// `Vm` and its memory mappings on the main thread while worker threads each
-/// create and run their own vCPU.
-pub(crate) fn create_vcpu_current_thread() -> Result<Vcpu, Error> {
-    let vm = VirtualMachineStaticInstance::get_gic().ok_or(Error::NoVm)?;
-    Ok(Vcpu {
-        inner: vm.vcpu_create()?,
-        pending_mmio: Cell::new(None),
-    })
-}
-
-/// Force the given vCPUs out of their in-flight `run()` (used on shutdown to
-/// kick running secondaries so their threads observe the shutdown flag).
-pub(crate) fn force_vcpus_exit(handles: &[VcpuHandle]) -> Result<(), Error> {
-    let vm = VirtualMachineStaticInstance::get_gic().ok_or(Error::NoVm)?;
-    vm.vcpus_exit(handles)?;
-    Ok(())
-}
+/// A shareable keepalive for this exact VM, captured before owner dispatch.
+pub(crate) type NativeVm = VirtualMachineInstance<GicEnabled>;
 
 /// Inject a message-based MSI into the GIC without a `Vm` reference — uses the
 /// process-global singleton, so a device worker thread can call it (the message
@@ -222,6 +209,34 @@ pub(crate) struct Vcpu {
 }
 
 impl Vcpu {
+    pub(crate) fn max_count() -> Result<u32, Error> {
+        Ok(AvVcpu::get_max_count()?)
+    }
+
+    /// Inspect and consume one exact configuration on its future CPU owner.
+    /// Full architectural profile admission remains a separate launch obligation.
+    pub(crate) fn prepare(vm: &NativeVm, profile: pmi::aarch64::Profile) -> Result<Self, Error> {
+        log::debug!(
+            "preparing HVF owner for {}",
+            dillo_machine::CpuProfile::Aarch64(profile).as_str()
+        );
+        let config = VcpuConfig::new();
+        let configured = config.get_feature_reg(FeatureReg::ID_AA64MMFR0_EL1)?;
+        let configured_bits = dillo_machine::aarch64_pa_bits(configured)
+            .ok_or_else(|| Error::Hv("reserved configured CPU PARange encoding".into()))?;
+        let inner = vm.vcpu_with_config(config)?;
+        let observed = inner.get_sys_reg(SysReg::ID_AA64MMFR0_EL1)?;
+        if dillo_machine::aarch64_pa_bits(observed) != Some(configured_bits) {
+            return Err(Error::Hv(
+                "created CPU PARange differs from its inspected configuration".into(),
+            ));
+        }
+        Ok(Self {
+            inner,
+            pending_mmio: Cell::new(None),
+        })
+    }
+
     /// Apply only the register values fixed by PMI's AArch64 vm contract.
     pub(crate) fn initialize_bsp(&self) -> Result<(), Error> {
         self.initialize_el1(0, 0)
@@ -256,6 +271,48 @@ impl Vcpu {
         Ok(())
     }
 
+    /// Bind logical affinity before asking HVF to realize its GIC redistributor.
+    /// Native allocation handles do not encode logical CPU identity.
+    pub(crate) fn prepare_affinity(&self, mpidr: u64) -> Result<(), Error> {
+        self.set_mpidr(mpidr)?;
+        if self.inner.get_sys_reg(SysReg::MPIDR_EL1)? != mpidr {
+            return Err(Error::Hv(
+                "created CPU did not retain its logical MPIDR".into(),
+            ));
+        }
+        let redistributor = self.inner.get_redistributor_base()?;
+        let typer = self
+            .inner
+            .get_redistributor_reg(applevisor::prelude::GicRedistributorReg::TYPER)?;
+        let affinity = (mpidr & 0x00ff_ffff) | ((mpidr >> 8) & 0xff00_0000);
+        if typer >> 32 != affinity {
+            return Err(Error::Hv(
+                "GIC redistributor affinity differs from logical CPU MPIDR".into(),
+            ));
+        }
+        log::debug!(
+            "HVF CPU affinity={mpidr:#x} native={} redistributor={redistributor:#x}",
+            self.inner.id()
+        );
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn native_identity(&self) -> Result<(u64, u64, u64, u64), Error> {
+        Ok((
+            self.inner.id(),
+            self.inner.get_sys_reg(SysReg::MPIDR_EL1)?,
+            self.inner.get_redistributor_base()?,
+            self.inner
+                .get_redistributor_reg(applevisor::prelude::GicRedistributorReg::TYPER)?,
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read_register(&self, register: Reg) -> Result<u64, Error> {
+        Ok(self.inner.get_reg(register)?)
+    }
+
     /// Snapshot the guest's EL1 exception state `(ESR_EL1, ELR_EL1, FAR_EL1)`.
     /// After a stage-2 fault at the (unmapped) EL1 vector, these still hold the
     /// *original* in-guest exception that vectored there — the real diagnostic.
@@ -273,7 +330,7 @@ impl Vcpu {
     }
 
     /// A `Send`/`Sync` handle to this vCPU, usable from other threads only to
-    /// force it out of `run()` via [`force_vcpus_exit`].
+    /// force it out of `run()` through the bound VM.
     pub(crate) fn handle(&self) -> VcpuHandle {
         self.inner.get_handle()
     }
@@ -283,8 +340,14 @@ impl Vcpu {
     /// handled inline as RAZ/WI and the guest is resumed — HVF traps the
     /// debug/PMU/unimplemented sysregs the kernel probes during boot, and
     /// read-as-zero / write-ignored is the standard VMM treatment.
-    pub(crate) fn run(&self) -> Result<VmExit, Error> {
+    pub(crate) fn run(
+        &self,
+        termination: &dyn dillo_machine::CpuTermination,
+    ) -> Result<VmExit, Error> {
         loop {
+            if termination.is_requested() {
+                return Ok(VmExit::Interrupted);
+            }
             self.inner.run()?;
             let exit = self.inner.get_exit_info();
             // The virtual timer fired. HVF delivers the timer PPI to the
@@ -337,6 +400,9 @@ impl Vcpu {
     }
 
     fn translate(&self, exit: &VcpuExit) -> Result<VmExit, Error> {
+        if exit.reason == ExitReason::CANCELED {
+            return Ok(VmExit::Interrupted);
+        }
         if exit.reason != ExitReason::EXCEPTION {
             return Ok(VmExit::Unknown(format!(
                 "hvf exit reason {:?}",
@@ -448,18 +514,18 @@ fn gpr(n: u8) -> Reg {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Each native test runs in its own entitled process because HVF owns a
     /// process-wide VM singleton. The directory outlives the reaped child.
-    struct SignedNativeTest {
+    pub(crate) struct SignedNativeTest {
         child: std::process::Child,
         _directory: tempfile::TempDir,
     }
 
     impl SignedNativeTest {
-        fn spawn(name: &str) -> Self {
+        pub(crate) fn spawn(name: &str) -> Self {
             let directory = tempfile::tempdir().expect("create native-test directory");
             let executable = directory.path().join("hvf-native-test");
             std::fs::copy(
@@ -493,7 +559,7 @@ mod tests {
             }
         }
 
-        fn verify(mut self) {
+        pub(crate) fn verify(mut self) {
             use wait_timeout::ChildExt;
             let status = self
                 .child
@@ -565,13 +631,21 @@ mod tests {
             msi_intid_base: 64,
             msi_intid_count: 32,
         };
-        let _vm = Vm::new(&gic, 36).expect("native HVF/GIC support is required");
+        let vm = Vm::new(&gic, 36).expect("native HVF/GIC support is required");
+        let ap_vm = vm.cpu_instance();
         std::thread::scope(|scope| {
             // Hypervisor.framework permits only one vCPU per owner thread.
             let (ready, prepared) = std::sync::mpsc::sync_channel(0);
             let (release, finished) = std::sync::mpsc::sync_channel(0);
             let ap_owner = scope.spawn(move || {
-                let ap = create_vcpu_current_thread().expect("create AP on its owner thread");
+                let ap = Vcpu::prepare(&ap_vm, pmi::aarch64::Profile::V8_0)
+                    .expect("create AP on its owner thread");
+                ap.prepare_affinity(0x8000_0001)
+                    .expect("set guest AP affinity");
+                let (_, mpidr, redistributor, typer) = ap.native_identity().unwrap();
+                assert_eq!(mpidr, 0x8000_0001);
+                assert_eq!(typer >> 32, 1);
+                assert!(redistributor >= gic.redist_base);
                 ap.initialize_secondary(0x4000_0000, 0x77)
                     .expect("guest-directed PSCI entry");
                 ready.send(()).expect("announce AP prepared");
@@ -581,7 +655,14 @@ mod tests {
                 assert_eq!(ap.inner.get_reg(Reg::CPSR).unwrap(), 0x3c5);
             });
             prepared.recv().expect("AP preparation succeeds");
-            let bsp = create_vcpu_current_thread().expect("create BSP on its owner thread");
+            let bsp = Vcpu::prepare(&vm.cpu_instance(), pmi::aarch64::Profile::V8_0)
+                .expect("create BSP on its owner thread");
+            bsp.prepare_affinity(0x8000_0000)
+                .expect("set logical BSP affinity");
+            let (_, mpidr, redistributor, typer) = bsp.native_identity().unwrap();
+            assert_eq!(mpidr, 0x8000_0000);
+            assert_eq!(typer >> 32, 0);
+            assert!(redistributor >= gic.redist_base);
             for register in GPRS {
                 bsp.inner.set_reg(register, 0x55).expect("seed BSP GPR");
             }
@@ -642,18 +723,20 @@ mod tests {
         }
         vm.write_guest(base, &bytes).expect("write_guest");
 
-        let vcpu = create_vcpu_current_thread().expect("create_vcpu");
+        let vcpu =
+            Vcpu::prepare(&vm.cpu_instance(), pmi::aarch64::Profile::V8_0).expect("create_vcpu");
+        let termination = std::sync::atomic::AtomicBool::new(false);
 
         // 1) HVC.
         vcpu.initialize_secondary(base, 0).expect("state");
-        let e = vcpu.run().expect("run hvc");
+        let e = vcpu.run(&termination).expect("run hvc");
         eprintln!("exit 1 (expect Hvc): {e:?}");
         assert!(matches!(e, VmExit::Hvc { .. }), "expected Hvc, got {e:?}");
 
         // 2) Faulting load from an unmapped IPA → MmioRead (64-bit → size 8).
         vcpu.initialize_secondary(base + 4, 0).expect("state");
         vcpu.set_gpr(2, mmio).expect("x2");
-        let e = vcpu.run().expect("run ldr");
+        let e = vcpu.run(&termination).expect("run ldr");
         eprintln!("exit 2 (expect MmioRead): {e:?}");
         match e {
             VmExit::MmioRead { addr, size } => {
@@ -668,7 +751,7 @@ mod tests {
         vcpu.initialize_secondary(base + 8, 0).expect("state");
         vcpu.set_gpr(1, 0xDEAD_BEEF_u64).expect("x1");
         vcpu.set_gpr(2, mmio).expect("x2");
-        let e = vcpu.run().expect("run str");
+        let e = vcpu.run(&termination).expect("run str");
         eprintln!("exit 3 (expect MmioWrite): {e:?}");
         match e {
             VmExit::MmioWrite { addr, data, size } => {

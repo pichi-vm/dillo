@@ -189,6 +189,22 @@ impl MappedMemory {
         let requested = regions.into_iter().collect::<Vec<_>>();
         let total_bytes = requested.iter().map(|(_, size)| *size).sum();
         let memfd = create_and_size(total_bytes)?;
+        Self::map(requested, memfd)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_backing(regions: &[(u64, u64)]) -> Result<Self> {
+        // Native CPU ownership tests run before CI provisions hugepages. Use
+        // the same mapping/retention path with an ordinary owned memfd.
+        let fd = memfd_create(c"dillo-test-guest", MFdFlags::MFD_CLOEXEC)?;
+        ftruncate(
+            &fd,
+            i64::try_from(regions.iter().map(|(_, size)| *size).sum::<u64>())?,
+        )?;
+        Self::map(regions.to_vec(), Memfd { fd })
+    }
+
+    fn map(requested: Vec<(u64, u64)>, memfd: Memfd) -> Result<Self> {
         let mut gpa_map = GpaMap::new();
         let mut mapped = Vec::with_capacity(requested.len());
         let mut host_base = 0;

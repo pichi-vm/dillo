@@ -2082,16 +2082,12 @@ mod machine_select {
         }
 
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-        use std::thread;
+        use std::sync::atomic::{AtomicBool, AtomicU32};
 
         use super::machine as selected_machine;
         use dillo_devtree::platform::Machine as PlatformMachine;
         use dillo_devtree::platform::{MsiParentage, WiredInterrupt};
-        use dillo_machine::{
-            Cpu as MachineCpu, CpuState as MachineCpuState, LaunchConfig, Machine,
-            Memory as MachineMemory, RamRange, VcpuStop,
-        };
+        use dillo_machine::{LaunchConfig, Machine, Memory as MachineMemory, RamRange, VcpuStop};
         use dillo_mmio::syscon;
         use dillo_mmio::{
             Attach, InterruptSource, MessageInterruptSource, MmioAttachment,
@@ -2212,14 +2208,6 @@ mod machine_select {
         #[derive(Debug)]
         struct SupervisorControl {
             supervisor_shutdown: &'static AtomicBool,
-        }
-
-        impl SupervisorControl {
-            fn stop_requested(&self) -> Option<VcpuStop> {
-                self.supervisor_shutdown
-                    .load(Ordering::Acquire)
-                    .then_some(VcpuStop::Stopped)
-            }
         }
 
         fn syscon_register(syscon: dillo_devtree::platform::Syscon) -> syscon::SysconRegister {
@@ -2471,92 +2459,11 @@ mod machine_select {
         where
             E: std::error::Error + Send + Sync + 'static,
             M: Machine<Error = E>,
-            M: Attach<M::CpuState, Error = E, Output = Arc<M::Cpu>>,
         {
-            let mut cpus = Vec::with_capacity(count as usize);
-            for index in 0..count {
-                let state = M::CpuState::new(index, cpu_profile).map_err(RunError::machine)?;
-                cpus.push(Attach::attach(vm, state).map_err(RunError::machine)?);
-            }
-            vm.prepare_vcpu_run().map_err(RunError::machine)?;
-
-            let shutdown = Arc::new(AtomicBool::new(false));
-            let mut first_stop = VcpuStop::Stopped;
-            let mut first_error = None;
-
-            thread::scope(|scope| {
-                let mut joins = Vec::with_capacity(cpus.len());
-                for cpu in &cpus {
-                    let cpu = Arc::clone(cpu);
-                    let all_cpus = cpus.clone();
-                    let shutdown = Arc::clone(&shutdown);
-                    joins.push(scope.spawn(move || -> Result<VcpuStop, String> {
-                        if shutdown.load(Ordering::Acquire) {
-                            return Ok(VcpuStop::Stopped);
-                        }
-                        let result = cpu.run().map_err(|e| e.to_string());
-                        shutdown.store(true, Ordering::Release);
-                        for cpu in &all_cpus {
-                            let _ = cpu.stop();
-                        }
-                        result
-                    }));
-                }
-
-                let monitor = {
-                    let control = Arc::clone(&control);
-                    let cpus = cpus.clone();
-                    let shutdown = Arc::clone(&shutdown);
-                    scope.spawn(move || {
-                        let mut stop_requested = false;
-                        while !shutdown.load(Ordering::Acquire) {
-                            if stop_requested || control.stop_requested().is_some() {
-                                stop_requested = true;
-                                for cpu in &cpus {
-                                    let _ = cpu.stop();
-                                }
-                            }
-                            thread::sleep(std::time::Duration::from_millis(10));
-                        }
-                    })
-                };
-
-                for join in joins {
-                    match join.join() {
-                        Ok(Ok(stop)) => {
-                            if matches!(stop, VcpuStop::GuestReset | VcpuStop::GuestPoweroff) {
-                                first_stop = stop;
-                            }
-                            for cpu in &cpus {
-                                let _ = cpu.stop();
-                            }
-                        }
-                        Ok(Err(error)) => {
-                            first_error.get_or_insert(error);
-                            for cpu in &cpus {
-                                let _ = cpu.stop();
-                            }
-                        }
-                        Err(_) => {
-                            first_error.get_or_insert_with(|| "vCPU thread panicked".to_string());
-                            for cpu in &cpus {
-                                let _ = cpu.stop();
-                            }
-                        }
-                    }
-                }
-                shutdown.store(true, Ordering::Release);
-                monitor.join().expect("vCPU stop monitor panicked");
-                if let Some(stop) = control.stop_requested() {
-                    first_stop = stop;
-                }
-                Ok::<(), RunError>(())
-            })?;
-
-            if let Some(error) = first_error {
-                return Err(RunError::Machine(error));
-            }
-            Ok(first_stop)
+            dillo_runtime::PreparingCpus::spawn(vm, count, cpu_profile)
+                .and_then(|owners| owners.prepare(control.supervisor_shutdown))
+                .and_then(|owners| owners.run(control.supervisor_shutdown))
+                .map_err(RunError::machine)
         }
 
         fn run_selected<M, E>(
@@ -2568,7 +2475,6 @@ mod machine_select {
             E: std::error::Error + Send + Sync + 'static,
             M: Machine<Error = E> + dillo_machine::Host,
             M: Attach<M::Memory, Error = E, Output = ()>,
-            M: Attach<M::CpuState, Error = E, Output = Arc<M::Cpu>>,
             M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn MmioAttachment>>,
             M: Attach<Arc<dillo_mmio_virtio::EmptySlot>, Error = E>,
             M: Attach<
@@ -2678,19 +2584,32 @@ mod machine_select {
                 prepared: usize,
             }
 
-            impl dillo_machine::CpuState for RefusedCpuInput {
+            #[derive(Clone)]
+            struct RefusedInterrupt;
+            impl dillo_machine::CpuInterrupt for RefusedInterrupt {
                 type Error = std::io::Error;
-                fn new(_: u32, _: dillo_machine::CpuProfile) -> Result<Self, Self::Error> {
-                    Ok(Self)
+                fn interrupt(&self) -> Result<(), Self::Error> {
+                    Ok(())
                 }
             }
-            impl dillo_machine::Cpu for RefusedCpu {
+            impl dillo_machine::CpuPreparation for RefusedCpuInput {
                 type Error = std::io::Error;
-                fn run(&self) -> Result<VcpuStop, Self::Error> {
-                    panic!("failed launch executed a guest")
+                type Interrupt = RefusedInterrupt;
+                type Runner = RefusedCpu;
+                fn interrupt(&self) -> RefusedInterrupt {
+                    RefusedInterrupt
                 }
-                fn stop(&self) -> Result<(), Self::Error> {
-                    Ok(())
+                fn prepare(self) -> Result<RefusedCpu, Self::Error> {
+                    Ok(RefusedCpu)
+                }
+            }
+            impl dillo_machine::CpuRunner for RefusedCpu {
+                type Error = std::io::Error;
+                fn run(
+                    &mut self,
+                    _: &dyn dillo_machine::CpuTermination,
+                ) -> Result<VcpuStop, Self::Error> {
+                    panic!("failed launch executed a guest")
                 }
             }
             impl dillo_machine::Memory for RefusedMemory {
@@ -2699,18 +2618,17 @@ mod machine_select {
                     Ok(Self)
                 }
             }
-            impl Attach<RefusedCpuInput> for RefusedMachine {
-                type Error = std::io::Error;
-                type Output = Arc<RefusedCpu>;
-                fn attach(&mut self, _: RefusedCpuInput) -> Result<Self::Output, Self::Error> {
-                    self.prepared += 1;
-                    Ok(Arc::new(RefusedCpu))
-                }
-            }
             impl Machine for RefusedMachine {
                 type Error = std::io::Error;
-                type Cpu = RefusedCpu;
-                type CpuState = RefusedCpuInput;
+                type CpuPreparation = RefusedCpuInput;
+                fn cpu_preparation(
+                    &mut self,
+                    _: u32,
+                    _: dillo_machine::CpuProfile,
+                ) -> Result<RefusedCpuInput, Self::Error> {
+                    self.prepared += 1;
+                    Ok(RefusedCpuInput)
+                }
                 type Memory = RefusedMemory;
                 fn guest_address_bits() -> Result<u32, Self::Error> {
                     Ok(48)

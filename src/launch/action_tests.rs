@@ -4,7 +4,7 @@
 use super::delegation_tests::{BaseChannel, base, image};
 use super::*;
 use dillo::pmi_parse::{self, Error as ParseError};
-use dillo_machine::{Cpu, CpuProfile, CpuState, LaunchConfig, Machine, Memory, RamRange, VcpuStop};
+use dillo_machine::{CpuProfile, LaunchConfig, Machine, Memory, RamRange, VcpuStop};
 use serde_json::json;
 
 /// A current-schema PE with independent source sections and authored actions.
@@ -139,19 +139,29 @@ struct UnusedCpu;
 struct UnusedCpuInput;
 struct UnusedMemory;
 
-impl Cpu for UnusedCpu {
+impl dillo_machine::CpuRunner for UnusedCpu {
     type Error = std::io::Error;
-    fn run(&self) -> Result<VcpuStop, Self::Error> {
-        panic!("recipe tests never execute CPUs")
+    fn run(&mut self, _: &dyn dillo_machine::CpuTermination) -> Result<VcpuStop, Self::Error> {
+        panic!("recipe tests never run CPUs")
     }
-    fn stop(&self) -> Result<(), Self::Error> {
+}
+#[derive(Clone)]
+struct UnusedInterrupt;
+impl dillo_machine::CpuInterrupt for UnusedInterrupt {
+    type Error = std::io::Error;
+    fn interrupt(&self) -> Result<(), Self::Error> {
         Ok(())
     }
 }
-impl CpuState for UnusedCpuInput {
+impl dillo_machine::CpuPreparation for UnusedCpuInput {
     type Error = std::io::Error;
-    fn new(_: u32, _: CpuProfile) -> Result<Self, Self::Error> {
-        Ok(Self)
+    type Interrupt = UnusedInterrupt;
+    type Runner = UnusedCpu;
+    fn interrupt(&self) -> UnusedInterrupt {
+        UnusedInterrupt
+    }
+    fn prepare(self) -> Result<UnusedCpu, Self::Error> {
+        Ok(UnusedCpu)
     }
 }
 impl Memory for UnusedMemory {
@@ -162,8 +172,10 @@ impl Memory for UnusedMemory {
 }
 impl Machine for RecordingMachine {
     type Error = std::io::Error;
-    type Cpu = UnusedCpu;
-    type CpuState = UnusedCpuInput;
+    type CpuPreparation = UnusedCpuInput;
+    fn cpu_preparation(&mut self, _: u32, _: CpuProfile) -> Result<UnusedCpuInput, Self::Error> {
+        Ok(UnusedCpuInput)
+    }
     type Memory = UnusedMemory;
     fn guest_address_bits() -> Result<u32, Self::Error> {
         Ok(48)

@@ -203,7 +203,6 @@ mod imp {
     pub struct Vm {
         inner: crate::hypervisor::Vm,
         mmio_bus: Arc<Mutex<MmioBus>>,
-        exit_requester: VcpuExitRequester,
         shared_memory: Vec<Arc<dyn SharedMemory>>,
         mapped_memory: Option<Arc<memory::MappedMemory>>,
         irq_manager: Arc<Mutex<IrqManager>>,
@@ -214,7 +213,6 @@ mod imp {
             f.debug_struct("Vm")
                 .field("inner", &self.inner)
                 .field("mmio_bus", &self.mmio_bus)
-                .field("exit_requester", &self.exit_requester)
                 .field("shared_memory", &self.shared_memory.len())
                 .field("mapped_memory", &self.mapped_memory.is_some())
                 .field("irq_manager", &"<backend-owned>")
@@ -352,16 +350,13 @@ mod imp {
             Ok(())
         }
 
+        #[cfg(all(test, target_arch = "x86_64"))]
         fn create_vcpu_inner(&self, idx: u32, cpu_profile: &str) -> Result<Vcpu, Error> {
             Ok(Vcpu {
                 inner: self.inner.create_vcpu(idx, cpu_profile)?,
                 mmio_bus: Arc::clone(&self.mmio_bus),
-                exit_requester: self.exit_requester(),
+                exit_requester: CpuInterrupt::new(),
             })
-        }
-
-        fn exit_requester(&self) -> VcpuExitRequester {
-            self.exit_requester.clone()
         }
 
         fn resolve_interrupts(
@@ -456,7 +451,6 @@ mod imp {
         type Error = Error;
 
         fn try_from(config: Config) -> Result<Self, Self::Error> {
-            let exit_requester = VcpuExitRequester::new();
             // The devicetree is the machine contract: the interrupt-controller
             // substrate is constructed from what it declares, on both arches.
             let parsed: Tree<'_> = Tree::parse(&config.dtb).map_err(Error::ParseDtb)?;
@@ -478,7 +472,6 @@ mod imp {
             Ok(Self {
                 inner,
                 mmio_bus: Arc::new(Mutex::new(MmioBus::new())),
-                exit_requester,
                 shared_memory: Vec::new(),
                 mapped_memory: None,
                 irq_manager,
@@ -583,9 +576,34 @@ mod imp {
 
     impl dillo_machine::Machine for Vm {
         type Error = Error;
-        type Cpu = Cpu;
-        type CpuState = CpuState;
+        type CpuPreparation = CpuPreparation;
         type Memory = Memory;
+
+        fn cpu_preparation(
+            &mut self,
+            index: u32,
+            cpu_profile: dillo_machine::CpuProfile,
+        ) -> Result<CpuPreparation, Error> {
+            #[cfg(target_arch = "x86_64")]
+            let matches = matches!(cpu_profile, dillo_machine::CpuProfile::X86_64(_));
+            #[cfg(target_arch = "aarch64")]
+            let matches = matches!(cpu_profile, dillo_machine::CpuProfile::Aarch64(_));
+            if !matches {
+                return Err(Error::UnhandledExit(
+                    "CPU profile architecture mismatch".into(),
+                ));
+            }
+            Ok(CpuPreparation {
+                index,
+                cpu_profile,
+                vm: self.inner.clone(),
+                mmio_bus: Arc::clone(&self.mmio_bus),
+                memory: self.mapped_memory.clone().ok_or_else(|| {
+                    Error::UnhandledExit("CPU preparation requires attached RAM".into())
+                })?,
+                interrupt: CpuInterrupt::new(),
+            })
+        }
 
         fn guest_address_bits() -> Result<u32, Self::Error> {
             crate::hypervisor::guest_address_bits()
@@ -671,69 +689,58 @@ mod imp {
     }
 
     #[derive(Debug)]
-    pub struct CpuState {
+    pub struct CpuPreparation {
         index: u32,
         cpu_profile: dillo_machine::CpuProfile,
+        vm: crate::hypervisor::Vm,
+        mmio_bus: Arc<Mutex<MmioBus>>,
+        memory: Arc<memory::MappedMemory>,
+        interrupt: CpuInterrupt,
     }
-
-    impl dillo_machine::CpuState for CpuState {
+    impl dillo_machine::CpuPreparation for CpuPreparation {
         type Error = Error;
-
-        fn new(index: u32, cpu_profile: dillo_machine::CpuProfile) -> Result<Self, Self::Error> {
-            #[cfg(target_arch = "x86_64")]
-            let matches = matches!(cpu_profile, dillo_machine::CpuProfile::X86_64(_));
-            #[cfg(target_arch = "aarch64")]
-            let matches = matches!(cpu_profile, dillo_machine::CpuProfile::Aarch64(_));
-            if !matches {
-                return Err(Error::UnhandledExit(
-                    "CPU profile architecture mismatch".into(),
-                ));
-            }
-            Ok(Self { index, cpu_profile })
+        type Interrupt = CpuInterrupt;
+        type Runner = CpuRunner;
+        fn interrupt(&self) -> CpuInterrupt {
+            self.interrupt.clone()
         }
-    }
-
-    impl Attach<CpuState> for Vm {
-        type Error = Error;
-        type Output = Arc<Cpu>;
-
-        fn attach(&mut self, item: CpuState) -> Result<Self::Output, Self::Error> {
-            let mut vcpu = self.create_vcpu_inner(item.index, item.cpu_profile.as_str())?;
-            if item.index == 0 {
+        fn prepare(self) -> Result<CpuRunner, Error> {
+            let mut vcpu = Vcpu {
+                inner: self.vm.create_vcpu(self.index, self.cpu_profile.as_str())?,
+                mmio_bus: self.mmio_bus,
+                exit_requester: self.interrupt,
+            };
+            if self.index == 0 {
                 vcpu.initialize_bsp()?;
             }
-            let exit_requester = vcpu.exit_requester.clone();
-            Ok(Arc::new(Cpu {
-                vcpu: Mutex::new(vcpu),
-                exit_requester,
-            }))
+            Ok(CpuRunner {
+                vcpu,
+                _memory: self.memory,
+                _owner: std::marker::PhantomData,
+            })
         }
     }
 
-    pub struct Cpu {
-        vcpu: Mutex<Vcpu>,
-        exit_requester: VcpuExitRequester,
+    /// Native execution and destruction remain on the preparing thread.
+    ///
+    /// ```compile_fail
+    /// fn move_owner(runner: dillo_machine_kvm::CpuRunner) {
+    ///     std::thread::spawn(move || drop(runner));
+    /// }
+    /// ```
+    #[derive(Debug)]
+    pub struct CpuRunner {
+        vcpu: Vcpu,
+        _memory: Arc<memory::MappedMemory>,
+        _owner: std::marker::PhantomData<std::rc::Rc<()>>,
     }
-
-    impl std::fmt::Debug for Cpu {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("Cpu").finish_non_exhaustive()
-        }
-    }
-
-    impl dillo_machine::Cpu for Cpu {
+    impl dillo_machine::CpuRunner for CpuRunner {
         type Error = Error;
-
-        fn run(&self) -> Result<VcpuStop, Self::Error> {
-            self.vcpu
-                .lock()
-                .expect("KVM vCPU lock poisoned")
-                .run_to_stop()
-        }
-
-        fn stop(&self) -> Result<(), Self::Error> {
-            self.exit_requester.request_exit();
-            Ok(())
+        fn run(
+            &mut self,
+            termination: &dyn dillo_machine::CpuTermination,
+        ) -> Result<VcpuStop, Error> {
+            self.vcpu.run_to_stop(termination)
         }
     }
 
@@ -856,21 +863,19 @@ mod imp {
     struct Vcpu {
         inner: crate::hypervisor::Vcpu,
         mmio_bus: Arc<Mutex<MmioBus>>,
-        exit_requester: VcpuExitRequester,
+        exit_requester: CpuInterrupt,
     }
 
     #[derive(Clone, Debug)]
-    struct VcpuExitRequester {
+    pub struct CpuInterrupt {
         threads: Arc<Mutex<Vec<libc::pthread_t>>>,
-        requested: Arc<AtomicBool>,
     }
 
-    impl VcpuExitRequester {
+    impl CpuInterrupt {
         fn new() -> Self {
             Self::install_kick_handler();
             Self {
                 threads: Arc::new(Mutex::new(Vec::new())),
-                requested: Arc::new(AtomicBool::new(false)),
             }
         }
 
@@ -898,12 +903,12 @@ mod imp {
             // the vCPU worker thread may be blocked in KVM_RUN.
             #[allow(unsafe_code)]
             let thread = unsafe { libc::pthread_self() };
-            let mut threads = self.threads.lock().expect("vCPU thread list poisoned");
+            let mut threads = self
+                .threads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             threads.push(thread);
             drop(threads);
-            if self.requested.load(Ordering::Acquire) {
-                Self::kick_thread(thread);
-            }
             VcpuRegistration {
                 requester: self.clone(),
                 thread,
@@ -911,37 +916,42 @@ mod imp {
             }
         }
 
-        fn request_exit(&self) {
-            self.requested.store(true, Ordering::Release);
+        fn request_exit(&self) -> Result<(), Error> {
             for thread in self
                 .threads
                 .lock()
-                .expect("vCPU thread list poisoned")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .iter()
             {
-                Self::kick_thread(*thread);
+                Self::kick_thread(*thread)?;
             }
+            Ok(())
         }
 
-        fn requested(&self) -> bool {
-            self.requested.load(Ordering::Acquire)
-        }
-
-        fn kick_thread(thread: libc::pthread_t) {
+        fn kick_thread(thread: libc::pthread_t) -> Result<(), Error> {
             // SAFETY: pthread_t values come from vCPU worker threads that
             // registered themselves before entering KVM_RUN. Remote kicks
             // hold the list lock to prevent retirement; registration can also
             // kick its own still-running thread after releasing that lock.
             #[allow(unsafe_code)]
             let rc = unsafe { libc::pthread_kill(thread, VCPU_KICK_SIGNAL as libc::c_int) };
-            if rc != 0 && rc != libc::ESRCH {
-                log::warn!("failed to kick vCPU thread with signal: errno {rc}");
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(Error::CpuInterrupt(std::io::Error::from_raw_os_error(rc)))
             }
         }
     }
 
+    impl dillo_machine::CpuInterrupt for CpuInterrupt {
+        type Error = Error;
+        fn interrupt(&self) -> Result<(), Error> {
+            self.request_exit()
+        }
+    }
+
     struct VcpuRegistration {
-        requester: VcpuExitRequester,
+        requester: CpuInterrupt,
         thread: libc::pthread_t,
         _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
     }
@@ -951,7 +961,7 @@ mod imp {
             self.requester
                 .threads
                 .lock()
-                .expect("vCPU thread list poisoned")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .retain(|thread| *thread != self.thread);
         }
     }
@@ -962,7 +972,7 @@ mod imp {
 
         #[test]
         fn finished_workers_are_not_signalled() {
-            let requester = VcpuExitRequester::new();
+            let requester = CpuInterrupt::new();
             let worker_requester = requester.clone();
             std::thread::spawn(move || {
                 let _registration = worker_requester.register_current_thread();
@@ -971,18 +981,18 @@ mod imp {
             .join()
             .unwrap();
             assert!(requester.threads.lock().unwrap().is_empty());
-            requester.request_exit();
+            requester.request_exit().unwrap();
         }
 
         #[test]
         fn unwinding_retires_registration() {
-            let requester = VcpuExitRequester::new();
+            let requester = CpuInterrupt::new();
             let _ = std::panic::catch_unwind(|| {
                 let _registration = requester.register_current_thread();
                 panic!("worker failure");
             });
             assert!(requester.threads.lock().unwrap().is_empty());
-            requester.request_exit();
+            requester.request_exit().unwrap();
         }
     }
 
@@ -1022,7 +1032,7 @@ mod imp {
             let kvm = kvm_ioctls::Kvm::new().unwrap();
             let vm = kvm.create_vm().unwrap();
             let mut cpu = vm.create_vcpu(0).unwrap();
-            let requester = VcpuExitRequester::new();
+            let requester = CpuInterrupt::new();
             let _restore = RestoreMask(
                 SigSet::all()
                     .thread_swap_mask(SigmaskHow::SIG_SETMASK)
@@ -1031,7 +1041,7 @@ mod imp {
             let previous = SigSet::thread_get_mask().unwrap();
             let mask = crate::hypervisor::block_kick_signal(&cpu, VCPU_KICK_SIGNAL).unwrap();
             let registration = requester.register_current_thread();
-            requester.request_exit();
+            requester.request_exit().unwrap();
             assert_eq!(cpu.run().unwrap_err().errno(), libc::EINTR);
             drop(registration);
             drop(mask);
@@ -1063,6 +1073,139 @@ mod imp {
         }
     }
 
+    #[cfg(test)]
+    mod owner_tests {
+        use super::*;
+        use dillo_machine::{CpuInterrupt as _, CpuPreparation as _, CpuRunner as _, Machine as _};
+
+        #[test]
+        fn native_owners_keep_ap_parked_and_pure_interrupts_do_not_terminate() {
+            #[cfg(target_arch = "x86_64")]
+            let (tree, profile, base, entry, code) = (
+                crate::intc_x86::tests::tree(0xfee0_0000, 0x1000, 0xfec0_0000, 0x1000),
+                dillo_machine::CpuProfile::X86_64(pmi::x86_64::Profile::V1),
+                0xffff_f000,
+                0xffff_fff0,
+                vec![0xeb, 0xfe],
+            );
+            #[cfg(target_arch = "aarch64")]
+            let (tree, profile, base, entry, code) = {
+                use dillo_devtree::devtree::{OwnedNode, OwnedProperty};
+                let root = OwnedNode::new("")
+                    .with_property(OwnedProperty::new("#address-cells").with_u32(2))
+                    .with_property(OwnedProperty::new("#size-cells").with_u32(2))
+                    .with_child(
+                        OwnedNode::new("interrupt-controller@8000000")
+                            .with_property(OwnedProperty::new("compatible").with_str("arm,gic-v3"))
+                            .with_property(OwnedProperty::new("reg").with_u32s(&[
+                                0,
+                                0x0800_0000,
+                                0,
+                                0x1_0000,
+                                0,
+                                0x080a_0000,
+                                0,
+                                0x4_0000,
+                            ])),
+                    )
+                    .with_child(
+                        OwnedNode::new("msi-controller@8020000")
+                            .with_property(
+                                OwnedProperty::new("compatible").with_str("arm,gic-v2m-frame"),
+                            )
+                            .with_property(OwnedProperty::new("arm,msi-num-spis").with_u32(64)),
+                    );
+                (
+                    OwnedTree::new(root),
+                    dillo_machine::CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0),
+                    0,
+                    0,
+                    0x1400_0000u32.to_le_bytes().to_vec(),
+                )
+            };
+            let mut vm = Vm::from_launch_config(LaunchConfig {
+                dtb: tree.encode().unwrap(),
+                vcpus: 2,
+                min_addr_space_bits: 32,
+            })
+            .expect("native KVM is required");
+            vm.attach_mapped_memory(Arc::new(
+                memory::MappedMemory::test_backing(&[(base, 0x1000)]).unwrap(),
+            ))
+            .unwrap();
+            // Spin at PMI's fixed BSP entry; AP gets no guest startup request.
+            vm.write_guest(entry, &code).unwrap();
+            let termination = Arc::new(AtomicBool::new(false));
+            let mut owners = Vec::new();
+            let mut releases = Vec::new();
+            let (ready, receiver) = std::sync::mpsc::channel();
+            for index in 0..2 {
+                let input = vm.cpu_preparation(index, profile).unwrap();
+                let interrupt = input.interrupt();
+                let token = Arc::clone(&termination);
+                let ready = ready.clone();
+                let (release, gate) = std::sync::mpsc::channel();
+                releases.push(release);
+                let join = thread::spawn(move || {
+                    let owner = thread::current().id();
+                    let mut runner = input.prepare().unwrap();
+                    assert_eq!(thread::current().id(), owner);
+                    ready.send(()).unwrap();
+                    if gate.recv().is_err() {
+                        return Ok(VcpuStop::Stopped);
+                    }
+                    let result = runner.run(token.as_ref());
+                    drop(runner);
+                    result
+                });
+                owners.push((interrupt, join));
+            }
+            drop(ready);
+            let ready_count = (0..2)
+                .filter(|_| receiver.recv_timeout(Duration::from_secs(2)).is_ok())
+                .count();
+            let machine_prepared = vm.prepare_vcpu_run();
+            for release in releases {
+                let _ = release.send(());
+            }
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while owners
+                .iter()
+                .any(|(interrupt, _)| interrupt.threads.lock().unwrap().is_empty())
+                && std::time::Instant::now() < deadline
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
+            let registered = owners
+                .iter()
+                .all(|(interrupt, _)| !interrupt.threads.lock().unwrap().is_empty());
+            for (interrupt, _) in &owners {
+                interrupt.interrupt().unwrap();
+            }
+            thread::sleep(Duration::from_millis(20));
+            let pure_wake_preserved_owners = owners.iter().all(|(_, join)| !join.is_finished());
+            termination.store(true, Ordering::Release);
+            while owners.iter().any(|(_, join)| !join.is_finished()) {
+                for (interrupt, _) in &owners {
+                    interrupt.interrupt().unwrap();
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            for (interrupt, join) in owners {
+                assert_eq!(join.join().unwrap().unwrap(), VcpuStop::Stopped);
+                assert!(interrupt.threads.lock().unwrap().is_empty());
+                interrupt.interrupt().unwrap();
+            }
+            assert_eq!(ready_count, 2);
+            machine_prepared.unwrap();
+            assert!(registered, "both native owners must reach their entry path");
+            assert!(
+                pure_wake_preserved_owners,
+                "native wake must not authorize termination or AP startup"
+            );
+        }
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum VcpuExit {
         MmioWrite { addr: u64, data: [u8; 8], size: u8 },
@@ -1090,7 +1233,10 @@ mod imp {
             self.inner.initialize_bsp()
         }
 
-        fn run(&mut self) -> Result<VcpuExit, Error> {
+        fn run(
+            &mut self,
+            termination: &dyn dillo_machine::CpuTermination,
+        ) -> Result<VcpuExit, Error> {
             loop {
                 let bus = Arc::clone(&self.mmio_bus);
                 let exit = self.inner.run(
@@ -1106,6 +1252,7 @@ mod imp {
                         }
                         handled
                     },
+                    termination,
                 )?;
                 match exit {
                     VmExit::MmioRead { addr, size } => {
@@ -1151,16 +1298,19 @@ mod imp {
             }
         }
 
-        fn run_to_stop(&mut self) -> Result<VcpuStop, Error> {
+        fn run_to_stop(
+            &mut self,
+            termination: &dyn dillo_machine::CpuTermination,
+        ) -> Result<VcpuStop, Error> {
             let _signal_mask = crate::hypervisor::block_kick_signal(&self.inner, VCPU_KICK_SIGNAL)?;
             let _registration = self.exit_requester.register_current_thread();
             loop {
-                if self.exit_requester.requested() {
+                if termination.is_requested() {
                     return Ok(VcpuStop::Stopped);
                 }
-                match self.run()? {
+                match self.run(termination)? {
                     VcpuExit::MmioWrite { .. } => {}
-                    VcpuExit::Interrupted => return Ok(VcpuStop::Stopped),
+                    VcpuExit::Interrupted => continue,
                     VcpuExit::GuestPoweroff => return Ok(VcpuStop::GuestPoweroff),
                     VcpuExit::GuestReset => return Ok(VcpuStop::GuestReset),
                     VcpuExit::Shutdown => {

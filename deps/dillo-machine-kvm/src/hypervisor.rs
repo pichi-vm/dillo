@@ -43,6 +43,8 @@ pub enum Error {
     AddressSpace(String),
     #[error("configure vCPU kick signal mask: {0}")]
     SignalMask(std::io::Error),
+    #[error("interrupt vCPU owner: {0}")]
+    CpuInterrupt(std::io::Error),
 
     #[error("open /dev/kvm: {0}")]
     OpenKvm(std::io::Error),
@@ -576,8 +578,12 @@ impl Vcpu {
         &mut self,
         pio_read: impl Fn(u16, u8) -> u32,
         mmio_read: impl Fn(u64, &mut [u8]) -> bool,
+        termination: &dyn dillo_machine::CpuTermination,
     ) -> Result<VmExit, Error> {
         let exit = loop {
+            if termination.is_requested() {
+                return Ok(VmExit::Interrupted);
+            }
             match self.fd.run() {
                 Ok(e) => break e,
                 Err(e) if e.errno() == nix::libc::EAGAIN => continue,
@@ -992,7 +998,13 @@ mod bsp_tests {
         assert_eq!(bsp.fd.get_xsave().unwrap().region[6], 0x1f80);
         assert_eq!(fpu.fpr, [[0; 16]; 8]);
         assert_eq!(fpu.xmm, [[0; 16]; 16]);
-        let exit = bsp.run(|_, _| 0, |_, _| false).unwrap();
+        let exit = bsp
+            .run(
+                |_, _| 0,
+                |_, _| false,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .unwrap();
         assert!(
             matches!(exit, VmExit::PioWrite { port: 0x42, .. }),
             "{exit:?}"

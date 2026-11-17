@@ -260,7 +260,30 @@ impl Vm {
             .collect()
     }
 
+    pub(crate) fn cpu_creator(&self) -> CpuCreator {
+        CpuCreator {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn create_vcpu(&self, idx: u32, cpu_profile: &str) -> Result<Vcpu, Error> {
+        self.cpu_creator().create(idx, cpu_profile)
+    }
+
+    pub(crate) fn interrupt_controller(&self) -> InterruptController {
+        InterruptController {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct CpuCreator {
+    inner: Arc<VmInner>,
+}
+impl CpuCreator {
+    pub(crate) fn create(self, idx: u32, cpu_profile: &str) -> Result<Vcpu, Error> {
         validate_cpu_profile(cpu_profile)?;
         raw::create_virtual_processor(self.inner.partition, idx).map_err(|hr| {
             Error::CreateVcpu {
@@ -269,15 +292,9 @@ impl Vm {
             }
         })?;
         Ok(Vcpu {
-            partition: Arc::clone(&self.inner),
+            partition: self.inner,
             idx,
         })
-    }
-
-    pub(crate) fn interrupt_controller(&self) -> InterruptController {
-        InterruptController {
-            inner: Arc::clone(&self.inner),
-        }
     }
 }
 
@@ -299,7 +316,7 @@ pub(crate) fn guest_address_bits() -> Result<u32, Error> {
     // The probe uses the launch partition policy, but never maps RAM or runs.
     // Vcpu and Vm drops release the probe even when a query fails.
     let vm = Vm::new_x86_64_with_local_apic_count(1)?;
-    let vcpu = vm.create_vcpu(0, "x86-64-v1")?;
+    let vcpu = vm.cpu_creator().create(0, "x86-64-v1")?;
     let physical = raw::guest_physical_bits(vcpu.partition.partition, vcpu.idx)
         .map_err(|hr| Error::AddressSpace(status(hr)))?;
     if !(32..=52).contains(&physical) {
@@ -478,7 +495,23 @@ impl Vcpu {
 
     /// Program every register fixed by PMI's x86 vm BSP contract.
     pub(crate) fn initialize_bsp(&mut self) -> Result<(), Error> {
-        use windows_sys::Win32::System::Hypervisor::*;
+        use windows_sys::Win32::System::Hypervisor::{
+            WHV_REGISTER_VALUE, WHV_X64_FP_CONTROL_STATUS_REGISTER,
+            WHV_X64_FP_CONTROL_STATUS_REGISTER_0, WHV_X64_SEGMENT_REGISTER,
+            WHV_X64_SEGMENT_REGISTER_0, WHV_X64_TABLE_REGISTER,
+            WHV_X64_XMM_CONTROL_STATUS_REGISTER, WHV_X64_XMM_CONTROL_STATUS_REGISTER_0,
+            WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterCs,
+            WHvX64RegisterDr6, WHvX64RegisterDr7, WHvX64RegisterDs, WHvX64RegisterEfer,
+            WHvX64RegisterEs, WHvX64RegisterFpControlStatus, WHvX64RegisterFpMmx7,
+            WHvX64RegisterFs, WHvX64RegisterGdtr, WHvX64RegisterGs, WHvX64RegisterIdtr,
+            WHvX64RegisterLdtr, WHvX64RegisterPat, WHvX64RegisterR8, WHvX64RegisterR9,
+            WHvX64RegisterR10, WHvX64RegisterR11, WHvX64RegisterR12, WHvX64RegisterR13,
+            WHvX64RegisterR14, WHvX64RegisterR15, WHvX64RegisterRax, WHvX64RegisterRbp,
+            WHvX64RegisterRbx, WHvX64RegisterRcx, WHvX64RegisterRdi, WHvX64RegisterRdx,
+            WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterRsi, WHvX64RegisterRsp,
+            WHvX64RegisterSs, WHvX64RegisterTr, WHvX64RegisterXCr0, WHvX64RegisterXmm0,
+            WHvX64RegisterXmmControlStatus,
+        };
         let mut registers = Vec::new();
         push_reg64(&mut registers, WHvX64RegisterRip, 0xffff_fff0);
         push_reg64(&mut registers, WHvX64RegisterRflags, 2);
@@ -580,13 +613,19 @@ impl Vcpu {
         &mut self,
         pio_read: impl Fn(u16, u8) -> u32,
         mmio_read: impl Fn(u64, &mut [u8]) -> bool,
+        termination: &dyn dillo_machine::CpuTermination,
     ) -> Result<VmExit, Error> {
-        let exit =
-            raw::run_virtual_processor(self.partition.partition, self.idx, &pio_read, &mmio_read)
-                .map_err(|hr| Error::RunVcpu {
-                idx: self.idx,
-                hr: status(hr),
-            })?;
+        let exit = raw::run_virtual_processor(
+            self.partition.partition,
+            self.idx,
+            &pio_read,
+            &mmio_read,
+            termination,
+        )
+        .map_err(|hr| Error::RunVcpu {
+            idx: self.idx,
+            hr: status(hr),
+        })?;
         Ok(match exit {
             raw::RunExit::Halted => VmExit::Halted,
             raw::RunExit::PioRead { port, size } => VmExit::PioRead { port, size },
@@ -619,7 +658,12 @@ impl VcpuCancel {
 
 impl Drop for Vcpu {
     fn drop(&mut self) {
-        raw::delete_virtual_processor(self.partition.partition, self.idx);
+        if let Err(error) = raw::delete_virtual_processor(self.partition.partition, self.idx) {
+            log::error!(
+                "WHP vCPU {} destruction failed ({error:?}); native retirement is unverified",
+                self.idx
+            );
+        }
     }
 }
 
@@ -1007,10 +1051,14 @@ mod raw {
         Ok(())
     }
 
-    pub(super) fn delete_virtual_processor(partition: PartitionHandle, idx: u32) {
-        // SAFETY: best-effort cleanup for a vCPU index created on this
-        // partition. WHP tolerates process teardown even if this fails.
-        let _ = unsafe { WHvDeleteVirtualProcessor(partition, idx) };
+    pub(super) fn delete_virtual_processor(
+        partition: PartitionHandle,
+        idx: u32,
+    ) -> Result<(), HResult> {
+        // SAFETY: this owner has returned from native entry and retired the
+        // synchronized wake binding before deleting its processor.
+        let hr = unsafe { WHvDeleteVirtualProcessor(partition, idx) };
+        if failed(hr) { Err(HResult(hr)) } else { Ok(()) }
     }
 
     pub(super) fn set_virtual_processor_registers(
@@ -1068,8 +1116,9 @@ mod raw {
         partition: PartitionHandle,
         idx: u32,
     ) -> Result<(), HResult> {
-        // SAFETY: requests cancellation of the active or next WHP run for `idx`
-        // in this partition; flags must be zero per the WHP API.
+        // SAFETY: requests cancellation of an active WHP run for `idx` in
+        // this live partition; flags must be zero per the WHP API. The runtime
+        // repeats interrupts until completion to cover entry races.
         let hr = unsafe { WHvCancelRunVirtualProcessor(partition, idx, 0) };
         if failed(hr) {
             return Err(HResult(hr));
@@ -1082,8 +1131,12 @@ mod raw {
         idx: u32,
         pio_read: &dyn Fn(u16, u8) -> u32,
         mmio_read: &dyn Fn(u64, &mut [u8]) -> bool,
+        termination: &dyn dillo_machine::CpuTermination,
     ) -> Result<RunExit, HResult> {
         loop {
+            if termination.is_requested() {
+                return Ok(RunExit::Canceled);
+            }
             let mut exit = WHV_RUN_VP_EXIT_CONTEXT::default();
             // SAFETY: `exit` points to writable storage of the exact WHP exit
             // context size for this ABI version.
@@ -1482,6 +1535,9 @@ mod raw {
 }
 
 #[cfg(test)]
+pub(crate) use tests::whp_test_lock;
+
+#[cfg(test)]
 mod tests {
     use super::{Error, Vcpu, Vm, push_reg64, raw, status};
     use crate::VmExit;
@@ -1795,7 +1851,13 @@ mod tests {
         vcpu.initialize_test_real_mode(code_base, 0)
             .expect("set real-mode state");
 
-        let exit = vcpu.run(|_, _| 0, |_, _| false).expect("run vCPU");
+        let exit = vcpu
+            .run(
+                |_, _| 0,
+                |_, _| false,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .expect("run vCPU");
         assert!(matches!(exit, VmExit::Halted), "expected HLT, got {exit:?}");
     }
 
@@ -1813,7 +1875,13 @@ mod tests {
         vcpu.initialize_test_real_mode(code_base, 0x5A)
             .expect("set real-mode state");
 
-        let exit = vcpu.run(|_, _| 0, |_, _| false).expect("run out");
+        let exit = vcpu
+            .run(
+                |_, _| 0,
+                |_, _| false,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .expect("run out");
         match exit {
             VmExit::PioWrite { port, data, size } => {
                 assert_eq!(port, 0x42);
@@ -1823,7 +1891,13 @@ mod tests {
             other => panic!("expected PIO write, got {other:?}"),
         }
 
-        let exit = vcpu.run(|_, _| 0, |_, _| false).expect("run hlt");
+        let exit = vcpu
+            .run(
+                |_, _| 0,
+                |_, _| false,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .expect("run hlt");
         assert!(matches!(exit, VmExit::Halted), "expected HLT, got {exit:?}");
     }
 
@@ -1842,7 +1916,13 @@ mod tests {
         vcpu.initialize_test_real_mode(code_base, 0xA5)
             .expect("set real-mode state");
 
-        let exit = vcpu.run(|_, _| 0, |_, _| false).expect("run mmio write");
+        let exit = vcpu
+            .run(
+                |_, _| 0,
+                |_, _| false,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .expect("run mmio write");
         match exit {
             VmExit::MmioWrite { addr, data, size } => {
                 assert_eq!(addr, 0x2000);
@@ -1852,7 +1932,13 @@ mod tests {
             other => panic!("expected MMIO write, got {other:?}"),
         }
 
-        let exit = vcpu.run(|_, _| 0, |_, _| false).expect("run hlt");
+        let exit = vcpu
+            .run(
+                |_, _| 0,
+                |_, _| false,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .expect("run hlt");
         assert!(matches!(exit, VmExit::Halted), "expected HLT, got {exit:?}");
     }
 
@@ -1914,7 +2000,7 @@ mod tests {
         }
     }
 
-    fn whp_test_lock() -> MutexGuard<'static, ()> {
+    pub(crate) fn whp_test_lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
