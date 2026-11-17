@@ -58,6 +58,157 @@ protection against a malicious host requires confidential computing and
 independent verification. Correct behavior by an honest Dillo is necessary
 for conformance, but cannot establish trust in a hostile host.
 
+### Crate architecture
+
+#### LAYOUT-001 — Give each crate an explicit responsibility
+
+The executable composes the selected machine family, reusable protocols and
+concrete devices. Shared libraries own launch interpretation, supervision and
+worker communication. Native implementations remain in the machine backends.
+
+| Crate | Responsibility |
+| --- | --- |
+| `dillo` | CLI, machine/target selection, concrete factories, resource-opening policy, debugger endpoint wiring, and normal or hidden-worker entry dispatch. |
+| `dillo-config` | User-facing configuration, normalization and device placement requests. |
+| `dillo-launch` | PMI parsing, stable launch inputs and recipe, DT realization planning, launch actions through Machine interfaces, and finalization. |
+| `dillo-runtime` | Shared CPU/device supervision, lifecycle arbitration, stop barriers, reconstruction orchestration and debugger session/hold policy. |
+| `dillo-machine` | Machine and associated service contracts for CPU preparation, runner/control, memory ownership/export, interrupts, notifications, process/IPC primitives, device lifecycle controls and authorized debugging. |
+| `dillo-devtree` | Owned DT representation and consumption helpers, declaration/claim records and resource provenance. |
+| `dillo-ipc` | Versioned worker messages, encoding/decoding, request/transition identities and transferable-resource descriptions. |
+| `dillo-worker` | Parent register proxies, child dispatch, bootstrap/binding and worker lifecycle plumbing. |
+| `dillo-machine-kvm` | Linux native VM, CPU, memory, interrupt, notification, process, confinement and resource-transfer services. |
+| `dillo-machine-hvf` | macOS implementations of those native services. |
+| `dillo-machine-whp` | Windows implementations of those native services. |
+| `dillo-mmio` | MMIO register/device interfaces, routing and syscon substrate behavior. |
+| `dillo-pci` | PCI endpoint/root behavior, configuration and BAR routing, and MSI-X behavior. |
+| `dillo-virtio` | Transport-independent device and activation contracts, queues, descriptor access and notification abstractions. |
+| `dillo-mmio-uart` | MMIO UART protocol implementation. |
+| `dillo-mmio-virtio` | Virtio-MMIO transport and its adaptation to device services. |
+| `dillo-pci-virtio` | Virtio PCI transport and its adaptation to device services. |
+| `dillo-virtio-blk` | Guest block protocol over a supplied storage backing. |
+| `dillo-virtio-console` | Guest console protocol, named-port data paths and resize control format. |
+| `dillo-virtio-fs` | Guest filesystem protocol, FUSE dispatch and host-filesystem adapters. |
+| `dillo-virtio-net` | Guest network protocol, userspace network stack and host-network adapters. |
+| `dillo-virtio-vsock` | Guest vsock protocol, connection state and host-socket adapters. |
+| `dillo-storage` | Block-backing contracts and raw-file/QCOW2 backing implementations. |
+| `dillo-storage-gpt` | Synthesized GPT composition over partition backings. |
+| `snuffler` | Linux guest test executable and host-readable report schema. |
+
+`dillo-machine` supplies narrow contracts organized by responsibility. Depending
+on it does not grant a Machine object, native handles or unrestricted memory
+access. Protocol implementations receive the service subset supplied by the
+selected Machine family's associated types and bound to the owning instance.
+General attachment contracts do not require all constructors to be methods
+on a live Machine.
+
+#### LAYOUT-002 — Preserve dependency direction
+
+The following table defines direct internal production dependencies. External
+libraries are omitted. Native-backend selection and host-specific device
+availability remain target-conditional. The named families expand to the
+individual crates listed in LAYOUT-001.
+
+| Consumer | Internal dependencies |
+| --- | --- |
+| `dillo` | `dillo-config`, `dillo-machine`, `dillo-launch`, `dillo-runtime`, `dillo-worker`, the three native machine crates, `dillo-mmio`, `dillo-pci`, `dillo-virtio`, UART, both virtio transports, all five virtio device crates, `dillo-storage`, `dillo-storage-gpt` |
+| `dillo-config`, `dillo-devtree`, `dillo-machine`, `dillo-storage` | None |
+| `dillo-launch` | `dillo-machine`, `dillo-devtree` |
+| `dillo-runtime` | `dillo-machine`, `dillo-launch` |
+| `dillo-ipc` | `dillo-machine` |
+| `dillo-worker` | `dillo-machine`, `dillo-ipc`, `dillo-mmio`, `dillo-pci` |
+| Each native machine crate | `dillo-machine`, `dillo-devtree`, `dillo-mmio` |
+| `dillo-mmio` | `dillo-machine` |
+| `dillo-pci` | `dillo-machine`, `dillo-mmio` |
+| `dillo-virtio` | `dillo-machine` |
+| `dillo-mmio-uart` | `dillo-machine`, `dillo-mmio` |
+| `dillo-mmio-virtio` | `dillo-machine`, `dillo-mmio`, `dillo-virtio` |
+| `dillo-pci-virtio` | `dillo-machine`, `dillo-pci`, `dillo-virtio` |
+| `dillo-virtio-blk` | `dillo-machine`, `dillo-virtio`, `dillo-storage` |
+| Each of `dillo-virtio-console`, `dillo-virtio-fs`, `dillo-virtio-net`, `dillo-virtio-vsock` | `dillo-machine`, `dillo-virtio` |
+| `dillo-storage-gpt` | `dillo-storage` |
+| `snuffler` | None |
+
+The diagram shows the core dependency paths. Arrows mean consumer depends on
+provider; the native node represents three separate crates. Device, transport
+and storage edges are specified in the table above.
+
+```mermaid
+flowchart TD
+    App[dillo] --> Config[dillo-config]
+    App --> Runtime[dillo-runtime]
+    App --> Launch[dillo-launch]
+    App --> Worker[dillo-worker]
+    App --> Native[dillo-machine-kvm / hvf / whp]
+    Runtime --> Launch
+    Runtime --> Machine[dillo-machine]
+    Launch --> DT[dillo-devtree]
+    Launch --> Machine
+    Worker --> IPC[dillo-ipc]
+    Worker --> PCI[dillo-pci]
+    Worker --> MMIO[dillo-mmio]
+    Worker --> Machine
+    IPC --> Machine
+    Native --> Machine
+    Native --> DT
+    Native --> MMIO
+    PCI --> MMIO
+    PCI --> Machine
+    MMIO --> Machine
+```
+
+Shared runtime, worker, protocol and device crates do not import concrete
+native machine implementations. Transports consume the `VirtioDevice`
+contract; the executable supplies concrete devices. General memory, interrupt,
+notification and execution contracts belong to `dillo-machine`, so virtio
+does not depend on MMIO merely to obtain those services.
+
+#### LAYOUT-003 — Separate supervision, wire protocols and native services
+
+`dillo-runtime` supervises participant controls supplied through the Machine
+family, including CPU controls and device controls implemented by worker
+proxies. It uses launch recipes for reconstruction and has no dependency on
+the worker implementation or concrete devices. Launch coordinates complete
+DT realization; backend handlers consume their delegated substrate facts.
+
+`dillo-worker` accepts local MMIO/PCI interfaces for register dispatch. The
+executable constructs the transport/device composition inside the worker.
+This supports non-virtio devices without making the worker mechanism depend
+on either virtio transport or any concrete device implementation.
+
+`dillo-ipc` defines message meaning and resource descriptions. Native machine
+backends implement OS channels, event endpoints, confinement and resource
+transfer; the worker layer binds those implementations to the protocol.
+Wire identifiers do not themselves authorize access to host resources.
+Bulk payloads use exported guest-memory backing rather than register messages.
+
+The VM process contains launch/runtime, the selected native machine, bus
+routing and parent proxies. Device processes use the same executable's hidden
+entry points, confined machine-family services, worker dispatch and their
+transport/device/backing composition. Crate linkage is not the security
+boundary: transferred authority and OS confinement establish that boundary.
+Early worker creation remains compatible with later machine-instance binding.
+
+#### LAYOUT-004 — Keep storage, session policy and test roles distinct
+
+Raw-file and QCOW2 implementations belong with the backing contracts in
+`dillo-storage`. `dillo-storage-gpt` implements a backing consumed by
+`dillo-virtio-blk`; it owns no separate guest device protocol. The executable
+selects and supplies the backing to the block device.
+
+Console owns its resize format and data-plane pipe/stdio helpers without
+depending on launcher configuration. Terminal ownership, session liveness
+and shutdown policy belong to executable/runtime integration. Device-local
+helpers participate in the worker lifecycle, including activity outside
+virtqueue activation. Network-stack threads, native network callbacks and
+filesystem adapters belong within their device workers; their implementations
+remain modules of the respective device crates.
+
+`snuffler` is consumed by host boot tests as a report schema and guest binary
+artifact. Arma is an external image-building test dependency. The standalone
+`dillo-fuzz` package depends on `dillo-launch` for PMI parsing and
+`dillo-virtio-net` for network parsing. These test relationships do not make
+test infrastructure a production dependency.
+
 ## Protecting the host from the guest
 
 Machine authority, process confinement and supervised execution limit the
