@@ -1737,7 +1737,6 @@ mod tests {
     fn named_tx_keeps_completion_pending_and_observes_cancel_under_backpressure() {
         use nix::fcntl::{FcntlArg, OFlag, fcntl};
         use std::os::fd::IntoRawFd;
-        let _fds = pipe::fd_table_lock();
         let (_read_end, write_end) = nix::unistd::pipe().unwrap();
         fcntl(&write_end, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
         loop {
@@ -1786,7 +1785,6 @@ mod tests {
     #[test]
     fn named_tx_accepts_output_before_event_failure_and_never_sends_the_next_chain() {
         use std::os::fd::IntoRawFd;
-        let _fds = pipe::fd_table_lock();
         let (read_end, write_end) = nix::unistd::pipe().unwrap();
         let end =
             pipe::PipeEnd::adopt("build", pipe::Direction::Tx, write_end.into_raw_fd() as u64)
@@ -1957,8 +1955,6 @@ mod tests {
     fn port_rx_worker_moves_bytes_then_closes_on_eof() {
         use std::os::fd::IntoRawFd;
 
-        let _fds = pipe::fd_table_lock();
-
         let (read_end, write_end) = nix::unistd::pipe().expect("pipe");
         nix::unistd::write(&write_end, b"hello").expect("host write");
         let end = pipe::PipeEnd::adopt("build", pipe::Direction::Rx, read_end.into_raw_fd() as u64)
@@ -2000,8 +1996,6 @@ mod tests {
     #[test]
     fn port_tx_worker_writes_guest_bytes_to_the_pipe() {
         use std::os::fd::IntoRawFd;
-
-        let _fds = pipe::fd_table_lock();
 
         let (read_end, write_end) = nix::unistd::pipe().expect("pipe");
         let end =

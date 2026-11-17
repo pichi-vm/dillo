@@ -391,17 +391,6 @@ mod imp {
     }
 }
 
-/// Serializes cooperating console pipe tests.
-///
-/// Other threads can still allocate descriptors, so this does not prevent
-/// reuse of a closed descriptor number.
-#[cfg(all(test, unix))]
-pub(crate) fn fd_table_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -420,7 +409,6 @@ mod tests {
 
     #[test]
     fn rx_reads_then_reports_eof() {
-        let _fds = super::fd_table_lock();
         let (read_end, write_end) = parent_pipe();
         let rx = adopt(read_end, Direction::Rx);
 
@@ -438,7 +426,6 @@ mod tests {
 
     #[test]
     fn tx_writes_then_reports_epipe() {
-        let _fds = super::fd_table_lock();
         let (read_end, write_end) = parent_pipe();
         let tx = adopt(write_end, Direction::Tx);
 
@@ -462,7 +449,6 @@ mod tests {
 
     #[test]
     fn adopting_closes_the_inherited_number() {
-        let _fds = super::fd_table_lock();
         let (read_end, write_end) = parent_pipe();
         let number = read_end.as_raw_fd();
         let adopted = adopt(read_end, Direction::Rx);
@@ -480,7 +466,6 @@ mod tests {
 
     #[test]
     fn nonblocking_is_not_set_on_the_caller_end() {
-        let _fds = super::fd_table_lock();
         // The parent's own end keeps its original flags: dillo sets O_NONBLOCK
         // on its dup'd copy, which has its own open file description flags…
         // except that O_NONBLOCK lives on the *description*, shared by dup. So
