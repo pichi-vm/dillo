@@ -29,7 +29,7 @@ mod uds;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dillo_mmio::Interrupt;
+use dillo_machine::interrupt::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
 use dillo_virtio::{
     ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
@@ -155,7 +155,6 @@ impl VirtioDevice for VirtioVsock {
         // Queue 1 is TX (guest → host). Kick-driven worker.
         let tx_queue = queues.remove(1);
         let tx_evt = queue_evts.remove(1);
-        let tx_wake = tx_evt.try_clone()?;
         let tx_handle = Arc::new(Mutex::new(Some(spawn_tx_worker(
             Arc::clone(&host),
             Arc::clone(&self.conn_mgr),
@@ -201,8 +200,6 @@ impl VirtioDevice for VirtioVsock {
                 {
                     handle.shutdown();
                 }
-                // Wake the kick-blocked TX worker so it observes shutdown.
-                let _ = tx_wake.write(1);
             },
             move || {
                 if let Some(handle) = tx_handle
@@ -235,18 +232,23 @@ fn spawn_tx_worker(
     kick: Kick,
     interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        tx_worker(
-            &conn_mgr,
-            &queue_memory,
-            &buffer_memory,
-            queue,
-            &kick,
-            interrupt.as_ref(),
-            &token,
-        );
-        Ok(())
-    }))
+    let wake = kick.clone();
+    host.spawn(
+        "vsock tx".into(),
+        Box::new(move |token| {
+            tx_worker(
+                &conn_mgr,
+                &queue_memory,
+                &buffer_memory,
+                queue,
+                &kick,
+                interrupt.as_ref(),
+                &token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
+    .map(|handle| handle.with_shutdown_wake(wake))
 }
 
 fn spawn_rx_worker(
@@ -257,17 +259,20 @@ fn spawn_rx_worker(
     queue: Queue,
     interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        rx_worker(
-            &conn_mgr,
-            &queue_memory,
-            &buffer_memory,
-            queue,
-            interrupt.as_ref(),
-            &token,
-        );
-        Ok(())
-    }))
+    host.spawn(
+        "vsock rx".into(),
+        Box::new(move |token| {
+            rx_worker(
+                &conn_mgr,
+                &queue_memory,
+                &buffer_memory,
+                queue,
+                interrupt.as_ref(),
+                &token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
 }
 
 /// TX worker: blocks on the queue kick, drains guest → host packets into the
@@ -280,15 +285,15 @@ fn tx_worker(
     kick: &Kick,
     interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Mutex::new(queue);
     loop {
         if let Err(e) = kick.read() {
             log::error!("virtio-vsock TX: kick read error: {e}");
-            return;
+            return Err(e);
         }
         if token.is_shutdown_requested() {
-            return;
+            return Ok(dillo_virtio::DeviceExit::Cancelled);
         }
         let mut q = queue.lock().expect("virtio-vsock TX queue mutex");
         let mut signaled = false;
@@ -322,12 +327,12 @@ fn rx_worker(
     queue: Queue,
     interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Mutex::new(queue);
     let mut pending: Option<VsockPacket> = None;
     loop {
         if token.is_shutdown_requested() {
-            return;
+            return Ok(dillo_virtio::DeviceExit::Cancelled);
         }
         if pending.is_none() {
             let mut mgr = conn_mgr.lock().expect("virtio-vsock conn_mgr mutex");

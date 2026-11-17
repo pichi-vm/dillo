@@ -46,7 +46,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use dillo_mmio::Interrupt;
+use dillo_machine::interrupt::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
 use dillo_virtio::{
     ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
@@ -352,14 +352,12 @@ impl VirtioDevice for VirtioConsole {
         let mut queues: Vec<Option<Queue>> = queues.into_iter().map(Some).collect();
         let mut queue_evts: Vec<Option<Kick>> = queue_evts.into_iter().map(Some).collect();
 
-        // Workers, plus the kick each one may be blocked on at shutdown.
+        // Each worker owns its shutdown wake, including during rollback.
         let mut workers: Vec<VirtioDeviceHandle> = Vec::new();
-        let mut wakes: Vec<Kick> = Vec::new();
 
         // --- port 0: the unnamed console, identical with or without MULTIPORT
         let tx_queue = take(&mut queues[1], "port 0 TX queue")?;
         let tx_evt = take(&mut queue_evts[1], "port 0 TX kick")?;
-        wakes.push(tx_evt.try_clone()?);
         workers.push(spawn_tx_worker(
             Arc::clone(&host),
             Arc::clone(&queue_memory),
@@ -371,7 +369,6 @@ impl VirtioDevice for VirtioConsole {
 
         let rx_queue = take(&mut queues[0], "port 0 RX queue")?;
         let rx_evt = take(&mut queue_evts[0], "port 0 RX kick")?;
-        wakes.push(rx_evt.try_clone()?);
         workers.push(spawn_rx_worker(
             Arc::clone(&host),
             Arc::clone(&queue_memory),
@@ -482,10 +479,6 @@ impl VirtioDevice for VirtioConsole {
                 {
                     handle.shutdown();
                 }
-                // Release any worker parked in a blocking `Kick::read`.
-                for wake in &wakes {
-                    let _ = wake.write(1);
-                }
             },
             move || {
                 let drained: Vec<_> = std::mem::take(
@@ -544,17 +537,22 @@ fn spawn_tx_worker(
     kick: Kick,
     call_interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        tx_worker(
-            queue_memory,
-            buffer_memory,
-            queue,
-            kick,
-            call_interrupt,
-            token,
-        );
-        Ok(())
-    }))
+    let wake = kick.clone();
+    host.spawn(
+        "console tx".into(),
+        Box::new(move |token| {
+            tx_worker(
+                queue_memory,
+                buffer_memory,
+                queue,
+                kick,
+                call_interrupt,
+                token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
+    .map(|handle| handle.with_shutdown_wake(wake))
 }
 
 fn spawn_rx_worker(
@@ -565,17 +563,22 @@ fn spawn_rx_worker(
     kick: Kick,
     call_interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        rx_worker(
-            queue_memory,
-            buffer_memory,
-            queue,
-            kick,
-            call_interrupt,
-            token,
-        );
-        Ok(())
-    }))
+    let wake = kick.clone();
+    host.spawn(
+        "console rx".into(),
+        Box::new(move |token| {
+            rx_worker(
+                queue_memory,
+                buffer_memory,
+                queue,
+                kick,
+                call_interrupt,
+                token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
+    .map(|handle| handle.with_shutdown_wake(wake))
 }
 
 /// Take one indexed activation input, naming it if it is somehow already gone.
@@ -598,20 +601,22 @@ fn spawn_control_worker(
     tx_call_interrupt: Option<Interrupt>,
     resize: Option<resize::Receiver>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        control_worker(
-            &plane,
-            &queue_memory,
-            &buffer_memory,
-            rx_queue,
-            tx_queue,
-            rx_call_interrupt.as_ref(),
-            tx_call_interrupt.as_ref(),
-            &token,
-            resize,
-        );
-        Ok(())
-    }))
+    host.spawn(
+        "console control".into(),
+        Box::new(move |token| {
+            Ok(control_worker(
+                &plane,
+                &queue_memory,
+                &buffer_memory,
+                rx_queue,
+                tx_queue,
+                rx_call_interrupt.as_ref(),
+                tx_call_interrupt.as_ref(),
+                &token,
+                resize,
+            ))
+        }),
+    )
 }
 
 /// Spawn the host → guest worker for one named port: read its pipe, hand the
@@ -625,18 +630,21 @@ fn spawn_port_rx_worker(
     queue: Queue,
     call_interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        port_rx_worker(
-            &end,
-            &liveness,
-            &queue_memory,
-            &buffer_memory,
-            queue,
-            call_interrupt.as_ref(),
-            &token,
-        );
-        Ok(())
-    }))
+    host.spawn(
+        format!("console port {} RX", liveness.id),
+        Box::new(move |token| {
+            port_rx_worker(
+                &end,
+                &liveness,
+                &queue_memory,
+                &buffer_memory,
+                queue,
+                call_interrupt.as_ref(),
+                &token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
 }
 
 /// Spawn the guest → host worker for one named port: drain its transmitq and
@@ -650,18 +658,21 @@ fn spawn_port_tx_worker(
     queue: Queue,
     call_interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        port_tx_worker(
-            &end,
-            &liveness,
-            &queue_memory,
-            &buffer_memory,
-            queue,
-            call_interrupt.as_ref(),
-            &token,
-        );
-        Ok(())
-    }))
+    host.spawn(
+        format!("console port {} TX", liveness.id),
+        Box::new(move |token| {
+            port_tx_worker(
+                &end,
+                &liveness,
+                &queue_memory,
+                &buffer_memory,
+                queue,
+                call_interrupt.as_ref(),
+                &token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
 }
 
 /// Drive the control plane until shutdown.
@@ -681,7 +692,7 @@ fn control_worker(
     tx_call_interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
     mut resize: Option<resize::Receiver>,
-) {
+) -> dillo_virtio::DeviceExit {
     let rx_queue = Arc::new(Mutex::new(rx_queue));
     let tx_queue = Arc::new(Mutex::new(tx_queue));
     while !token.is_shutdown_requested() {
@@ -734,6 +745,7 @@ fn control_worker(
             thread::sleep(PIPE_POLL);
         }
     }
+    dillo_virtio::DeviceExit::Cancelled
 }
 
 /// Host → guest for one named port.
@@ -745,7 +757,7 @@ fn port_rx_worker(
     queue: Queue,
     call_interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Arc::new(Mutex::new(queue));
     let mut pending: VecDeque<u8> = VecDeque::new();
     let mut host_open = true;
@@ -764,7 +776,7 @@ fn port_rx_worker(
                 Ok(pipe::Transfer::Closed) => host_open = false,
                 Err(e) => {
                     log::warn!("virtio-console: port {} rx read failed: {e}", liveness.id);
-                    host_open = false;
+                    return Err(e);
                 }
             }
         }
@@ -793,12 +805,13 @@ fn port_rx_worker(
         // every other port untouched.
         if !host_open && pending.is_empty() {
             liveness.direction_closed(end.direction());
-            return;
+            return Ok(dillo_virtio::DeviceExit::EndpointClosed);
         }
         if !progress {
             thread::sleep(PIPE_POLL);
         }
     }
+    Ok(dillo_virtio::DeviceExit::Cancelled)
 }
 
 /// Guest → host for one named port.
@@ -810,7 +823,7 @@ fn port_tx_worker(
     queue: Queue,
     call_interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Arc::new(Mutex::new(queue));
     let mut backlog: VecDeque<u8> = VecDeque::new();
     let mut host_open = true;
@@ -846,9 +859,7 @@ fn port_tx_worker(
                 }
                 Err(e) => {
                     log::warn!("virtio-console: port {} tx write failed: {e}", liveness.id);
-                    host_open = false;
-                    backlog.clear();
-                    liveness.direction_closed(end.direction());
+                    return Err(e);
                 }
             }
         }
@@ -857,6 +868,7 @@ fn port_tx_worker(
             thread::sleep(PIPE_POLL);
         }
     }
+    Ok(dillo_virtio::DeviceExit::Cancelled)
 }
 
 fn tx_worker(
@@ -866,15 +878,15 @@ fn tx_worker(
     kick: Kick,
     call_interrupt: Option<Interrupt>,
     token: VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Arc::new(Mutex::new(queue));
     loop {
         if let Err(e) = kick.read() {
             log::error!("virtio-console TX: kick read error: {e}");
-            return;
+            return Err(e);
         }
         if token.is_shutdown_requested() {
-            return;
+            return Ok(dillo_virtio::DeviceExit::Cancelled);
         }
         drain_tx(
             &queue_memory,
@@ -892,30 +904,36 @@ fn rx_worker(
     kick: Kick,
     call_interrupt: Option<Interrupt>,
     token: VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Arc::new(Mutex::new(queue));
     let mut pending = VecDeque::new();
     loop {
-        if token.is_shutdown_requested() {
-            return;
+        let cancelled = token.is_shutdown_requested();
+        input::check_failure()?;
+        if cancelled {
+            return Ok(dillo_virtio::DeviceExit::Cancelled);
         }
         if pending.is_empty() {
             match input::next() {
-                Ok(Some(bytes)) => pending.extend(bytes),
+                Ok(Some(input::Input::Data(bytes))) => pending.extend(bytes),
+                Ok(Some(input::Input::Closed)) => {
+                    return Ok(dillo_virtio::DeviceExit::EndpointClosed);
+                }
                 Ok(None) => {
                     thread::sleep(PIPE_POLL);
                     continue;
                 }
                 Err(error) => {
-                    log::debug!("virtio-console stdin ended: {error}");
-                    return;
+                    return Err(error);
                 }
             }
         }
 
         while !pending.is_empty() {
-            if token.is_shutdown_requested() {
-                return;
+            let cancelled = token.is_shutdown_requested();
+            input::check_failure()?;
+            if cancelled {
+                return Ok(dillo_virtio::DeviceExit::Cancelled);
             }
             if drain_rx(
                 &queue_memory,
@@ -928,7 +946,7 @@ fn rx_worker(
             }
             if let Err(e) = kick.read() {
                 log::error!("virtio-console RX: kick read error: {e}");
-                return;
+                return Err(e);
             }
         }
     }
@@ -1118,7 +1136,9 @@ fn push_to_queue(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_machine::memory::{
+        AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
+    };
     use dillo_virtio::queue::VIRTQ_DESC_F_WRITE;
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
 
@@ -1703,7 +1723,7 @@ mod tests {
         // Close the host end so the worker drains, reports the close, and
         // returns on its own rather than waiting for shutdown.
         drop(write_end);
-        port_rx_worker(
+        let exit = port_rx_worker(
             &end,
             &live,
             &tq.queue_memory,
@@ -1711,7 +1731,9 @@ mod tests {
             tq.queue.lock().expect("queue").clone(),
             None,
             &token(&stop),
-        );
+        )
+        .unwrap();
+        assert_eq!(exit, dillo_virtio::DeviceExit::EndpointClosed);
 
         assert_eq!(tq.get(0, 5), b"hello");
         assert_eq!(
@@ -1750,7 +1772,7 @@ mod tests {
             buf[..n].to_vec()
         });
 
-        port_tx_worker(
+        let exit = port_tx_worker(
             &end,
             &live,
             &tq.queue_memory,
@@ -1758,7 +1780,9 @@ mod tests {
             queue,
             None,
             &token(&stop),
-        );
+        )
+        .unwrap();
+        assert_eq!(exit, dillo_virtio::DeviceExit::Cancelled);
 
         assert_eq!(reader.join().expect("reader"), b"from guest\0\0\0\0\0\0");
     }

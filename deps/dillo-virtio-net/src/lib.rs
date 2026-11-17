@@ -41,7 +41,7 @@ mod macvtap;
 
 use std::sync::{Arc, Mutex};
 
-use dillo_mmio::Interrupt;
+use dillo_machine::interrupt::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
 use dillo_virtio::{
     ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
@@ -192,7 +192,6 @@ impl VirtioDevice for VirtioNet {
         // Queue 1 is TX (guest → host). Kick-driven worker.
         let tx_queue = queues.remove(1);
         let tx_evt = queue_evts.remove(1);
-        let tx_wake = tx_evt.try_clone()?;
         let tx_handle = Arc::new(Mutex::new(Some(spawn_tx_worker(
             Arc::clone(&host),
             Arc::clone(&self.backend),
@@ -238,10 +237,6 @@ impl VirtioDevice for VirtioNet {
                 {
                     handle.shutdown();
                 }
-                // Wake the kick-blocked TX worker so it observes shutdown. The
-                // RX worker polls the backend with a bounded timeout, so it
-                // observes shutdown on its own.
-                let _ = tx_wake.write(1);
             },
             move || {
                 if let Some(handle) = tx_handle
@@ -282,18 +277,23 @@ fn spawn_tx_worker(
     kick: Kick,
     interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        tx_worker(
-            &backend,
-            &queue_memory,
-            &buffer_memory,
-            queue,
-            &kick,
-            interrupt.as_ref(),
-            &token,
-        );
-        Ok(())
-    }))
+    let wake = kick.clone();
+    host.spawn(
+        "net tx".into(),
+        Box::new(move |token| {
+            tx_worker(
+                &backend,
+                &queue_memory,
+                &buffer_memory,
+                queue,
+                &kick,
+                interrupt.as_ref(),
+                &token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
+    .map(|handle| handle.with_shutdown_wake(wake))
 }
 
 fn spawn_rx_worker(
@@ -304,17 +304,20 @@ fn spawn_rx_worker(
     queue: Queue,
     interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        rx_worker(
-            &backend,
-            &queue_memory,
-            &buffer_memory,
-            queue,
-            interrupt.as_ref(),
-            &token,
-        );
-        Ok(())
-    }))
+    host.spawn(
+        "net rx".into(),
+        Box::new(move |token| {
+            rx_worker(
+                &backend,
+                &queue_memory,
+                &buffer_memory,
+                queue,
+                interrupt.as_ref(),
+                &token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
 }
 
 /// TX worker: blocks on the queue kick, drains guest → host frames, hands each
@@ -328,15 +331,15 @@ fn tx_worker(
     kick: &Kick,
     interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Mutex::new(queue);
     loop {
         if let Err(e) = kick.read() {
             log::error!("virtio-net TX: kick read error: {e}");
-            return;
+            return Err(e);
         }
         if token.is_shutdown_requested() {
-            return;
+            return Ok(dillo_virtio::DeviceExit::Cancelled);
         }
         drain_tx(backend, queue_memory, buffer_memory, &queue, interrupt);
     }
@@ -407,13 +410,13 @@ fn rx_worker(
     queue: Queue,
     interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Mutex::new(queue);
     let mut scratch = vec![0u8; MAX_FRAME_LEN];
     let mut pending: Option<Vec<u8>> = None;
     loop {
         if token.is_shutdown_requested() {
-            return;
+            return Ok(dillo_virtio::DeviceExit::Cancelled);
         }
         let frame = match pending.take() {
             Some(frame) => frame,
@@ -421,10 +424,9 @@ fn rx_worker(
                 Ok(Some(n)) => scratch[..n].to_vec(),
                 // Timeout: loop to re-check shutdown, then poll again.
                 Ok(None) => continue,
-                Err(e) => {
-                    log::warn!("virtio-net RX: backend recv: {e}");
-                    continue;
-                }
+                // A native read may be interrupted after readiness polling.
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
             },
         };
         let mut q = queue.lock().expect("virtio-net RX queue mutex");
@@ -500,7 +502,9 @@ mod tests {
     use std::io;
     use std::sync::Mutex as StdMutex;
 
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_machine::memory::{
+        AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
+    };
     use dillo_virtio::queue::VIRTQ_DESC_F_WRITE;
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
     use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryMmap};
@@ -576,6 +580,42 @@ mod tests {
         q.avail_ring = GuestAddress(avail);
         q.used_ring = GuestAddress(used);
         q
+    }
+
+    #[test]
+    fn rx_retries_interrupted_reads_and_timeout_but_reports_fatal_errors() {
+        #[derive(Debug)]
+        struct Backend(std::sync::atomic::AtomicUsize);
+        impl NetBackend for Backend {
+            fn send(&self, _: &[u8]) -> io::Result<()> {
+                unreachable!()
+            }
+            fn recv(&self, _: &mut [u8]) -> io::Result<Option<usize>> {
+                match self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) {
+                    0 => Err(io::ErrorKind::Interrupted.into()),
+                    1 => Ok(None),
+                    2 => Err(io::Error::other("fatal receive failure")),
+                    _ => panic!("fatal receive error must not be retried"),
+                }
+            }
+        }
+        let backend: Arc<dyn NetBackend> =
+            Arc::new(Backend(std::sync::atomic::AtomicUsize::new(0)));
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let qmem: Arc<dyn QueueMemory> =
+            Arc::new(SharedQueueMemory::new(vec![shared(&mem, 0, 0x4000)]));
+        let bmem: Arc<dyn VirtioMemory> =
+            Arc::new(SharedVirtioMemory::new(vec![shared(&mem, 0x5000, 0x1000)]));
+        let error = rx_worker(
+            &backend,
+            &qmem,
+            &bmem,
+            ready_queue(0x100, 0x1000, 0x2000),
+            None,
+            &VirtioRunToken::from_fn(|| false),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "fatal receive failure");
     }
 
     /// TX: a guest frame (virtio_net_hdr + Ethernet) is handed to the backend

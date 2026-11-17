@@ -24,7 +24,7 @@ mod fuse;
 
 use std::sync::{Arc, Mutex};
 
-use dillo_mmio::Interrupt;
+use dillo_machine::interrupt::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
 use dillo_virtio::{
     ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
@@ -173,16 +173,15 @@ impl VirtioDevice for VirtioFs {
         // uniform, so each worker runs the same drain over shared state.
         let mut workers: Vec<Arc<Mutex<Option<VirtioDeviceHandle>>>> =
             Vec::with_capacity(NUM_QUEUES);
-        let mut wakes: Vec<Kick> = Vec::with_capacity(NUM_QUEUES);
         for index in 0..NUM_QUEUES {
             let queue = queues.remove(0);
             let evt = queue_evts.remove(0);
-            wakes.push(evt.try_clone()?);
             let call_interrupt = activation.queue_interrupt(index);
             let handle = spawn_queue_worker(
                 Arc::clone(&host),
                 Arc::clone(&queue_memory),
                 Arc::clone(&buffer_memory),
+                index,
                 queue,
                 evt,
                 call_interrupt,
@@ -209,9 +208,6 @@ impl VirtioDevice for VirtioFs {
                         handle.shutdown();
                     }
                 }
-                for wake in &wakes {
-                    let _ = wake.write(1);
-                }
             },
             move || {
                 for worker in &join_workers {
@@ -230,25 +226,31 @@ fn spawn_queue_worker(
     host: Arc<dyn VirtioDeviceHost>,
     queue_memory: Arc<dyn QueueMemory>,
     buffer_memory: Arc<dyn VirtioMemory>,
+    queue_index: usize,
     queue: Queue,
     kick: Kick,
     call_interrupt: Option<Interrupt>,
     state: Arc<Mutex<FsState>>,
     backend: Arc<dyn FsBackend>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        queue_worker(
-            queue_memory,
-            buffer_memory,
-            queue,
-            kick,
-            call_interrupt,
-            state,
-            backend,
-            token,
-        );
-        Ok(())
-    }))
+    let wake = kick.clone();
+    host.spawn(
+        format!("fs queue {queue_index}"),
+        Box::new(move |token| {
+            queue_worker(
+                queue_memory,
+                buffer_memory,
+                queue,
+                kick,
+                call_interrupt,
+                state,
+                backend,
+                token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
+    .map(|handle| handle.with_shutdown_wake(wake))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -261,15 +263,15 @@ fn queue_worker(
     state: Arc<Mutex<FsState>>,
     backend: Arc<dyn FsBackend>,
     token: VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Arc::new(Mutex::new(queue));
     loop {
         if let Err(e) = kick.read() {
             log::error!("virtio-fs: kick read error: {e}");
-            return;
+            return Err(e);
         }
         if token.is_shutdown_requested() {
-            return;
+            return Ok(dillo_virtio::DeviceExit::Cancelled);
         }
         drain_requests(
             &queue_memory,
@@ -375,10 +377,135 @@ fn scatter_write(buffer_memory: &Arc<dyn VirtioMemory>, writable: &[Desc], reply
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_machine::memory::{
+        AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
+    };
     use dillo_virtio::queue::VIRTQ_DESC_F_NEXT;
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
     use vm_memory::{Address, Bytes, GuestMemoryMmap};
+
+    #[test]
+    fn later_spawn_failure_wakes_and_joins_the_first_queue_worker() {
+        use dillo_virtio::DeviceJoinError;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        #[derive(Debug)]
+        struct ObservedKick {
+            inner: Kick,
+            entered: mpsc::Sender<()>,
+            shutdown: Arc<AtomicBool>,
+            wakes: Arc<AtomicUsize>,
+            woke_before_shutdown: Arc<AtomicBool>,
+        }
+        impl dillo_machine::notification::WriteNotification for ObservedKick {
+            fn read(&self) -> std::io::Result<u64> {
+                self.entered.send(()).unwrap();
+                self.inner.read()
+            }
+            fn write(&self, count: u64) -> std::io::Result<()> {
+                if !self.shutdown.load(Ordering::Acquire) {
+                    self.woke_before_shutdown.store(true, Ordering::Release);
+                }
+                self.wakes.fetch_add(1, Ordering::Relaxed);
+                self.inner.write(count)
+            }
+        }
+        #[derive(Debug)]
+        struct FailSecondSpawn {
+            entered: Mutex<mpsc::Receiver<()>>,
+            shutdown: Arc<AtomicBool>,
+            spawned: AtomicUsize,
+            joined: Arc<AtomicUsize>,
+        }
+        impl VirtioDeviceHost for FailSecondSpawn {
+            fn spawn(
+                &self,
+                _name: String,
+                run: Box<
+                    dyn FnOnce(VirtioRunToken) -> Result<dillo_virtio::DeviceExit, DeviceJoinError>
+                        + Send,
+                >,
+            ) -> Result<VirtioDeviceHandle, ActivateError> {
+                if self.spawned.fetch_add(1, Ordering::Relaxed) == 1 {
+                    self.entered
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap();
+                    return Err(ActivateError::Io(std::io::Error::other(
+                        "second spawn failed",
+                    )));
+                }
+                let shutdown = Arc::clone(&self.shutdown);
+                let token_shutdown = Arc::clone(&shutdown);
+                let worker = std::thread::spawn(move || {
+                    run(VirtioRunToken::from_fn(move || {
+                        token_shutdown.load(Ordering::Acquire)
+                    }))
+                });
+                let joined = Arc::clone(&self.joined);
+                Ok(VirtioDeviceHandle::new(
+                    move || shutdown.store(true, Ordering::Release),
+                    move || {
+                        joined.fetch_add(1, Ordering::Relaxed);
+                        worker
+                            .join()
+                            .map_err(|_| DeviceJoinError::Panicked)?
+                            .map(|_| ())
+                    },
+                ))
+            }
+        }
+
+        let (entered, wait) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let woke_before_shutdown = Arc::new(AtomicBool::new(false));
+        let joined = Arc::new(AtomicUsize::new(0));
+        let rescue = Kick::new().unwrap();
+        let kick = Kick::from_notification(Arc::new(ObservedKick {
+            inner: rescue.clone(),
+            entered,
+            shutdown: Arc::clone(&shutdown),
+            wakes: Arc::clone(&wakes),
+            woke_before_shutdown: Arc::clone(&woke_before_shutdown),
+        }));
+        let host = Arc::new(FailSecondSpawn {
+            entered: Mutex::new(wait),
+            shutdown,
+            spawned: AtomicUsize::new(0),
+            joined: Arc::clone(&joined),
+        });
+        let activation = VirtioActivate::with_host(
+            vec![Queue::new(16), Queue::new(16)],
+            vec![kick, Kick::new().unwrap()],
+            host.clone(),
+        );
+        let (finished, completion) = mpsc::channel();
+        let activation_thread = std::thread::spawn(move || {
+            let mut fs = VirtioFs::new("rollback", Arc::new(MapFs::new()), true).unwrap();
+            let result = fs.activate(activation);
+            finished.send(result.map(drop)).unwrap();
+        });
+        let result = completion.recv_timeout(Duration::from_secs(2));
+        // Rescue a broken implementation only after recording the timeout.
+        // The fallback must never turn a missed shutdown wake into a pass.
+        if result.is_err() {
+            host.shutdown.store(true, Ordering::Release);
+            rescue.write(1).unwrap();
+        }
+        activation_thread.join().unwrap();
+        let error = result
+            .expect("activation rollback must finish without rescue")
+            .unwrap_err();
+        assert!(error.to_string().contains("second spawn failed"));
+        assert_eq!(host.spawned.load(Ordering::Relaxed), 2);
+        assert_eq!(joined.load(Ordering::Relaxed), 1);
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        assert!(!woke_before_shutdown.load(Ordering::Acquire));
+    }
 
     #[test]
     fn config_carries_tag_and_one_request_queue() {

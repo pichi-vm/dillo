@@ -16,7 +16,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use dillo_mmio::Interrupt;
+use dillo_machine::interrupt::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
 use dillo_virtio::{
     ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
@@ -350,13 +350,12 @@ impl VirtioDevice for VirtioBlk {
         let call_interrupt = activation.queue_interrupt(0);
         let queue = queues.remove(0);
         let evt = queue_evts.remove(0);
-        let wake = evt.try_clone()?;
 
         let backing = Arc::clone(&self.backing);
         let read_only = self.read_only;
         let negotiated = activation.negotiated_features();
 
-        let handle = Arc::new(Mutex::new(Some(spawn_request_worker(
+        let handle = spawn_request_worker(
             host,
             queue_memory,
             buffer_memory,
@@ -366,8 +365,7 @@ impl VirtioDevice for VirtioBlk {
             backing,
             read_only,
             negotiated,
-        )?)));
-        let shutdown_handle = Arc::clone(&handle);
+        )?;
 
         self.activated = true;
         log::info!(
@@ -375,24 +373,7 @@ impl VirtioDevice for VirtioBlk {
             self.capacity,
             self.read_only
         );
-        Ok(VirtioDeviceHandle::new(
-            move || {
-                if let Some(handle) = shutdown_handle
-                    .lock()
-                    .expect("virtio-blk handle poisoned")
-                    .as_mut()
-                {
-                    handle.shutdown();
-                }
-                let _ = wake.write(1);
-            },
-            move || {
-                if let Some(handle) = handle.lock().expect("virtio-blk handle poisoned").take() {
-                    handle.join()?;
-                }
-                Ok(())
-            },
-        ))
+        Ok(handle)
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
@@ -416,20 +397,25 @@ fn spawn_request_worker(
     read_only: bool,
     negotiated: u64,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        request_worker(
-            queue_memory,
-            buffer_memory,
-            queue,
-            kick,
-            call_interrupt,
-            backing,
-            read_only,
-            negotiated,
-            token,
-        )
-        .map_err(|e| dillo_virtio::DeviceJoinError::Worker(e.to_string()))
-    }))
+    let wake = kick.clone();
+    host.spawn(
+        "blk request".into(),
+        Box::new(move |token| {
+            request_worker(
+                queue_memory,
+                buffer_memory,
+                queue,
+                kick,
+                call_interrupt,
+                backing,
+                read_only,
+                negotiated,
+                token,
+            )
+            .map_err(|e| dillo_virtio::DeviceJoinError::Worker(e.to_string()))
+        }),
+    )
+    .map(|handle| handle.with_shutdown_wake(wake))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -443,7 +429,7 @@ fn request_worker(
     read_only: bool,
     negotiated: u64,
     token: VirtioRunToken,
-) -> std::io::Result<()> {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Arc::new(Mutex::new(queue));
     loop {
         if let Err(e) = kick.read() {
@@ -451,7 +437,9 @@ fn request_worker(
             return Err(e);
         }
         if token.is_shutdown_requested() {
-            return backing.flush();
+            return backing
+                .flush()
+                .map(|()| dillo_virtio::DeviceExit::Cancelled);
         }
         drain_requests(
             &queue_memory,
@@ -717,7 +705,9 @@ fn process_request(
 mod tests {
     use super::*;
 
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_machine::memory::{
+        AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
+    };
     use dillo_virtio::queue::VIRTQ_DESC_F_NEXT;
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
     use vm_memory::{Address, Bytes, GuestMemoryMmap};
@@ -973,7 +963,9 @@ mod tests {
 #[cfg(test)]
 mod qcow2_tests {
     use super::*;
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_machine::memory::{
+        AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
+    };
     use dillo_virtio::SharedVirtioMemory;
     use vm_memory::{Bytes, GuestMemoryMmap};
 

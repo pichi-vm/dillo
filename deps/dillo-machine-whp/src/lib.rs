@@ -5,6 +5,9 @@
 
 mod cpuid_x86;
 mod hypervisor;
+mod launch_input;
+
+pub use launch_input::CapturedLaunchInput;
 mod ioapic;
 
 /// Reasons a WHP vCPU run returned to backend code.
@@ -28,19 +31,21 @@ mod imp {
         CompatMismatch, FromDevTree, NodeExt, OwnedNodeExt, PropExt,
         devtree::{OwnedTree, Tree},
     };
-    use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
-    use dillo_mmio::{
-        Attach, Interrupt, InterruptError, InterruptLine, MessageInterrupt, MessageInterruptDomain,
-        MmioAttachment, MmioBus, MmioDevice, MmioDeviceHandle, MmioInterrupt,
-        MmioInterruptRequirement, MmioRunToken, MmioSpawnError, MmioWindow, MmioWriteOutcome,
-        SharedMemory,
+    use dillo_machine::attachment::{Attach, DeviceAttachment};
+    use dillo_machine::execution::{DeviceHandle, RunToken, SpawnError};
+    use dillo_machine::interrupt::{
+        Interrupt, InterruptError, InterruptLine, InterruptRequirement, InterruptResource,
+        MessageInterrupt, MessageInterruptDomain,
     };
+    use dillo_machine::memory::{AddressRange, SharedMemory};
+    use dillo_machine::{Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
+    use dillo_mmio::{MmioBus, MmioDevice, MmioWriteOutcome};
     use vm_memory::{GuestAddress, GuestMemoryMmap};
 
-    use crate::VmExit;
     pub use crate::hypervisor::Error;
     use crate::hypervisor::InterruptController;
     use crate::ioapic::IoApic;
+    use crate::{CapturedLaunchInput, VmExit};
 
     fn install_signal_watchers(_supervisor_shutdown: &'static AtomicBool) {}
 
@@ -59,6 +64,7 @@ mod imp {
         inner: crate::hypervisor::Vm,
         mmio_bus: Arc<Mutex<MmioBus>>,
         shared_memory: Vec<Arc<dyn SharedMemory>>,
+        device_failures: dillo_machine::execution::DeviceFailureReporter,
         ioapic: Option<Arc<IoApic>>,
     }
 
@@ -73,6 +79,7 @@ mod imp {
 
     impl Host for Vm {
         type RawStdioGuard = RawStdio;
+        type LaunchInput = CapturedLaunchInput;
 
         const ARCH: HostArchitecture = HostArchitecture::X86_64;
 
@@ -103,6 +110,7 @@ mod imp {
                 inner: crate::hypervisor::Vm::new_x86_64_with_local_apic_count(processor_count)?,
                 mmio_bus,
                 shared_memory: Vec::new(),
+                device_failures: dillo_machine::execution::DeviceFailureReporter::default(),
                 ioapic,
             })
         }
@@ -114,20 +122,13 @@ mod imp {
         fn attach_guest_memory(&mut self, memory: GuestMemoryMmap) -> Result<(), Error> {
             self.set_memory(memory)?;
             let guest_mem = self.guest_memory()?;
-            self.shared_memory = vec![Arc::new(dillo_mmio::MappedSharedMemory::for_guest_memory(
-                guest_mem,
-                dillo_mmio::SharedAccess::ReadWrite,
-            ))];
+            self.shared_memory = vec![Arc::new(
+                dillo_machine::memory::MappedSharedMemory::for_guest_memory(
+                    guest_mem,
+                    dillo_machine::memory::SharedAccess::ReadWrite,
+                ),
+            )];
             Ok(())
-        }
-
-        fn create_vcpu_inner(&self, idx: u32, cpu_profile: &str) -> Result<Vcpu, Error> {
-            let inner = self.inner.create_vcpu(idx, cpu_profile)?;
-            Ok(Vcpu {
-                inner,
-                mmio_bus: Arc::clone(&self.mmio_bus),
-                stop_requested: Arc::new(AtomicBool::new(false)),
-            })
         }
 
         fn fixed_interrupt_requester(&self) -> FixedInterruptRequester {
@@ -142,17 +143,17 @@ mod imp {
 
         fn resolve_interrupts(
             &self,
-            requirements: &[MmioInterruptRequirement],
-        ) -> Result<Vec<MmioInterrupt>, Error> {
+            requirements: &[InterruptRequirement],
+        ) -> Result<Vec<InterruptResource>, Error> {
             requirements
                 .iter()
                 .map(|requirement| match requirement {
-                    MmioInterruptRequirement::Line { source } => {
+                    InterruptRequirement::Line { source } => {
                         let irq = Self::wired_irq_from_cells(&source.cells, source.cell_count)?;
-                        self.create_line_interrupt(irq).map(MmioInterrupt::Line)
+                        self.create_line_interrupt(irq).map(InterruptResource::Line)
                     }
-                    MmioInterruptRequirement::MessageDomain { vectors, .. } => {
-                        Ok(MmioInterrupt::MessageDomain(
+                    InterruptRequirement::MessageDomain { vectors, .. } => {
+                        Ok(InterruptResource::MessageDomain(
                             self.create_message_interrupt_domain(*vectors),
                         ))
                     }
@@ -209,10 +210,34 @@ mod imp {
     }
 
     impl dillo_machine::Machine for Vm {
+        fn device_failures(&self) -> dillo_machine::execution::DeviceFailureObserver {
+            self.device_failures.observer()
+        }
+
         type Error = Error;
-        type Cpu = Cpu;
-        type CpuState = CpuState;
+        type CpuPreparation = CpuPreparation;
         type Memory = Memory;
+
+        fn cpu_preparation(
+            &mut self,
+            index: u32,
+            cpu_profile: dillo_machine::CpuProfile,
+        ) -> Result<CpuPreparation, Error> {
+            if !matches!(cpu_profile, dillo_machine::CpuProfile::X86_64(_)) {
+                return Err(Error::UnhandledExit(
+                    "CPU profile architecture mismatch".into(),
+                ));
+            }
+            Ok(CpuPreparation {
+                index,
+                cpu_profile,
+                creator: self.inner.cpu_creator()?,
+                mmio_bus: Arc::clone(&self.mmio_bus),
+                interrupt: CpuInterrupt {
+                    target: Arc::new(Mutex::new(None)),
+                },
+            })
+        }
 
         fn guest_address_bits() -> Result<u32, Self::Error> {
             crate::hypervisor::guest_address_bits()
@@ -235,6 +260,19 @@ mod imp {
 
         fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Self::Error> {
             self.inner.write_guest(gpa, data)
+        }
+
+        fn zero_guest(&mut self, mut gpa: u64, mut len: u64) -> Result<(), Self::Error> {
+            gpa.checked_add(len)
+                .ok_or_else(|| Error::AddressSpace("guest zero range overflows".into()))?;
+            let zeros = [0u8; 4096];
+            while len > 0 {
+                let count = len.min(zeros.len() as u64) as usize;
+                <Self as dillo_machine::Machine>::write_guest(self, gpa, &zeros[..count])?;
+                gpa += count as u64;
+                len -= count as u64;
+            }
+            Ok(())
         }
     }
 
@@ -312,7 +350,7 @@ mod imp {
                 });
             }
             Ok(Some(Self {
-                ioapic: IoApic::new(MmioWindow { base, size }),
+                ioapic: IoApic::new(AddressRange { base, size }),
             }))
         }
     }
@@ -342,83 +380,98 @@ mod imp {
     }
 
     #[derive(Debug)]
-    pub struct CpuState {
+    pub struct CpuPreparation {
         index: u32,
-        cpu_profile: String,
-        boot_state: Option<pmi::vm::vcpu::x86_64::CpuState>,
+        cpu_profile: dillo_machine::CpuProfile,
+        creator: crate::hypervisor::CpuCreator,
+        mmio_bus: Arc<Mutex<MmioBus>>,
+        interrupt: CpuInterrupt,
     }
-
-    impl dillo_machine::CpuState for CpuState {
+    impl dillo_machine::CpuPreparation for CpuPreparation {
         type Error = Error;
-
-        fn new(
-            index: u32,
-            cpu_profile: &str,
-            boot_state: Option<&dyn BootVcpuState>,
-        ) -> Result<Self, Self::Error> {
-            let boot_state = (index == 0)
-                .then_some(boot_state)
-                .flatten()
-                .map(|state| {
-                    state
-                        .x86_64()
-                        .cloned()
-                        .ok_or_else(|| Error::UnhandledExit("boot vCPU state is not x86_64".into()))
-                })
-                .transpose()?;
-            Ok(Self {
-                index,
-                cpu_profile: cpu_profile.into(),
-                boot_state,
+        type Interrupt = CpuInterrupt;
+        type Runner = CpuRunner;
+        fn interrupt(&self) -> CpuInterrupt {
+            self.interrupt.clone()
+        }
+        fn prepare(self) -> Result<CpuRunner, Error> {
+            let mut vcpu = Vcpu {
+                inner: self.creator.create(self.index, self.cpu_profile.as_str())?,
+                mmio_bus: self.mmio_bus,
+            };
+            if self.index == 0 {
+                vcpu.initialize_bsp()?;
+            }
+            let binding = self.interrupt.bind(vcpu.inner.cancel_handle());
+            Ok(CpuRunner {
+                _binding: binding,
+                vcpu,
+                _owner: std::marker::PhantomData,
             })
         }
     }
 
-    impl Attach<CpuState> for Vm {
-        type Error = Error;
-        type Output = Arc<Cpu>;
-
-        fn attach(&mut self, item: CpuState) -> Result<Self::Output, Self::Error> {
-            let mut vcpu = self.create_vcpu_inner(item.index, &item.cpu_profile)?;
-            if let Some(state) = &item.boot_state {
-                vcpu.set_x86_64_state(state)?;
-            }
-            let stop_requested = Arc::new(AtomicBool::new(false));
-            vcpu.stop_requested = Arc::clone(&stop_requested);
-            let cancel = vcpu.inner.cancel_handle();
-            Ok(Arc::new(Cpu {
-                vcpu: Mutex::new(vcpu),
-                cancel,
-                stop_requested,
-            }))
-        }
+    #[derive(Debug, Clone)]
+    pub struct CpuInterrupt {
+        target: Arc<Mutex<Option<crate::hypervisor::VcpuCancel>>>,
     }
-
-    pub struct Cpu {
-        vcpu: Mutex<Vcpu>,
-        cancel: crate::hypervisor::VcpuCancel,
-        stop_requested: Arc<AtomicBool>,
-    }
-
-    impl std::fmt::Debug for Cpu {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("Cpu").finish_non_exhaustive()
-        }
-    }
-
-    impl dillo_machine::Cpu for Cpu {
-        type Error = Error;
-
-        fn run(&self) -> Result<VcpuStop, Self::Error> {
-            self.vcpu
+    impl CpuInterrupt {
+        fn bind(self, target: crate::hypervisor::VcpuCancel) -> InterruptBinding {
+            *self
+                .target
                 .lock()
-                .expect("WHP vCPU lock poisoned")
-                .run_to_stop()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(target);
+            InterruptBinding { interrupt: self }
         }
+    }
+    impl dillo_machine::CpuInterrupt for CpuInterrupt {
+        type Error = Error;
+        fn interrupt(&self) -> Result<(), Error> {
+            let target = self
+                .target
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match target.as_ref() {
+                Some(target) => target.cancel(),
+                None => Ok(()),
+            }
+        }
+    }
+    #[derive(Debug)]
+    struct InterruptBinding {
+        interrupt: CpuInterrupt,
+    }
+    impl Drop for InterruptBinding {
+        fn drop(&mut self) {
+            self.interrupt
+                .target
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        }
+    }
 
-        fn stop(&self) -> Result<(), Self::Error> {
-            self.stop_requested.store(true, Ordering::Release);
-            self.cancel.cancel()
+    /// Native execution and destruction remain on the preparing thread.
+    ///
+    /// ```compile_fail
+    /// fn move_owner(runner: dillo_machine_whp::CpuRunner) {
+    ///     std::thread::spawn(move || drop(runner));
+    /// }
+    /// ```
+    #[derive(Debug)]
+    pub struct CpuRunner {
+        // Drop clears the wake target under its call lock before native deletion.
+        _binding: InterruptBinding,
+        vcpu: Vcpu,
+        _owner: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
+    impl dillo_machine::CpuRunner for CpuRunner {
+        type Error = Error;
+        fn run(
+            &mut self,
+            termination: &dyn dillo_machine::CpuTermination,
+        ) -> Result<VcpuStop, Error> {
+            self.vcpu.run_to_stop(termination)
         }
     }
 
@@ -437,7 +490,7 @@ mod imp {
         D: MmioDevice + 'static,
     {
         type Error = Error;
-        type Output = Arc<dyn MmioAttachment>;
+        type Output = Arc<dyn DeviceAttachment>;
 
         fn attach(&mut self, item: Arc<D>) -> Result<Self::Output, Self::Error> {
             if !item.shared_memory().is_empty() {
@@ -447,6 +500,9 @@ mod imp {
                 )));
             }
             let interrupts = self.resolve_interrupts(item.interrupts())?;
+            let device_failures = self
+                .device_failures
+                .scoped(format!("MMIO {:?}", item.windows()));
             self.mmio_bus
                 .lock()
                 .expect("MMIO bus lock poisoned")
@@ -454,6 +510,7 @@ mod imp {
             Ok(Arc::new(MachineMmioAttachment {
                 interrupts,
                 shared_memory: self.shared_memory.clone(),
+                device_failures,
             }))
         }
     }
@@ -668,8 +725,9 @@ mod imp {
     }
 
     struct MachineMmioAttachment {
-        interrupts: Vec<MmioInterrupt>,
+        interrupts: Vec<InterruptResource>,
         shared_memory: Vec<Arc<dyn SharedMemory>>,
+        device_failures: dillo_machine::execution::DeviceFailureReporter,
     }
 
     impl std::fmt::Debug for MachineMmioAttachment {
@@ -677,12 +735,13 @@ mod imp {
             f.debug_struct("MachineMmioAttachment")
                 .field("interrupts", &self.interrupts.len())
                 .field("shared_memory", &self.shared_memory.len())
+                .field("device_failures", &self.device_failures)
                 .finish()
         }
     }
 
-    impl MmioAttachment for MachineMmioAttachment {
-        fn interrupts(&self) -> &[MmioInterrupt] {
+    impl DeviceAttachment for MachineMmioAttachment {
+        fn interrupts(&self) -> &[InterruptResource] {
             &self.interrupts
         }
 
@@ -692,20 +751,30 @@ mod imp {
 
         fn spawn(
             self: Arc<Self>,
-            run: dillo_mmio::MmioDeviceRun,
-        ) -> Result<MmioDeviceHandle, MmioSpawnError> {
+            name: String,
+            run: dillo_machine::execution::DeviceRun,
+        ) -> Result<DeviceHandle, SpawnError> {
             let shutdown = Arc::new(AtomicBool::new(false));
             let token_shutdown = Arc::clone(&shutdown);
-            let token = MmioRunToken::from_fn(move || token_shutdown.load(Ordering::Acquire));
-            let join = std::thread::spawn(move || run(token));
-            Ok(MmioDeviceHandle::new(
+            let token = RunToken::from_fn(move || token_shutdown.load(Ordering::Acquire));
+            let reporter = self.device_failures.scoped(name);
+            let worker_reporter = reporter.clone();
+            let join = std::thread::Builder::new()
+                .spawn(move || worker_reporter.run(run, token))
+                .map_err(|error| {
+                    reporter.report(dillo_machine::execution::JoinError::Spawn(
+                        error.to_string(),
+                    ));
+                    SpawnError
+                })?;
+            Ok(DeviceHandle::new(
                 move || {
                     shutdown.store(true, Ordering::Release);
                     Ok(())
                 },
                 move || match join.join() {
                     Ok(result) => result,
-                    Err(_) => Err(dillo_mmio::MmioJoinError::Panicked),
+                    Err(_) => Err(dillo_machine::execution::JoinError::Panicked),
                 },
             ))
         }
@@ -714,7 +783,6 @@ mod imp {
     struct Vcpu {
         inner: crate::hypervisor::Vcpu,
         mmio_bus: Arc<Mutex<MmioBus>>,
-        stop_requested: Arc<AtomicBool>,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -740,14 +808,14 @@ mod imp {
     }
 
     impl Vcpu {
-        fn set_x86_64_state(
-            &mut self,
-            state: &pmi::vm::vcpu::x86_64::CpuState,
-        ) -> Result<(), Error> {
-            self.inner.set_x86_64_state(state)
+        fn initialize_bsp(&mut self) -> Result<(), Error> {
+            self.inner.initialize_bsp()
         }
 
-        fn run(&mut self) -> Result<VcpuExit, Error> {
+        fn run(
+            &mut self,
+            termination: &dyn dillo_machine::CpuTermination,
+        ) -> Result<VcpuExit, Error> {
             loop {
                 let bus = Arc::clone(&self.mmio_bus);
                 let exit = self.inner.run(
@@ -763,6 +831,7 @@ mod imp {
                         }
                         handled
                     },
+                    termination,
                 )?;
                 match exit {
                     VmExit::MmioRead { addr, size } => {
@@ -806,14 +875,17 @@ mod imp {
             }
         }
 
-        fn run_to_stop(&mut self) -> Result<VcpuStop, Error> {
+        fn run_to_stop(
+            &mut self,
+            termination: &dyn dillo_machine::CpuTermination,
+        ) -> Result<VcpuStop, Error> {
             loop {
-                if self.stop_requested.load(Ordering::Acquire) {
+                if termination.is_requested() {
                     return Ok(VcpuStop::Stopped);
                 }
-                match self.run()? {
+                match self.run(termination)? {
                     VcpuExit::MmioWrite { .. } => {}
-                    VcpuExit::Interrupted => return Ok(VcpuStop::Stopped),
+                    VcpuExit::Interrupted => continue,
                     VcpuExit::GuestPoweroff => return Ok(VcpuStop::GuestPoweroff),
                     VcpuExit::GuestReset => return Ok(VcpuStop::GuestReset),
                     VcpuExit::Shutdown => {
@@ -826,9 +898,472 @@ mod imp {
     }
 
     #[cfg(test)]
+    mod owner_tests {
+        use super::*;
+        use dillo_machine::{
+            CpuInterrupt as _, CpuPreparation as _, CpuRunner as _, Machine as _, Memory as _,
+        };
+        use std::thread;
+
+        #[test]
+        fn attached_worker_failure_stops_native_cpus_and_preserves_retained_ram() {
+            use dillo_machine::Machine as _;
+            use dillo_machine::execution::JoinError;
+            use dillo_machine::memory::{AddressRange, SharedAccess, SharedRange};
+            use dillo_mmio::{MmioError, MmioWriteOutcome};
+            use std::sync::mpsc;
+            use std::time::Duration;
+
+            struct WorkerEndpoint {
+                window: [AddressRange; 1],
+            }
+            impl MmioDevice for WorkerEndpoint {
+                fn windows(&self) -> &[AddressRange] {
+                    &self.window
+                }
+                fn read(&self, _: AddressRange, _: u64, _: &mut [u8]) -> Result<(), MmioError> {
+                    Err(MmioError::Unsupported)
+                }
+                fn write(
+                    &self,
+                    _: AddressRange,
+                    _: u64,
+                    _: &[u8],
+                ) -> Result<MmioWriteOutcome, MmioError> {
+                    Err(MmioError::Unsupported)
+                }
+            }
+
+            let _guard = crate::hypervisor::whp_test_lock();
+            if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
+                crate::hypervisor::memory_tests::NativeMemoryTest::spawn("imp::owner_tests::attached_worker_failure_stops_native_cpus_and_preserves_retained_ram").verify();
+                return;
+            }
+            for panics in [false, true] {
+                let mut vm = Vm::new_x86_64(2, None).expect("native WHP is required");
+                let base = 0xffff_f000;
+                vm.attach(
+                    Memory::from_ranges(&[RamRange {
+                        gpa: base,
+                        size: 0x1000,
+                    }])
+                    .unwrap(),
+                )
+                .unwrap();
+                let profile = dillo_machine::CpuProfile::X86_64(pmi::x86_64::Profile::V1);
+
+                let observer = vm.device_failures();
+                let probe = vm.inner.allocation_probe(0);
+                let retained = vm.shared_memory[0]
+                    .region(SharedRange {
+                        gpa: base,
+                        size: 0x1000,
+                        access: SharedAccess::ReadWrite,
+                    })
+                    .unwrap();
+                // PMI enters flat 32-bit protected mode. Store an aligned
+                // dword in retained RAM, then spin without guest exits. This
+                // fixture qualifies worker-failure cancellation, not WHP MMIO
+                // instruction emulation in the fixed initial CPU state.
+                vm.write_guest(
+                    0xffff_fff0,
+                    &[0xc7, 0x05, 0x80, 0xf0, 0xff, 0xff, 1, 0, 0, 0, 0xeb, 0xfe],
+                )
+                .unwrap();
+                let progress = retained.clone();
+                // Obtain the real machine-bound worker service; guest code
+                // does not access this attachment's MMIO window.
+                let attachment = vm
+                    .attach(Arc::new(WorkerEndpoint {
+                        window: [AddressRange {
+                            base: 0x0b00_0000,
+                            size: 0x1000,
+                        }],
+                    }))
+                    .unwrap();
+                let worker = attachment
+                    .spawn(
+                        "native failing worker".into(),
+                        Box::new(move |_| {
+                            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                            while progress.load_u32_le(0x80).map_err(|error| {
+                                JoinError::Host(format!("guest progress missing: {error}"))
+                            })? != 1
+                            {
+                                if std::time::Instant::now() >= deadline {
+                                    return Err(JoinError::Host(
+                                        "guest progress missing: timed out".into(),
+                                    ));
+                                }
+                                thread::sleep(Duration::from_millis(1));
+                            }
+                            assert!(!panics, "injected native attached worker panic");
+                            Err(JoinError::Host(
+                                "injected native attached worker error".into(),
+                            ))
+                        }),
+                    )
+                    .unwrap();
+                let shutdown = Arc::new(AtomicBool::new(false));
+                let rescue_shutdown = Arc::clone(&shutdown);
+                let (done, completed) = mpsc::channel();
+                let rescue = thread::spawn(move || {
+                    let rescued = completed.recv_timeout(Duration::from_secs(5)).is_err();
+                    if rescued {
+                        rescue_shutdown.store(true, Ordering::Release);
+                    }
+                    rescued
+                });
+                let result = dillo_runtime::PreparingCpus::spawn(&mut vm, 2, profile)
+                    .and_then(|cpus| cpus.prepare(shutdown.as_ref()))
+                    .and_then(|cpus| cpus.run(shutdown.as_ref()));
+                let _ = done.send(());
+                let rescued = rescue.join().unwrap();
+                let joined = worker.join();
+                assert!(
+                    !rescued,
+                    "runtime required operator rescue after attached failure"
+                );
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("native failing worker"), "{error}");
+                assert!(!error.contains("guest progress missing"), "{error}");
+                assert!(joined.is_err());
+                assert!(observer.check().is_err());
+                probe.assert_retained();
+                drop(vm);
+                probe.assert_retained();
+                retained.write(0x80, b"retained").unwrap();
+                let mut bytes = [0; 8];
+                retained.read(0x80, &mut bytes).unwrap();
+                assert_eq!(&bytes, b"retained");
+                drop(retained);
+                probe.assert_reclaimed();
+            }
+        }
+
+        #[test]
+        fn native_ram_exports_preserve_old_allocation_across_fresh_partitions() {
+            use crate::hypervisor::memory_tests::NativeMemoryTest;
+            use vm_memory::Bytes;
+            let _guard = crate::hypervisor::whp_test_lock();
+            if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
+                NativeMemoryTest::spawn("imp::owner_tests::native_ram_exports_preserve_old_allocation_across_fresh_partitions").verify();
+                return;
+            }
+            let mut vm = Vm::new_x86_64(1, None).expect("native WHP is required");
+            vm.attach(
+                Memory::from_ranges(&[RamRange {
+                    gpa: 0x10000,
+                    size: 0x1000,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            vm.write_guest(0x10100, &[0x11, 0x22]).unwrap();
+            let original = vm.inner.allocation_probe(0);
+            let export = vm.shared_memory[0]
+                .region(dillo_machine::memory::SharedRange {
+                    gpa: 0x10000,
+                    size: 0x1000,
+                    access: dillo_machine::memory::SharedAccess::ReadWrite,
+                })
+                .unwrap();
+            drop(vm);
+            original.assert_retained();
+            let mut replacement = Vm::new_x86_64(1, None).unwrap();
+            replacement
+                .attach(
+                    Memory::from_ranges(&[RamRange {
+                        gpa: 0x10000,
+                        size: 0x1000,
+                    }])
+                    .unwrap(),
+                )
+                .unwrap();
+            replacement.write_guest(0x10100, &[0x33, 0x44]).unwrap();
+            let fresh = replacement.inner.allocation_probe(0);
+            let mut bytes = [0; 2];
+            export.read(0x100, &mut bytes).unwrap();
+            assert_eq!(bytes, [0x11, 0x22]);
+            export.write(0x100, &[0x55, 0x66]).unwrap();
+            replacement
+                .guest_memory()
+                .unwrap()
+                .read_slice(&mut bytes, GuestAddress(0x10100))
+                .unwrap();
+            assert_eq!(bytes, [0x33, 0x44]);
+            drop(export);
+            original.assert_reclaimed();
+            fresh.assert_retained();
+            drop(replacement);
+            fresh.assert_reclaimed();
+        }
+
+        #[test]
+        fn native_preparation_runner_and_cancel_retain_registered_ram() {
+            use crate::hypervisor::memory_tests::NativeMemoryTest;
+            let _guard = crate::hypervisor::whp_test_lock();
+            if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
+                NativeMemoryTest::spawn(
+                    "imp::owner_tests::native_preparation_runner_and_cancel_retain_registered_ram",
+                )
+                .verify();
+                return;
+            }
+            let mut vm = Vm::new_x86_64(1, None).expect("native WHP is required");
+            let profile = dillo_machine::CpuProfile::X86_64(pmi::x86_64::Profile::V1);
+            assert!(matches!(
+                vm.cpu_preparation(0, profile),
+                Err(Error::MemoryNotReady)
+            ));
+            vm.attach(
+                Memory::from_ranges(&[RamRange {
+                    gpa: 0x10000,
+                    size: 0x1000,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            // Native progress marker, followed by an infinite guest loop.
+            vm.write_guest(0x10000, &[0xe6, 0x42, 0xeb, 0xfe]).unwrap();
+            let original = vm.inner.allocation_probe(0);
+            let input = vm.cpu_preparation(0, profile).unwrap();
+            let interrupt = input.interrupt();
+            drop(vm);
+            original.assert_retained();
+            let (progress, observed_progress) = std::sync::mpsc::channel();
+            let (completed, observed_completion) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let termination = Arc::new(AtomicBool::new(false));
+            thread::scope(|scope| {
+                let token = Arc::clone(&termination);
+                let worker = scope.spawn(move || {
+                    let mut runner = input.prepare().unwrap();
+                    runner
+                        .vcpu
+                        .inner
+                        .initialize_test_real_mode(0x10000, 0x5a)
+                        .unwrap();
+                    let marker = runner
+                        .vcpu
+                        .inner
+                        .run(|_, _| 0, |_, _| false, token.as_ref())
+                        .unwrap();
+                    assert!(
+                        matches!(
+                            marker,
+                            VmExit::PioWrite {
+                                port: 0x42,
+                                data: [0x5a, ..],
+                                size: 1
+                            }
+                        ),
+                        "{marker:?}"
+                    );
+                    progress.send(()).unwrap();
+                    let exit = runner
+                        .vcpu
+                        .inner
+                        .run(|_, _| 0, |_, _| false, token.as_ref())
+                        .unwrap();
+                    assert!(matches!(exit, VmExit::Interrupted), "{exit:?}");
+                    assert!(
+                        !token.load(Ordering::Acquire),
+                        "live cancellation must precede fallback termination"
+                    );
+                    completed.send(()).unwrap();
+                    released
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                });
+                let progress = observed_progress.recv_timeout(std::time::Duration::from_secs(5));
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let mut cancellation = None;
+                let mut wake_error = None;
+                // WHP only guarantees cancelling an active call. Repeated
+                // native requests close the progress-marker/next-entry race.
+                while progress.is_ok() && std::time::Instant::now() < deadline {
+                    if let Err(error) = interrupt.interrupt() {
+                        wake_error = Some(error);
+                        break;
+                    }
+                    match observed_completion.recv_timeout(std::time::Duration::from_millis(1)) {
+                        Ok(()) => {
+                            cancellation = Some(());
+                            break;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                if cancellation.is_some() {
+                    original.assert_retained();
+                    assert!(interrupt.target.lock().unwrap().is_some());
+                }
+                // Cleanup cannot turn a failed live-cancel assertion into a
+                // pass. The receipt above was required while the token=false.
+                termination.store(true, Ordering::Release);
+                let _ = release.send(());
+                let cleanup_deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !worker.is_finished() && std::time::Instant::now() < cleanup_deadline {
+                    let _ = interrupt.interrupt();
+                    std::thread::yield_now();
+                }
+                let result = worker.join();
+                assert!(
+                    progress.is_ok(),
+                    "actual guest progress must precede cancellation: {progress:?}"
+                );
+                assert!(wake_error.is_none(), "native wake failed: {wake_error:?}");
+                assert!(
+                    cancellation.is_some(),
+                    "live native cancellation must complete before fallback"
+                );
+                result.unwrap();
+            });
+            assert!(interrupt.target.lock().unwrap().is_none());
+            interrupt.interrupt().expect("retired wake is harmless");
+            original.assert_reclaimed();
+        }
+
+        #[test]
+        fn native_line_and_msi_services_retain_their_partition_ram() {
+            use crate::hypervisor::memory_tests::NativeMemoryTest;
+            let _guard = crate::hypervisor::whp_test_lock();
+            if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
+                NativeMemoryTest::spawn(
+                    "imp::owner_tests::native_line_and_msi_services_retain_their_partition_ram",
+                )
+                .verify();
+                return;
+            }
+            let window = AddressRange {
+                base: 0xfec0_0000,
+                size: 0x1000,
+            };
+            let mut vm =
+                Vm::new_x86_64(1, Some(IoApic::new(window))).expect("native WHP is required");
+            vm.attach(
+                Memory::from_ranges(&[RamRange {
+                    gpa: 0x10000,
+                    size: 0x1000,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            let original = vm.inner.allocation_probe(0);
+            let ioapic = Arc::clone(vm.ioapic.as_ref().unwrap());
+            ioapic.write(window, 0, &0x10u32.to_le_bytes()).unwrap();
+            ioapic.write(window, 0x10, &0x40u32.to_le_bytes()).unwrap();
+            let line = vm.create_line_interrupt(0).unwrap();
+            let cpu = vm.inner.create_vcpu(0, "x86-64-v1").unwrap();
+            drop(vm);
+            line.set_level(true)
+                .expect("native interrupt uses original partition");
+            drop(cpu);
+            original.assert_retained();
+            drop(line);
+            original.assert_reclaimed();
+
+            let mut vm = Vm::new_x86_64(1, None).unwrap();
+            vm.attach(
+                Memory::from_ranges(&[RamRange {
+                    gpa: 0x10000,
+                    size: 0x1000,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            let original = vm.inner.allocation_probe(0);
+            let domain = FixedMessageInterruptDomain::new(vm.fixed_interrupt_requester(), 1);
+            domain
+                .update(
+                    0,
+                    MessageInterrupt {
+                        address: 0xfee0_0000,
+                        data: 0x41,
+                        masked: false,
+                    },
+                )
+                .unwrap();
+            domain.enabled(0, true).unwrap();
+            let msi = domain.interrupt(0).unwrap();
+            let cpu = vm.inner.create_vcpu(0, "x86-64-v1").unwrap();
+            drop(vm);
+            domain
+                .inner
+                .fixed_interrupts
+                .request_fixed_interrupt(0, 0x41)
+                .expect("native MSI requester uses original partition");
+            drop(domain);
+            msi.signal();
+            drop(cpu);
+            original.assert_retained();
+            drop(msi);
+            original.assert_reclaimed();
+        }
+
+        #[test]
+        fn native_owner_wake_binding_retires_before_processor_replacement() {
+            // Share the existing native fixture guard through all owner joins
+            // and VM teardown, matching the hypervisor's other native tests.
+            let _guard = crate::hypervisor::whp_test_lock();
+            let mut vm = Vm::new_x86_64(2, None).expect("native WHP is required");
+            vm.attach(
+                Memory::from_ranges(&[RamRange {
+                    gpa: 0xffff_f000,
+                    size: 0x1000,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            vm.write_guest(0xffff_fff0, &[0xeb, 0xfe]).unwrap();
+            let profile = dillo_machine::CpuProfile::X86_64(pmi::x86_64::Profile::V1);
+            let input = vm.cpu_preparation(0, profile).unwrap();
+            let interrupt = input.interrupt();
+            let termination = Arc::new(AtomicBool::new(false));
+            let token = Arc::clone(&termination);
+            let (ready, receiver) = std::sync::mpsc::channel();
+            let join = thread::spawn(move || {
+                let mut runner = input.prepare().unwrap();
+                ready.send(()).unwrap();
+                runner.run(token.as_ref())
+            });
+            let ready = receiver.recv_timeout(std::time::Duration::from_secs(2));
+            interrupt.interrupt().unwrap();
+            thread::sleep(std::time::Duration::from_millis(20));
+            let pure_wake_preserved_owner = !join.is_finished();
+            termination.store(true, Ordering::Release);
+            while !join.is_finished() {
+                interrupt.interrupt().unwrap();
+                thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert_eq!(join.join().unwrap().unwrap(), VcpuStop::Stopped);
+            assert!(ready.is_ok(), "owner preparation must publish readiness");
+            assert!(
+                pure_wake_preserved_owner,
+                "native cancel is a wake, not a termination request"
+            );
+            assert!(interrupt.target.lock().unwrap().is_none());
+            // Reuse the native processor index. The retired endpoint must never
+            // cancel the replacement owner, even while that owner exists.
+            let input = vm.cpu_preparation(0, profile).unwrap();
+            let replacement_interrupt = input.interrupt();
+            thread::spawn(move || {
+                let _runner = input.prepare().unwrap();
+                interrupt.interrupt().unwrap();
+            })
+            .join()
+            .unwrap();
+            assert!(replacement_interrupt.target.lock().unwrap().is_none());
+        }
+    }
+
+    #[cfg(test)]
     mod tests {
         use super::{FixedMessage, FixedMessageTable, FixedMsi, decode_fixed_msi};
-        use dillo_mmio::MessageInterrupt;
+        use dillo_machine::interrupt::MessageInterrupt;
         use std::sync::Mutex;
 
         #[test]
