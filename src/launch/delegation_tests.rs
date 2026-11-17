@@ -8,7 +8,7 @@ use dillo_devtree::platform::PropExt;
 use serde_json::json;
 
 #[derive(Debug, Clone, Copy)]
-enum BaseChannel {
+pub(super) enum BaseChannel {
     Bundled,
     Detached,
     Optional,
@@ -21,7 +21,7 @@ const CHANNELS: [BaseChannel; 3] = [
     BaseChannel::Optional,
 ];
 
-fn base(arch: HostArchitecture, fixed_cpus: bool, fixed_memory: bool) -> Vec<u8> {
+pub(super) fn base(arch: HostArchitecture, fixed_cpus: bool, fixed_memory: bool) -> Vec<u8> {
     let mut fdt = FdtBuilder::new();
     fdt.begin_node("");
     fdt.property_u32("#address-cells", 2);
@@ -116,7 +116,7 @@ fn base(arch: HostArchitecture, fixed_cpus: bool, fixed_memory: bool) -> Vec<u8>
 // A small native PMI fixture, with no kernel download or hypervisor required.
 // The dummy load backs one 2 MiB page; the base and overlay occupy the next.
 // Keep a .dtbo reservation even without its fill to prove the action is required.
-fn image(
+pub(super) fn image(
     arch: HostArchitecture,
     channel: BaseChannel,
     base: &[u8],
@@ -131,12 +131,11 @@ fn image(
         actions
             .push(json!({"type": "fill", "section": ".dtbo", "gpa": 0x20_1000, "kind": "dt:dtbo"}));
     }
-    let (machine, profile, vcpu) = match arch {
-        HostArchitecture::X86_64 => (0x8664u16, "x86-64-v1", json!({})),
-        HostArchitecture::Aarch64 => (0xaa64, "armv8.0-a", json!({"pstate": 5})),
+    let (machine, profile) = match arch {
+        HostArchitecture::X86_64 => (0x8664u16, "x86-64-v1"),
+        HostArchitecture::Aarch64 => (0xaa64, "armv8.0-a"),
     };
-    let mut manifest =
-        json!({"version": 1, "actions": actions, "vm:vcpu": vcpu, "cpu:profile": profile});
+    let mut manifest = json!({"version": 1, "actions": actions, "cpu:profile": profile});
     if !matches!(channel, BaseChannel::Detached) {
         manifest["dt:dtb"] = json!(".base");
     }
@@ -255,7 +254,12 @@ fn invalid_image_does_not_require_a_hypervisor() {
 
 // Use a non-arma section name and a 4 KiB capacity. Action GPAs remain the
 // authority even though the PE section's VirtualAddress is deliberately zero.
-fn with_bootconfig(mut bytes: Vec<u8>, gpas: &[u64], capacity: u32, raw_size: u32) -> Vec<u8> {
+pub(super) fn with_bootconfig(
+    mut bytes: Vec<u8>,
+    gpas: &[u64],
+    capacity: u32,
+    raw_size: u32,
+) -> Vec<u8> {
     let mut manifest: serde_json::Value = ciborium::from_reader(&bytes[0x1000..0x2000]).unwrap();
     for gpa in gpas {
         manifest["actions"].as_array_mut().unwrap().push(json!({
@@ -301,7 +305,13 @@ fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
                 input.as_path()
             });
             let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 4, 1, None, file).unwrap();
-            let write = plan.guest_writes.last().unwrap();
+            let write = plan
+                .recipe
+                .operations
+                .iter()
+                .rev()
+                .find(|operation| !matches!(operation.data, WriteSrc::Zero { .. }))
+                .unwrap();
             assert_eq!(write.section, ".config");
             assert_eq!(write.gpa, 0x20_2000);
             let WriteSrc::Owned(data) = &write.data else {
@@ -358,10 +368,12 @@ fn bootconfig_invalid_reservations_fail_preflight() {
             (vec![0x20_2000], 0, 0),
         ] {
             let bytes = with_bootconfig(base.clone(), &gpas, capacity, raw_size);
-            assert!(matches!(
-                dillo::pmi_parse::parse(&bytes, &opts),
-                Err(Error::BootconfigFill(_))
-            ));
+            let error = dillo::pmi_parse::parse(&bytes, &opts).unwrap_err();
+            if gpas.len() > 1 {
+                assert!(matches!(error, Error::BootconfigFill(_)));
+            } else {
+                assert!(matches!(error, Error::InvalidSectionShape { .. }));
+            }
         }
         let bytes = with_bootconfig(base.clone(), &[0x20_2001], 4096, 0);
         assert!(matches!(
@@ -403,7 +415,8 @@ fn delegated_allocation_is_delivered_in_reserved_overlay() {
                 let (_dir, plan) =
                     launch(arch, channel, &base(arch, false, false), Some(size), 2).unwrap();
                 let write = plan
-                    .guest_writes
+                    .recipe
+                    .operations
                     .iter()
                     .find(|write| write.section == ".dtbo")
                     .unwrap();

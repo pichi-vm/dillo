@@ -9,12 +9,13 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
-pub use dillo_mmio::{
-    MessageInterrupt, MessageInterruptDomain, MmioAttachment, MmioDeviceHandle, MmioDeviceRun,
-    MmioInterrupt, MmioInterruptRequirement, MmioJoinError, MmioSpawnError, MmioWriteOutcome,
-    SharedMemory,
+use dillo_machine::attachment::DeviceAttachment;
+use dillo_machine::execution::{DeviceHandle, DeviceRun, SpawnError};
+use dillo_machine::interrupt::{
+    InterruptRequirement, InterruptResource, MessageInterrupt, MessageInterruptDomain,
 };
-use dillo_mmio::{MmioDevice, MmioError, MmioWindow};
+use dillo_machine::memory::{AddressRange, SharedMemory};
+use dillo_mmio::{MmioDevice, MmioError, MmioWriteOutcome};
 
 /// ECAM MMIO address decoding.
 pub mod address;
@@ -111,7 +112,7 @@ pub trait PciDeviceHost: Send + Sync + std::fmt::Debug {
         None
     }
 
-    fn spawn(&self, run: MmioDeviceRun) -> Result<MmioDeviceHandle, MmioSpawnError>;
+    fn spawn(&self, run: DeviceRun) -> Result<DeviceHandle, SpawnError>;
 }
 
 /// PCI MSI-X table adapter backed by a machine-owned message-interrupt domain.
@@ -132,7 +133,7 @@ impl MsixInterruptAdapter {
     }
 
     /// Interrupt for a device completion on `vector`.
-    pub fn interrupt_for(&self, vector: u16) -> Option<dillo_mmio::Interrupt> {
+    pub fn interrupt_for(&self, vector: u16) -> Option<dillo_machine::interrupt::Interrupt> {
         self.domain.interrupt(vector)
     }
 }
@@ -157,7 +158,7 @@ impl MsixNotifier for MsixInterruptAdapter {
         }
     }
 
-    fn interrupt_for(&self, vector: u16) -> Option<dillo_mmio::Interrupt> {
+    fn interrupt_for(&self, vector: u16) -> Option<dillo_machine::interrupt::Interrupt> {
         MsixInterruptAdapter::interrupt_for(self, vector)
     }
 }
@@ -335,9 +336,9 @@ impl PciBus {
 /// The root owns the ECAM MMIO window and the single downstream PCI bus.
 /// Legacy CF8/CFC PIO is intentionally absent so x86 guests use ECAM.
 pub struct PciRoot {
-    window: MmioWindow,
-    windows: Vec<MmioWindow>,
-    interrupts: Vec<MmioInterruptRequirement>,
+    window: AddressRange,
+    windows: Vec<AddressRange>,
+    interrupts: Vec<InterruptRequirement>,
     bus: PciBus,
 }
 
@@ -352,7 +353,7 @@ impl std::fmt::Debug for PciRoot {
 }
 
 impl PciRoot {
-    pub fn new(window: MmioWindow) -> Self {
+    pub fn new(window: AddressRange) -> Self {
         Self {
             window,
             windows: vec![window],
@@ -362,8 +363,8 @@ impl PciRoot {
     }
 
     pub fn with_interrupt_requirement(
-        window: MmioWindow,
-        interrupt: MmioInterruptRequirement,
+        window: AddressRange,
+        interrupt: InterruptRequirement,
     ) -> Self {
         Self {
             window,
@@ -379,7 +380,7 @@ impl PciRoot {
         self.refresh_interrupts();
     }
 
-    pub fn set_attachment(&self, attachment: Arc<dyn MmioAttachment>) {
+    pub fn set_attachment(&self, attachment: Arc<dyn DeviceAttachment>) {
         self.bus.set_host(Arc::new(PciRootHost { attachment }));
     }
 
@@ -430,8 +431,8 @@ impl PciRoot {
         (bus, device, function, reg_byte >> 2, reg_byte & 0x3)
     }
 
-    fn bar_window(_slot: u8, bar: &BarRegion) -> MmioWindow {
-        MmioWindow {
+    fn bar_window(_slot: u8, bar: &BarRegion) -> AddressRange {
+        AddressRange {
             base: bar.base_gpa,
             size: bar.size,
         }
@@ -453,13 +454,13 @@ impl PciRoot {
     fn refresh_interrupts(&mut self) {
         let total = self.bus.total_msix_vectors();
         for req in &mut self.interrupts {
-            if let MmioInterruptRequirement::MessageDomain { vectors, .. } = req {
+            if let InterruptRequirement::MessageDomain { vectors, .. } = req {
                 *vectors = total;
             }
         }
     }
 
-    fn bar_route(&self, window: MmioWindow) -> Option<(u8, u8)> {
+    fn bar_route(&self, window: AddressRange) -> Option<(u8, u8)> {
         self.enumerate_bars()
             .into_iter()
             .find(|(_, bar)| bar.base_gpa == window.base && bar.size == window.size)
@@ -469,7 +470,7 @@ impl PciRoot {
 
 #[derive(Debug)]
 struct PciRootHost {
-    attachment: Arc<dyn MmioAttachment>,
+    attachment: Arc<dyn DeviceAttachment>,
 }
 
 impl PciDeviceHost for PciRootHost {
@@ -482,15 +483,15 @@ impl PciDeviceHost for PciRootHost {
             .interrupts()
             .iter()
             .find_map(|interrupt| match interrupt {
-                MmioInterrupt::MessageDomain(domain) => {
+                InterruptResource::MessageDomain(domain) => {
                     Some(Arc::new(MsixInterruptAdapter::new(Arc::clone(domain)))
                         as Arc<dyn MsixNotifier>)
                 }
-                MmioInterrupt::Line(_) => None,
+                InterruptResource::Line(_) => None,
             })
     }
 
-    fn spawn(&self, run: MmioDeviceRun) -> Result<MmioDeviceHandle, MmioSpawnError> {
+    fn spawn(&self, run: DeviceRun) -> Result<DeviceHandle, SpawnError> {
         Arc::clone(&self.attachment).spawn(run)
     }
 }
@@ -524,7 +525,7 @@ impl PciDeviceHost for OffsetPciDeviceHost {
         })
     }
 
-    fn spawn(&self, run: MmioDeviceRun) -> Result<MmioDeviceHandle, MmioSpawnError> {
+    fn spawn(&self, run: DeviceRun) -> Result<DeviceHandle, SpawnError> {
         self.inner.spawn(run)
     }
 }
@@ -560,21 +561,21 @@ impl MsixNotifier for OffsetMsixNotifier {
             .msix_enabled(vector.saturating_add(self.vector_base), enabled);
     }
 
-    fn interrupt_for(&self, vector: u16) -> Option<dillo_mmio::Interrupt> {
+    fn interrupt_for(&self, vector: u16) -> Option<dillo_machine::interrupt::Interrupt> {
         self.inner.interrupt_for(self.domain_vector(vector)?)
     }
 }
 
 impl MmioDevice for PciRoot {
-    fn windows(&self) -> &[MmioWindow] {
+    fn windows(&self) -> &[AddressRange] {
         &self.windows
     }
 
-    fn interrupts(&self) -> &[MmioInterruptRequirement] {
+    fn interrupts(&self) -> &[InterruptRequirement] {
         &self.interrupts
     }
 
-    fn read(&self, window: MmioWindow, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
+    fn read(&self, window: AddressRange, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
         if window.base == self.window.base && window.size == self.window.size {
             let (bus, device, function, reg_idx, in_dword) = Self::decode_ecam(offset);
             let value = self.config_read(bus, device, function, reg_idx);
@@ -596,7 +597,7 @@ impl MmioDevice for PciRoot {
 
     fn write(
         &self,
-        window: MmioWindow,
+        window: AddressRange,
         offset: u64,
         data: &[u8],
     ) -> Result<MmioWriteOutcome, MmioError> {
@@ -708,7 +709,7 @@ mod tests {
 
     #[test]
     fn pci_root_ecam_reads_host_bridge_config() {
-        let root = PciRoot::new(MmioWindow {
+        let root = PciRoot::new(AddressRange {
             base: 0x3000_0000,
             size: 0x1000_0000,
         });
@@ -723,7 +724,7 @@ mod tests {
 
     #[test]
     fn pci_root_ecam_reads_unaligned_bytes() {
-        let root = PciRoot::new(MmioWindow {
+        let root = PciRoot::new(AddressRange {
             base: 0x3000_0000,
             size: 0x1000_0000,
         });
@@ -768,7 +769,7 @@ mod tests {
             }
         }
 
-        let mut root = PciRoot::new(MmioWindow {
+        let mut root = PciRoot::new(AddressRange {
             base: 0x3000_0000,
             size: 0x1000_0000,
         });
@@ -823,7 +824,7 @@ mod tests {
             }
         }
 
-        let mut root = PciRoot::new(MmioWindow {
+        let mut root = PciRoot::new(AddressRange {
             base: 0x3000_0000,
             size: 0x1000_0000,
         });
@@ -847,20 +848,20 @@ mod tests {
         #[derive(Debug)]
         struct FakeAttachment;
 
-        impl MmioAttachment for FakeAttachment {
-            fn interrupts(&self) -> &[dillo_mmio::MmioInterrupt] {
+        impl DeviceAttachment for FakeAttachment {
+            fn interrupts(&self) -> &[dillo_machine::interrupt::InterruptResource] {
                 &[]
             }
 
-            fn shared_memory(&self) -> &[Arc<dyn dillo_mmio::SharedMemory>] {
+            fn shared_memory(&self) -> &[Arc<dyn dillo_machine::memory::SharedMemory>] {
                 &[]
             }
 
             fn spawn(
                 self: Arc<Self>,
-                _run: dillo_mmio::MmioDeviceRun,
-            ) -> Result<MmioDeviceHandle, MmioSpawnError> {
-                Ok(MmioDeviceHandle::noop())
+                _run: dillo_machine::execution::DeviceRun,
+            ) -> Result<DeviceHandle, SpawnError> {
+                Ok(DeviceHandle::noop())
             }
         }
 
@@ -898,7 +899,7 @@ mod tests {
         }
 
         let observed_host = Arc::new(AtomicBool::new(false));
-        let mut root = PciRoot::new(MmioWindow {
+        let mut root = PciRoot::new(AddressRange {
             base: 0x3000_0000,
             size: 0x1000_0000,
         });
@@ -916,7 +917,7 @@ mod tests {
 
     mod msix_bounds {
         use super::*;
-        use dillo_mmio::{Interrupt, InterruptError, MmioInterrupt};
+        use dillo_machine::interrupt::{Interrupt, InterruptError, InterruptResource};
 
         #[derive(Default)]
         struct RecordingDomain {
@@ -943,10 +944,10 @@ mod tests {
 
         #[derive(Debug)]
         struct FakeAttachment {
-            interrupts: Vec<MmioInterrupt>,
+            interrupts: Vec<InterruptResource>,
         }
-        impl MmioAttachment for FakeAttachment {
-            fn interrupts(&self) -> &[MmioInterrupt] {
+        impl DeviceAttachment for FakeAttachment {
+            fn interrupts(&self) -> &[InterruptResource] {
                 &self.interrupts
             }
             fn shared_memory(&self) -> &[Arc<dyn SharedMemory>] {
@@ -954,9 +955,9 @@ mod tests {
             }
             fn spawn(
                 self: Arc<Self>,
-                _run: dillo_mmio::MmioDeviceRun,
-            ) -> Result<MmioDeviceHandle, MmioSpawnError> {
-                Ok(MmioDeviceHandle::noop())
+                _run: dillo_machine::execution::DeviceRun,
+            ) -> Result<DeviceHandle, SpawnError> {
+                Ok(DeviceHandle::noop())
             }
         }
 
@@ -999,11 +1000,11 @@ mod tests {
             let domain = Arc::new(RecordingDomain::default());
 
             let mut root = PciRoot::with_interrupt_requirement(
-                MmioWindow {
+                AddressRange {
                     base: 0x3000_0000,
                     size: 0x1000_0000,
                 },
-                MmioInterruptRequirement::MessageDomain {
+                InterruptRequirement::MessageDomain {
                     source: None,
                     vectors: 0,
                 },
@@ -1037,11 +1038,11 @@ mod tests {
             // The root sized its requested domain to the sum of both functions.
             assert!(matches!(
                 root.interrupts(),
-                [MmioInterruptRequirement::MessageDomain { vectors: 5, .. }]
+                [InterruptRequirement::MessageDomain { vectors: 5, .. }]
             ));
 
             root.set_attachment(Arc::new(FakeAttachment {
-                interrupts: vec![MmioInterrupt::MessageDomain(domain.clone())],
+                interrupts: vec![InterruptResource::MessageDomain(domain.clone())],
             }));
 
             let entry = MsixTableEntry::default();
@@ -1144,7 +1145,7 @@ mod tests {
                 &self,
                 vector: u16,
                 msg: MessageInterrupt,
-            ) -> Result<(), dillo_mmio::InterruptError> {
+            ) -> Result<(), dillo_machine::interrupt::InterruptError> {
                 self.updates
                     .lock()
                     .expect("updates lock poisoned")
@@ -1156,13 +1157,13 @@ mod tests {
                 &self,
                 vector: u16,
                 enabled: bool,
-            ) -> Result<(), dillo_mmio::InterruptError> {
+            ) -> Result<(), dillo_machine::interrupt::InterruptError> {
                 assert_eq!(vector, 2);
                 self.enabled.store(enabled, Ordering::Release);
                 Ok(())
             }
 
-            fn interrupt(&self, _vector: u16) -> Option<dillo_mmio::Interrupt> {
+            fn interrupt(&self, _vector: u16) -> Option<dillo_machine::interrupt::Interrupt> {
                 None
             }
         }

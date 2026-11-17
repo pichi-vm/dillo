@@ -29,7 +29,7 @@ mod uds;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dillo_mmio::Interrupt;
+use dillo_machine::interrupt::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
 use dillo_virtio::{
     ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,

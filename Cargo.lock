@@ -76,8 +76,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 [[package]]
 name = "applevisor"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "139a0fe60afd3e8c3a42fc0265caf4eb04b84a8b760623f7a6229174c18e4e36"
+source = "git+https://github.com/pichi-vm/applevisor?rev=1f60794ae520bc5701ea9d35ca2c2048e3c76923#1f60794ae520bc5701ea9d35ca2c2048e3c76923"
 dependencies = [
  "applevisor-sys",
 ]
@@ -134,7 +133,7 @@ dependencies = [
 [[package]]
 name = "arma"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
+source = "git+https://github.com/pichi-vm/arma?rev=6810244cf0a7f12f1567afd89862392a19295d9e#6810244cf0a7f12f1567afd89862392a19295d9e"
 dependencies = [
  "anyhow",
  "ciborium",
@@ -146,6 +145,7 @@ dependencies = [
  "pmi",
  "regex",
  "ruzstd",
+ "serde",
  "tatu",
  "thiserror 2.0.18",
  "vm-fdt",
@@ -485,6 +485,7 @@ dependencies = [
  "dillo-mmio-virtio",
  "dillo-pci",
  "dillo-pci-virtio",
+ "dillo-runtime",
  "dillo-storage",
  "dillo-virtio",
  "dillo-virtio-blk",
@@ -498,7 +499,6 @@ dependencies = [
  "imago",
  "interprocess",
  "log",
- "mmarinus",
  "nix 0.30.1",
  "object",
  "pmi",
@@ -542,8 +542,9 @@ dependencies = [
 name = "dillo-machine"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
  "pmi",
+ "thiserror 2.0.18",
+ "vm-memory 0.17.2",
 ]
 
 [[package]]
@@ -558,8 +559,10 @@ dependencies = [
  "libc",
  "log",
  "pmi",
+ "tempfile",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
+ "wait-timeout",
 ]
 
 [[package]]
@@ -574,8 +577,11 @@ dependencies = [
  "kvm-ioctls",
  "libc",
  "log",
+ "mmarinus",
  "nix 0.30.1",
  "pmi",
+ "rustix",
+ "tempfile",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
  "vmm-sys-util",
@@ -592,6 +598,7 @@ dependencies = [
  "pmi",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
+ "wait-timeout",
  "windows-sys 0.61.2",
 ]
 
@@ -599,15 +606,16 @@ dependencies = [
 name = "dillo-mmio"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "log",
  "thiserror 2.0.18",
- "vm-memory 0.17.2",
 ]
 
 [[package]]
 name = "dillo-mmio-uart"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "dillo-mmio",
  "vm-superio",
 ]
@@ -616,6 +624,7 @@ dependencies = [
 name = "dillo-mmio-virtio"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "dillo-mmio",
  "dillo-virtio",
  "log",
@@ -626,6 +635,7 @@ dependencies = [
 name = "dillo-pci"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "dillo-mmio",
  "log",
 ]
@@ -634,11 +644,20 @@ dependencies = [
 name = "dillo-pci-virtio"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "dillo-mmio",
  "dillo-pci",
  "dillo-virtio",
  "log",
  "vm-memory 0.17.2",
+]
+
+[[package]]
+name = "dillo-runtime"
+version = "0.1.0"
+dependencies = [
+ "dillo-machine",
+ "pmi",
 ]
 
 [[package]]
@@ -652,7 +671,7 @@ dependencies = [
 name = "dillo-virtio"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
+ "dillo-machine",
  "log",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
@@ -662,7 +681,7 @@ dependencies = [
 name = "dillo-virtio-blk"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
+ "dillo-machine",
  "dillo-storage",
  "dillo-virtio",
  "imago",
@@ -677,7 +696,7 @@ name = "dillo-virtio-console"
 version = "0.1.0"
 dependencies = [
  "dillo-config",
- "dillo-mmio",
+ "dillo-machine",
  "dillo-virtio",
  "interprocess",
  "log",
@@ -695,7 +714,7 @@ dependencies = [
 name = "dillo-virtio-fs"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
+ "dillo-machine",
  "dillo-virtio",
  "libc",
  "log",
@@ -724,7 +743,7 @@ name = "dillo-virtio-net"
 version = "0.1.0"
 dependencies = [
  "block2",
- "dillo-mmio",
+ "dillo-machine",
  "dillo-virtio",
  "libc",
  "log",
@@ -738,7 +757,7 @@ dependencies = [
 name = "dillo-virtio-vsock"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
+ "dillo-machine",
  "dillo-virtio",
  "log",
 ]
@@ -763,7 +782,7 @@ checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
 [[package]]
 name = "dtb2acpi"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
+source = "git+https://github.com/pichi-vm/arma?rev=6810244cf0a7f12f1567afd89862392a19295d9e#6810244cf0a7f12f1567afd89862392a19295d9e"
 dependencies = [
  "devtree",
  "zerocopy",
@@ -772,7 +791,7 @@ dependencies = [
 [[package]]
 name = "dtb2e820"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
+source = "git+https://github.com/pichi-vm/arma?rev=6810244cf0a7f12f1567afd89862392a19295d9e#6810244cf0a7f12f1567afd89862392a19295d9e"
 dependencies = [
  "devtree",
 ]
@@ -827,6 +846,15 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[package]]
+name = "flagset"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "flate2"
@@ -1527,8 +1555,9 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "pmi"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/pmi?branch=main#5d6fe93b87d5af20d7387491f97aa89f31361ef9"
+source = "git+https://github.com/pichi-vm/pmi?branch=main#d6c2543129c3dad900d39a14ac9c4909bd39c0ac"
 dependencies = [
+ "flagset",
  "serde",
 ]
 
@@ -1995,7 +2024,7 @@ dependencies = [
 [[package]]
 name = "tatu"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
+source = "git+https://github.com/pichi-vm/arma?rev=6810244cf0a7f12f1567afd89862392a19295d9e#6810244cf0a7f12f1567afd89862392a19295d9e"
 dependencies = [
  "arrayvec",
  "devtree",

@@ -16,7 +16,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use dillo_mmio::Interrupt;
+use dillo_machine::interrupt::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
 use dillo_virtio::{
     ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
@@ -717,7 +717,9 @@ fn process_request(
 mod tests {
     use super::*;
 
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_machine::memory::{
+        AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
+    };
     use dillo_virtio::queue::VIRTQ_DESC_F_NEXT;
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
     use vm_memory::{Address, Bytes, GuestMemoryMmap};
@@ -973,7 +975,9 @@ mod tests {
 #[cfg(test)]
 mod qcow2_tests {
     use super::*;
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_machine::memory::{
+        AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
+    };
     use dillo_virtio::SharedVirtioMemory;
     use vm_memory::{Bytes, GuestMemoryMmap};
 

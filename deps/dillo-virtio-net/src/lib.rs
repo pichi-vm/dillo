@@ -41,7 +41,7 @@ mod macvtap;
 
 use std::sync::{Arc, Mutex};
 
-use dillo_mmio::Interrupt;
+use dillo_machine::interrupt::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
 use dillo_virtio::{
     ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
@@ -500,7 +500,9 @@ mod tests {
     use std::io;
     use std::sync::Mutex as StdMutex;
 
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_machine::memory::{
+        AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
+    };
     use dillo_virtio::queue::VIRTQ_DESC_F_WRITE;
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
     use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryMmap};

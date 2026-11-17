@@ -4,24 +4,27 @@
 use std::io;
 use std::sync::Arc;
 
-use dillo_mmio::{MmioWindow, WriteNotification};
-use kvm_ioctls::{IoEventAddress, VmFd};
+use dillo_machine::memory::AddressRange;
+use dillo_machine::notification::WriteNotification;
+use kvm_ioctls::IoEventAddress;
+
+use crate::hypervisor::Vm;
 use vmm_sys_util::eventfd::EventFd;
 
 /// Registration authority restricted to the attached device's declared windows.
 pub(crate) struct Notifications {
-    vm: Arc<VmFd>,
-    windows: Vec<MmioWindow>,
+    vm: Vm,
+    windows: Vec<AddressRange>,
 }
 
 impl Notifications {
-    pub(crate) fn new(vm: Arc<VmFd>, windows: Vec<MmioWindow>) -> Self {
+    pub(crate) fn new(vm: Vm, windows: Vec<AddressRange>) -> Self {
         Self { vm, windows }
     }
 
     pub(crate) fn register(
         &self,
-        window: MmioWindow,
+        window: AddressRange,
         offset: u64,
         value: u32,
     ) -> io::Result<Option<Arc<dyn WriteNotification>>> {
@@ -37,6 +40,7 @@ impl Notifications {
             .ok_or(io::ErrorKind::InvalidInput)?;
         if self
             .vm
+            .fd()
             .check_extension_raw(kvm_bindings::KVM_CAP_IOEVENTFD.into())
             <= 0
         {
@@ -45,10 +49,11 @@ impl Notifications {
         let event = EventFd::new(libc::EFD_CLOEXEC)?;
         let address = IoEventAddress::Mmio(address);
         self.vm
+            .fd()
             .register_ioevent(&event, &address, value)
             .map_err(|error| io::Error::from_raw_os_error(error.errno()))?;
         Ok(Some(Arc::new(Notification {
-            vm: Arc::clone(&self.vm),
+            vm: self.vm.clone(),
             event,
             address,
             value,
@@ -58,7 +63,7 @@ impl Notifications {
 
 #[derive(Debug)]
 struct Notification {
-    vm: Arc<VmFd>,
+    vm: Vm,
     event: EventFd,
     address: IoEventAddress,
     value: u32,
@@ -88,6 +93,7 @@ impl Drop for Notification {
     fn drop(&mut self) {
         if let Err(error) = self
             .vm
+            .fd()
             .unregister_ioevent(&self.event, &self.address, self.value)
         {
             log::error!("KVM write-notification unregister failed: {error}");
@@ -99,21 +105,22 @@ impl Drop for Notification {
 mod tests {
     use super::*;
 
-    fn authority(window: MmioWindow) -> Notifications {
+    fn authority(window: AddressRange) -> Notifications {
         let kvm = kvm_ioctls::Kvm::new().expect("open /dev/kvm");
-        Notifications::new(Arc::new(kvm.create_vm().unwrap()), vec![window])
+        let vm = kvm.create_vm().unwrap();
+        Notifications::new(Vm::test_from_native(kvm, vm), vec![window])
     }
 
     #[test]
     fn registration_enforces_owned_window_and_complete_write_extent() {
-        let window = MmioWindow {
+        let window = AddressRange {
             base: 0x1000,
             size: 0x1000,
         };
         let owner = authority(window);
         for (requested, offset) in [
             (
-                MmioWindow {
+                AddressRange {
                     base: 0x2000,
                     ..window
                 },
@@ -127,7 +134,7 @@ mod tests {
                 io::ErrorKind::InvalidInput
             );
         }
-        let overflowing = MmioWindow {
+        let overflowing = AddressRange {
             base: u64::MAX - 1,
             size: 16,
         };
@@ -142,7 +149,7 @@ mod tests {
 
     #[test]
     fn counter_wakes_and_registration_lasts_until_final_clone() {
-        let window = MmioWindow {
+        let window = AddressRange {
             base: 0x1000,
             size: 0x1000,
         };
@@ -173,41 +180,23 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn guest_writes_match_address_width_and_queue_value() {
-        let ram = vm_memory::MmapRegion::<()>::new(0x1000).unwrap();
-        // Real-mode stores: matched dword, wrong value, wrong width,
-        // wrong address, then halt. Only the first may bypass userspace.
+        use vm_memory::{Bytes, GuestAddress};
+        let backing = Arc::new(crate::memory::MappedMemory::test_backing(&[(0, 0x1000)]).unwrap());
+        let ram = backing.guest_memory();
         let code = [
             0x66, 0xc7, 0x06, 0x50, 0x10, 0x01, 0x00, 0x00, 0x00, 0x66, 0xc7, 0x06, 0x50, 0x10,
             0x02, 0x00, 0x00, 0x00, 0xc7, 0x06, 0x50, 0x10, 0x01, 0x00, 0x66, 0xc7, 0x06, 0x54,
             0x10, 0x01, 0x00, 0x00, 0x00, 0xf4,
         ];
-        // SAFETY: ram owns a writable mapping larger than code, and the
-        // vCPU has not been created yet.
-        #[allow(unsafe_code)]
-        unsafe {
-            std::ptr::copy_nonoverlapping(code.as_ptr(), ram.as_ptr(), code.len());
-        };
-        let window = MmioWindow {
+        ram.write_slice(&code, GuestAddress(0)).unwrap();
+        let window = AddressRange {
             base: 0x1000,
             size: 0x1000,
         };
         let owner = authority(window);
-        // SAFETY: ram remains allocated until after the VM and vCPU drop.
-        #[allow(unsafe_code)]
-        unsafe {
-            owner
-                .vm
-                .set_user_memory_region(kvm_bindings::kvm_userspace_memory_region {
-                    slot: 0,
-                    guest_phys_addr: 0,
-                    memory_size: 0x1000,
-                    userspace_addr: ram.as_ptr() as u64,
-                    flags: 0,
-                })
-                .unwrap();
-        }
+        owner.vm.attach_memory(backing).unwrap();
         let notification = owner.register(window, 0x50, 1).unwrap().unwrap();
-        let mut vcpu = owner.vm.create_vcpu(0).unwrap();
+        let mut vcpu = owner.vm.fd().create_vcpu(0).unwrap();
         let mut sregs = vcpu.get_sregs().unwrap();
         sregs.cs.base = 0;
         sregs.cs.selector = 0;

@@ -12,9 +12,10 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
-use dillo_mmio::SharedMemory;
+use dillo_machine::execution::JoinError;
+use dillo_machine::memory::SharedMemory;
+use dillo_pci::PciDeviceHost;
 use dillo_pci::{CAP_ID_MSIX, MsixNotifier, MsixTable, NoopNotifier, PciConfiguration};
-use dillo_pci::{MmioJoinError, PciDeviceHost};
 use dillo_virtio::Kick;
 use dillo_virtio::queue::Queue;
 use dillo_virtio::{
@@ -743,7 +744,7 @@ impl VirtioDeviceHost for PciVirtioHost {
                 run(VirtioRunToken::from_fn(move || {
                     token.is_shutdown_requested()
                 }))
-                .map_err(|e| MmioJoinError::Host(e.to_string()))
+                .map_err(|e| JoinError::Host(e.to_string()))
             }))
             .map_err(|e| ActivateError::InvalidConfig(format!("spawn virtio worker: {e}")))?;
         let handle = Arc::new(Mutex::new(Some(handle)));

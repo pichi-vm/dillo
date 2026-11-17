@@ -22,6 +22,9 @@ kvm-ioctls.workspace = true
 libc = "0.2"
 nix.workspace = true
 vmm-sys-util.workspace = true
+tempfile.workspace = true
+rustix = { version = "1", default-features = false, features = ["std", "fs"] }
+mmarinus = "0.4"
 
 [lints]
 workspace = true

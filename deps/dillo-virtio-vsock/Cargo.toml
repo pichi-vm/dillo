@@ -10,5 +10,5 @@ workspace = true
 
 [dependencies]
 dillo-virtio = { workspace = true }
-dillo-mmio = { workspace = true }
+dillo-machine = { workspace = true }
 log = { workspace = true }
