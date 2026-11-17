@@ -543,12 +543,15 @@ fn boots_and_reports(#[values(256, 1024)] mem_mib: u32, #[values(1, 2)] cpus: u3
 
 #[cfg(target_arch = "aarch64")]
 #[rstest]
-fn boots_armv81_payload(#[values(1, 2)] cpus: u32) {
+fn boots_arm_profile_payload(
+    #[values("armv8.1-a", "armv8.2-a")] profile: &str,
+    #[values(1, 2)] cpus: u32,
+) {
     use dillo::pmi_parse::{HostArch, ParseOptions, parse};
 
     assert!(
         hypervisor_available(),
-        "Armv8.1 qualification requires a native hypervisor"
+        "Arm profile qualification requires a native hypervisor"
     );
     let kernel = require(&["PCI", "VIRTIO_PCI", "VIRTIO_BLK", "VIRTIO_CONSOLE"], &[])
         .expect("kernel DB: no PCI + virtio-blk kernel available");
@@ -557,13 +560,13 @@ fn boots_armv81_payload(#[values(1, 2)] cpus: u32) {
         tmp.path(),
         &kernel,
         host::CONFIG,
-        "armv8.1-a",
+        profile,
         "console=hvc0",
         false,
         &[],
     );
     // Assert the producer selected this floor; a baseline-image fallback must
-    // not turn a successful ordinary boot into positive v8.1 qualification.
+    // not turn a successful ordinary boot into qualification for a different profile.
     let image = std::fs::read(&pmi).unwrap();
     let parsed = parse(
         &image,
@@ -572,11 +575,25 @@ fn boots_armv81_payload(#[values(1, 2)] cpus: u32) {
             memory_mib: 256,
         },
     )
-    .expect("valid Armv8.1 PMI");
-    assert_eq!(parsed.cpu_profile.as_str(), "armv8.1-a");
+    .expect("valid selected Arm profile PMI");
+    assert_eq!(parsed.cpu_profile.as_str(), profile);
     let output = boot(&pmi, 256, cpus, tmp.path());
-    let report = parse_report(&output)
-        .unwrap_or_else(|| panic!("Armv8.1 payload did not report:\n{output}"));
+    let report = parse_report(&output);
+    // An HVF context with older debug architecture must refuse this floor.
+    // That is negative evidence, not a positive payload boot; a complete
+    // context must take the successful-report path below.
+    if cfg!(target_os = "macos") && profile == "armv8.2-a" && report.is_none() {
+        assert!(
+            output.contains("guest lacks required Arm property: FEAT_Debugv8p2 (ID_AA64DFR0_EL1 observed=0x6, minimum=0x8)"),
+            "unexpected Armv8.2 launch failure:\n{output}"
+        );
+        assert!(!output.contains(REPORT_BEGIN));
+        println!(
+            "{profile} precise pre-entry refusal ({cpus} CPUs): DebugVer6 < Debugv8p2 minimum8"
+        );
+        return;
+    }
+    let report = report.unwrap_or_else(|| panic!("{profile} payload did not report:\n{output}"));
     assert_eq!(report.arch, host::ARCH, "guest architecture");
     assert_eq!(
         report.cpu.online_count, cpus as usize,
@@ -589,7 +606,7 @@ fn boots_armv81_payload(#[values(1, 2)] cpus: u32) {
             .any(|console| console.starts_with("hvc0"))
     );
     println!(
-        "armv8.1-a payload boot: {} online CPUs, guest flags {:?}",
+        "{profile} payload boot: {} online CPUs, guest flags {:?}",
         report.cpu.online_count, report.cpu.flags
     );
 }

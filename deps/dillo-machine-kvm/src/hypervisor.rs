@@ -522,7 +522,7 @@ impl Vcpu {
         use dillo_machine::aarch64::{AdmissionError, CpuSnapshot, Register};
         if !matches!(
             profile,
-            pmi::aarch64::Profile::V8_0 | pmi::aarch64::Profile::V8_1
+            pmi::aarch64::Profile::V8_0 | pmi::aarch64::Profile::V8_1 | pmi::aarch64::Profile::V8_2
         ) {
             return Err(AdmissionError::UnsupportedProfile(profile).into());
         }
@@ -1164,8 +1164,115 @@ mod bsp_tests {
 mod arm_v81;
 
 #[cfg(all(test, target_arch = "aarch64"))]
+#[path = "../../dillo-machine/tests/fixtures/arm_v82.rs"]
+mod arm_v82;
+
+#[cfg(all(test, target_arch = "aarch64"))]
 mod arm_bsp_tests {
     use super::*;
+
+    #[test]
+    fn arm_v82_native_operations_for_one_and_two_owners() {
+        for count in [1u32, 2] {
+            let ranges = arm_v82::RANGES.map(|range| (range.gpa, range.size));
+            let backing = Arc::new(crate::memory::MappedMemory::test_backing(&ranges).unwrap());
+            let memory = backing.guest_memory();
+            let vm = Vm::new_with_gic(&crate::imp::Aarch64Substrate {
+                dist_base: 0x0800_0000,
+                redist_base: 0x080a_0000,
+                spi_count: 64,
+            })
+            .expect("native ARM KVM is required");
+            vm.attach_memory(backing).unwrap();
+            let probe = arm_v82::NativeOperations::new(memory, count);
+            let (all_ready, gic, results) = std::thread::scope(|scope| {
+                let probe = &probe;
+                let (ready, prepared) = std::sync::mpsc::channel();
+                let mut owners = Vec::new();
+                let mut releases = Vec::new();
+                for index in 0..count {
+                    let vm = vm.clone();
+                    let ready = ready.clone();
+                    let (release, gate) = std::sync::mpsc::channel();
+                    releases.push(release);
+                    owners.push(scope.spawn(move || {
+                        let prepared = (|| {
+                            let mut cpu = vm.create_vcpu(index, "armv8.2-a")?;
+                            let admitted = cpu.admit_arm_profile(pmi::aarch64::Profile::V8_2)?;
+                            eprintln!(
+                                "KVM native operations owner {index} admission: {admitted:?}"
+                            );
+                            let (owner, owners) = probe
+                                .entry_arguments(index, &admitted)
+                                .map_err(|message| Error::AddressSpace(message.into()))?;
+                            cpu.initialize_bsp()?;
+                            cpu.fd
+                                .set_mp_state(kvm_bindings::kvm_mp_state {
+                                    mp_state: kvm_bindings::KVM_MP_STATE_RUNNABLE,
+                                })
+                                .map_err(|error| Error::SetRegs(index, io(error)))?;
+                            cpu.set_one_u64(core_reg(0), owner)?;
+                            cpu.set_one_u64(core_reg(1), owners)?;
+                            Ok::<_, Error>(cpu)
+                        })();
+                        ready.send(prepared.is_ok()).unwrap();
+                        let mut cpu = prepared?;
+                        if gate.recv().is_err() {
+                            return Ok(None);
+                        }
+                        cpu.run(
+                            |_, _| 0,
+                            |_, _| false,
+                            &std::sync::atomic::AtomicBool::new(false),
+                        )
+                        .map(Some)
+                    }));
+                }
+                drop(ready);
+                let all_ready = (0..count).all(|_| {
+                    prepared
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap_or(false)
+                });
+                let gic = all_ready.then(|| vm.init_gic());
+                if matches!(gic, Some(Ok(()))) {
+                    for release in &releases {
+                        let _ = release.send(());
+                    }
+                }
+                drop(releases);
+                let results: Vec<_> = owners
+                    .into_iter()
+                    .map(std::thread::ScopedJoinHandle::join)
+                    .collect();
+                (all_ready, gic, results)
+            });
+            for (owner, result) in results.iter().enumerate() {
+                eprintln!("KVM native operations owner {owner} exit: {result:?}");
+            }
+            probe.report("KVM");
+            assert!(all_ready, "every native owner must admit before entry");
+            gic.unwrap().unwrap();
+            for result in results {
+                let exit = result
+                    .expect("native owner panic")
+                    .expect("native operation provider failure")
+                    .expect("initial gate release");
+                assert!(
+                    matches!(
+                        exit,
+                        VmExit::MmioWrite {
+                            addr: 0x2_0000,
+                            size: 8,
+                            ..
+                        }
+                    ),
+                    "{exit:?}"
+                );
+            }
+            probe.verify();
+        }
+    }
 
     #[test]
     fn arm_v81_native_lor_and_owner_floor() {
@@ -1209,7 +1316,7 @@ mod arm_bsp_tests {
                 let admitted = cpu.admit_arm_profile(pmi::aarch64::Profile::V8_0).unwrap();
                 for register in Register::ALL {
                     eprintln!(
-                        "KVM owner {index} {}: native/default effective={:#x}",
+                        "KVM owner {index} {}: native/default effective={:#x?}",
                         register.name(),
                         admitted.value(register)
                     );
@@ -1225,7 +1332,7 @@ mod arm_bsp_tests {
                     |_, _| false,
                     &std::sync::atomic::AtomicBool::new(false),
                 );
-                Some((admitted.value(Register::Mmfr1), v81, exit))
+                Some((admitted.value(Register::Mmfr1).unwrap(), v81, exit))
             }));
         }
         drop(ready);
@@ -1312,6 +1419,9 @@ mod arm_bsp_tests {
             (Register::Dfr0, 0xd538_0500),
             (Register::Ctr, 0xd53b_0020),
             (Register::Sctlr, 0xd538_1000),
+            (Register::Isar1, 0xd538_0620),
+            (Register::Mmfr2, 0xd538_0740),
+            (Register::A32Mmfr4, 0xd538_02c0),
         ];
         let mut code = Vec::new();
         for (index, (_, instruction)) in inputs.iter().enumerate() {
@@ -1326,6 +1436,8 @@ mod arm_bsp_tests {
             let admitted = cpu
                 .admit_arm_profile(pmi::aarch64::Profile::V8_0)
                 .expect("admit actual retained owner");
+            let v82 = cpu.admit_arm_profile(pmi::aarch64::Profile::V8_2);
+            eprintln!("KVM actual-owner armv8.2-a admission: {v82:?}");
             cpu.set_one_u64(core_reg(1), 0x1000).unwrap();
             cpu.set_one_u64(core_reg(2), 0x2_0000).unwrap();
             vm.init_gic().unwrap();
@@ -1347,7 +1459,7 @@ mod arm_bsp_tests {
                 ),
                 "{exit:?}"
             );
-            let observed: [u64; 7] = std::array::from_fn(|index| {
+            let observed: [u64; 10] = std::array::from_fn(|index| {
                 memory
                     .read_obj::<u64>(GuestAddress(0x1000 + index as u64 * 8))
                     .unwrap()
@@ -1357,14 +1469,16 @@ mod arm_bsp_tests {
             for ((register, _), observed) in inputs.iter().zip(observed) {
                 let expected = admitted.value(*register);
                 eprintln!(
-                    "KVM {}: guest={observed:#x}, admitted API={expected:#x}, xor={:#x}",
+                    "KVM {}: guest={observed:#x}, admitted API={expected:#x?}, xor={:#x?}",
                     register.name(),
-                    observed ^ expected
+                    expected.as_ref().map(|value| observed ^ value)
                 );
             }
             eprintln!("KVM SCTLR_EL1: post-run API={saved_sctlr:#x}");
             for ((register, _), observed) in inputs.into_iter().zip(observed) {
-                let expected = admitted.value(register);
+                let Ok(expected) = admitted.value(register) else {
+                    continue;
+                };
                 if register == Register::Ctr {
                     // DDI0487 M.c D24.2.41: IVIPT consumes only L1Ip[15:14].
                     // Linux v6.12 cpufeature.c:ftr_ctr omits MTE2's TminLine;

@@ -7,7 +7,8 @@
 //! D24.2.92 (PFR0), D24.2.83 (ISAR0), D24.2.87 (MMFR0), D24.2.41 (CTR),
 //! D7.3 (endianness) and D24.1.3 (signed/unsigned ID interpretation).
 //! A2.2.2 adds the v8.1 floor and its direct conditions; MMFR1 is D24.2.88
-//! and DFR0 is D24.2.79. Native AArch64 execution supplies inseparable base
+//! and DFR0 is D24.2.79. A2.2.3 adds v8.2; ISAR1/MMFR2 are D24.2.84/89.
+//! Native AArch64 execution supplies inseparable base
 //! instructions; configurable guest facts must come from the retained owner,
 //! including Dillo emulation.
 
@@ -23,9 +24,13 @@ pub enum Register {
     Dfr0,
     Ctr,
     Sctlr,
+    Isar1,
+    Mmfr2,
+    A32Mmfr4,
 }
 impl Register {
-    pub const ALL: [Self; 7] = [
+    /// Normal AArch64 inputs; AA32 MMFR4 is captured only when required.
+    pub const ALL: [Self; 9] = [
         Self::Pfr0,
         Self::Isar0,
         Self::Mmfr0,
@@ -33,6 +38,8 @@ impl Register {
         Self::Dfr0,
         Self::Ctr,
         Self::Sctlr,
+        Self::Isar1,
+        Self::Mmfr2,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -44,6 +51,9 @@ impl Register {
             Self::Dfr0 => "ID_AA64DFR0_EL1",
             Self::Ctr => "CTR_EL0",
             Self::Sctlr => "SCTLR_EL1",
+            Self::Isar1 => "ID_AA64ISAR1_EL1",
+            Self::Mmfr2 => "ID_AA64MMFR2_EL1",
+            Self::A32Mmfr4 => "ID_MMFR4_EL1",
         }
     }
     /// Op0:Op1:CRn:CRm:Op2 encoding, also used by MRS and trapped ISS fields.
@@ -56,20 +66,33 @@ impl Register {
             Self::Dfr0 => 0xc028,
             Self::Ctr => 0xd801,
             Self::Sctlr => 0xc080,
+            Self::Isar1 => 0xc031,
+            Self::Mmfr2 => 0xc03a,
+            Self::A32Mmfr4 => 0xc016,
         }
     }
     pub fn from_encoding(encoding: u16) -> Option<Self> {
         Self::ALL
             .into_iter()
+            .chain([Self::A32Mmfr4])
             .find(|register| register.encoding() == encoding)
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdmissionError {
     UnsupportedProfile(pmi::aarch64::Profile),
-    Unavailable { register: Register, reason: String },
+    Unavailable {
+        register: Register,
+        reason: String,
+    },
     Missing(&'static str),
+    MissingField {
+        feature: &'static str,
+        register: Register,
+        observed: u64,
+        minimum: u64,
+    },
     Contradiction(&'static str),
     Unevidenced(&'static str),
 }
@@ -87,6 +110,16 @@ impl fmt::Display for AdmissionError {
                 register.name()
             ),
             Self::Missing(feature) => write!(f, "guest lacks required Arm property: {feature}"),
+            Self::MissingField {
+                feature,
+                register,
+                observed,
+                minimum,
+            } => write!(
+                f,
+                "guest lacks required Arm property: {feature} ({} observed={observed:#x}, minimum={minimum:#x})",
+                register.name()
+            ),
             Self::Contradiction(rule) => write!(f, "contradictory guest Arm configuration: {rule}"),
             Self::Unevidenced(rule) => write!(f, "guest Arm condition is not evidenced: {rule}"),
         }
@@ -104,36 +137,61 @@ pub struct CpuSnapshot {
     dfr0: u64,
     ctr: u64,
     sctlr: u64,
+    // Additional reads retain their errors without raising earlier profiles.
+    isar1: Result<u64, AdmissionError>,
+    mmfr2: Result<u64, AdmissionError>,
+    a32_mmfr4: Option<Result<u64, AdmissionError>>,
 }
 impl CpuSnapshot {
     pub fn capture(
         mut read: impl FnMut(Register) -> Result<u64, AdmissionError>,
     ) -> Result<Self, AdmissionError> {
-        Ok(Self {
-            pfr0: read(Register::Pfr0)?,
+        let pfr0 = read(Register::Pfr0)?;
+        let mmfr1 = read(Register::Mmfr1)?;
+        let mut snapshot = Self {
+            pfr0,
             isar0: read(Register::Isar0)?,
             mmfr0: read(Register::Mmfr0)?,
-            mmfr1: read(Register::Mmfr1)?,
+            mmfr1,
             dfr0: read(Register::Dfr0)?,
             ctr: read(Register::Ctr)?,
             sctlr: read(Register::Sctlr)?,
-        })
+            isar1: read(Register::Isar1),
+            mmfr2: read(Register::Mmfr2),
+            a32_mmfr4: None,
+        };
+        if snapshot.has_aarch32() {
+            snapshot.a32_mmfr4 = Some(read(Register::A32Mmfr4));
+        }
+        Ok(snapshot)
     }
-    pub const fn value(&self, register: Register) -> u64 {
+    fn has_aarch32(&self) -> bool {
+        (0..4).any(|el| (self.pfr0 >> (el * 4)) & 15 >= 2)
+    }
+
+    pub fn value(&self, register: Register) -> Result<u64, AdmissionError> {
         match register {
-            Register::Pfr0 => self.pfr0,
-            Register::Isar0 => self.isar0,
-            Register::Mmfr0 => self.mmfr0,
-            Register::Mmfr1 => self.mmfr1,
-            Register::Dfr0 => self.dfr0,
-            Register::Ctr => self.ctr,
-            Register::Sctlr => self.sctlr,
+            Register::Pfr0 => Ok(self.pfr0),
+            Register::Isar0 => Ok(self.isar0),
+            Register::Mmfr0 => Ok(self.mmfr0),
+            Register::Mmfr1 => Ok(self.mmfr1),
+            Register::Dfr0 => Ok(self.dfr0),
+            Register::Ctr => Ok(self.ctr),
+            Register::Sctlr => Ok(self.sctlr),
+            Register::Isar1 => self.isar1.clone(),
+            Register::Mmfr2 => self.mmfr2.clone(),
+            Register::A32Mmfr4 => self.a32_mmfr4.clone().unwrap_or_else(|| {
+                Err(AdmissionError::Unavailable {
+                    register,
+                    reason: "AArch32 is absent; MMFR4 is architecturally UNKNOWN".into(),
+                })
+            }),
         }
     }
     pub fn admit(self, profile: pmi::aarch64::Profile) -> Result<AdmittedCpu, AdmissionError> {
         if !matches!(
             profile,
-            pmi::aarch64::Profile::V8_0 | pmi::aarch64::Profile::V8_1
+            pmi::aarch64::Profile::V8_0 | pmi::aarch64::Profile::V8_1 | pmi::aarch64::Profile::V8_2
         ) {
             return Err(AdmissionError::UnsupportedProfile(profile));
         }
@@ -204,8 +262,14 @@ impl CpuSnapshot {
                 "FEAT_TRC_SR requires guest ETMv4 or ETE system-register realization",
             ));
         }
-        if profile == pmi::aarch64::Profile::V8_1 {
+        if matches!(
+            profile,
+            pmi::aarch64::Profile::V8_1 | pmi::aarch64::Profile::V8_2
+        ) {
             self.validate_v81()?;
+        }
+        if profile == pmi::aarch64::Profile::V8_2 {
+            self.validate_v82()?;
         }
         Ok(AdmittedCpu { snapshot: self })
     }
@@ -271,6 +335,100 @@ impl CpuSnapshot {
         }
         Ok(())
     }
+    fn validate_v82(&self) -> Result<(), AdmissionError> {
+        let isar1 = self.value(Register::Isar1)?;
+        let mmfr2 = self.value(Register::Mmfr2)?;
+        for (register, observed, minimum, feature) in [
+            (Register::Isar1, isar1 & 15, 1, "FEAT_DPB"),
+            (Register::Dfr0, self.dfr0 & 15, 8, "FEAT_Debugv8p2"),
+            (Register::Mmfr1, (self.mmfr1 >> 20) & 15, 2, "FEAT_PAN2"),
+            (Register::Pfr0, (self.pfr0 >> 28) & 15, 1, "FEAT_RAS"),
+            (Register::Mmfr2, mmfr2 & 15, 1, "FEAT_TTCNP"),
+            (Register::Mmfr2, (mmfr2 >> 4) & 15, 1, "FEAT_UAO"),
+        ] {
+            if observed < minimum {
+                return Err(AdmissionError::MissingField {
+                    feature,
+                    register,
+                    observed,
+                    minimum,
+                });
+            }
+        }
+        let el2 = (self.pfr0 >> 8) & 15 != 0;
+        let xnx = (self.mmfr1 >> 28) & 15 != 0;
+        if el2 && !xnx {
+            return Err(AdmissionError::Missing("FEAT_XNX when EL2 is present"));
+        }
+        if xnx && !el2 {
+            return Err(AdmissionError::Contradiction("FEAT_XNX requires EL2"));
+        }
+        let sve = (self.pfr0 >> 32) & 15 != 0;
+        let fhm = (self.isar0 >> 48) & 15 != 0;
+        let fp = (self.pfr0 >> 16) & 15;
+        if (sve || fhm) && !(1..8).contains(&fp) {
+            return Err(AdmissionError::Missing(
+                "FEAT_FP16 when SVE or FHM is present",
+            ));
+        }
+        let aes = (self.isar0 >> 4) & 15;
+        let sha1 = (self.isar0 >> 8) & 15;
+        let sha256 = (self.isar0 >> 12) & 15;
+        let sha3 = (self.isar0 >> 32) & 15;
+        let sm3 = (self.isar0 >> 36) & 15;
+        let sm4 = (self.isar0 >> 40) & 15;
+        if sm3 != sm4 {
+            return Err(AdmissionError::Contradiction(
+                "ISAR0.SM3 and SM4 must be equal",
+            ));
+        }
+        // Positive forward levels retain SHA3/SHA512, not merely the exact
+        // encodings currently named in D24.2.83.
+        if (sha3 != 0) != (sha256 >= 2) {
+            return Err(AdmissionError::Contradiction(
+                "SHA3 and SHA512 must both be present or both absent",
+            ));
+        }
+        if (sha3 != 0 || sm3 != 0 || sm4 != 0) && aes == 0 && sha1 == 0 {
+            return Err(AdmissionError::Contradiction(
+                "SHA3/SM3/SM4 requires Crypto's AES or SHA1",
+            ));
+        }
+        if (aes != 0 || sha1 != 0) && aes < 2 && sha256 == 0 && sm3 == 0 && sm4 == 0 {
+            return Err(AdmissionError::Missing(
+                "Crypto in v8.2 requires PMULL, SHA256, SM3 or SM4",
+            ));
+        }
+        // A2.2.3: LSMAOC controls AArch32 load/store multiple behavior.
+        if (mmfr2 >> 8) & 15 != 0 && !self.has_aarch32() {
+            return Err(AdmissionError::Contradiction(
+                "FEAT_LSMAOC requires AArch32",
+            ));
+        }
+        if self.has_aarch32() {
+            // D24.2.111: these fields apply whenever any AArch32 state exists.
+            // Without AArch32 the entire register is UNKNOWN, not zero evidence.
+            let mmfr4 = self.value(Register::A32Mmfr4)?;
+            let cnp = (mmfr4 >> 12) & 15;
+            let ac2 = (mmfr4 >> 4) & 15;
+            if cnp == 0 || ac2 == 0 {
+                return Err(AdmissionError::Missing("AArch32 MMFR4.CnP and AC2 in v8.2"));
+            }
+            let aa32_xnx = (mmfr4 >> 8) & 15;
+            if (self.pfr0 >> 8) & 15 >= 2 && aa32_xnx == 0 {
+                return Err(AdmissionError::Missing(
+                    "AArch32 MMFR4.XNX when AArch32 EL2 is present",
+                ));
+            }
+            let aa32_hpd = (mmfr4 >> 16) & 15;
+            if (self.pfr0 >> 4) & 15 >= 2 && (self.mmfr1 >> 12) & 15 >= 2 && aa32_hpd == 0 {
+                return Err(AdmissionError::Missing(
+                    "FEAT_AA32HPD when AArch32 EL1 and HPDS2 are present",
+                ));
+            }
+        }
+        Ok(())
+    }
     fn validate_endianness(&self) -> Result<(), AdmissionError> {
         let mixed = (self.mmfr0 >> 8) & 15;
         let el0_mixed = (self.mmfr0 >> 16) & 15;
@@ -295,7 +453,7 @@ pub struct AdmittedCpu {
     snapshot: CpuSnapshot,
 }
 impl AdmittedCpu {
-    pub fn value(&self, register: Register) -> u64 {
+    pub fn value(&self, register: Register) -> Result<u64, AdmissionError> {
         self.snapshot.value(register)
     }
 }

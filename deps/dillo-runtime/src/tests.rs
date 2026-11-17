@@ -27,6 +27,8 @@ enum AdmissionRefusal {
     MissingEvidence,
     V81MissingEvidence,
     V81MissingFeature,
+    V82MissingEvidence,
+    V82MissingFeature,
     Contradiction,
     UnsupportedProfile,
 }
@@ -147,7 +149,13 @@ impl CpuPreparation for Input {
                         .iter()
                         .any(|event| matches!(event, Event::Prepared(0, _)))
                 });
+                let v82 = matches!(
+                    refusal,
+                    AdmissionRefusal::V82MissingEvidence | AdmissionRefusal::V82MissingFeature
+                );
                 let profile = if matches!(refusal, AdmissionRefusal::UnsupportedProfile) {
+                    pmi::aarch64::Profile::V8_3
+                } else if v82 {
                     pmi::aarch64::Profile::V8_2
                 } else if matches!(
                     refusal,
@@ -158,6 +166,14 @@ impl CpuPreparation for Input {
                     pmi::aarch64::Profile::V8_0
                 };
                 let result = CpuSnapshot::capture(|register| {
+                    if register == Register::Mmfr2
+                        && matches!(refusal, AdmissionRefusal::V82MissingEvidence)
+                    {
+                        return Err(AdmissionError::Unavailable {
+                            register,
+                            reason: "injected missing MMFR2 selector".into(),
+                        });
+                    }
                     if register == Register::Mmfr1
                         && matches!(refusal, AdmissionRefusal::V81MissingEvidence)
                     {
@@ -178,16 +194,26 @@ impl CpuPreparation for Input {
                         Register::Pfr0 if matches!(refusal, AdmissionRefusal::Contradiction) => {
                             0x00f0_0011
                         }
+                        Register::Pfr0 if v82 => 0x11 | (1 << 28),
                         Register::Pfr0 => 0x11,
                         Register::Ctr if matches!(refusal, AdmissionRefusal::MissingFeature) => {
                             1 << 14
                         }
                         Register::Ctr => 3 << 14,
                         Register::Isar0
-                            if matches!(refusal, AdmissionRefusal::V81MissingFeature) =>
+                            if v82 || matches!(refusal, AdmissionRefusal::V81MissingFeature) =>
                         {
                             (1 << 16) | (2 << 20) | (1 << 28)
                         }
+                        Register::Mmfr1 if v82 => (1 << 12) | (1 << 16) | (2 << 20),
+                        Register::Dfr0 if v82 => 8,
+                        Register::Isar1 if v82 => 1,
+                        Register::Mmfr2
+                            if matches!(refusal, AdmissionRefusal::V82MissingFeature) =>
+                        {
+                            1
+                        }
+                        Register::Mmfr2 if v82 => 0x11,
                         Register::Mmfr1
                             if matches!(refusal, AdmissionRefusal::V81MissingFeature) =>
                         {
@@ -642,10 +668,12 @@ fn architectural_admission_failure_cannot_release_a_prepared_peer() {
         (AdmissionRefusal::MissingEvidence, "native selector"),
         (AdmissionRefusal::V81MissingEvidence, "MMFR1 selector"),
         (AdmissionRefusal::V81MissingFeature, "FEAT_LOR"),
+        (AdmissionRefusal::V82MissingEvidence, "MMFR2 selector"),
+        (AdmissionRefusal::V82MissingFeature, "FEAT_UAO"),
         (AdmissionRefusal::Contradiction, "FP and AdvSIMD"),
         (
             AdmissionRefusal::UnsupportedProfile,
-            "armv8.2-a admission is not implemented",
+            "armv8.3-a admission is not implemented",
         ),
     ] {
         let mut machine =
