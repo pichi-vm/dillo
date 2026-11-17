@@ -7,6 +7,7 @@ license.workspace = true
 description = "PCI root complex and endpoint traits for dillo."
 
 [dependencies]
+dillo-machine.workspace = true
 dillo-mmio.workspace = true
 log.workspace = true
 

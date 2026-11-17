@@ -22,9 +22,10 @@
 mod backend;
 mod fuse;
 
+use dillo_virtio::queue::PublicationError;
 use std::sync::{Arc, Mutex};
 
-use dillo_mmio::Interrupt;
+use dillo_machine::interrupt::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
 use dillo_virtio::{
     ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
@@ -173,16 +174,15 @@ impl VirtioDevice for VirtioFs {
         // uniform, so each worker runs the same drain over shared state.
         let mut workers: Vec<Arc<Mutex<Option<VirtioDeviceHandle>>>> =
             Vec::with_capacity(NUM_QUEUES);
-        let mut wakes: Vec<Kick> = Vec::with_capacity(NUM_QUEUES);
         for index in 0..NUM_QUEUES {
             let queue = queues.remove(0);
             let evt = queue_evts.remove(0);
-            wakes.push(evt.try_clone()?);
             let call_interrupt = activation.queue_interrupt(index);
             let handle = spawn_queue_worker(
                 Arc::clone(&host),
                 Arc::clone(&queue_memory),
                 Arc::clone(&buffer_memory),
+                index,
                 queue,
                 evt,
                 call_interrupt,
@@ -209,9 +209,6 @@ impl VirtioDevice for VirtioFs {
                         handle.shutdown();
                     }
                 }
-                for wake in &wakes {
-                    let _ = wake.write(1);
-                }
             },
             move || {
                 for worker in &join_workers {
@@ -230,25 +227,31 @@ fn spawn_queue_worker(
     host: Arc<dyn VirtioDeviceHost>,
     queue_memory: Arc<dyn QueueMemory>,
     buffer_memory: Arc<dyn VirtioMemory>,
+    queue_index: usize,
     queue: Queue,
     kick: Kick,
     call_interrupt: Option<Interrupt>,
     state: Arc<Mutex<FsState>>,
     backend: Arc<dyn FsBackend>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        queue_worker(
-            queue_memory,
-            buffer_memory,
-            queue,
-            kick,
-            call_interrupt,
-            state,
-            backend,
-            token,
-        );
-        Ok(())
-    }))
+    let wake = kick.clone();
+    host.spawn(
+        format!("fs queue {queue_index}"),
+        Box::new(move |token| {
+            queue_worker(
+                queue_memory,
+                buffer_memory,
+                queue,
+                kick,
+                call_interrupt,
+                state,
+                backend,
+                token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
+    .map(|handle| handle.with_shutdown_wake(wake))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -261,15 +264,15 @@ fn queue_worker(
     state: Arc<Mutex<FsState>>,
     backend: Arc<dyn FsBackend>,
     token: VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Arc::new(Mutex::new(queue));
     loop {
         if let Err(e) = kick.read() {
             log::error!("virtio-fs: kick read error: {e}");
-            return;
+            return Err(e);
         }
         if token.is_shutdown_requested() {
-            return;
+            return Ok(dillo_virtio::DeviceExit::Cancelled);
         }
         drain_requests(
             &queue_memory,
@@ -278,7 +281,7 @@ fn queue_worker(
             call_interrupt.as_ref(),
             &state,
             backend.as_ref(),
-        );
+        )?;
     }
 }
 
@@ -292,57 +295,64 @@ fn drain_requests(
     call_interrupt: Option<&Interrupt>,
     state: &Arc<Mutex<FsState>>,
     backend: &dyn FsBackend,
-) {
+) -> Result<(), PublicationError> {
     let mut q = queue.lock().expect("virtio-fs queue mutex");
     let mut signaled = false;
-    while let Some(head) = q.pop(queue_memory) {
-        let head_index = head.index;
+    let result: Result<(), PublicationError> = (|| {
+        while let Some(head) = q.pop(queue_memory) {
+            let head_index = head.index;
 
-        // Split the chain: device-readable = request, device-writable = reply.
-        let mut readable: Vec<Desc> = Vec::new();
-        let mut writable: Vec<Desc> = Vec::new();
-        let mut current = Some(head);
-        while let Some(desc) = current {
-            if desc.flags & VIRTQ_DESC_F_WRITE != 0 {
-                writable.push((desc.addr, desc.len));
-            } else {
-                readable.push((desc.addr, desc.len));
+            // Split the chain: device-readable = request, device-writable = reply.
+            let mut readable: Vec<Desc> = Vec::new();
+            let mut writable: Vec<Desc> = Vec::new();
+            let mut current = Some(head);
+            while let Some(desc) = current {
+                if desc.flags & VIRTQ_DESC_F_WRITE != 0 {
+                    writable.push((desc.addr, desc.len));
+                } else {
+                    readable.push((desc.addr, desc.len));
+                }
+                current = desc.next_desc(queue_memory);
             }
-            current = desc.next_desc(queue_memory);
-        }
 
-        // Gather the request bytes.
-        let mut input = Vec::new();
-        for &(addr, len) in &readable {
-            if input.len() >= MAX_REQUEST {
-                break;
-            }
-            let take = (len as usize).min(MAX_REQUEST - input.len());
-            let mut buf = vec![0u8; take];
-            match buffer_memory.read(addr, &mut buf) {
-                Ok(n) => input.extend_from_slice(&buf[..n]),
-                Err(e) => {
-                    log::warn!("virtio-fs: request read at {:#x}+{len}: {e:?}", addr.0);
+            // Gather the request bytes.
+            let mut input = Vec::new();
+            for &(addr, len) in &readable {
+                if input.len() >= MAX_REQUEST {
                     break;
                 }
+                let take = (len as usize).min(MAX_REQUEST - input.len());
+                let mut buf = vec![0u8; take];
+                match buffer_memory.read(addr, &mut buf) {
+                    Ok(n) => input.extend_from_slice(&buf[..n]),
+                    Err(e) => {
+                        log::warn!("virtio-fs: request read at {:#x}+{len}: {e:?}", addr.0);
+                        break;
+                    }
+                }
             }
+
+            let reply = {
+                let mut st = state.lock().expect("virtio-fs state mutex");
+                fuse::dispatch(&mut st, backend, &input)
+            };
+
+            let written = match reply {
+                Some(reply) => scatter_write(buffer_memory, &writable, &reply),
+                None => 0, // replyless op (FORGET / INTERRUPT): return desc, len 0.
+            };
+            q.add_used(queue_memory, head_index, written)?;
+            signaled = true;
         }
-
-        let reply = {
-            let mut st = state.lock().expect("virtio-fs state mutex");
-            fuse::dispatch(&mut st, backend, &input)
-        };
-
-        let written = match reply {
-            Some(reply) => scatter_write(buffer_memory, &writable, &reply),
-            None => 0, // replyless op (FORGET / INTERRUPT): return desc, len 0.
-        };
-        q.add_used(queue_memory, head_index, written);
-        signaled = true;
-    }
-    if signaled && let Some(intr) = call_interrupt {
+        Ok(())
+    })();
+    drop(q);
+    if (signaled || result.as_ref().is_err_and(PublicationError::is_published))
+        && let Some(intr) = call_interrupt
+    {
         intr.signal();
     }
+    result
 }
 
 /// Write `reply` across the device-writable descriptors in order. Returns the
@@ -375,10 +385,204 @@ fn scatter_write(buffer_memory: &Arc<dyn VirtioMemory>, writable: &[Desc], reply
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_machine::memory::{
+        AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
+    };
     use dillo_virtio::queue::VIRTQ_DESC_F_NEXT;
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
     use vm_memory::{Address, Bytes, GuestMemoryMmap};
+
+    #[test]
+    fn failed_publication_does_not_repeat_filesystem_mutation() {
+        struct Backend(std::sync::atomic::AtomicUsize, MapFs);
+        impl FsBackend for Backend {
+            fn stat(&self, path: &std::path::Path) -> std::io::Result<backend::Attr> {
+                self.1.stat(path)
+            }
+            fn readdir(&self, _: &std::path::Path) -> std::io::Result<Vec<backend::DirEntry>> {
+                unreachable!()
+            }
+            fn read(&self, _: &std::path::Path, _: u64, _: u32) -> std::io::Result<Vec<u8>> {
+                unreachable!()
+            }
+            fn readlink(&self, _: &std::path::Path) -> std::io::Result<Vec<u8>> {
+                unreachable!()
+            }
+            fn mkdir(&self, _: &std::path::Path, _: u32) -> std::io::Result<backend::Attr> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.1.stat(std::path::Path::new(""))
+            }
+        }
+        for fail in 0..4 {
+            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let shared = Arc::new(MappedSharedMemory::for_guest_memory(
+                mem.clone(),
+                SharedAccess::ReadWrite,
+            ));
+            let fault = Arc::new(dillo_virtio::test_support::FaultQueueMemory::new(
+                Arc::new(SharedQueueMemory::new(vec![shared.clone()])),
+                fail,
+            ));
+            let qmem: Arc<dyn QueueMemory> = fault.clone();
+            let bmem: Arc<dyn VirtioMemory> = Arc::new(SharedVirtioMemory::new(vec![shared]));
+            let mut queue = Queue::new(16);
+            queue.uses_notif_suppression = true;
+            queue.ready = true;
+            queue.desc_table = GuestAddress(0x100);
+            queue.avail_ring = GuestAddress(0x1000);
+            queue.used_ring = GuestAddress(0x2000);
+            mem.write_obj::<u16>(2, GuestAddress(0x1002)).unwrap();
+            let mut request = vec![0u8; 50];
+            request[0..4].copy_from_slice(&50u32.to_le_bytes());
+            request[4..8].copy_from_slice(&9u32.to_le_bytes()); // FUSE_MKDIR
+            request[8..16].copy_from_slice(&1u64.to_le_bytes());
+            request[16..24].copy_from_slice(&1u64.to_le_bytes()); // root inode
+            request[40..44].copy_from_slice(&0o755u32.to_le_bytes());
+            request[48] = b'x';
+            mem.write_slice(&request, GuestAddress(0x5000)).unwrap();
+            write_desc(&mem, queue.desc_table, 0, 0x5000, 50, VIRTQ_DESC_F_NEXT, 1);
+            write_desc(
+                &mem,
+                queue.desc_table,
+                1,
+                0x6000,
+                256,
+                VIRTQ_DESC_F_WRITE,
+                0,
+            );
+            let queue = Arc::new(Mutex::new(queue));
+            let state = Arc::new(Mutex::new(FsState::new(false)));
+            let backend = Backend(std::sync::atomic::AtomicUsize::new(0), MapFs::new());
+            let error = drain_requests(&qmem, &bmem, &queue, None, &state, &backend).unwrap_err();
+            assert_eq!(backend.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(queue.lock().unwrap().next_avail.0, 1);
+            assert_eq!(error.is_published(), fail == 3);
+            assert_eq!(fault.attempts(), fail + 1);
+        }
+    }
+
+    #[test]
+    fn later_spawn_failure_wakes_and_joins_the_first_queue_worker() {
+        use dillo_virtio::DeviceJoinError;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        #[derive(Debug)]
+        struct ObservedKick {
+            inner: Kick,
+            entered: mpsc::Sender<()>,
+            shutdown: Arc<AtomicBool>,
+            wakes: Arc<AtomicUsize>,
+            woke_before_shutdown: Arc<AtomicBool>,
+        }
+        impl dillo_machine::notification::WriteNotification for ObservedKick {
+            fn read(&self) -> std::io::Result<u64> {
+                self.entered.send(()).unwrap();
+                self.inner.read()
+            }
+            fn write(&self, count: u64) -> std::io::Result<()> {
+                if !self.shutdown.load(Ordering::Acquire) {
+                    self.woke_before_shutdown.store(true, Ordering::Release);
+                }
+                self.wakes.fetch_add(1, Ordering::Relaxed);
+                self.inner.write(count)
+            }
+        }
+        #[derive(Debug)]
+        struct FailSecondSpawn {
+            entered: Mutex<mpsc::Receiver<()>>,
+            shutdown: Arc<AtomicBool>,
+            spawned: AtomicUsize,
+            joined: Arc<AtomicUsize>,
+        }
+        impl VirtioDeviceHost for FailSecondSpawn {
+            fn spawn(
+                &self,
+                _name: String,
+                run: Box<
+                    dyn FnOnce(VirtioRunToken) -> Result<dillo_virtio::DeviceExit, DeviceJoinError>
+                        + Send,
+                >,
+            ) -> Result<VirtioDeviceHandle, ActivateError> {
+                if self.spawned.fetch_add(1, Ordering::Relaxed) == 1 {
+                    self.entered
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap();
+                    return Err(ActivateError::Io(std::io::Error::other(
+                        "second spawn failed",
+                    )));
+                }
+                let shutdown = Arc::clone(&self.shutdown);
+                let token_shutdown = Arc::clone(&shutdown);
+                let worker = std::thread::spawn(move || {
+                    run(VirtioRunToken::from_fn(move || {
+                        token_shutdown.load(Ordering::Acquire)
+                    }))
+                });
+                let joined = Arc::clone(&self.joined);
+                Ok(VirtioDeviceHandle::new(
+                    move || shutdown.store(true, Ordering::Release),
+                    move || {
+                        joined.fetch_add(1, Ordering::Relaxed);
+                        worker
+                            .join()
+                            .map_err(|_| DeviceJoinError::Panicked)?
+                            .map(|_| ())
+                    },
+                ))
+            }
+        }
+
+        let (entered, wait) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let woke_before_shutdown = Arc::new(AtomicBool::new(false));
+        let joined = Arc::new(AtomicUsize::new(0));
+        let rescue = Kick::new().unwrap();
+        let kick = Kick::from_notification(Arc::new(ObservedKick {
+            inner: rescue.clone(),
+            entered,
+            shutdown: Arc::clone(&shutdown),
+            wakes: Arc::clone(&wakes),
+            woke_before_shutdown: Arc::clone(&woke_before_shutdown),
+        }));
+        let host = Arc::new(FailSecondSpawn {
+            entered: Mutex::new(wait),
+            shutdown,
+            spawned: AtomicUsize::new(0),
+            joined: Arc::clone(&joined),
+        });
+        let activation = VirtioActivate::with_host(
+            vec![Queue::new(16), Queue::new(16)],
+            vec![kick, Kick::new().unwrap()],
+            host.clone(),
+        );
+        let (finished, completion) = mpsc::channel();
+        let activation_thread = std::thread::spawn(move || {
+            let mut fs = VirtioFs::new("rollback", Arc::new(MapFs::new()), true).unwrap();
+            let result = fs.activate(activation);
+            finished.send(result.map(drop)).unwrap();
+        });
+        let result = completion.recv_timeout(Duration::from_secs(2));
+        // Rescue a broken implementation only after recording the timeout.
+        // The fallback must never turn a missed shutdown wake into a pass.
+        if result.is_err() {
+            host.shutdown.store(true, Ordering::Release);
+            rescue.write(1).unwrap();
+        }
+        activation_thread.join().unwrap();
+        let error = result
+            .expect("activation rollback must finish without rescue")
+            .unwrap_err();
+        assert!(error.to_string().contains("second spawn failed"));
+        assert_eq!(host.spawned.load(Ordering::Relaxed), 2);
+        assert_eq!(joined.load(Ordering::Relaxed), 1);
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        assert!(!woke_before_shutdown.load(Ordering::Acquire));
+    }
 
     #[test]
     fn config_carries_tag_and_one_request_queue() {
@@ -490,7 +694,8 @@ mod tests {
             None,
             &state,
             backend.as_ref(),
-        );
+        )
+        .unwrap();
 
         // Reply: out_header (len, error=0, unique=1) + fuse_init_out.
         let reply_len: u32 = mem.read_obj(reply_buf).unwrap();

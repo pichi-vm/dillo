@@ -3,11 +3,15 @@
 
 use std::sync::{Arc, Mutex};
 
-use dillo_mmio::{Interrupt, InterruptError, MmioDevice, MmioWindow};
-use dillo_pci::{
-    MessageInterrupt, MessageInterruptDomain, MmioAttachment, MmioDeviceHandle, MmioDeviceRun,
-    MmioInterrupt, MmioInterruptRequirement, MmioSpawnError, PciRoot, SharedMemory,
+use dillo_machine::attachment::DeviceAttachment;
+use dillo_machine::execution::{DeviceHandle, DeviceRun, SpawnError};
+use dillo_machine::interrupt::{
+    Interrupt, InterruptError, InterruptRequirement, InterruptResource, MessageInterrupt,
+    MessageInterruptDomain,
 };
+use dillo_machine::memory::{AddressRange, SharedMemory};
+use dillo_mmio::MmioDevice;
+use dillo_pci::PciRoot;
 use dillo_pci_virtio::{VirtioPciAdapter, VirtioPciDevice};
 use dillo_virtio::{
     ActivateError, VIRTIO_F_VERSION_1, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
@@ -41,10 +45,10 @@ impl MessageInterruptDomain for RecordingDomain {
 }
 
 #[derive(Debug)]
-struct Attachment(Vec<MmioInterrupt>);
+struct Attachment(Vec<InterruptResource>);
 
-impl MmioAttachment for Attachment {
-    fn interrupts(&self) -> &[MmioInterrupt] {
+impl DeviceAttachment for Attachment {
+    fn interrupts(&self) -> &[InterruptResource] {
         &self.0
     }
 
@@ -52,8 +56,8 @@ impl MmioAttachment for Attachment {
         &[]
     }
 
-    fn spawn(self: Arc<Self>, _run: MmioDeviceRun) -> Result<MmioDeviceHandle, MmioSpawnError> {
-        Ok(MmioDeviceHandle::noop())
+    fn spawn(self: Arc<Self>, _name: String, _run: DeviceRun) -> Result<DeviceHandle, SpawnError> {
+        Ok(DeviceHandle::noop())
     }
 }
 
@@ -115,11 +119,11 @@ fn queue_vectors_stay_within_each_function_on_activation() {
         let domain = Arc::new(RecordingDomain::default());
         let activations = Arc::new(Mutex::new(Vec::new()));
         let mut root = PciRoot::with_interrupt_requirement(
-            MmioWindow {
+            AddressRange {
                 base: 0x3000_0000,
                 size: 0x1000_0000,
             },
-            MmioInterruptRequirement::MessageDomain {
+            InterruptRequirement::MessageDomain {
                 source: None,
                 vectors: 0,
             },
@@ -141,11 +145,11 @@ fn queue_vectors_stay_within_each_function_on_activation() {
         }
         assert!(matches!(
             root.interrupts(),
-            [MmioInterruptRequirement::MessageDomain { vectors: 4, .. }]
+            [InterruptRequirement::MessageDomain { vectors: 4, .. }]
         ));
-        root.set_attachment(Arc::new(Attachment(vec![MmioInterrupt::MessageDomain(
-            domain.clone(),
-        )])));
+        root.set_attachment(Arc::new(Attachment(vec![
+            InterruptResource::MessageDomain(domain.clone()),
+        ])));
 
         let mut expected = Vec::new();
         for (slot, local) in (1..=2).zip(locals) {

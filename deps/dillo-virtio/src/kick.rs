@@ -13,7 +13,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 /// Queue notification shared between the transport and a device worker.
 #[derive(Clone, Debug)]
-pub struct Kick(Arc<dyn dillo_mmio::WriteNotification>);
+pub struct Kick(Arc<dyn dillo_machine::notification::WriteNotification>);
 
 #[derive(Debug)]
 struct Inner {
@@ -29,7 +29,9 @@ impl Kick {
         })))
     }
 
-    pub fn from_notification(notification: Arc<dyn dillo_mmio::WriteNotification>) -> Self {
+    pub fn from_notification(
+        notification: Arc<dyn dillo_machine::notification::WriteNotification>,
+    ) -> Self {
         Self(notification)
     }
 
@@ -46,7 +48,7 @@ impl Kick {
     }
 }
 
-impl dillo_mmio::WriteNotification for Inner {
+impl dillo_machine::notification::WriteNotification for Inner {
     fn read(&self) -> std::io::Result<u64> {
         let mut count = self.count.lock().expect("kick mutex poisoned");
         while *count == 0 {

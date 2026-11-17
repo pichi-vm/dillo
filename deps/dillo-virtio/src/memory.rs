@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use dillo_mmio::{SharedAccess, SharedMemory, SharedMemoryError, SharedRange};
+use dillo_machine::memory::{SharedAccess, SharedMemory, SharedMemoryError, SharedRange};
 use vm_memory::{Address, GuestAddress};
 
 /// Error returned by virtio descriptor-buffer memory access.
@@ -75,7 +75,7 @@ impl SharedVirtioMemory {
         addr: GuestAddress,
         size: usize,
         access: SharedAccess,
-    ) -> Result<dillo_mmio::SharedRegion, SharedMemoryError> {
+    ) -> Result<dillo_machine::memory::SharedRegion, SharedMemoryError> {
         let mut last = SharedMemoryError::Unsupported;
         for capability in &self.capabilities {
             match capability.region(SharedRange {
@@ -108,7 +108,7 @@ impl VirtioMemory for SharedVirtioMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedMemoryRequirement};
+    use dillo_machine::memory::{AddressRange, MappedSharedMemory, SharedMemoryRequirement};
     use vm_memory::{Bytes, GuestMemoryMmap};
 
     #[test]

@@ -18,5 +18,13 @@ thiserror.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys.workspace = true
 
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Memory"] }
+wait-timeout = "0.2"
+
+[dev-dependencies]
+dillo-virtio = { workspace = true, features = ["test-support"] }
+dillo-runtime.workspace = true
+
 [lints]
 workspace = true
