@@ -679,9 +679,9 @@ fn failed_retained_source_view_prevents_all_guest_writes() {
     impl LaunchInput for RefusedView {
         type View<'a> = <SelectedInput as LaunchInput>::View<'a>;
 
-        fn capture(source: std::fs::File) -> std::io::Result<Self> {
+        fn capture(source: std::fs::File, max_len: u64) -> std::io::Result<Self> {
             Ok(Self {
-                source: SelectedInput::capture(source)?,
+                source: SelectedInput::capture(source, max_len)?,
                 viewed: std::cell::Cell::new(false),
             })
         }

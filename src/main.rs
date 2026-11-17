@@ -1514,7 +1514,11 @@ mod launch {
                 path: path.display().to_string(),
                 source,
             };
-            let source = S::capture(File::open(path).map_err(read_error)?).map_err(read_error)?;
+            let source = S::capture(
+                File::open(path).map_err(read_error)?,
+                dillo::pmi_parse::caps::MAX_FILE_SIZE,
+            )
+            .map_err(read_error)?;
             Ok(Self {
                 source,
                 path: path.to_path_buf(),

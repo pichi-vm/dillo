@@ -41,9 +41,16 @@ impl AsRef<[u8]> for LaunchView<'_> {
 impl CapturedLaunchInput {
     fn capture_with(
         mut source: File,
+        max_len: u64,
         clone: impl FnOnce(&File, &File) -> io::Result<()>,
     ) -> io::Result<Self> {
         let source_len = source.metadata()?.len();
+        if source_len > max_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "launch input exceeds size limit",
+            ));
+        }
         usize::try_from(source_len)
             .map_err(|_| io::Error::other("launch input exceeds host address space"))?;
         let directory = tempfile::Builder::new()
@@ -75,7 +82,14 @@ impl CapturedLaunchInput {
             }
             Err(error) => return Err(error),
         }
-        let len = usize::try_from(file.metadata()?.len())
+        let captured_len = file.metadata()?.len();
+        if captured_len > max_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "launch input exceeds size limit",
+            ));
+        }
+        let len = usize::try_from(captured_len)
             .map_err(|_| io::Error::other("launch input exceeds host address space"))?;
         Ok(Self {
             file,
@@ -88,8 +102,8 @@ impl CapturedLaunchInput {
 impl dillo_machine::LaunchInput for CapturedLaunchInput {
     type View<'a> = LaunchView<'a>;
 
-    fn capture(source: File) -> io::Result<Self> {
-        Self::capture_with(source, |destination, source| {
+    fn capture(source: File, max_len: u64) -> io::Result<Self> {
+        Self::capture_with(source, max_len, |destination, source| {
             rustix::fs::ioctl_ficlone(destination, source).map_err(Into::into)
         })
     }
@@ -124,15 +138,38 @@ mod tests {
     use std::io::Write;
 
     #[test]
+    fn oversized_input_is_refused_before_clone_or_copy() {
+        let source = tempfile::tempfile().unwrap();
+        source.set_len(4097).unwrap();
+        let error = CapturedLaunchInput::capture_with(source, 4096, |_, _| {
+            panic!("oversized input must not reach capture")
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn cloned_growth_cannot_bypass_the_limit() {
+        let source = tempfile::tempfile().unwrap();
+        source.set_len(4096).unwrap();
+        let error = CapturedLaunchInput::capture_with(source, 4096, |destination, _| {
+            destination.set_len(4097)
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn copy_fallback_survives_source_overwrite_truncation_and_view_drop() {
         let mut source = tempfile::NamedTempFile::new().unwrap();
         let expected = vec![0x5a; 16384];
         source.write_all(&expected).unwrap();
-        let capture =
-            CapturedLaunchInput::capture_with(File::open(source.path()).unwrap(), |_, _| {
-                Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP))
-            })
-            .unwrap();
+        let capture = CapturedLaunchInput::capture_with(
+            File::open(source.path()).unwrap(),
+            u64::MAX,
+            |_, _| Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP)),
+        )
+        .unwrap();
         assert_eq!(
             capture
                 .directory
@@ -162,6 +199,7 @@ mod tests {
         let cloned = Cell::new(false);
         let capture = CapturedLaunchInput::capture_with(
             File::open(source.path()).unwrap(),
+            u64::MAX,
             |destination, source| {
                 rustix::fs::ioctl_ficlone(destination, source).map_err(io::Error::from)?;
                 cloned.set(true);
@@ -187,21 +225,26 @@ mod tests {
     fn copy_refuses_truncation_during_capture() {
         let mut source = tempfile::NamedTempFile::new().unwrap();
         source.write_all(&[0x11; 8192]).unwrap();
-        let error =
-            CapturedLaunchInput::capture_with(File::open(source.path()).unwrap(), |_, _| {
+        let error = CapturedLaunchInput::capture_with(
+            File::open(source.path()).unwrap(),
+            u64::MAX,
+            |_, _| {
                 source.as_file().set_len(7).unwrap();
                 Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP))
-            })
-            .unwrap_err();
+            },
+        )
+        .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     #[test]
     fn copy_bounds_source_growth_and_discards_failed_clone_contents() {
         let mut source = tempfile::NamedTempFile::new().unwrap();
-        source.write_all(b"validated capture").unwrap();
+        let expected = b"validated capture";
+        source.write_all(expected).unwrap();
         let capture = CapturedLaunchInput::capture_with(
             File::open(source.path()).unwrap(),
+            expected.len() as u64,
             |mut destination, _| {
                 destination.write_all(&[0xcc; 8192]).unwrap();
                 source.write_all(&[0xff; 8192]).unwrap();
@@ -209,13 +252,13 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(capture.view().unwrap().as_ref(), b"validated capture");
+        assert_eq!(capture.view().unwrap().as_ref(), expected);
     }
 
     #[test]
     fn unexpected_clone_failure_is_reported_without_copying() {
         let source = tempfile::tempfile().unwrap();
-        let error = CapturedLaunchInput::capture_with(source, |_, _| {
+        let error = CapturedLaunchInput::capture_with(source, u64::MAX, |_, _| {
             Err(io::Error::from_raw_os_error(libc::EIO))
         })
         .unwrap_err();
@@ -224,7 +267,7 @@ mod tests {
 
     #[test]
     fn empty_capture_provides_an_empty_view() {
-        let capture = CapturedLaunchInput::capture(tempfile::tempfile().unwrap()).unwrap();
+        let capture = CapturedLaunchInput::capture(tempfile::tempfile().unwrap(), 0).unwrap();
         assert!(capture.view().unwrap().as_ref().is_empty());
     }
 }

@@ -118,8 +118,10 @@ pub trait LaunchInput: std::fmt::Debug + Sized + 'static {
 
     /// Consume an opened file and capture its contents from offset zero. Capture
     /// may observe concurrent source changes, but its completed bytes must be
-    /// immutable before returning. Partial capture is an error.
-    fn capture(source: std::fs::File) -> std::io::Result<Self>;
+    /// immutable before returning. Refuse lengths above `max_len` before bulk
+    /// allocation or copying, including a clone that grows past this limit.
+    /// Partial capture is an error.
+    fn capture(source: std::fs::File, max_len: u64) -> std::io::Result<Self>;
 
     /// Borrow the same captured bytes on every call. Dropping a view may release
     /// its mapping; it must not discard or reread the retained source contents.

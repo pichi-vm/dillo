@@ -21,8 +21,14 @@ impl std::fmt::Debug for CapturedLaunchInput {
 impl dillo_machine::LaunchInput for CapturedLaunchInput {
     type View<'a> = &'a [u8];
 
-    fn capture(mut source: File) -> io::Result<Self> {
+    fn capture(mut source: File, max_len: u64) -> io::Result<Self> {
         let len = source.metadata()?.len();
+        if len > max_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "launch input exceeds size limit",
+            ));
+        }
         let capacity = usize::try_from(len)
             .map_err(|_| io::Error::other("launch input exceeds host address space"))?;
         source.rewind()?;
