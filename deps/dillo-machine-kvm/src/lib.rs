@@ -687,8 +687,19 @@ mod imp {
             if self.index == 0 {
                 vcpu.initialize_bsp()?;
             }
+            #[cfg(target_arch = "aarch64")]
+            let admitted = {
+                let dillo_machine::CpuProfile::Aarch64(profile) = self.cpu_profile else {
+                    return Err(Error::UnhandledExit(
+                        "CPU profile architecture mismatch".into(),
+                    ));
+                };
+                vcpu.inner.admit_arm_profile(profile)?
+            };
             Ok(CpuRunner {
                 vcpu,
+                #[cfg(target_arch = "aarch64")]
+                _admitted: admitted,
                 _owner: std::marker::PhantomData,
             })
         }
@@ -704,6 +715,8 @@ mod imp {
     #[derive(Debug)]
     pub struct CpuRunner {
         vcpu: Vcpu,
+        #[cfg(target_arch = "aarch64")]
+        _admitted: dillo_machine::aarch64::AdmittedCpu,
         _owner: std::marker::PhantomData<std::rc::Rc<()>>,
     }
     impl dillo_machine::CpuRunner for CpuRunner {

@@ -39,6 +39,8 @@ use crate::cpuid_x86;
 /// Hypervisor / VM errors.
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("Arm CPU admission: {0}")]
+    ArmAdmission(#[from] dillo_machine::aarch64::AdmissionError),
     #[error("KVM guest address space: {0}")]
     AddressSpace(String),
     #[error("configure vCPU kick signal mask: {0}")]
@@ -512,6 +514,53 @@ pub(crate) struct Vcpu {
 }
 
 impl Vcpu {
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) fn admit_arm_profile(
+        &self,
+        profile: pmi::aarch64::Profile,
+    ) -> Result<dillo_machine::aarch64::AdmittedCpu, Error> {
+        use dillo_machine::aarch64::{AdmissionError, CpuSnapshot, Register};
+        if profile != pmi::aarch64::Profile::V8_0 {
+            return Err(AdmissionError::UnsupportedProfile(profile).into());
+        }
+        let unavailable = |reason: String| AdmissionError::Unavailable {
+            register: Register::Pfr0,
+            reason,
+        };
+        let mut registers =
+            kvm_bindings::RegList::new(0).map_err(|e| unavailable(e.to_string()))?;
+        if let Err(error) = self.fd.get_reg_list(&mut registers)
+            && error.errno() != libc::E2BIG
+        {
+            return Err(unavailable(format!("KVM_GET_REG_LIST: {error}")).into());
+        }
+        let mut registers = kvm_bindings::RegList::new(registers.as_fam_struct_ref().n as usize)
+            .map_err(|e| unavailable(e.to_string()))?;
+        self.fd
+            .get_reg_list(&mut registers)
+            .map_err(|e| unavailable(format!("KVM_GET_REG_LIST: {e}")))?;
+        let snapshot = CpuSnapshot::capture(|register| {
+            let id = KVM_REG_ARM64
+                | KVM_REG_SIZE_U64
+                | u64::from(KVM_REG_ARM64_SYSREG)
+                | u64::from(register.encoding());
+            if !registers.as_slice().contains(&id) {
+                return Err(AdmissionError::Unavailable {
+                    register,
+                    reason: "native selector is absent from KVM_GET_REG_LIST".into(),
+                });
+            }
+            let mut bytes = [0; 8];
+            self.fd
+                .get_one_reg(id, &mut bytes)
+                .map_err(|e| AdmissionError::Unavailable {
+                    register,
+                    reason: format!("KVM_GET_ONE_REG: {e}"),
+                })?;
+            Ok(u64::from_le_bytes(bytes))
+        })?;
+        Ok(snapshot.admit(profile)?)
+    }
     /// Apply PMI's fixed vm BSP state. APs retain native guest-startup state.
     #[cfg(target_arch = "x86_64")]
     pub(crate) fn initialize_bsp(&mut self) -> Result<(), Error> {
@@ -1110,6 +1159,121 @@ mod bsp_tests {
 #[cfg(all(test, target_arch = "aarch64"))]
 mod arm_bsp_tests {
     use super::*;
+
+    #[test]
+    fn arm_admitted_owner_matches_guest_mrs_reads() {
+        use dillo_machine::aarch64::Register;
+        use vm_memory::{Bytes, GuestAddress};
+        let backing = Arc::new(crate::memory::MappedMemory::test_backing(&[(0, 0x2000)]).unwrap());
+        let memory = backing.guest_memory();
+        let vm = Vm::new_with_gic(&crate::imp::Aarch64Substrate {
+            dist_base: 0x0800_0000,
+            redist_base: 0x080a_0000,
+            spi_count: 64,
+        })
+        .expect("native ARM KVM is required");
+        vm.attach_memory(backing).unwrap();
+        // Independent architectural opcodes: MRS X0, <register>; STR X0,[X1,#n].
+        let inputs = [
+            (Register::Pfr0, 0xd538_0400u32),
+            (Register::Isar0, 0xd538_0600),
+            (Register::Mmfr0, 0xd538_0700),
+            (Register::Dfr0, 0xd538_0500),
+            (Register::Ctr, 0xd53b_0020),
+            (Register::Sctlr, 0xd538_1000),
+        ];
+        let mut code = Vec::new();
+        for (index, (_, instruction)) in inputs.iter().enumerate() {
+            code.extend_from_slice(&instruction.to_le_bytes());
+            code.extend_from_slice(&(0xf900_0020 | ((index as u32) << 10)).to_le_bytes());
+        }
+        code.extend_from_slice(&0xf900_0040u32.to_le_bytes()); // STR X0,[X2]: MMIO exit.
+        memory.write_slice(&code, GuestAddress(0)).unwrap();
+        std::thread::spawn(move || {
+            let mut cpu = vm.create_vcpu(0, "armv8.0-a").unwrap();
+            cpu.initialize_bsp().unwrap();
+            let admitted = cpu
+                .admit_arm_profile(pmi::aarch64::Profile::V8_0)
+                .expect("admit actual retained owner");
+            cpu.set_one_u64(core_reg(1), 0x1000).unwrap();
+            cpu.set_one_u64(core_reg(2), 0x2_0000).unwrap();
+            vm.init_gic().unwrap();
+            let exit = cpu
+                .run(
+                    |_, _| 0,
+                    |_, _| false,
+                    &std::sync::atomic::AtomicBool::new(false),
+                )
+                .unwrap();
+            assert!(
+                matches!(
+                    exit,
+                    VmExit::MmioWrite {
+                        addr: 0x2_0000,
+                        size: 8,
+                        ..
+                    }
+                ),
+                "{exit:?}"
+            );
+            let observed: [u64; 6] = std::array::from_fn(|index| {
+                memory
+                    .read_obj::<u64>(GuestAddress(0x1000 + index as u64 * 8))
+                    .unwrap()
+            });
+            let saved_sctlr = cpu.native_register(sys_reg(3, 0, 1, 0, 0));
+            // Retain all six raw comparisons even if the first assertion fails.
+            for ((register, _), observed) in inputs.iter().zip(observed) {
+                let expected = admitted.value(*register);
+                eprintln!(
+                    "KVM {}: guest={observed:#x}, admitted API={expected:#x}, xor={:#x}",
+                    register.name(),
+                    observed ^ expected
+                );
+            }
+            eprintln!("KVM SCTLR_EL1: post-run API={saved_sctlr:#x}");
+            for ((register, _), observed) in inputs.into_iter().zip(observed) {
+                let expected = admitted.value(register);
+                if register == Register::Ctr {
+                    // DDI0487 M.c D24.2.41: IVIPT consumes only L1Ip[15:14].
+                    // Linux v6.12 cpufeature.c:ftr_ctr omits MTE2's TminLine;
+                    // sys_regs.c:vcpu_set_hcr can leave CTR reads direct via
+                    // TID4. Guest TminLine can then differ from GET_ONE_REG.
+                    // Check the exact admission fact and retain both raw views.
+                    assert_eq!(
+                        (observed >> 14) & 3,
+                        (expected >> 14) & 3,
+                        "guest CTR_EL0.L1Ip; full guest={observed:#x}, API={expected:#x}"
+                    );
+                } else if register == Register::Sctlr {
+                    // Linux v6.12 sys_regs.c exposes the literal reset context
+                    // (0x00c50078) before entry. hyp/sysreg-sr.h restores it to
+                    // hardware and saves hardware readback after execution.
+                    // Arm DDI0601 SCTLR_EL1 gives LSMAOE/nTLSMD/EOS/SED/ITD/
+                    // CP15BEN feature-dependent RES1/RES0 behavior, so the
+                    // pre-entry raw context need not equal guest MRS readback.
+                    // Preserve every admission and fixed-BSP fact, then compare
+                    // the full register at the matching post-execution phase.
+                    const EE_E0E_M_C_I: u64 =
+                        (1 << 25) | (1 << 24) | (1 << 0) | (1 << 2) | (1 << 12);
+                    assert_eq!(
+                        observed & EE_E0E_M_C_I,
+                        expected & EE_E0E_M_C_I,
+                        "guest SCTLR_EL1 admission endianness and fixed BSP controls"
+                    );
+                    assert_eq!(observed & 0x0200_1005, 0, "guest fixed BSP M/C/I/EE");
+                    assert_eq!(
+                        observed, saved_sctlr,
+                        "guest SCTLR_EL1 versus saved native state"
+                    );
+                } else {
+                    assert_eq!(observed, expected, "guest MRS {}", register.name());
+                }
+            }
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn arm_fixed_bsp_state_matches_pmi_and_preserves_powered_off_ap() {

@@ -17,8 +17,16 @@ enum Behavior {
     PrepareError,
     PreparePanic,
     FailAfterPeer,
+    AdmissionFailure(AdmissionRefusal),
     LostFirstInterrupt,
     CoObserved(Outcome),
+}
+#[derive(Clone, Copy, Debug)]
+enum AdmissionRefusal {
+    MissingFeature,
+    MissingEvidence,
+    Contradiction,
+    UnsupportedProfile,
 }
 #[derive(Clone, Copy, Debug)]
 enum Outcome {
@@ -130,6 +138,42 @@ impl CpuPreparation for Input {
                 return Err(std::io::Error::other("injected preparation error"));
             }
             Behavior::PreparePanic => panic!("injected preparation panic"),
+            Behavior::AdmissionFailure(refusal) => {
+                use dillo_machine::aarch64::{AdmissionError, CpuSnapshot, Register};
+                self.trace.wait(|events| {
+                    events
+                        .iter()
+                        .any(|event| matches!(event, Event::Prepared(0, _)))
+                });
+                let profile = if matches!(refusal, AdmissionRefusal::UnsupportedProfile) {
+                    pmi::aarch64::Profile::V8_1
+                } else {
+                    pmi::aarch64::Profile::V8_0
+                };
+                let result = CpuSnapshot::capture(|register| {
+                    if register == Register::Ctr
+                        && matches!(refusal, AdmissionRefusal::MissingEvidence)
+                    {
+                        return Err(AdmissionError::Unavailable {
+                            register,
+                            reason: "injected missing native selector".into(),
+                        });
+                    }
+                    Ok(match register {
+                        Register::Pfr0 if matches!(refusal, AdmissionRefusal::Contradiction) => {
+                            0x00f0_0011
+                        }
+                        Register::Pfr0 => 0x11,
+                        Register::Ctr if matches!(refusal, AdmissionRefusal::MissingFeature) => {
+                            1 << 14
+                        }
+                        Register::Ctr => 3 << 14,
+                        _ => 0,
+                    })
+                })
+                .and_then(|snapshot| snapshot.admit(profile));
+                return Err(std::io::Error::other(result.unwrap_err()));
+            }
             Behavior::FailAfterPeer => {
                 self.trace
                     .wait(|events| events.iter().any(|e| matches!(e, Event::Prepared(0, _))));
@@ -563,5 +607,28 @@ fn co_observed_terminal_precedence_is_independent_of_cpu_index_and_joins_all_own
                 assert!(events.iter().any(|event| matches!(event, Event::Destroyed(i, thread) if *i == index && thread == owner)), "every owner must be destroyed before result publication: {events:?}");
             }
         }
+    }
+}
+
+#[test]
+fn architectural_admission_failure_cannot_release_a_prepared_peer() {
+    for (refusal, diagnostic) in [
+        (AdmissionRefusal::MissingFeature, "FEAT_IVIPT"),
+        (AdmissionRefusal::MissingEvidence, "native selector"),
+        (AdmissionRefusal::Contradiction, "FP and AdvSIMD"),
+        (
+            AdmissionRefusal::UnsupportedProfile,
+            "armv8.1-a admission is not implemented",
+        ),
+    ] {
+        let mut machine =
+            TestMachine::new(vec![Behavior::Wait, Behavior::AdmissionFailure(refusal)]);
+        let trace = Arc::clone(&machine.trace);
+        let error = PreparingCpus::spawn(&mut machine, 2, PROFILE)
+            .unwrap()
+            .prepare(&AtomicBool::new(false))
+            .unwrap_err();
+        assert!(error.to_string().contains(diagnostic), "{error}");
+        trace.assert_no_entry_and_owners_destroyed();
     }
 }

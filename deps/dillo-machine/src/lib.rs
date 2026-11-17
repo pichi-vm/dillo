@@ -9,6 +9,9 @@
 
 use std::sync::atomic::AtomicBool;
 
+/// Architectural Arm guest feature admission shared by native Machine families.
+pub mod aarch64;
+
 /// x86_64 `cpu:profile` validation policy shared by KVM and WHP backends.
 #[cfg(target_arch = "x86_64")]
 pub mod cpuid_x86;

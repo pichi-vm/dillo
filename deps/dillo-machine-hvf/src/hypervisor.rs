@@ -45,6 +45,8 @@ pub(crate) struct GicParams {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Arm CPU admission: {0}")]
+    ArmAdmission(#[from] dillo_machine::aarch64::AdmissionError),
     #[error("hvf: {0}")]
     Hv(String),
     #[error("hvf: parse DTB: {0}")]
@@ -204,6 +206,7 @@ struct PendingMmio {
 /// A single vCPU, bound to the thread that created it.
 #[derive(Debug)]
 pub(crate) struct Vcpu {
+    admitted: dillo_machine::aarch64::AdmittedCpu,
     inner: AvVcpu,
     pending_mmio: Cell<Option<PendingMmio>>,
 }
@@ -213,27 +216,59 @@ impl Vcpu {
         Ok(AvVcpu::get_max_count()?)
     }
 
-    /// Inspect and consume one exact configuration on its future CPU owner.
-    /// Full architectural profile admission remains a separate launch obligation.
+    /// Inspect and consume the exact configuration on its future CPU owner,
+    /// and admit the implemented architectural floor before owner readiness.
     pub(crate) fn prepare(vm: &NativeVm, profile: pmi::aarch64::Profile) -> Result<Self, Error> {
-        log::debug!(
-            "preparing HVF owner for {}",
-            dillo_machine::CpuProfile::Aarch64(profile).as_str()
-        );
+        use dillo_machine::aarch64::{AdmissionError, CpuSnapshot, Register};
+        if profile != pmi::aarch64::Profile::V8_0 {
+            return Err(AdmissionError::UnsupportedProfile(profile).into());
+        }
         let config = VcpuConfig::new();
-        let configured = config.get_feature_reg(FeatureReg::ID_AA64MMFR0_EL1)?;
+        let configured = config
+            .get_feature_reg(FeatureReg::ID_AA64MMFR0_EL1)
+            .map_err(|e| AdmissionError::Unavailable {
+                register: Register::Mmfr0,
+                reason: e.to_string(),
+            })?;
         let configured_bits = dillo_machine::aarch64_pa_bits(configured)
             .ok_or_else(|| Error::Hv("reserved configured CPU PARange encoding".into()))?;
+        // applevisor has a configuration CTR selector, but no native SysReg
+        // discriminant for CTR. Retain this exact config's value, and realize
+        // any trapped guest CTR read from the admitted immutable snapshot.
+        let ctr = config.get_feature_reg(FeatureReg::CTR_EL0).map_err(|e| {
+            AdmissionError::Unavailable {
+                register: Register::Ctr,
+                reason: e.to_string(),
+            }
+        })?;
         let inner = vm.vcpu_with_config(config)?;
-        let observed = inner.get_sys_reg(SysReg::ID_AA64MMFR0_EL1)?;
-        if dillo_machine::aarch64_pa_bits(observed) != Some(configured_bits) {
+        let snapshot = CpuSnapshot::capture(|register| {
+            let native = match register {
+                Register::Pfr0 => SysReg::ID_AA64PFR0_EL1,
+                Register::Isar0 => SysReg::ID_AA64ISAR0_EL1,
+                Register::Mmfr0 => SysReg::ID_AA64MMFR0_EL1,
+                Register::Dfr0 => SysReg::ID_AA64DFR0_EL1,
+                Register::Sctlr => SysReg::SCTLR_EL1,
+                Register::Ctr => return Ok(ctr),
+            };
+            inner
+                .get_sys_reg(native)
+                .map_err(|e| AdmissionError::Unavailable {
+                    register,
+                    reason: e.to_string(),
+                })
+        })?;
+        if dillo_machine::aarch64_pa_bits(snapshot.value(Register::Mmfr0)) != Some(configured_bits)
+        {
             return Err(Error::Hv(
                 "created CPU PARange differs from its inspected configuration".into(),
             ));
         }
+        let admitted = snapshot.admit(profile)?;
         Ok(Self {
             inner,
             pending_mmio: Cell::new(None),
+            admitted,
         })
     }
 
@@ -336,10 +371,9 @@ impl Vcpu {
     }
 
     /// Run until the next exit that the caller must handle, returning a
-    /// decoded [`VmExit`]. Trapped system-register accesses (`EC=0x18`) are
-    /// handled inline as RAZ/WI and the guest is resumed — HVF traps the
-    /// debug/PMU/unimplemented sysregs the kernel probes during boot, and
-    /// read-as-zero / write-ignored is the standard VMM treatment.
+    /// decoded [`VmExit`]. Admission-relevant system-register reads preserve
+    /// the admitted values. Other trapped registers retain the existing
+    /// read-as-zero/write-ignored fallback.
     pub(crate) fn run(
         &self,
         termination: &dyn dillo_machine::CpuTermination,
@@ -366,16 +400,27 @@ impl Vcpu {
         }
     }
 
-    /// RAZ/WI a trapped MSR/MRS (`EC=0x18`): for a read (`MRS`), write 0 into
-    /// the destination GPR; for a write (`MSR`), ignore the value. Then step
-    /// past the instruction so the guest makes progress.
+    /// Realize admitted ID reads and live SCTLR reads after an EC=0x18 trap.
+    /// Unrelated registers retain the existing RAZ/WI fallback.
     fn handle_sysreg_trap(&self, esr: u64) -> Result<(), Error> {
         let iss = esr & 0x1FF_FFFF;
         let is_read = iss & 1 == 1; // ISS[0]: 0=MSR(write), 1=MRS(read)
         if is_read {
             let rt = ((iss >> 5) & 0x1F) as u8; // ISS[9:5]
             if rt != 31 {
-                self.inner.set_reg(gpr(rt), 0)?;
+                use dillo_machine::aarch64::Register;
+                let encoding = (((iss >> 20) & 3) << 14)
+                    | (((iss >> 14) & 7) << 11)
+                    | (((iss >> 10) & 15) << 7)
+                    | (((iss >> 1) & 15) << 3)
+                    | ((iss >> 17) & 7);
+                let value = match Register::from_encoding(encoding as u16) {
+                    // SCTLR is mutable guest control state, not an ID register.
+                    Some(Register::Sctlr) => self.inner.get_sys_reg(SysReg::SCTLR_EL1)?,
+                    Some(register) => self.admitted.value(register),
+                    None => 0,
+                };
+                self.inner.set_reg(gpr(rt), value)?;
             }
         }
         self.advance_pc()
@@ -579,6 +624,109 @@ pub(crate) mod tests {
             // executable and entitlement directory can be reclaimed.
             let _ = self.child.kill();
             let _ = self.child.wait();
+        }
+    }
+
+    #[test]
+    fn hvf_admitted_owner_matches_guest_mrs_and_trap_reads() {
+        use dillo_machine::aarch64::Register;
+        if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
+            SignedNativeTest::spawn(
+                "hypervisor::tests::hvf_admitted_owner_matches_guest_mrs_and_trap_reads",
+            )
+            .verify();
+            return;
+        }
+        let gic = GicParams {
+            dist_base: 0x0800_0000,
+            redist_base: 0x0810_0000,
+            msi_base: 0x0a10_0000,
+            msi_intid_base: 64,
+            msi_intid_count: 32,
+        };
+        let mut vm = Vm::new(&gic, 36).expect("native HVF/GIC is required");
+        vm.add_memory(0, 0x4000).unwrap();
+        let inputs = [
+            (Register::Pfr0, 0xd538_0400u32),
+            (Register::Isar0, 0xd538_0600),
+            (Register::Mmfr0, 0xd538_0700),
+            (Register::Dfr0, 0xd538_0500),
+            (Register::Ctr, 0xd53b_0020),
+            (Register::Sctlr, 0xd538_1000),
+        ];
+        let mut code = Vec::new();
+        for (index, (_, instruction)) in inputs.iter().enumerate() {
+            code.extend_from_slice(&instruction.to_le_bytes());
+            code.extend_from_slice(&(0xf900_0020 | ((index as u32) << 10)).to_le_bytes());
+        }
+        code.extend_from_slice(&0xf900_0040u32.to_le_bytes());
+        vm.write_guest(0, &code).unwrap();
+        let native = vm.cpu_instance();
+        let admitted = std::thread::spawn(move || {
+            let cpu =
+                Vcpu::prepare(&native, pmi::aarch64::Profile::V8_0).expect("admit retained owner");
+            cpu.prepare_affinity(0x8000_0000).unwrap();
+            cpu.initialize_bsp().unwrap();
+            cpu.set_gpr(1, 0x1000).unwrap();
+            cpu.set_gpr(2, 0x2_0000).unwrap();
+            let exit = cpu.run(&std::sync::atomic::AtomicBool::new(false)).unwrap();
+            assert!(
+                matches!(
+                    exit,
+                    VmExit::MmioWrite {
+                        addr: 0x2_0000,
+                        size: 8,
+                        ..
+                    }
+                ),
+                "{exit:?}"
+            );
+            // Native API readback and an explicit decoder exercise complement
+            // the real guest MRS path, regardless of which IDs HVF traps.
+            for (register, instruction) in inputs {
+                let op = instruction >> 5;
+                let iss = (((op >> 14) & 3) << 20)
+                    | ((op & 7) << 17)
+                    | (((op >> 11) & 7) << 14)
+                    | (((op >> 7) & 15) << 10)
+                    | (((op >> 3) & 15) << 1)
+                    | (3 << 5)
+                    | 1;
+                cpu.handle_sysreg_trap((0x18 << 26) | u64::from(iss))
+                    .unwrap();
+                let expected = if register == Register::Sctlr {
+                    cpu.inner.get_sys_reg(SysReg::SCTLR_EL1).unwrap()
+                } else {
+                    cpu.admitted.value(register)
+                };
+                assert_eq!(
+                    cpu.inner.get_reg(Reg::X3).unwrap(),
+                    expected,
+                    "trapped {}",
+                    register.name()
+                );
+            }
+            cpu.admitted.clone()
+        })
+        .join()
+        .unwrap();
+        let mut bytes = [0; 48];
+        vm.regions[0].mem.read(0x1000, &mut bytes).unwrap();
+        for (index, (register, _)) in inputs.into_iter().enumerate() {
+            let value = u64::from_le_bytes(bytes[index * 8..index * 8 + 8].try_into().unwrap());
+            // Admission uses only SCTLR's fixed-endian capability bits. BSP
+            // initialization may change its other guest-control bits.
+            let mask = if register == Register::Sctlr {
+                0x0300_0000
+            } else {
+                u64::MAX
+            };
+            assert_eq!(
+                value & mask,
+                admitted.value(register) & mask,
+                "guest MRS {}",
+                register.name()
+            );
         }
     }
 
