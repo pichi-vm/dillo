@@ -610,6 +610,19 @@ mod imp {
                 .map_err(|e| Error::UnhandledExit(e.to_string()))
         }
 
+        fn zero_guest(&mut self, mut gpa: u64, mut len: u64) -> Result<(), Self::Error> {
+            gpa.checked_add(len)
+                .ok_or_else(|| Error::AddressSpace("guest zero range overflows".into()))?;
+            let zeros = [0u8; 4096];
+            while len > 0 {
+                let count = len.min(zeros.len() as u64) as usize;
+                <Self as dillo_machine::Machine>::write_guest(self, gpa, &zeros[..count])?;
+                gpa += count as u64;
+                len -= count as u64;
+            }
+            Ok(())
+        }
+
         fn prepare_vcpu_run(&mut self) -> Result<(), Self::Error> {
             #[cfg(target_arch = "aarch64")]
             {

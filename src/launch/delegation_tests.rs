@@ -8,7 +8,7 @@ use dillo_devtree::platform::PropExt;
 use serde_json::json;
 
 #[derive(Debug, Clone, Copy)]
-enum BaseChannel {
+pub(super) enum BaseChannel {
     Bundled,
     Detached,
     Optional,
@@ -21,7 +21,7 @@ const CHANNELS: [BaseChannel; 3] = [
     BaseChannel::Optional,
 ];
 
-fn base(arch: HostArchitecture, fixed_cpus: bool, fixed_memory: bool) -> Vec<u8> {
+pub(super) fn base(arch: HostArchitecture, fixed_cpus: bool, fixed_memory: bool) -> Vec<u8> {
     let mut fdt = FdtBuilder::new();
     fdt.begin_node("");
     fdt.property_u32("#address-cells", 2);
@@ -116,7 +116,7 @@ fn base(arch: HostArchitecture, fixed_cpus: bool, fixed_memory: bool) -> Vec<u8>
 // A small native PMI fixture, with no kernel download or hypervisor required.
 // The dummy load backs one 2 MiB page; the base and overlay occupy the next.
 // Keep a .dtbo reservation even without its fill to prove the action is required.
-fn image(
+pub(super) fn image(
     arch: HostArchitecture,
     channel: BaseChannel,
     base: &[u8],
@@ -300,7 +300,13 @@ fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
                 input.as_path()
             });
             let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 4, 1, None, file).unwrap();
-            let write = plan.guest_writes.last().unwrap();
+            let write = plan
+                .recipe
+                .operations
+                .iter()
+                .rev()
+                .find(|operation| !matches!(operation.data, WriteSrc::Zero { .. }))
+                .unwrap();
             assert_eq!(write.section, ".config");
             assert_eq!(write.gpa, 0x20_2000);
             let WriteSrc::Owned(data) = &write.data else {
@@ -357,10 +363,12 @@ fn bootconfig_invalid_reservations_fail_preflight() {
             (vec![0x20_2000], 0, 0),
         ] {
             let bytes = with_bootconfig(base.clone(), &gpas, capacity, raw_size);
-            assert!(matches!(
-                dillo::pmi_parse::parse(&bytes, &opts),
-                Err(Error::BootconfigFill(_))
-            ));
+            let error = dillo::pmi_parse::parse(&bytes, &opts).unwrap_err();
+            if gpas.len() > 1 {
+                assert!(matches!(error, Error::BootconfigFill(_)));
+            } else {
+                assert!(matches!(error, Error::InvalidSectionShape { .. }));
+            }
         }
         let bytes = with_bootconfig(base.clone(), &[0x20_2001], 4096, 0);
         assert!(matches!(
@@ -402,7 +410,8 @@ fn delegated_allocation_is_delivered_in_reserved_overlay() {
                 let (_dir, plan) =
                     launch(arch, channel, &base(arch, false, false), Some(size), 2).unwrap();
                 let write = plan
-                    .guest_writes
+                    .recipe
+                    .operations
                     .iter()
                     .find(|write| write.section == ".dtbo")
                     .unwrap();

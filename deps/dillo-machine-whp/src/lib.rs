@@ -236,6 +236,19 @@ mod imp {
         fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Self::Error> {
             self.inner.write_guest(gpa, data)
         }
+
+        fn zero_guest(&mut self, mut gpa: u64, mut len: u64) -> Result<(), Self::Error> {
+            gpa.checked_add(len)
+                .ok_or_else(|| Error::AddressSpace("guest zero range overflows".into()))?;
+            let zeros = [0u8; 4096];
+            while len > 0 {
+                let count = len.min(zeros.len() as u64) as usize;
+                <Self as dillo_machine::Machine>::write_guest(self, gpa, &zeros[..count])?;
+                gpa += count as u64;
+                len -= count as u64;
+            }
+            Ok(())
+        }
     }
 
     #[derive(Debug)]

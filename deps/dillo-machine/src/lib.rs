@@ -148,6 +148,10 @@ pub trait Machine: Sized + 'static {
     /// Write launch data into guest RAM through backend-owned memory access.
     fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Self::Error>;
 
+    /// Explicitly zero an existing guest RAM range; allocation contents are
+    /// not a substitute for this ordered launch operation.
+    fn zero_guest(&mut self, gpa: u64, len: u64) -> Result<(), Self::Error>;
+
     /// Prepare backend-owned run state after all vCPUs have been created.
     fn prepare_vcpu_run(&mut self) -> Result<(), Self::Error> {
         Ok(())
@@ -274,6 +278,10 @@ mod tests {
         }
 
         fn write_guest(&mut self, _gpa: u64, _data: &[u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn zero_guest(&mut self, _gpa: u64, _len: u64) -> Result<(), Self::Error> {
             Ok(())
         }
     }

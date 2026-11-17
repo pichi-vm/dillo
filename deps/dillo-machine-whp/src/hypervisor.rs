@@ -236,7 +236,7 @@ impl Vm {
     pub(crate) fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Error> {
         let memory = self.memory.as_ref().ok_or(Error::UnmappedGuestAddr(gpa))?;
         memory
-            .write(data, GuestAddress(gpa))
+            .write_slice(data, GuestAddress(gpa))
             .map_err(|source| Error::WriteGuest { gpa, source })?;
         Ok(())
     }
@@ -1693,6 +1693,15 @@ mod tests {
             .expect("map guest memory");
         vm.write_guest(0x1000_1000, &[1, 2, 3, 4])
             .expect("write guest memory");
+        vm.write_guest(0x101f_ffff, &[0x55])
+            .expect("last mapped byte fits");
+        assert!(
+            matches!(
+                vm.write_guest(0x101f_ffff, &[0x66, 0x77]),
+                Err(Error::WriteGuest { .. })
+            ),
+            "short native writes must not become successful launch operations"
+        );
         let mappings = vm.region_mappings();
         assert_eq!(mappings, vec![(0x1000_0000, mappings[0].1, 0x0020_0000)]);
     }
