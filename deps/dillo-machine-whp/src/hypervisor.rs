@@ -14,8 +14,8 @@ use thiserror::Error;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 use windows_sys::Win32::System::Hypervisor::{WHV_REGISTER_NAME, WHV_REGISTER_VALUE};
 
-use crate::VmExit;
 use crate::cpuid_x86;
+use crate::{Memory, VmExit};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -161,21 +161,18 @@ struct VmInner {
 #[derive(Debug)]
 enum RamRegistration {
     Empty,
-    Attempted {
-        memory: GuestMemoryMmap,
-        attempts: usize,
-    },
-    Ready(GuestMemoryMmap),
+    Attempted { memory: Memory, attempts: usize },
+    Ready(Memory),
 }
 
 impl RamRegistration {
     fn ready(&self) -> Result<&GuestMemoryMmap, Error> {
         match self {
-            Self::Ready(memory) => Ok(memory),
+            Self::Ready(memory) => Ok(memory.guest()),
             Self::Empty => Err(Error::MemoryNotReady),
             Self::Attempted { memory, attempts } => Err(Error::MemoryRegistrationFailed {
                 attempts: *attempts,
-                regions: memory.num_regions(),
+                regions: memory.guest().num_regions(),
             }),
         }
     }
@@ -241,15 +238,14 @@ impl Vm {
 
     #[cfg(test)]
     pub(crate) fn add_memory(&mut self, base: u64, size: u64) -> Result<(), Error> {
-        if size == 0 {
-            return Err(Error::EmptyMemoryRegion);
-        }
-        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(base), size as usize)])
-            .map_err(|source| Error::CreateGuestMemory(source.to_string()))?;
+        let memory = <Memory as dillo_machine::Memory>::from_ranges(&[dillo_machine::RamRange {
+            gpa: base,
+            size,
+        }])?;
         self.set_memory(memory)
     }
 
-    pub(crate) fn set_memory(&mut self, memory: GuestMemoryMmap) -> Result<(), Error> {
+    pub(crate) fn set_memory(&mut self, memory: Memory) -> Result<(), Error> {
         self.inner.set_memory(memory)
     }
 
@@ -404,29 +400,28 @@ impl VmInner {
             .cloned()
     }
 
-    fn set_memory(&self, memory: GuestMemoryMmap) -> Result<(), Error> {
+    fn set_memory(&self, memory: Memory) -> Result<(), Error> {
         let mut registration = self.memory.lock().expect("WHP RAM registration poisoned");
         if !matches!(*registration, RamRegistration::Empty) {
             return Err(Error::MemoryAlreadyRegistered);
         }
-        if memory.num_regions() == 0 {
-            return Err(Error::EmptyMemoryRegion);
-        }
         // Publish the actual allocation before the first native mapping. Any
         // attempted range remains backed until this partition is destroyed.
         *registration = RamRegistration::Attempted {
-            memory: memory.clone(),
+            memory,
             attempts: 0,
         };
-        for (index, region) in memory.iter().enumerate() {
+        let RamRegistration::Attempted { memory, attempts } = &mut *registration else {
+            unreachable!("WHP RAM registration was just installed");
+        };
+        for (index, region) in memory.guest().iter().enumerate() {
             let base = region.start_addr().raw_value();
             let size = region.len();
             let host = memory
+                .guest()
                 .get_host_address(region.start_addr())
                 .map_err(|source| Error::GuestMemoryHostAddress { gpa: base, source })?;
-            if let RamRegistration::Attempted { attempts, .. } = &mut *registration {
-                *attempts = index + 1;
-            }
+            *attempts = index + 1;
             #[cfg(test)]
             if *self.fail_map_at.lock().unwrap() == Some(index) {
                 return Err(Error::MapGpa {
@@ -443,6 +438,11 @@ impl VmInner {
                 }
             })?;
         }
+        let RamRegistration::Attempted { memory, .. } =
+            std::mem::replace(&mut *registration, RamRegistration::Empty)
+        else {
+            unreachable!("WHP RAM registration remained installed during mapping");
+        };
         *registration = RamRegistration::Ready(memory);
         Ok(())
     }
@@ -2122,7 +2122,7 @@ pub(crate) mod memory_tests {
     use std::sync::atomic::AtomicBool;
 
     use windows_sys::Win32::System::Memory::{
-        MEM_COMMIT, MEM_FREE, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, VirtualQuery,
+        MEM_COMMIT, MEM_FREE, MEM_MAPPED, MEMORY_BASIC_INFORMATION, VirtualQuery,
     };
 
     use super::*;
@@ -2137,9 +2137,12 @@ pub(crate) mod memory_tests {
 
     impl AllocationProbe {
         pub(crate) fn new(memory: &GuestMemoryMmap, index: usize) -> Self {
-            let region = memory.iter().nth(index).unwrap();
+            Self::from_region(memory.iter().nth(index).unwrap())
+        }
+
+        pub(crate) fn from_region(region: &vm_memory::GuestRegionMmap) -> Self {
             let probe = Self {
-                address: memory.get_host_address(region.start_addr()).unwrap() as usize,
+                address: region.get_mmap().as_ptr() as usize,
                 size: region.len() as usize,
                 original: Arc::downgrade(&region.get_mmap()),
             };
@@ -2181,7 +2184,7 @@ pub(crate) mod memory_tests {
             assert_eq!(original.as_ptr() as usize, self.address);
             let information = self.query();
             assert_eq!(information.State, MEM_COMMIT);
-            assert_eq!(information.Type, MEM_PRIVATE);
+            assert_eq!(information.Type, MEM_MAPPED);
             assert_eq!(information.AllocationBase as usize, self.address);
         }
 
@@ -2216,7 +2219,12 @@ pub(crate) mod memory_tests {
         .unwrap();
         vm.write_guest(0x10100, &[0x5a, 0, 0xee]).unwrap();
         let probe = vm.allocation_probe(0);
-        let candidate = GuestMemoryMmap::from_ranges(&[(GuestAddress(0x10000), 0x1000)]).unwrap();
+        let candidate =
+            <Memory as dillo_machine::Memory>::from_ranges(&[dillo_machine::RamRange {
+                gpa: 0x10000,
+                size: 0x1000,
+            }])
+            .unwrap();
         assert!(matches!(
             vm.set_memory(candidate),
             Err(Error::MemoryAlreadyRegistered)
@@ -2250,14 +2258,23 @@ pub(crate) mod memory_tests {
             return;
         }
         let mut vm = Vm::new().expect("native WHP is required");
-        let memory = GuestMemoryMmap::from_ranges(&[
-            (GuestAddress(0x10000), 0x1000),
-            (GuestAddress(0x20000), 0x1000),
+        let memory = <Memory as dillo_machine::Memory>::from_ranges(&[
+            dillo_machine::RamRange {
+                gpa: 0x10000,
+                size: 0x1000,
+            },
+            dillo_machine::RamRange {
+                gpa: 0x20000,
+                size: 0x1000,
+            },
         ])
         .unwrap();
-        memory.write_slice(&[0xf4], GuestAddress(0x10000)).unwrap();
-        let first = AllocationProbe::new(&memory, 0);
-        let second = AllocationProbe::new(&memory, 1);
+        memory
+            .guest()
+            .write_slice(&[0xf4], GuestAddress(0x10000))
+            .unwrap();
+        let first = AllocationProbe::new(memory.guest(), 0);
+        let second = AllocationProbe::new(memory.guest(), 1);
         *vm.inner.fail_map_at.lock().unwrap() = Some(1);
         assert!(matches!(
             vm.set_memory(memory),
@@ -2333,37 +2350,60 @@ pub(crate) mod memory_tests {
     /// Owns/reaps isolated native assertions, including failure children, on unwind.
     pub(crate) struct NativeMemoryTest {
         child: std::process::Child,
+        output: Option<std::thread::JoinHandle<std::io::Result<String>>>,
     }
 
     impl NativeMemoryTest {
         pub(crate) fn spawn(name: &str) -> Self {
-            Self {
+            use std::io::Read as _;
+            let mut test = Self {
                 child: std::process::Command::new(std::env::current_exe().unwrap())
                     .args([name, "--exact", "--nocapture", "--test-threads=1"])
                     .env("DILLO_WHP_MEMORY_CHILD", "1")
+                    .stdout(std::process::Stdio::piped())
                     .spawn()
                     .unwrap(),
-            }
+                output: None,
+            };
+            let mut stdout = test.child.stdout.take().unwrap();
+            test.output = Some(
+                std::thread::Builder::new()
+                    .spawn(move || {
+                        let mut output = String::new();
+                        stdout.read_to_string(&mut output)?;
+                        Ok(output)
+                    })
+                    .unwrap(),
+            );
+            test
         }
 
-        fn finish(&mut self) -> std::process::ExitStatus {
+        fn finish(&mut self) -> (std::process::ExitStatus, String) {
             use wait_timeout::ChildExt;
-            self.child
+            let status = self
+                .child
                 .wait_timeout(std::time::Duration::from_secs(30))
                 .unwrap()
-                .expect("native memory assertion child exceeded 30 seconds")
+                .expect("native memory assertion child exceeded 30 seconds");
+            let output = self.output.take().unwrap().join().unwrap().unwrap();
+            print!("{output}");
+            (status, output)
         }
 
         pub(crate) fn verify(mut self) {
-            let status = self.finish();
+            let (status, output) = self.finish();
             assert!(
                 status.success(),
                 "native WHP memory assertions failed: {status}"
             );
+            assert!(
+                output.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+                "the native child must execute exactly one assertion case"
+            );
         }
 
         fn verify_abort(mut self) {
-            let status = self.finish();
+            let (status, _) = self.finish();
             // Rust's Windows abort uses __fastfail(FAST_FAIL_FATAL_APP_EXIT).
             // https://learn.microsoft.com/en-us/cpp/intrinsics/fastfail
             assert_eq!(
@@ -2378,6 +2418,9 @@ pub(crate) mod memory_tests {
         fn drop(&mut self) {
             let _ = self.child.kill();
             let _ = self.child.wait();
+            if let Some(output) = self.output.take() {
+                let _ = output.join();
+            }
         }
     }
 

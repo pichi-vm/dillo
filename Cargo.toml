@@ -275,3 +275,7 @@ snuffler = { path = "deps/snuffler", artifact = "bin", lib = true, target = "aar
 
 [lints]
 workspace = true
+
+# Temporary staging revision pending upstream integration.
+[patch.crates-io]
+vm-memory = { git = "https://github.com/pichi-vm/vm-memory", rev = "940b3327919f441eea38d48c67f32fdb7125871c" }

@@ -2251,8 +2251,7 @@ dependencies = [
 [[package]]
 name = "vm-memory"
 version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b55e753c7725603745cb32b2287ef7ef3da05c03c7702cda3fa8abe25ae0465"
+source = "git+https://github.com/pichi-vm/vm-memory?rev=940b3327919f441eea38d48c67f32fdb7125871c#940b3327919f441eea38d48c67f32fdb7125871c"
 dependencies = [
  "arc-swap",
  "libc",
