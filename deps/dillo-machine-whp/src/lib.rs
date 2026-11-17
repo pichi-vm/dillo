@@ -28,13 +28,15 @@ mod imp {
         CompatMismatch, FromDevTree, NodeExt, OwnedNodeExt, PropExt,
         devtree::{OwnedTree, Tree},
     };
-    use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
-    use dillo_mmio::{
-        Attach, Interrupt, InterruptError, InterruptLine, MessageInterrupt, MessageInterruptDomain,
-        MmioAttachment, MmioBus, MmioDevice, MmioDeviceHandle, MmioInterrupt,
-        MmioInterruptRequirement, MmioRunToken, MmioSpawnError, MmioWindow, MmioWriteOutcome,
-        SharedMemory,
+    use dillo_machine::attachment::{Attach, DeviceAttachment};
+    use dillo_machine::execution::{DeviceHandle, RunToken, SpawnError};
+    use dillo_machine::interrupt::{
+        Interrupt, InterruptError, InterruptLine, InterruptRequirement, InterruptResource,
+        MessageInterrupt, MessageInterruptDomain,
     };
+    use dillo_machine::memory::{AddressRange, SharedMemory};
+    use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
+    use dillo_mmio::{MmioBus, MmioDevice, MmioWriteOutcome};
     use vm_memory::{GuestAddress, GuestMemoryMmap};
 
     use crate::VmExit;
@@ -114,10 +116,12 @@ mod imp {
         fn attach_guest_memory(&mut self, memory: GuestMemoryMmap) -> Result<(), Error> {
             self.set_memory(memory)?;
             let guest_mem = self.guest_memory()?;
-            self.shared_memory = vec![Arc::new(dillo_mmio::MappedSharedMemory::for_guest_memory(
-                guest_mem,
-                dillo_mmio::SharedAccess::ReadWrite,
-            ))];
+            self.shared_memory = vec![Arc::new(
+                dillo_machine::memory::MappedSharedMemory::for_guest_memory(
+                    guest_mem,
+                    dillo_machine::memory::SharedAccess::ReadWrite,
+                ),
+            )];
             Ok(())
         }
 
@@ -142,17 +146,17 @@ mod imp {
 
         fn resolve_interrupts(
             &self,
-            requirements: &[MmioInterruptRequirement],
-        ) -> Result<Vec<MmioInterrupt>, Error> {
+            requirements: &[InterruptRequirement],
+        ) -> Result<Vec<InterruptResource>, Error> {
             requirements
                 .iter()
                 .map(|requirement| match requirement {
-                    MmioInterruptRequirement::Line { source } => {
+                    InterruptRequirement::Line { source } => {
                         let irq = Self::wired_irq_from_cells(&source.cells, source.cell_count)?;
-                        self.create_line_interrupt(irq).map(MmioInterrupt::Line)
+                        self.create_line_interrupt(irq).map(InterruptResource::Line)
                     }
-                    MmioInterruptRequirement::MessageDomain { vectors, .. } => {
-                        Ok(MmioInterrupt::MessageDomain(
+                    InterruptRequirement::MessageDomain { vectors, .. } => {
+                        Ok(InterruptResource::MessageDomain(
                             self.create_message_interrupt_domain(*vectors),
                         ))
                     }
@@ -312,7 +316,7 @@ mod imp {
                 });
             }
             Ok(Some(Self {
-                ioapic: IoApic::new(MmioWindow { base, size }),
+                ioapic: IoApic::new(AddressRange { base, size }),
             }))
         }
     }
@@ -437,7 +441,7 @@ mod imp {
         D: MmioDevice + 'static,
     {
         type Error = Error;
-        type Output = Arc<dyn MmioAttachment>;
+        type Output = Arc<dyn DeviceAttachment>;
 
         fn attach(&mut self, item: Arc<D>) -> Result<Self::Output, Self::Error> {
             if !item.shared_memory().is_empty() {
@@ -668,7 +672,7 @@ mod imp {
     }
 
     struct MachineMmioAttachment {
-        interrupts: Vec<MmioInterrupt>,
+        interrupts: Vec<InterruptResource>,
         shared_memory: Vec<Arc<dyn SharedMemory>>,
     }
 
@@ -681,8 +685,8 @@ mod imp {
         }
     }
 
-    impl MmioAttachment for MachineMmioAttachment {
-        fn interrupts(&self) -> &[MmioInterrupt] {
+    impl DeviceAttachment for MachineMmioAttachment {
+        fn interrupts(&self) -> &[InterruptResource] {
             &self.interrupts
         }
 
@@ -692,20 +696,20 @@ mod imp {
 
         fn spawn(
             self: Arc<Self>,
-            run: dillo_mmio::MmioDeviceRun,
-        ) -> Result<MmioDeviceHandle, MmioSpawnError> {
+            run: dillo_machine::execution::DeviceRun,
+        ) -> Result<DeviceHandle, SpawnError> {
             let shutdown = Arc::new(AtomicBool::new(false));
             let token_shutdown = Arc::clone(&shutdown);
-            let token = MmioRunToken::from_fn(move || token_shutdown.load(Ordering::Acquire));
+            let token = RunToken::from_fn(move || token_shutdown.load(Ordering::Acquire));
             let join = std::thread::spawn(move || run(token));
-            Ok(MmioDeviceHandle::new(
+            Ok(DeviceHandle::new(
                 move || {
                     shutdown.store(true, Ordering::Release);
                     Ok(())
                 },
                 move || match join.join() {
                     Ok(result) => result,
-                    Err(_) => Err(dillo_mmio::MmioJoinError::Panicked),
+                    Err(_) => Err(dillo_machine::execution::JoinError::Panicked),
                 },
             ))
         }
@@ -828,7 +832,7 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::{FixedMessage, FixedMessageTable, FixedMsi, decode_fixed_msi};
-        use dillo_mmio::MessageInterrupt;
+        use dillo_machine::interrupt::MessageInterrupt;
         use std::sync::Mutex;
 
         #[test]

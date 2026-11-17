@@ -24,7 +24,7 @@ mod fuse;
 
 use std::sync::{Arc, Mutex};
 
-use dillo_mmio::Interrupt;
+use dillo_machine::interrupt::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
 use dillo_virtio::{
     ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
@@ -372,7 +372,9 @@ fn scatter_write(buffer_memory: &Arc<dyn VirtioMemory>, writable: &[Desc], reply
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_machine::memory::{
+        AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
+    };
     use dillo_virtio::queue::VIRTQ_DESC_F_NEXT;
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
     use vm_memory::{Address, Bytes, GuestMemoryMmap};
@@ -392,7 +394,7 @@ mod tests {
             wakes: Arc<AtomicUsize>,
             woke_before_shutdown: Arc<AtomicBool>,
         }
-        impl dillo_mmio::WriteNotification for ObservedKick {
+        impl dillo_machine::notification::WriteNotification for ObservedKick {
             fn read(&self) -> std::io::Result<u64> {
                 self.entered.send(()).unwrap();
                 self.inner.read()

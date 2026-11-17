@@ -3,11 +3,22 @@
 
 //! Host-neutral machine boundary for dillo.
 //!
-//! This crate owns the narrow VM-facing traits shared by backend machine
-//! implementations. Concrete backend crates implement this trait boundary, and
+//! This crate owns the VM-facing traits and narrow device services shared by
+//! backend machine implementations. Concrete backend crates implement this trait boundary, and
 //! the top-level `dillo` launcher composes only through these APIs.
 
 use std::sync::atomic::AtomicBool;
+
+/// Registration and device services.
+pub mod attachment;
+/// Device execution lifecycle contracts.
+pub mod execution;
+/// Interrupt declarations and delivery services.
+pub mod interrupt;
+/// Shared guest-memory access.
+pub mod memory;
+/// Accelerated guest-write notification counters.
+pub mod notification;
 
 /// x86_64 `cpu:profile` validation policy shared by KVM and WHP backends.
 #[cfg(target_arch = "x86_64")]
@@ -159,7 +170,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use dillo_mmio::Attach;
+    use crate::attachment::Attach;
 
     #[test]
     fn arm_physical_width_uses_parange_only() {

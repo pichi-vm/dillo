@@ -4,24 +4,25 @@
 use std::io;
 use std::sync::Arc;
 
-use dillo_mmio::{MmioWindow, WriteNotification};
+use dillo_machine::memory::AddressRange;
+use dillo_machine::notification::WriteNotification;
 use kvm_ioctls::{IoEventAddress, VmFd};
 use vmm_sys_util::eventfd::EventFd;
 
 /// Registration authority restricted to the attached device's declared windows.
 pub(crate) struct Notifications {
     vm: Arc<VmFd>,
-    windows: Vec<MmioWindow>,
+    windows: Vec<AddressRange>,
 }
 
 impl Notifications {
-    pub(crate) fn new(vm: Arc<VmFd>, windows: Vec<MmioWindow>) -> Self {
+    pub(crate) fn new(vm: Arc<VmFd>, windows: Vec<AddressRange>) -> Self {
         Self { vm, windows }
     }
 
     pub(crate) fn register(
         &self,
-        window: MmioWindow,
+        window: AddressRange,
         offset: u64,
         value: u32,
     ) -> io::Result<Option<Arc<dyn WriteNotification>>> {
@@ -99,21 +100,21 @@ impl Drop for Notification {
 mod tests {
     use super::*;
 
-    fn authority(window: MmioWindow) -> Notifications {
+    fn authority(window: AddressRange) -> Notifications {
         let kvm = kvm_ioctls::Kvm::new().expect("open /dev/kvm");
         Notifications::new(Arc::new(kvm.create_vm().unwrap()), vec![window])
     }
 
     #[test]
     fn registration_enforces_owned_window_and_complete_write_extent() {
-        let window = MmioWindow {
+        let window = AddressRange {
             base: 0x1000,
             size: 0x1000,
         };
         let owner = authority(window);
         for (requested, offset) in [
             (
-                MmioWindow {
+                AddressRange {
                     base: 0x2000,
                     ..window
                 },
@@ -127,7 +128,7 @@ mod tests {
                 io::ErrorKind::InvalidInput
             );
         }
-        let overflowing = MmioWindow {
+        let overflowing = AddressRange {
             base: u64::MAX - 1,
             size: 16,
         };
@@ -142,7 +143,7 @@ mod tests {
 
     #[test]
     fn counter_wakes_and_registration_lasts_until_final_clone() {
-        let window = MmioWindow {
+        let window = AddressRange {
             base: 0x1000,
             size: 0x1000,
         };
@@ -178,7 +179,7 @@ mod tests {
         use std::sync::mpsc;
         use std::time::Duration;
 
-        let window = MmioWindow {
+        let window = AddressRange {
             base: 0x1000,
             size: 0x1000,
         };
@@ -235,7 +236,7 @@ mod tests {
         unsafe {
             std::ptr::copy_nonoverlapping(code.as_ptr(), ram.as_ptr(), code.len());
         };
-        let window = MmioWindow {
+        let window = AddressRange {
             base: 0x1000,
             size: 0x1000,
         };

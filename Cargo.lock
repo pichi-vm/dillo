@@ -553,8 +553,9 @@ dependencies = [
 name = "dillo-machine"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
  "pmi",
+ "thiserror 2.0.18",
+ "vm-memory 0.17.2",
 ]
 
 [[package]]
@@ -611,15 +612,16 @@ dependencies = [
 name = "dillo-mmio"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "log",
  "thiserror 2.0.18",
- "vm-memory 0.17.2",
 ]
 
 [[package]]
 name = "dillo-mmio-uart"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "dillo-mmio",
  "vm-superio",
 ]
@@ -628,6 +630,7 @@ dependencies = [
 name = "dillo-mmio-virtio"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "dillo-mmio",
  "dillo-virtio",
  "log",
@@ -638,6 +641,7 @@ dependencies = [
 name = "dillo-pci"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "dillo-mmio",
  "log",
 ]
@@ -646,6 +650,7 @@ dependencies = [
 name = "dillo-pci-virtio"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "dillo-mmio",
  "dillo-pci",
  "dillo-virtio",
@@ -664,7 +669,7 @@ dependencies = [
 name = "dillo-virtio"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
+ "dillo-machine",
  "log",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
@@ -674,7 +679,7 @@ dependencies = [
 name = "dillo-virtio-blk"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
+ "dillo-machine",
  "dillo-storage",
  "dillo-virtio",
  "imago",
@@ -689,7 +694,7 @@ name = "dillo-virtio-console"
 version = "0.1.0"
 dependencies = [
  "dillo-config",
- "dillo-mmio",
+ "dillo-machine",
  "dillo-virtio",
  "interprocess",
  "log",
@@ -707,7 +712,7 @@ dependencies = [
 name = "dillo-virtio-fs"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
+ "dillo-machine",
  "dillo-virtio",
  "libc",
  "log",
@@ -736,7 +741,7 @@ name = "dillo-virtio-net"
 version = "0.1.0"
 dependencies = [
  "block2",
- "dillo-mmio",
+ "dillo-machine",
  "dillo-virtio",
  "libc",
  "log",
@@ -750,7 +755,7 @@ dependencies = [
 name = "dillo-virtio-vsock"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
+ "dillo-machine",
  "dillo-virtio",
  "log",
 ]
