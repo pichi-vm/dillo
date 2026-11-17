@@ -581,6 +581,7 @@ dependencies = [
  "dillo-devtree",
  "dillo-machine",
  "dillo-mmio",
+ "dillo-virtio",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",

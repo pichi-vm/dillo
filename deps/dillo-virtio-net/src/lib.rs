@@ -192,7 +192,6 @@ impl VirtioDevice for VirtioNet {
         // Queue 1 is TX (guest → host). Kick-driven worker.
         let tx_queue = queues.remove(1);
         let tx_evt = queue_evts.remove(1);
-        let tx_wake = tx_evt.try_clone()?;
         let tx_handle = Arc::new(Mutex::new(Some(spawn_tx_worker(
             Arc::clone(&host),
             Arc::clone(&self.backend),
@@ -238,10 +237,6 @@ impl VirtioDevice for VirtioNet {
                 {
                     handle.shutdown();
                 }
-                // Wake the kick-blocked TX worker so it observes shutdown. The
-                // RX worker polls the backend with a bounded timeout, so it
-                // observes shutdown on its own.
-                let _ = tx_wake.write(1);
             },
             move || {
                 if let Some(handle) = tx_handle
@@ -282,6 +277,7 @@ fn spawn_tx_worker(
     kick: Kick,
     interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
+    let wake = kick.clone();
     host.spawn(Box::new(move |token| {
         tx_worker(
             &backend,
@@ -294,6 +290,7 @@ fn spawn_tx_worker(
         );
         Ok(())
     }))
+    .map(|handle| handle.with_shutdown_wake(wake))
 }
 
 fn spawn_rx_worker(
