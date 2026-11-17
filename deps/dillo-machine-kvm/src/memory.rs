@@ -215,7 +215,9 @@ impl MappingProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dillo_machine::memory::{MappedSharedMemory, SharedAccess, SharedMemory, SharedRange};
     use std::os::unix::fs::FileExt;
+    use vm_memory::{GuestMemory, GuestMemoryRegion, MmapRegion};
 
     #[test]
     fn owning_views_preserve_file_offsets_and_reclaim_after_last_region() {
@@ -277,5 +279,50 @@ mod tests {
                 .unwrap(),
             3
         );
+    }
+
+    #[test]
+    fn atomic_metadata_uses_independent_views_of_original_memfd() {
+        let backing = MappedMemory::new([(0x20_0000, 0x20_0000)])
+            .expect("native hugepage-backed Machine RAM is required");
+        let original = backing.guest_memory();
+        let first = original.iter().next().unwrap();
+        let alias =
+            MmapRegion::<()>::from_file(first.file_offset().unwrap().clone(), first.len() as usize)
+                .unwrap();
+        assert_ne!(
+            alias.as_ptr(),
+            first.as_ptr(),
+            "independent host mapping required"
+        );
+        let alias = GuestMemoryMmap::from_regions(vec![
+            GuestRegionMmap::new(alias, first.start_addr()).unwrap(),
+        ])
+        .unwrap();
+        original
+            .store(
+                0x8877_6655_4433_2211u64.to_le(),
+                GuestAddress(0x20_0010),
+                Ordering::Relaxed,
+            )
+            .unwrap();
+        let capability = MappedSharedMemory::for_guest_memory(original, SharedAccess::ReadWrite);
+        let independent = MappedSharedMemory::for_guest_memory(alias, SharedAccess::ReadWrite);
+        let range = SharedRange {
+            gpa: 0x20_0000,
+            size: 0x20,
+            access: SharedAccess::ReadWrite,
+        };
+        let first = capability.region(range).unwrap();
+        let second = independent.region(range).unwrap();
+        first.store_u16_le(0, 0x00ff).unwrap();
+        first.store_u32_le(4, 0x89ab_cdef).unwrap();
+        assert_eq!(second.load_u16_le(0).unwrap(), 0x00ff);
+        assert_eq!(second.load_u32_le(4).unwrap(), 0x89ab_cdef);
+        assert_eq!(second.load_u64_le(0x10).unwrap(), 0x8877_6655_4433_2211);
+        second.store_u16_le(0, 0x0100).unwrap();
+        second.store_u32_le(4, 0x0123_4567).unwrap();
+        assert_eq!(first.load_u16_le(0).unwrap(), 0x0100);
+        assert_eq!(first.load_u32_le(4).unwrap(), 0x0123_4567);
     }
 }

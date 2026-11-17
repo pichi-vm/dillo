@@ -12,7 +12,7 @@ use std::num::Wrapping;
 use std::sync::Arc;
 use std::sync::atomic::{Ordering, fence};
 
-use dillo_machine::memory::{SharedAccess, SharedMemory, SharedMemoryError, SharedRange};
+use dillo_machine::memory::{SharedAccess, SharedMemory, SharedRange, SharedRegion};
 use vm_memory::{Address, GuestAddress};
 
 /// Descriptor flag: buffer continues via `next` field.
@@ -62,6 +62,9 @@ impl DescriptorChain {
 }
 
 /// Memory access needed by split virtqueue metadata.
+///
+/// Successful scalar operations are indivisible little-endian accesses with
+/// relaxed ordering. The queue supplies the protocol's publication barriers.
 pub trait QueueMemory: Send + Sync {
     fn read_u16(&self, addr: GuestAddress) -> Option<u16>;
 
@@ -141,60 +144,48 @@ impl SharedQueueMemory {
         Self { capabilities }
     }
 
-    fn read<const N: usize>(&self, addr: GuestAddress) -> Result<[u8; N], SharedMemoryError> {
-        let mut last = SharedMemoryError::Unsupported;
-        for capability in &self.capabilities {
-            match capability.region(SharedRange {
-                gpa: addr.raw_value(),
-                size: N as u64,
-                access: SharedAccess::ReadOnly,
-            }) {
-                Ok(region) => {
-                    let mut data = [0u8; N];
-                    region.read(0, &mut data)?;
-                    return Ok(data);
-                }
-                Err(err) => last = err,
-            }
-        }
-        Err(last)
-    }
-
-    fn write(&self, addr: GuestAddress, data: &[u8]) -> Result<(), SharedMemoryError> {
-        let mut last = SharedMemoryError::Unsupported;
-        for capability in &self.capabilities {
-            match capability.region(SharedRange {
-                gpa: addr.raw_value(),
-                size: data.len() as u64,
-                access: SharedAccess::WriteOnly,
-            }) {
-                Ok(region) => return region.write(0, data),
-                Err(err) => last = err,
-            }
-        }
-        Err(last)
+    fn region(&self, addr: GuestAddress, size: u64, access: SharedAccess) -> Option<SharedRegion> {
+        self.capabilities.iter().find_map(|capability| {
+            capability
+                .region(SharedRange {
+                    gpa: addr.raw_value(),
+                    size,
+                    access,
+                })
+                .ok()
+        })
     }
 }
 
 impl QueueMemory for SharedQueueMemory {
     fn read_u16(&self, addr: GuestAddress) -> Option<u16> {
-        self.read(addr).ok().map(u16::from_le_bytes)
+        self.region(addr, 2, SharedAccess::ReadOnly)?
+            .load_u16_le(0)
+            .ok()
     }
 
     fn read_u32(&self, addr: GuestAddress) -> Option<u32> {
-        self.read(addr).ok().map(u32::from_le_bytes)
+        self.region(addr, 4, SharedAccess::ReadOnly)?
+            .load_u32_le(0)
+            .ok()
     }
 
     fn read_u64(&self, addr: GuestAddress) -> Option<u64> {
-        self.read(addr).ok().map(u64::from_le_bytes)
+        self.region(addr, 8, SharedAccess::ReadOnly)?
+            .load_u64_le(0)
+            .ok()
     }
 
     fn write_u16(&self, addr: GuestAddress, value: u16) -> Option<()> {
-        self.write(addr, &value.to_le_bytes()).ok()
+        self.region(addr, 2, SharedAccess::WriteOnly)?
+            .store_u16_le(0, value)
+            .ok()
     }
 
     fn write_u32(&self, addr: GuestAddress, value: u32) -> Option<()> {
-        self.write(addr, &value.to_le_bytes()).ok()
+        self.region(addr, 4, SharedAccess::WriteOnly)?
+            .store_u32_le(0, value)
+            .ok()
     }
 }
 
@@ -403,6 +394,47 @@ mod tests {
     }
 
     // --- Queue::new tests ---
+
+    #[test]
+    fn shared_queue_scalars_use_atomic_service_and_refuse_misalignment() {
+        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
+        memory
+            .write_slice(&[0x5a; 32], GuestAddress(0x100))
+            .unwrap();
+        memory
+            .store(
+                0x8877_6655_4433_2211u64.to_le(),
+                GuestAddress(0x110),
+                Ordering::Relaxed,
+            )
+            .unwrap();
+        let queue_memory = shared_queue_memory(&memory, 0, 0x1000);
+        assert_eq!(
+            queue_memory.write_u16(GuestAddress(0x102), 0x00ff),
+            Some(())
+        );
+        assert_eq!(
+            queue_memory.write_u32(GuestAddress(0x104), 0x89ab_cdef),
+            Some(())
+        );
+        assert_eq!(queue_memory.read_u16(GuestAddress(0x102)), Some(0x00ff));
+        assert_eq!(
+            queue_memory.read_u32(GuestAddress(0x104)),
+            Some(0x89ab_cdef)
+        );
+        assert_eq!(
+            queue_memory.read_u64(GuestAddress(0x110)),
+            Some(0x8877_6655_4433_2211)
+        );
+        assert_eq!(queue_memory.write_u16(GuestAddress(0x101), 0), None);
+        assert_eq!(queue_memory.write_u32(GuestAddress(0x106), 0), None);
+        assert_eq!(queue_memory.read_u16(GuestAddress(0x101)), None);
+        assert_eq!(queue_memory.read_u32(GuestAddress(0x106)), None);
+        assert_eq!(queue_memory.read_u64(GuestAddress(0x114)), None);
+        let mut bytes = [0; 8];
+        memory.read_slice(&mut bytes, GuestAddress(0x100)).unwrap();
+        assert_eq!(bytes, [0x5a, 0x5a, 0xff, 0, 0xef, 0xcd, 0xab, 0x89]);
+    }
 
     #[test]
     fn test_new_defaults() {

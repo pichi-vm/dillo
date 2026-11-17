@@ -1646,6 +1646,7 @@ pub(crate) use tests::whp_test_lock;
 mod tests {
     use super::{Error, Vcpu, Vm, push_reg64, raw, status};
     use crate::VmExit;
+    use dillo_machine::memory::{MappedSharedMemory, SharedAccess, SharedMemory, SharedRange};
     use std::collections::BTreeMap;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use windows_sys::Win32::System::Hypervisor::*;
@@ -1950,7 +1951,29 @@ mod tests {
         let mut vm = Vm::new().expect("create WHP partition");
         let code_base = 0x1_0000;
         vm.add_memory(code_base, 0x1000).expect("map guest memory");
-        vm.write_guest(code_base, &[0xF4]).expect("write hlt");
+        let shared = MappedSharedMemory::for_guest_memory(
+            vm.guest_memory().unwrap(),
+            SharedAccess::ReadWrite,
+        );
+        let region = shared
+            .region(SharedRange {
+                gpa: code_base,
+                size: 0x1000,
+                access: SharedAccess::ReadWrite,
+            })
+            .unwrap();
+        region.store_u16_le(0x100, 0x0100).unwrap();
+        region.store_u32_le(0x108, 0x89ab_cdef).unwrap();
+        // DS=0x1000; copy native guest halfword/word loads to neighboring
+        // slots, then halt. These are the original partition's RAM bytes.
+        vm.write_guest(
+            code_base,
+            &[
+                0xb8, 0x00, 0x10, 0x8e, 0xd8, 0xa1, 0x00, 0x01, 0xa3, 0x02, 0x01, 0x66, 0xa1, 0x08,
+                0x01, 0x66, 0xa3, 0x0c, 0x01, 0xf4,
+            ],
+        )
+        .unwrap();
 
         let mut vcpu = vm.create_vcpu(0, "x86-64-v2").expect("create WHP vCPU");
         vcpu.initialize_test_real_mode(code_base, 0)
@@ -1964,6 +1987,9 @@ mod tests {
             )
             .expect("run vCPU");
         assert!(matches!(exit, VmExit::Halted), "expected HLT, got {exit:?}");
+        assert_eq!(region.load_u16_le(0x102).unwrap(), 0x0100);
+        assert_eq!(region.load_u32_le(0x10c).unwrap(), 0x89ab_cdef);
+        assert_eq!(region.load_u64_le(0x108).unwrap(), 0x89ab_cdef_89ab_cdef);
     }
 
     #[test]

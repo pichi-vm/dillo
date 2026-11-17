@@ -3,9 +3,12 @@
 
 //! Shared guest-memory access and mapped-memory adapters.
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 
-use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
+use vm_memory::{
+    Address, AtomicAccess, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion,
+};
 
 /// A guest-physical address range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,13 +130,30 @@ pub enum SharedMemoryError {
 }
 
 /// Backend implementation for one claimed shared-memory region.
+///
+/// Scalar methods access the original backing indivisibly with relaxed ordering
+/// and little-endian encoding. They reject permission, range and native alignment
+/// failures before a store, without a byte-copy fallback. Protocol ordering is the
+/// caller's responsibility; multiple scalar accesses are not a transaction.
 pub trait SharedRegionAccess: Send + Sync + std::fmt::Debug {
     fn read(&self, offset: u64, data: &mut [u8]) -> Result<(), SharedMemoryError>;
 
     fn write(&self, offset: u64, data: &[u8]) -> Result<(), SharedMemoryError>;
+
+    fn load_u16_le(&self, offset: u64) -> Result<u16, SharedMemoryError>;
+
+    fn load_u32_le(&self, offset: u64) -> Result<u32, SharedMemoryError>;
+
+    fn load_u64_le(&self, offset: u64) -> Result<u64, SharedMemoryError>;
+
+    fn store_u16_le(&self, offset: u64, value: u16) -> Result<(), SharedMemoryError>;
+
+    fn store_u32_le(&self, offset: u64, value: u32) -> Result<(), SharedMemoryError>;
 }
 
 /// Opaque shared-memory region handle.
+///
+/// Scalar operations follow the [`SharedRegionAccess`] access contract.
 #[derive(Clone, Debug)]
 pub struct SharedRegion {
     access: Arc<dyn SharedRegionAccess>,
@@ -150,6 +170,26 @@ impl SharedRegion {
 
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), SharedMemoryError> {
         self.access.write(offset, data)
+    }
+
+    pub fn load_u16_le(&self, offset: u64) -> Result<u16, SharedMemoryError> {
+        self.access.load_u16_le(offset)
+    }
+
+    pub fn load_u32_le(&self, offset: u64) -> Result<u32, SharedMemoryError> {
+        self.access.load_u32_le(offset)
+    }
+
+    pub fn load_u64_le(&self, offset: u64) -> Result<u64, SharedMemoryError> {
+        self.access.load_u64_le(offset)
+    }
+
+    pub fn store_u16_le(&self, offset: u64, value: u16) -> Result<(), SharedMemoryError> {
+        self.access.store_u16_le(offset, value)
+    }
+
+    pub fn store_u32_le(&self, offset: u64, value: u32) -> Result<(), SharedMemoryError> {
+        self.access.store_u32_le(offset, value)
     }
 }
 
@@ -183,9 +223,52 @@ impl SharedRegionAccess for MappedSharedRegion {
             .map_err(|e| SharedMemoryError::Backing(e.to_string()))
             .map(|_| ())
     }
+
+    fn load_u16_le(&self, offset: u64) -> Result<u16, SharedMemoryError> {
+        self.load(offset).map(u16::from_le)
+    }
+
+    fn load_u32_le(&self, offset: u64) -> Result<u32, SharedMemoryError> {
+        self.load(offset).map(u32::from_le)
+    }
+
+    fn load_u64_le(&self, offset: u64) -> Result<u64, SharedMemoryError> {
+        self.load(offset).map(u64::from_le)
+    }
+
+    fn store_u16_le(&self, offset: u64, value: u16) -> Result<(), SharedMemoryError> {
+        self.store(offset, value.to_le())
+    }
+
+    fn store_u32_le(&self, offset: u64, value: u32) -> Result<(), SharedMemoryError> {
+        self.store(offset, value.to_le())
+    }
 }
 
 impl MappedSharedRegion {
+    fn load<T: AtomicAccess>(&self, offset: u64) -> Result<T, SharedMemoryError> {
+        if !self.access.permits_read() {
+            return Err(SharedMemoryError::AccessDenied);
+        }
+        let addr = self.checked_access(offset, std::mem::size_of::<T>())?;
+        self.memory
+            .load(GuestAddress(addr), Ordering::Relaxed)
+            .map_err(|error| SharedMemoryError::Backing(error.to_string()))
+    }
+
+    fn store<T: AtomicAccess>(&self, offset: u64, value: T) -> Result<(), SharedMemoryError> {
+        if !self.access.permits_write() {
+            return Err(SharedMemoryError::AccessDenied);
+        }
+        let addr = self.checked_access(offset, std::mem::size_of::<T>())?;
+        // vm-memory validates the entire scalar in one mapped region and its
+        // native alignment before performing the atomic store. It never splits
+        // a scalar into byte accesses or mutates a short first-region slice.
+        self.memory
+            .store(value, GuestAddress(addr), Ordering::Relaxed)
+            .map_err(|error| SharedMemoryError::Backing(error.to_string()))
+    }
+
     fn checked_access(&self, offset: u64, len: usize) -> Result<u64, SharedMemoryError> {
         let len = u64::try_from(len).map_err(|_| SharedMemoryError::OutOfRange)?;
         let end = offset
@@ -345,6 +428,192 @@ impl SharedMemory for MappedSharedMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_accesses_use_little_endian_storage_and_retain_the_mapping() {
+        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0x1000), 0x1000)]).unwrap();
+        memory
+            .write_slice(&[0x5a; 32], GuestAddress(0x1100))
+            .unwrap();
+        memory
+            .store(
+                0x8877_6655_4433_2211u64.to_le(),
+                GuestAddress(0x1110),
+                Ordering::Relaxed,
+            )
+            .unwrap();
+        let original = Arc::downgrade(&memory.iter().next().unwrap().get_mmap());
+        let shared = MappedSharedMemory::for_guest_memory(memory.clone(), SharedAccess::ReadWrite);
+        // Alignment belongs to the final native address, not the claimed base.
+        let region = shared
+            .region(SharedRange {
+                gpa: 0x1101,
+                size: 0x1f,
+                access: SharedAccess::ReadWrite,
+            })
+            .unwrap();
+        region.store_u16_le(1, 0x12ab).unwrap();
+        region.store_u32_le(3, 0x89ab_cdef).unwrap();
+        assert_eq!(region.load_u16_le(1).unwrap(), 0x12ab);
+        assert_eq!(region.load_u32_le(3).unwrap(), 0x89ab_cdef);
+        assert_eq!(region.load_u64_le(15).unwrap(), 0x8877_6655_4433_2211);
+        let mut bytes = [0; 32];
+        memory.read_slice(&mut bytes, GuestAddress(0x1100)).unwrap();
+        assert_eq!(
+            &bytes[..8],
+            &[0x5a, 0x5a, 0xab, 0x12, 0xef, 0xcd, 0xab, 0x89]
+        );
+        assert_eq!(&bytes[8..16], &[0x5a; 8]);
+        assert_eq!(
+            &bytes[16..24],
+            &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
+        );
+        assert_eq!(&bytes[24..], &[0x5a; 8]);
+        drop(memory);
+        drop(shared);
+        assert!(original.upgrade().is_some());
+        region.store_u16_le(1, 0x00ff).unwrap();
+        assert_eq!(region.load_u16_le(1).unwrap(), 0x00ff);
+        drop(region);
+        assert!(original.upgrade().is_none());
+    }
+
+    #[test]
+    fn scalar_permissions_and_refused_stores_preserve_original_bytes() {
+        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0x1000), 0x1000)]).unwrap();
+        memory
+            .write_slice(&[0x5a; 32], GuestAddress(0x1100))
+            .unwrap();
+        let shared = MappedSharedMemory::for_guest_memory(memory.clone(), SharedAccess::ReadWrite);
+        let read_only = shared
+            .region(SharedRange {
+                gpa: 0x1100,
+                size: 16,
+                access: SharedAccess::ReadOnly,
+            })
+            .unwrap();
+        assert!(matches!(
+            read_only.store_u16_le(0, 0),
+            Err(SharedMemoryError::AccessDenied)
+        ));
+        assert!(matches!(
+            read_only.store_u32_le(0, 0),
+            Err(SharedMemoryError::AccessDenied)
+        ));
+        assert_eq!(read_only.load_u16_le(0).unwrap(), 0x5a5a);
+        assert_eq!(read_only.load_u32_le(0).unwrap(), 0x5a5a_5a5a);
+        assert_eq!(read_only.load_u64_le(0).unwrap(), 0x5a5a_5a5a_5a5a_5a5a);
+        let write_only = shared
+            .region(SharedRange {
+                gpa: 0x1100,
+                size: 16,
+                access: SharedAccess::WriteOnly,
+            })
+            .unwrap();
+        assert!(matches!(
+            write_only.load_u16_le(0),
+            Err(SharedMemoryError::AccessDenied)
+        ));
+        assert!(matches!(
+            write_only.load_u32_le(0),
+            Err(SharedMemoryError::AccessDenied)
+        ));
+        assert!(matches!(
+            write_only.load_u64_le(0),
+            Err(SharedMemoryError::AccessDenied)
+        ));
+        for offset in [15, 16, u64::MAX] {
+            assert!(matches!(
+                write_only.store_u16_le(offset, 0),
+                Err(SharedMemoryError::OutOfRange)
+            ));
+            assert!(matches!(
+                write_only.store_u32_le(offset, 0),
+                Err(SharedMemoryError::OutOfRange)
+            ));
+        }
+        assert!(matches!(
+            write_only.store_u16_le(1, 0),
+            Err(SharedMemoryError::Backing(_))
+        ));
+        assert!(matches!(
+            write_only.store_u32_le(2, 0),
+            Err(SharedMemoryError::Backing(_))
+        ));
+        assert!(matches!(
+            read_only.load_u16_le(1),
+            Err(SharedMemoryError::Backing(_))
+        ));
+        assert!(matches!(
+            read_only.load_u32_le(2),
+            Err(SharedMemoryError::Backing(_))
+        ));
+        assert!(matches!(
+            read_only.load_u64_le(4),
+            Err(SharedMemoryError::Backing(_))
+        ));
+        let mut bytes = [0; 32];
+        memory.read_slice(&mut bytes, GuestAddress(0x1100)).unwrap();
+        assert_eq!(bytes, [0x5a; 32]);
+        write_only.store_u16_le(14, 0x1234).unwrap();
+        write_only.store_u32_le(0, 0x89ab_cdef).unwrap();
+        assert_eq!(read_only.load_u16_le(14).unwrap(), 0x1234);
+        assert_eq!(read_only.load_u32_le(0).unwrap(), 0x89ab_cdef);
+    }
+
+    #[test]
+    fn scalar_accesses_refuse_to_span_mapped_regions_without_partial_store() {
+        // Deliberately split a scalar across independently owned mappings, even
+        // though the claimed guest range is contiguous and the address aligned.
+        let memory = GuestMemoryMmap::from_ranges(&[
+            (GuestAddress(0x1000), 3),
+            (GuestAddress(0x1003), 0x1000),
+        ])
+        .unwrap();
+        memory
+            .write_slice(&[0x5a; 16], GuestAddress(0x1000))
+            .unwrap();
+        let shared = MappedSharedMemory::new(
+            memory.clone(),
+            SharedMemoryRequirement {
+                range: AddressRange {
+                    base: 0x1000,
+                    size: 16,
+                },
+                access: SharedAccess::ReadWrite,
+            },
+        );
+        let region = shared
+            .region(SharedRange {
+                gpa: 0x1000,
+                size: 16,
+                access: SharedAccess::ReadWrite,
+            })
+            .unwrap();
+        assert!(matches!(
+            region.store_u16_le(2, 0),
+            Err(SharedMemoryError::Backing(_))
+        ));
+        assert!(matches!(
+            region.store_u32_le(0, 0),
+            Err(SharedMemoryError::Backing(_))
+        ));
+        assert!(matches!(
+            region.load_u16_le(2),
+            Err(SharedMemoryError::Backing(_))
+        ));
+        assert!(matches!(
+            region.load_u32_le(0),
+            Err(SharedMemoryError::Backing(_))
+        ));
+        assert!(matches!(
+            region.load_u64_le(0),
+            Err(SharedMemoryError::Backing(_))
+        ));
+        let mut bytes = [0; 16];
+        memory.read_slice(&mut bytes, GuestAddress(0x1000)).unwrap();
+        assert_eq!(bytes, [0x5a; 16]);
+    }
 
     #[test]
     fn mapped_shared_memory_reads_and_writes_claimed_region() {

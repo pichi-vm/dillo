@@ -1169,6 +1169,7 @@ mod imp {
         #[test]
         fn hvf_host_exports_outlive_retirement_without_retargeting() {
             use dillo_machine::Machine as _;
+            use vm_memory::{GuestMemory as _, VolatileMemory as _};
             if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
                 crate::hypervisor::tests::SignedNativeTest::spawn(
                     "imp::tests::hvf_host_exports_outlive_retirement_without_retargeting",
@@ -1193,6 +1194,18 @@ mod imp {
             )
             .unwrap();
             let probe = vm.inner.mapping_probe(0);
+            let alias = probe.alias();
+            assert_ne!(
+                alias.as_ptr(),
+                vm.inner
+                    .guest_memory()
+                    .unwrap()
+                    .iter()
+                    .next()
+                    .unwrap()
+                    .as_ptr(),
+                "scalar observation uses an independent host mapping"
+            );
             let export = vm.shared_memory[0]
                 .region(dillo_machine::memory::SharedRange {
                     gpa: 0,
@@ -1234,6 +1247,31 @@ mod imp {
                 [0x33, 0x44],
                 "old export never retargets a replacement VM"
             );
+            // These accesses still address the retired VM's original shared
+            // object while a replacement VM is alive at the same GPAs.
+            let independent = alias.as_volatile_slice();
+            export.store_u16_le(0x20, 0x00ff).unwrap();
+            export.store_u32_le(0x24, 0x89ab_cdef).unwrap();
+            assert_eq!(
+                u16::from_le(independent.load(0x20, Ordering::Relaxed).unwrap()),
+                0x00ff
+            );
+            assert_eq!(
+                u32::from_le(independent.load(0x24, Ordering::Relaxed).unwrap()),
+                0x89ab_cdef
+            );
+            independent
+                .store(0x0100u16.to_le(), 0x20, Ordering::Relaxed)
+                .unwrap();
+            independent
+                .store(0x0123_4567u32.to_le(), 0x24, Ordering::Relaxed)
+                .unwrap();
+            independent
+                .store(0x8877_6655_4433_2211u64.to_le(), 0x30, Ordering::Relaxed)
+                .unwrap();
+            assert_eq!(export.load_u16_le(0x20).unwrap(), 0x0100);
+            assert_eq!(export.load_u32_le(0x24).unwrap(), 0x0123_4567);
+            assert_eq!(export.load_u64_le(0x30).unwrap(), 0x8877_6655_4433_2211);
             drop(export);
             assert!(!probe.is_mapped());
             assert!(replacement_probe.is_mapped());
