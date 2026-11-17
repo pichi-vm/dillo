@@ -562,7 +562,8 @@ mod imp {
         }
     }
 
-    #[derive(Debug, Clone)]
+    /// Allocated RAM is consumed by attachment to exactly one native machine.
+    #[derive(Debug)]
     pub struct Memory {
         backing: Arc<crate::memory::MappedMemory>,
     }
