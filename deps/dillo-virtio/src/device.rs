@@ -5,8 +5,8 @@
 
 //! VirtioDevice trait defining the device contract for transport layers.
 
-use dillo_mmio::Interrupt;
-use dillo_mmio::SharedMemory;
+use dillo_machine::interrupt::Interrupt;
+use dillo_machine::memory::SharedMemory;
 
 use crate::kick::Kick;
 use crate::memory::{NullVirtioMemory, SharedVirtioMemory, VirtioMemory};
@@ -334,7 +334,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_machine::memory::{
+        AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
+    };
     use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
     use super::*;

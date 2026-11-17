@@ -4,7 +4,8 @@
 use std::io;
 use std::sync::Arc;
 
-use dillo_mmio::{MmioWindow, WriteNotification};
+use dillo_machine::memory::AddressRange;
+use dillo_machine::notification::WriteNotification;
 use kvm_ioctls::IoEventAddress;
 
 use crate::hypervisor::Vm;
@@ -13,17 +14,17 @@ use vmm_sys_util::eventfd::EventFd;
 /// Registration authority restricted to the attached device's declared windows.
 pub(crate) struct Notifications {
     vm: Vm,
-    windows: Vec<MmioWindow>,
+    windows: Vec<AddressRange>,
 }
 
 impl Notifications {
-    pub(crate) fn new(vm: Vm, windows: Vec<MmioWindow>) -> Self {
+    pub(crate) fn new(vm: Vm, windows: Vec<AddressRange>) -> Self {
         Self { vm, windows }
     }
 
     pub(crate) fn register(
         &self,
-        window: MmioWindow,
+        window: AddressRange,
         offset: u64,
         value: u32,
     ) -> io::Result<Option<Arc<dyn WriteNotification>>> {
@@ -104,7 +105,7 @@ impl Drop for Notification {
 mod tests {
     use super::*;
 
-    fn authority(window: MmioWindow) -> Notifications {
+    fn authority(window: AddressRange) -> Notifications {
         let kvm = kvm_ioctls::Kvm::new().expect("open /dev/kvm");
         let vm = kvm.create_vm().unwrap();
         Notifications::new(Vm::test_from_native(kvm, vm), vec![window])
@@ -112,14 +113,14 @@ mod tests {
 
     #[test]
     fn registration_enforces_owned_window_and_complete_write_extent() {
-        let window = MmioWindow {
+        let window = AddressRange {
             base: 0x1000,
             size: 0x1000,
         };
         let owner = authority(window);
         for (requested, offset) in [
             (
-                MmioWindow {
+                AddressRange {
                     base: 0x2000,
                     ..window
                 },
@@ -133,7 +134,7 @@ mod tests {
                 io::ErrorKind::InvalidInput
             );
         }
-        let overflowing = MmioWindow {
+        let overflowing = AddressRange {
             base: u64::MAX - 1,
             size: 16,
         };
@@ -148,7 +149,7 @@ mod tests {
 
     #[test]
     fn counter_wakes_and_registration_lasts_until_final_clone() {
-        let window = MmioWindow {
+        let window = AddressRange {
             base: 0x1000,
             size: 0x1000,
         };
@@ -188,7 +189,7 @@ mod tests {
             0x10, 0x01, 0x00, 0x00, 0x00, 0xf4,
         ];
         ram.write_slice(&code, GuestAddress(0)).unwrap();
-        let window = MmioWindow {
+        let window = AddressRange {
             base: 0x1000,
             size: 0x1000,
         };

@@ -12,7 +12,7 @@ use std::num::Wrapping;
 use std::sync::Arc;
 use std::sync::atomic::{Ordering, fence};
 
-use dillo_mmio::{SharedAccess, SharedMemory, SharedMemoryError, SharedRange};
+use dillo_machine::memory::{SharedAccess, SharedMemory, SharedMemoryError, SharedRange};
 use vm_memory::{Address, GuestAddress};
 
 /// Descriptor flag: buffer continues via `next` field.
@@ -361,7 +361,9 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_machine::memory::{
+        AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
+    };
     use vm_memory::{Address, Bytes, GuestMemoryMmap};
 
     const QUEUE_SIZE: u16 = 16;

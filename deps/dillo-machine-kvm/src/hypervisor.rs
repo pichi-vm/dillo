@@ -1493,7 +1493,7 @@ mod memory_registration_tests {
         assert!(probe.mappings() > 0);
         // A native service can outlive the failed visible VM, too. Its final
         // context close retires the partially installed slot before RAM frees.
-        let window = dillo_mmio::MmioWindow {
+        let window = dillo_machine::memory::AddressRange {
             base: 0x4000,
             size: 0x1000,
         };

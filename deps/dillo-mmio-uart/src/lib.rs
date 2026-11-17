@@ -15,7 +15,7 @@
 //! UART, dillo constructs an owned [`Ns16550`] with the node's register
 //! window and attaches it to the MMIO bus (register `N` at offset
 //! `N << reg_shift`). IRQ delivery is provided by the machine backend as a
-//! resolved [`dillo_mmio::Interrupt`].
+//! resolved [`dillo_machine::interrupt::Interrupt`].
 //!
 //! ## THR-empty interrupt on enable
 //!
@@ -39,10 +39,9 @@ use vm_superio::Serial;
 use vm_superio::Trigger;
 use vm_superio::serial::NoEvents;
 
-use dillo_mmio::{
-    Interrupt, MmioDevice, MmioError, MmioInterrupt, MmioInterruptRequirement, MmioWindow,
-    MmioWriteOutcome,
-};
+use dillo_machine::interrupt::{Interrupt, InterruptRequirement, InterruptResource};
+use dillo_machine::memory::AddressRange;
+use dillo_mmio::{MmioDevice, MmioError, MmioWriteOutcome};
 
 // 16550 register offsets and bits we post-process on top of vm-superio.
 // Offsets are pre-`reg_shift` register indices (0..=7).
@@ -98,8 +97,8 @@ type Mmio16550 = Serial<InterruptTrigger, NoEvents, Box<dyn Write + Send>>;
 /// MMIO ns16550a: a `vm-superio` `Serial` plus the THR-empty-on-enable
 /// emulation it lacks (see module docs).
 pub struct Ns16550 {
-    window: MmioWindow,
-    interrupts: Vec<MmioInterruptRequirement>,
+    window: AddressRange,
+    interrupts: Vec<InterruptRequirement>,
     interrupt: Arc<RwLock<Option<Interrupt>>>,
     state: Mutex<Ns16550State>,
 }
@@ -114,7 +113,7 @@ impl std::fmt::Debug for Ns16550 {
 
 impl Ns16550 {
     pub fn new(
-        window: MmioWindow,
+        window: AddressRange,
         reg_shift: u32,
         interrupt: Option<Interrupt>,
         out: Box<dyn Write + Send>,
@@ -130,9 +129,9 @@ impl Ns16550 {
     }
 
     pub fn with_interrupt_requirement(
-        window: MmioWindow,
+        window: AddressRange,
         reg_shift: u32,
-        interrupt: MmioInterruptRequirement,
+        interrupt: InterruptRequirement,
         out: Box<dyn Write + Send>,
     ) -> Self {
         let interrupt_state = Arc::new(RwLock::new(None));
@@ -145,8 +144,8 @@ impl Ns16550 {
         )
     }
 
-    pub fn set_attachment(&self, attachment: &dyn dillo_mmio::MmioAttachment) {
-        if let Some(MmioInterrupt::Line(interrupt)) = attachment.interrupts().first() {
+    pub fn set_attachment(&self, attachment: &dyn dillo_machine::attachment::DeviceAttachment) {
+        if let Some(InterruptResource::Line(interrupt)) = attachment.interrupts().first() {
             self.set_interrupt(Some(interrupt.clone()));
         }
     }
@@ -159,8 +158,8 @@ impl Ns16550 {
     }
 
     fn with_serial(
-        window: MmioWindow,
-        interrupts: Vec<MmioInterruptRequirement>,
+        window: AddressRange,
+        interrupts: Vec<InterruptRequirement>,
         interrupt: Arc<RwLock<Option<Interrupt>>>,
         reg_shift: u32,
         serial: Mmio16550,
@@ -175,15 +174,15 @@ impl Ns16550 {
 }
 
 impl MmioDevice for Ns16550 {
-    fn windows(&self) -> &[MmioWindow] {
+    fn windows(&self) -> &[AddressRange] {
         std::slice::from_ref(&self.window)
     }
 
-    fn interrupts(&self) -> &[MmioInterruptRequirement] {
+    fn interrupts(&self) -> &[InterruptRequirement] {
         &self.interrupts
     }
 
-    fn read(&self, _window: MmioWindow, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
+    fn read(&self, _window: AddressRange, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
         data.fill(0);
         if let Some(slot) = data.first_mut()
             && let Ok(mut state) = self.state.lock()
@@ -195,7 +194,7 @@ impl MmioDevice for Ns16550 {
 
     fn write(
         &self,
-        _window: MmioWindow,
+        _window: AddressRange,
         offset: u64,
         data: &[u8],
     ) -> Result<MmioWriteOutcome, MmioError> {
@@ -276,7 +275,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use dillo_mmio::{InterruptError, InterruptLine};
+    use dillo_machine::interrupt::{InterruptError, InterruptLine};
 
     #[derive(Debug)]
     struct CountLine {
