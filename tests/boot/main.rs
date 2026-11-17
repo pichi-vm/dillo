@@ -1408,7 +1408,7 @@ fn boots_with_named_console_ports() {
         .expect("host write to the rx pipe");
 
     let cmdline = format!(
-        "console=hvc0 dillo.console_port=build dillo.console_port_read={} \
+        "console=hvc0 dillo.console_port=build dillo.console_port_expect=log dillo.console_port_read={} \
          dillo.console_port_write={FROM_GUEST}",
         TO_GUEST.len()
     );
@@ -1632,7 +1632,7 @@ fn boots_with_named_console_ports() {
         .expect("host write to the rx pipe");
 
     let cmdline = format!(
-        "console=hvc0 dillo.console_port=build dillo.console_port_read={} \
+        "console=hvc0 dillo.console_port=build dillo.console_port_expect=log dillo.console_port_read={} \
          dillo.console_port_write={FROM_GUEST}",
         TO_GUEST.len()
     );
