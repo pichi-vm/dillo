@@ -1658,7 +1658,7 @@ mod tests {
                 pci.set_property(
                     OwnedProperty::new("reg").with_u32s(&reg2(0x1_0000_0000, 0x1000_0000)),
                 );
-                let result = Machine::survey(&dtb(root), arch);
+                let result = Machine::survey(dtb(root), arch);
                 if valid {
                     let pci = result.expect("valid bus interval").pcie;
                     assert_eq!([u32::from(pci.bus_min), u32::from(pci.bus_max)], buses);
@@ -1706,7 +1706,7 @@ mod tests {
                 let pci = root.child_mut("pcie@100000000").unwrap();
                 pci.set_property(OwnedProperty::new("bus-range").with_u32s(&buses));
                 pci.set_property(OwnedProperty::new("reg").with_u32s(&reg2(0x1_0000_0000, size)));
-                let result = Machine::survey(&dtb(root), arch);
+                let result = Machine::survey(dtb(root), arch);
                 if valid {
                     let pci = result.expect("sufficient ECAM capacity").pcie;
                     assert_eq!([u32::from(pci.bus_min), u32::from(pci.bus_max)], buses);
