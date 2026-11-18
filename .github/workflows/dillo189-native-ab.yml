@@ -1,0 +1,40 @@
+name: Dillo 189 Ubuntu boot A/B
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [diag/issue-247-native-ab]
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Fetch exact comparison revisions
+        shell: bash
+        run: |
+          git fetch --no-tags origin 36b784b15a276d94c842bb9ef83593edcbc50b52 19caa6fb8415fa0bef0a7380d06b2b1fa54b23f2
+      - name: Install matched toolchain
+        shell: bash
+        run: |
+          rustup toolchain install nightly-2026-07-06 --profile minimal --component rust-src
+          rustup target add --toolchain nightly-2026-07-06 x86_64-unknown-none aarch64-unknown-none x86_64-unknown-linux-musl
+      - name: Enable KVM
+        shell: bash
+        run: |
+          test -c /dev/kvm
+          sudo chmod 666 /dev/kvm
+      - name: Build immutable fixtures and run native A/B
+        shell: bash
+        run: bash .github/scripts/dillo189-native-ab/run.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/dillo189-evidence"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: dillo189-native-ab
+          path: ${{ runner.temp }}/dillo189-evidence
