@@ -553,6 +553,7 @@ impl Topology {
 pub struct Machine {
     dtb: Vec<u8>,
     arch: Arch,
+    gic: Option<GicConfig>,
     pcie: Pcie,
     has_pcie: bool,
     plan: ResourcePlan,
@@ -577,19 +578,21 @@ impl Machine {
         let mut reboot = None;
 
         // arch-specific substrate (specific → general within the arch).
-        match arch {
+        let gic = match arch {
             Arch::Aarch64 => {
-                GicConfig::from_tree(&mut t, &mut plan, &mut topology)?;
+                let gic = GicConfig::from_tree(&mut t, &mut plan, &mut topology)?;
                 Timer::from_tree(&mut t, &mut plan, &topology)?;
                 Psci::from_tree(&mut t, &mut plan)?;
+                Some(gic)
             }
             Arch::X86_64 => {
                 X86Intc::from_tree(&mut t, &mut plan, &mut topology)?;
                 let (po, rb) = X86Syscon::from_tree(&mut t, &mut plan)?;
                 poweroff = Some(po);
                 reboot = rb;
+                None
             }
-        }
+        };
 
         // Shared devices, then the general device last. The serial is the same
         // MMIO `ns16550a` on both arches (present only under `--serial`).
@@ -612,6 +615,7 @@ impl Machine {
         Ok(Self {
             dtb,
             arch,
+            gic,
             pcie,
             has_pcie,
             plan,
@@ -629,6 +633,11 @@ impl Machine {
 
     pub fn arch(&self) -> Arch {
         self.arch
+    }
+
+    /// The Arm GIC distributor, redistributor and MSI frame declared in the base DTB.
+    pub fn gic(&self) -> Option<&GicConfig> {
+        self.gic.as_ref()
     }
 
     /// The declared PCIe host bridge. When [`Self::has_pcie`] is false,
@@ -1770,6 +1779,19 @@ mod tests {
         let m = Machine::survey(bytes, Arch::Aarch64).expect("survey ok");
         assert_eq!(m.dtb(), expected);
         assert_eq!(m.dtb().as_ptr(), address);
+        assert_eq!(
+            m.gic().copied(),
+            Some(GicConfig {
+                dist_base: GICD_BASE,
+                dist_size: 0x1_0000,
+                redist_base: GICR_BASE,
+                redist_size: 0x200_0000,
+                msi_frame_base: V2M_BASE,
+                msi_frame_size: 0x1_0000,
+                spi_base: 64,
+                spi_count: 32,
+            })
+        );
 
         let uart = m.uart.as_ref().expect("uart present");
         assert_eq!(uart.base, SERIAL_BASE);
@@ -2296,6 +2318,7 @@ mod tests {
     #[test]
     fn x86_base_drains_and_binds() {
         let m = Machine::survey(dtb(x86_base_root()), Arch::X86_64).expect("survey ok");
+        assert!(m.gic().is_none());
 
         let po = m.poweroff.expect("poweroff");
         assert_eq!((po.base, po.value, po.mask), (POWEROFF_BASE, 0x34, 0xFF));

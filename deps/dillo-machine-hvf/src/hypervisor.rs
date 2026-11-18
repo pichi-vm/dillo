@@ -31,9 +31,7 @@ use crate::VmExit;
 /// AArch64 instruction length (no 16-bit encodings).
 const INSN_LEN: u64 = 4;
 
-/// In-kernel GICv3 placement, derived by the platform layer from the DTB
-/// (`/intc`+`/v2m`) and handed to [`Vm::new`]. The hypervisor never hardcodes
-/// these — addresses are the image's to assign (device-model §4); F7a.
+/// Base addresses and MSI ID range used by the native GICv3 setters.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GicParams {
     pub dist_base: u64,
@@ -43,21 +41,59 @@ pub(crate) struct GicParams {
     pub msi_intid_count: u32,
 }
 
+impl GicParams {
+    pub(crate) fn from_survey(
+        declared: &dillo_devtree::platform::GicConfig,
+    ) -> Result<Self, Error> {
+        for (region, declared_size, required) in [
+            (
+                "GICD",
+                declared.dist_size,
+                GicConfig::get_distributor_size()?,
+            ),
+            (
+                "GICR",
+                declared.redist_size,
+                GicConfig::get_redistributor_region_size()?,
+            ),
+            (
+                "MSI",
+                declared.msi_frame_size,
+                GicConfig::get_msi_region_size()?,
+            ),
+        ] {
+            let required = required as u64;
+            if declared_size < required {
+                return Err(Error::GicExtent {
+                    region,
+                    declared: declared_size,
+                    required,
+                });
+            }
+        }
+        Ok(Self {
+            dist_base: declared.dist_base,
+            redist_base: declared.redist_base,
+            msi_base: declared.msi_frame_base,
+            msi_intid_base: declared.spi_base,
+            msi_intid_count: declared.spi_count,
+        })
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Arm CPU admission: {0}")]
     ArmAdmission(#[from] dillo_machine::aarch64::AdmissionError),
     #[error("hvf: {0}")]
     Hv(String),
-    #[error("hvf: parse DTB: {0}")]
-    ParseDtb(dillo_devtree::devtree::Error),
     #[error("hvf: missing required DTB substrate {0}")]
     MissingSubstrate(&'static str),
-    #[error("hvf: bad DTB substrate property {node}:{prop}: {reason}")]
-    BadSubstrateProperty {
-        node: &'static str,
-        prop: &'static str,
-        reason: &'static str,
+    #[error("hvf: native {region} requires {required} bytes within the declared {declared} bytes")]
+    GicExtent {
+        region: &'static str,
+        declared: u64,
+        required: u64,
     },
     #[error("hvf: guest address {0:#x} not in any mapped region")]
     UnmappedGuestAddr(u64),

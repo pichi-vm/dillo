@@ -33,11 +33,7 @@ mod imp {
         atomic::{AtomicBool, Ordering},
     };
 
-    use dillo_devtree::{
-        CompatMismatch, FromDevTree, NodeExt, OwnedNodeExt, PropExt,
-        devtree::{OwnedTree, Tree},
-        platform::Machine as PlatformMachine,
-    };
+    use dillo_devtree::platform::Machine as PlatformMachine;
     use dillo_machine::attachment::{Attach, DeviceAttachment};
     use dillo_machine::execution::{DeviceHandle, RunToken, SpawnError};
     use dillo_machine::interrupt::{
@@ -257,120 +253,6 @@ mod imp {
         }
     }
 
-    impl FromDevTree for crate::hypervisor::GicParams {
-        type Error = Error;
-
-        fn from_devtree(tree: &mut OwnedTree) -> Result<Option<Self>, Self::Error> {
-            let root = tree.root_mut();
-            let intc_name = root
-                .children()
-                .find(|node| {
-                    node.name().starts_with("interrupt-controller@")
-                        && node.compatible_contains("arm,gic-v3")
-                })
-                .map(|node| node.name().to_string())
-                .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
-            let mut intc = root
-                .remove_child(&intc_name)
-                .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
-            intc.take_compatible("arm,gic-v3").map_err(|e| match e {
-                CompatMismatch::Missing => Error::BadSubstrateProperty {
-                    node: "/interrupt-controller",
-                    prop: "compatible",
-                    reason: "missing",
-                },
-                CompatMismatch::Unsupported => Error::BadSubstrateProperty {
-                    node: "/interrupt-controller",
-                    prop: "compatible",
-                    reason: "unsupported compatible",
-                },
-            })?;
-            let reg = intc
-                .remove_property("reg")
-                .ok_or(Error::BadSubstrateProperty {
-                    node: "/interrupt-controller",
-                    prop: "reg",
-                    reason: "missing",
-                })?;
-            let (dist_base, _) = (&reg).reg_pair(0).ok_or(Error::BadSubstrateProperty {
-                node: "/interrupt-controller",
-                prop: "reg",
-                reason: "missing GICD pair",
-            })?;
-            let (redist_base, _) = (&reg).reg_pair(1).ok_or(Error::BadSubstrateProperty {
-                node: "/interrupt-controller",
-                prop: "reg",
-                reason: "missing GICR pair",
-            })?;
-            let _ = intc.remove_property("#interrupt-cells");
-            let _ = intc.remove_property("interrupt-controller");
-            let _ = intc.remove_property("phandle");
-
-            let v2m_name = root
-                .children()
-                .find(|node| {
-                    node.name().starts_with("msi-controller@")
-                        && node.compatible_contains("arm,gic-v2m-frame")
-                })
-                .map(|node| node.name().to_string())
-                .ok_or(Error::MissingSubstrate("/msi-controller@*"))?;
-            let mut v2m = root
-                .remove_child(&v2m_name)
-                .ok_or(Error::MissingSubstrate("/msi-controller@*"))?;
-            v2m.take_compatible("arm,gic-v2m-frame")
-                .map_err(|e| match e {
-                    CompatMismatch::Missing => Error::BadSubstrateProperty {
-                        node: "/msi-controller",
-                        prop: "compatible",
-                        reason: "missing",
-                    },
-                    CompatMismatch::Unsupported => Error::BadSubstrateProperty {
-                        node: "/msi-controller",
-                        prop: "compatible",
-                        reason: "unsupported compatible",
-                    },
-                })?;
-            let reg = v2m
-                .remove_property("reg")
-                .ok_or(Error::BadSubstrateProperty {
-                    node: "/msi-controller",
-                    prop: "reg",
-                    reason: "missing",
-                })?;
-            let (msi_base, _) = (&reg).reg_pair(0).ok_or(Error::BadSubstrateProperty {
-                node: "/msi-controller",
-                prop: "reg",
-                reason: "missing MSI frame pair",
-            })?;
-            let msi_intid_base = v2m
-                .remove_property("arm,msi-base-spi")
-                .and_then(|prop| prop.as_u32())
-                .ok_or(Error::BadSubstrateProperty {
-                    node: "/msi-controller",
-                    prop: "arm,msi-base-spi",
-                    reason: "missing or not a u32",
-                })?;
-            let msi_intid_count = v2m
-                .remove_property("arm,msi-num-spis")
-                .and_then(|prop| prop.as_u32())
-                .ok_or(Error::BadSubstrateProperty {
-                    node: "/msi-controller",
-                    prop: "arm,msi-num-spis",
-                    reason: "missing or not a u32",
-                })?;
-            let _ = v2m.remove_property("msi-controller");
-            let _ = v2m.remove_property("phandle");
-
-            Ok(Some(Self {
-                dist_base,
-                redist_base,
-                msi_base,
-                msi_intid_base,
-                msi_intid_count,
-            }))
-        }
-    }
-
     #[derive(Debug)]
     struct SpiInterruptLine {
         native: crate::hypervisor::NativeVm,
@@ -539,10 +421,11 @@ mod imp {
                 .platform
                 .required_address_bits_for_ram(config.ram.iter().map(|r| (r.gpa, r.size)))
                 .map_err(|error| Error::Hv(error.to_string()))?;
-            let parsed: Tree<'_> = Tree::parse(config.platform.dtb()).map_err(Error::ParseDtb)?;
-            let mut tree = OwnedTree::materialize(&parsed);
-            let gic = crate::hypervisor::GicParams::from_devtree(&mut tree)?
+            let gic = config
+                .platform
+                .gic()
                 .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
+            let gic = crate::hypervisor::GicParams::from_survey(gic)?;
             let mut vm = Self::new(&gic, required, config.vcpus)?;
             vm.attach_guest_memory(&config.ram)?;
             Ok(vm)
@@ -1157,6 +1040,139 @@ mod imp {
 
         use super::*;
         use vm_memory::{Bytes, GuestAddress};
+
+        #[test]
+        fn surveyed_gic_apertures_contain_native_reservations() {
+            use applevisor::prelude::GicConfig;
+            use dillo_devtree::{
+                devtree::{OwnedNode, OwnedProperty, OwnedTree},
+                platform::Arch,
+            };
+            use dillo_machine::Machine as _;
+
+            const EXTRA: u64 = 0x1000;
+
+            if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
+                crate::hypervisor::tests::SignedNativeTest::spawn(
+                    "imp::tests::surveyed_gic_apertures_contain_native_reservations",
+                )
+                .verify();
+                return;
+            }
+
+            let native = [
+                GicConfig::get_distributor_size().unwrap() as u64,
+                GicConfig::get_redistributor_region_size().unwrap() as u64,
+                GicConfig::get_msi_region_size().unwrap() as u64,
+            ];
+            let alignment = [
+                GicConfig::get_distributor_base_alignment().unwrap() as u64,
+                GicConfig::get_redistributor_base_alignment().unwrap() as u64,
+                GicConfig::get_msi_region_base_alignment().unwrap() as u64,
+            ];
+            // Keep the same aligned bases for all cases, with room to widen each window.
+            let mut next = 0x0800_0000u64;
+            let [dist_base, redist_base, msi_base] = std::array::from_fn(|index| {
+                let base = next.checked_next_multiple_of(alignment[index]).unwrap();
+                next = base
+                    .checked_add(native[index])
+                    .and_then(|end| end.checked_add(EXTRA))
+                    .unwrap();
+                base
+            });
+
+            eprintln!(
+                "HVF GICD/GICR/MSI sizes {native:#x?}, alignments {alignment:#x?}, bases {:#x?}",
+                [dist_base, redist_base, msi_base],
+            );
+
+            let launch = |[dist, redist, msi]: [u64; 3]| {
+                let reg = |base: u64, size: u64| {
+                    [
+                        (base >> 32) as u32,
+                        base as u32,
+                        (size >> 32) as u32,
+                        size as u32,
+                    ]
+                };
+                let gic_reg = [reg(dist_base, dist), reg(redist_base, redist)].concat();
+                let root = OwnedNode::new("")
+                    .with_property(OwnedProperty::new("#address-cells").with_u32(2))
+                    .with_property(OwnedProperty::new("#size-cells").with_u32(2))
+                    .with_child(
+                        OwnedNode::new(&format!("interrupt-controller@{dist_base:x}"))
+                            .with_property(OwnedProperty::new("compatible").with_str("arm,gic-v3"))
+                            .with_property(OwnedProperty::new("reg").with_u32s(&gic_reg))
+                            .with_property(OwnedProperty::new("#interrupt-cells").with_u32(3))
+                            .with_property(OwnedProperty::new("interrupt-controller"))
+                            .with_property(OwnedProperty::new("phandle").with_u32(1)),
+                    )
+                    .with_child(
+                        OwnedNode::new(&format!("msi-controller@{msi_base:x}"))
+                            .with_property(
+                                OwnedProperty::new("compatible").with_str("arm,gic-v2m-frame"),
+                            )
+                            .with_property(OwnedProperty::new("reg").with_u32s(&reg(msi_base, msi)))
+                            .with_property(OwnedProperty::new("arm,msi-base-spi").with_u32(64))
+                            .with_property(OwnedProperty::new("arm,msi-num-spis").with_u32(32))
+                            .with_property(OwnedProperty::new("msi-controller"))
+                            .with_property(OwnedProperty::new("phandle").with_u32(3)),
+                    )
+                    .with_child(
+                        OwnedNode::new("timer")
+                            .with_property(
+                                OwnedProperty::new("compatible").with_str("arm,armv8-timer"),
+                            )
+                            .with_property(OwnedProperty::new("interrupt-parent").with_u32(1))
+                            .with_property(OwnedProperty::new("interrupts").with_u32s(&[
+                                1, 13, 0xff08, 1, 14, 0xff08, 1, 11, 0xff08, 1, 10, 0xff08,
+                            ]))
+                            .with_property(OwnedProperty::new("always-on")),
+                    )
+                    .with_child(
+                        OwnedNode::new("psci")
+                            .with_property(
+                                OwnedProperty::new("compatible").with_str("arm,psci-1.0"),
+                            )
+                            .with_property(OwnedProperty::new("method").with_str("hvc")),
+                    );
+                let dtb = OwnedTree::new(root).encode().expect("encode fixture");
+                let platform = PlatformMachine::survey(dtb, Arch::Aarch64).expect("survey fixture");
+                Vm::from_launch_config(LaunchConfig {
+                    platform: &platform,
+                    vcpus: 1,
+                    ram: vec![RamRange {
+                        gpa: 0,
+                        size: 0x4000,
+                    }],
+                })
+            };
+            let exact = launch(native).expect("exact declared apertures");
+            assert!(exact.inner.guest_memory().is_ok());
+
+            // Hold the process VM slot to distinguish an extent refusal before creation.
+            for (index, region) in ["GICD", "GICR", "MSI"].into_iter().enumerate() {
+                let mut short = native;
+                short[index] = native[index]
+                    .checked_sub(1)
+                    .expect("nonempty native aperture");
+                let error = launch(short).expect_err("short aperture must fail before creation");
+                assert!(
+                    matches!(error, Error::GicExtent { region: actual, declared, required }
+                        if actual == region && declared == short[index] && required == native[index]),
+                    "{error}"
+                );
+            }
+            drop(exact);
+
+            for index in 0..native.len() {
+                let mut larger = native;
+                larger[index] = native[index].checked_add(EXTRA).unwrap();
+                let vm =
+                    launch(larger).expect("larger disjoint aperture can be admitted after refusal");
+                assert!(vm.inner.guest_memory().is_ok());
+            }
+        }
 
         #[test]
         fn attached_worker_failure_stops_native_cpus_and_preserves_retained_ram() {
