@@ -1250,11 +1250,11 @@ mod bsp_tests {
     use super::*;
 
     #[test]
-    fn fixed_bsp_state_is_written_and_ap_remains_uninitialized() {
+    fn fixed_bsp_state_and_repeated_ap_startup() {
         use dillo_virtio::test_support::TestGuestMemory;
         use vm_memory::GuestAddress;
         let backing = Arc::new(
-            crate::memory::MappedMemory::test_backing(&[(0x1000, 0x1000), (0xffff_f000, 0x1000)])
+            crate::memory::MappedMemory::test_backing(&[(0x1000, 0x2000), (0xffff_f000, 0x1000)])
                 .unwrap(),
         );
         let memory = TestGuestMemory::from_owner(backing.guest_memory());
@@ -1270,13 +1270,25 @@ mod bsp_tests {
             .write_slice(
                 &[
                     0x0f, 0x20, 0xe0, 0x0d, 0x00, 0x02, 0x00, 0x00, 0x0f, 0x22, 0xe0, 0x0f, 0xae,
-                    0x1d, 0x00, 0x10, 0x00, 0x00, 0xe6, 0x42, 0xf4,
+                    0x1d, 0x00, 0x10, 0x00, 0x00, 0xe6, 0x42,
+                    // Send INIT and SIPI vector 2 to APIC ID 1 through xAPIC.
+                    0xc7, 0x05, 0xf0, 0x00, 0xe0, 0xfe, 0xff, 0x01, 0x00, 0x00, // enable LAPIC
+                    0xba, 0x00, 0x03, 0xe0, 0xfe, // mov edx, 0xfee00300 (ICR)
+                    0xc7, 0x42, 0x10, 0x00, 0x00, 0x00, 0x01, // mov [edx+0x10], 0x01000000
+                    0xc7, 0x02, 0x00, 0xc5, 0x00, 0x00, // mov [edx], 0xc500 (INIT)
+                    0xc7, 0x02, 0x02, 0x46, 0x00, 0x00, // mov [edx], 0x4602 (SIPI)
+                    0xe6, 0x43, // out 0x43, al
+                    0xeb, 0xf0, // jump back to INIT
                 ],
                 GuestAddress(0xffff_f000),
             )
             .unwrap();
+        // A resumed AP would report port 0x45. A freshly started AP reports 0x44.
+        memory
+            .write_slice(&[0xb0, 0x5a, 0xe6, 0x44, 0xe6, 0x45], GuestAddress(0x2000))
+            .unwrap();
         let mut bsp = vm.create_vcpu(0, "x86-64-v1").unwrap();
-        let ap = vm.create_vcpu(1, "x86-64-v1").unwrap();
+        let mut ap = vm.create_vcpu(1, "x86-64-v1").unwrap();
         let ap_before = ap.fd.get_sregs().unwrap();
         bsp.initialize_bsp().unwrap();
         let regs = bsp.fd.get_regs().unwrap();
@@ -1376,6 +1388,22 @@ mod bsp_tests {
             ap.fd.get_mp_state().unwrap().mp_state,
             kvm_bindings::KVM_MP_STATE_UNINITIALIZED
         );
+        for attempt in 1..=2 {
+            assert!(matches!(bsp.fd.run().unwrap(), VcpuExit::IoOut(0x43, [_])));
+            // KVM_GET_MP_STATE processes pending INIT/SIPI. Check that the AP
+            // was made runnable before entering KVM_RUN, which can otherwise park.
+            assert_eq!(
+                ap.fd.get_mp_state().unwrap().mp_state,
+                kvm_bindings::KVM_MP_STATE_RUNNABLE,
+                "AP startup {attempt}"
+            );
+            let sregs = ap.fd.get_sregs().unwrap();
+            assert_eq!(sregs.cr0 & 0x8000_0001, 0, "unpaged real-mode AP");
+            assert_eq!(sregs.cs.base, 0x2000, "SIPI vector set CS base");
+            let exit = ap.fd.run().unwrap();
+            assert!(matches!(exit, VcpuExit::IoOut(0x44, [0x5a])), "{exit:?}");
+            eprintln!("AP startup {attempt}: SIPI vector 2 reached real-mode guest");
+        }
     }
 }
 
