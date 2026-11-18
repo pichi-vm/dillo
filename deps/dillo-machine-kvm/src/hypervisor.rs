@@ -102,6 +102,13 @@ pub enum Error {
     #[error("configure VGIC: {0}")]
     ConfigureVgic(std::io::Error),
 
+    #[error("configure KVM VGIC IRQ count {count}: {source}")]
+    ConfigureVgicIrqCount {
+        count: u32,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("KVM redistributor count {0} must be in 1..=4095")]
     GicRedistributorCount(u32),
 
@@ -121,6 +128,17 @@ pub enum Error {
         declared: u64,
         required: u64,
     },
+
+    #[error(
+        "KVM MSI interval with base {base} and count {count} must be nonempty and within INTIDs 32 through 1019"
+    )]
+    GicMsiRange { base: u32, count: u32 },
+
+    #[error("KVM {node} interrupt {cells:?} must be a classic SPI within INTIDs 32 through 1019")]
+    GicWiredSpi { node: String, cells: Vec<u32> },
+
+    #[error("KVM {node} wired SPI INTID {intid} overlaps the GICv2m MSI interval")]
+    GicWiredMsiOverlap { node: String, intid: u32 },
 
     #[error("parse DTB for KVM platform substrate: {0:?}")]
     ParseDtb(dillo_devtree::devtree::Error),
@@ -919,16 +937,18 @@ fn create_vgic(vm: &VmFd, gic: &crate::imp::Aarch64Substrate) -> Result<DeviceFd
         KVM_VGIC_V3_ADDR_TYPE_REDIST_REGION,
         gic.redist_region(),
     )?;
-    let nr_irqs = 32 + gic.spi_count.max(96);
     let nr_irqs_attr = kvm_device_attr {
         group: KVM_DEV_ARM_VGIC_GRP_NR_IRQS,
         attr: 0,
-        addr: &raw const nr_irqs as u64,
+        addr: &raw const gic.nr_irqs as u64,
         flags: 0,
     };
     vgic.set_device_attr(&nr_irqs_attr)
         .map_err(io)
-        .map_err(Error::ConfigureVgic)?;
+        .map_err(|source| Error::ConfigureVgicIrqCount {
+            count: gic.nr_irqs,
+            source,
+        })?;
     Ok(vgic)
 }
 
@@ -1237,7 +1257,7 @@ mod arm_bsp_tests {
                 dist_base: 0x0800_0000,
                 redist_base: 0x080a_0000,
                 vcpus: count,
-                spi_count: 64,
+                nr_irqs: 128,
             })
             .expect("native ARM KVM is required");
             vm.attach_memory(backing).unwrap();
@@ -1342,7 +1362,7 @@ mod arm_bsp_tests {
             dist_base: 0x0800_0000,
             redist_base: 0x080a_0000,
             vcpus: 2,
-            spi_count: 64,
+            nr_irqs: 128,
         })
         .expect("native ARM KVM is required");
         vm.attach_memory(backing).unwrap();
@@ -1467,7 +1487,7 @@ mod arm_bsp_tests {
             dist_base: 0x0800_0000,
             redist_base: 0x080a_0000,
             vcpus: 1,
-            spi_count: 64,
+            nr_irqs: 128,
         })
         .expect("native ARM KVM is required");
         vm.attach_memory(backing).unwrap();

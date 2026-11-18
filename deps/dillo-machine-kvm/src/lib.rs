@@ -40,8 +40,6 @@ mod imp {
 
     #[cfg(target_arch = "x86_64")]
     use dillo_devtree::devtree::{OwnedTree, Tree};
-    #[cfg(target_arch = "aarch64")]
-    use dillo_devtree::platform::GicConfig;
     use dillo_devtree::platform::Machine as PlatformMachine;
     use dillo_machine::attachment::{Attach, DeviceAttachment};
     use dillo_machine::execution::{DeviceHandle, RunToken, SpawnError};
@@ -436,7 +434,7 @@ mod imp {
         pub(crate) dist_base: u64,
         pub(crate) redist_base: u64,
         pub(crate) vcpus: u32,
-        pub(crate) spi_count: u32,
+        pub(crate) nr_irqs: u32,
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -445,7 +443,10 @@ mod imp {
         const GICR_STRIDE: u64 = 128 << 10;
         const REDIST_COUNT_SHIFT: u32 = 52;
 
-        fn from_survey(gic: &GicConfig, vcpus: u32) -> Result<Self, Error> {
+        fn from_survey(platform: &PlatformMachine, vcpus: u32) -> Result<Self, Error> {
+            let gic = platform
+                .gic()
+                .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
             if !(1..=0xfff).contains(&vcpus) {
                 return Err(Error::GicRedistributorCount(vcpus));
             }
@@ -468,11 +469,43 @@ mod imp {
                     });
                 }
             }
+            let msi_end = gic
+                .spi_base
+                .checked_add(gic.spi_count)
+                .filter(|&end| gic.spi_base >= 32 && end > gic.spi_base && end <= 1020)
+                .ok_or(Error::GicMsiRange {
+                    base: gic.spi_base,
+                    count: gic.spi_count,
+                })?;
+            let msi = gic.spi_base..msi_end;
+            let mut nr_irqs = msi_end.max(128);
+            let wired = platform
+                .uart()
+                .into_iter()
+                .map(|uart| &uart.interrupt)
+                .chain(platform.virtio_mmio().iter().map(|slot| &slot.interrupt));
+            for interrupt in wired {
+                let intid = match interrupt.cells.as_slice() {
+                    [0, pin, _] => pin.checked_add(32).filter(|&intid| intid < 1020),
+                    _ => None,
+                }
+                .ok_or_else(|| Error::GicWiredSpi {
+                    node: interrupt.node.clone(),
+                    cells: interrupt.cells.clone(),
+                })?;
+                if msi.contains(&intid) {
+                    return Err(Error::GicWiredMsiOverlap {
+                        node: interrupt.node.clone(),
+                        intid,
+                    });
+                }
+                nr_irqs = nr_irqs.max(intid + 1);
+            }
             Ok(Self {
                 dist_base: gic.dist_base,
                 redist_base: gic.redist_base,
                 vcpus,
-                spi_count: gic.spi_count,
+                nr_irqs: nr_irqs.next_multiple_of(32),
             })
         }
 
@@ -554,11 +587,7 @@ mod imp {
             let mut vm = Self::from_dtb(config.platform.dtb())?;
             #[cfg(target_arch = "aarch64")]
             let mut vm = {
-                let gic = config
-                    .platform
-                    .gic()
-                    .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
-                let substrate = Aarch64Substrate::from_survey(gic, config.vcpus)?;
+                let substrate = Aarch64Substrate::from_survey(config.platform, config.vcpus)?;
                 Self::from_native(crate::hypervisor::Vm::new_with_gic(&substrate)?)?
             };
             let available = Self::guest_address_bits()?;
@@ -1277,7 +1306,7 @@ mod imp {
                     dist_base: 0x0800_0000,
                     redist_base: 0x080a_0000,
                     vcpus: 2,
-                    spi_count: 64,
+                    nr_irqs: 128,
                 };
                 let native = crate::hypervisor::Vm::new_with_gic(&substrate)
                     .expect("native KVM is required");
@@ -1511,6 +1540,7 @@ mod imp {
         const DIST: u64 = 0x0900_0000;
         const REDIST: u64 = 0x0b00_0000;
         const MSI: u64 = 0x0c00_0000;
+        const DEFAULT_MSI: (u32, u32) = (64, 32);
         const GICD: u64 = Aarch64Substrate::GICD_SIZE;
         const STRIDE: u64 = Aarch64Substrate::GICR_STRIDE;
         const PROFILE: CpuProfile = CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0);
@@ -1521,6 +1551,22 @@ mod imp {
                 (redist, redist_size): (u64, u64),
                 vcpus: u32,
             ) -> Result<Self, Error> {
+                Self::from_gic_irq_fixture(
+                    (dist, dist_size),
+                    (redist, redist_size),
+                    vcpus,
+                    DEFAULT_MSI,
+                    None,
+                )
+            }
+
+            fn from_gic_irq_fixture(
+                (dist, dist_size): (u64, u64),
+                (redist, redist_size): (u64, u64),
+                vcpus: u32,
+                (msi_base, msi_count): (u32, u32),
+                wired: Option<(&str, [u32; 3])>,
+            ) -> Result<Self, Error> {
                 let reg = |base: u64, size: u64| {
                     [
                         (base >> 32) as u32,
@@ -1530,7 +1576,7 @@ mod imp {
                     ]
                 };
                 let gic = [reg(dist, dist_size), reg(redist, redist_size)].concat();
-                let root = OwnedNode::new("")
+                let mut root = OwnedNode::new("")
                     .with_property(OwnedProperty::new("#address-cells").with_u32(2))
                     .with_property(OwnedProperty::new("#size-cells").with_u32(2))
                     .with_child(
@@ -1547,8 +1593,12 @@ mod imp {
                                 OwnedProperty::new("compatible").with_str("arm,gic-v2m-frame"),
                             )
                             .with_property(OwnedProperty::new("reg").with_u32s(&reg(MSI, 0x10000)))
-                            .with_property(OwnedProperty::new("arm,msi-base-spi").with_u32(64))
-                            .with_property(OwnedProperty::new("arm,msi-num-spis").with_u32(32))
+                            .with_property(
+                                OwnedProperty::new("arm,msi-base-spi").with_u32(msi_base),
+                            )
+                            .with_property(
+                                OwnedProperty::new("arm,msi-num-spis").with_u32(msi_count),
+                            )
                             .with_property(OwnedProperty::new("msi-controller"))
                             .with_property(OwnedProperty::new("phandle").with_u32(3)),
                     )
@@ -1570,6 +1620,24 @@ mod imp {
                             )
                             .with_property(OwnedProperty::new("method").with_str("hvc")),
                     );
+                if let Some((node, interrupt)) = wired {
+                    let (name, compatible) = match node {
+                        "/serial" => ("serial@d100000", "ns16550a"),
+                        "/virtio_mmio" => ("virtio_mmio@d100000", "virtio,mmio"),
+                        _ => panic!("unexpected wired fixture {node}"),
+                    };
+                    let mut device = OwnedNode::new(name)
+                        .with_property(OwnedProperty::new("compatible").with_str(compatible))
+                        .with_property(
+                            OwnedProperty::new("reg").with_u32s(&reg(0x0d10_0000, 0x1000)),
+                        )
+                        .with_property(OwnedProperty::new("interrupt-parent").with_u32(1))
+                        .with_property(OwnedProperty::new("interrupts").with_u32s(&interrupt));
+                    if node == "/serial" {
+                        device = device.with_property(OwnedProperty::new("reg-shift").with_u32(2));
+                    }
+                    root = root.with_child(device);
+                }
                 let dtb = OwnedTree::new(root).encode().unwrap();
                 let platform = PlatformMachine::survey(dtb, Arch::Aarch64).expect("survey fixture");
                 Self::from_launch_config(LaunchConfig {
@@ -1674,11 +1742,73 @@ mod imp {
         }
 
         #[test]
-        fn relocated_counted_vgic_serves_both_redistributors() {
-            for extra in [0, 0x1000] {
-                let mut vm =
-                    Vm::from_gic_fixture((DIST, GICD + extra), (REDIST, STRIDE * 2 + extra), 2)
-                        .expect("native KVM admits relocated controller windows");
+        fn surveyed_gic_refuses_invalid_or_conflicting_spis() {
+            let fixture = |msi, wired| {
+                Vm::from_gic_irq_fixture((DIST, GICD), (REDIST, STRIDE), 1, msi, wired)
+            };
+            for (base, count) in [(64, 0), (31, 1), (1019, 2), (u32::MAX, 2)] {
+                let result = fixture((base, count), None);
+                assert!(
+                    matches!(result, Err(Error::GicMsiRange { base: b, count: n }) if (b, n) == (base, count)),
+                    "{result:?}"
+                );
+            }
+            for (node, cells) in [
+                ("/serial", [0, 988, 4]),
+                ("/virtio_mmio", [1, 11, 1]),
+                ("/virtio_mmio", [0, u32::MAX, 1]),
+            ] {
+                let result = fixture(DEFAULT_MSI, Some((node, cells)));
+                assert!(
+                    matches!(result, Err(Error::GicWiredSpi { node: ref n, cells: ref c }) if n == node && c == &cells),
+                    "{result:?}"
+                );
+            }
+            for (node, cells, intid) in [
+                ("/serial", [0, 32, 4], 64),
+                ("/virtio_mmio", [0, 63, 1], 95),
+            ] {
+                let result = fixture(DEFAULT_MSI, Some((node, cells)));
+                assert!(
+                    matches!(result, Err(Error::GicWiredMsiOverlap { node: ref n, intid: id }) if n == node && id == intid),
+                    "{result:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn relocated_counted_vgic_serves_both_redistributors_and_admits_irqs() {
+            for (extra, msi, wired, nr_irqs) in [
+                (0, DEFAULT_MSI, None, 128),
+                (0x1000, DEFAULT_MSI, None, 128),
+                (0, (160, 7), None, 192),
+                (0, DEFAULT_MSI, Some(("/virtio_mmio", [0, 224, 1])), 288),
+                (0, DEFAULT_MSI, Some(("/serial", [0, 160, 4])), 224),
+                (0, (991, 1), None, 992),
+                (0, (1019, 1), None, 1024),
+            ] {
+                let mut vm = match Vm::from_gic_irq_fixture(
+                    (DIST, GICD + extra),
+                    (REDIST, STRIDE * 2 + extra),
+                    2,
+                    msi,
+                    wired,
+                ) {
+                    Ok(vm) => vm,
+                    // Some kernels reject the documented upper count in NR_IRQS.
+                    Err(Error::ConfigureVgicIrqCount {
+                        count: 1024,
+                        source,
+                    }) if nr_irqs == 1024 && source.raw_os_error() == Some(libc::EINVAL) => {
+                        eprintln!(
+                            "MSI {msi:?}, wired {wired:?}: KVM NR_IRQS refused 1024: {source}"
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        panic!("MSI {msi:?}, wired {wired:?}: expected {nr_irqs} IRQs: {error}")
+                    }
+                };
                 assert_eq!(vm.inner.vgic_address(KVM_VGIC_V3_ADDR_TYPE_DIST), DIST);
                 assert_eq!(
                     vm.inner.vgic_address(KVM_VGIC_V3_ADDR_TYPE_REDIST_REGION),
@@ -1708,9 +1838,14 @@ mod imp {
                         .unwrap()
                 });
                 assert_eq!(progress, 1);
-                assert_eq!(dist & 0x1f, 3, "128 native interrupt lines");
+                let realized = ((dist & 0x1f) + 1) * 32;
+                assert_eq!(
+                    realized, nr_irqs,
+                    "guest GICD_TYPER for MSI {msi:?}, wired {wired:?}"
+                );
                 assert_ne!(first, second, "the two redistributors must be distinct");
                 assert_eq!([first & 0x10, second & 0x10], [0, 0x10], "GICR_TYPER.Last");
+                eprintln!("MSI {msi:?}, wired {wired:?}: guest GICD_TYPER reports {realized} IRQs");
             }
         }
 
