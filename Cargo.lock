@@ -476,6 +476,7 @@ dependencies = [
  "ciborium",
  "dillo-config",
  "dillo-devtree",
+ "dillo-launch",
  "dillo-machine",
  "dillo-machine-hvf",
  "dillo-machine-kvm",
@@ -500,7 +501,6 @@ dependencies = [
  "interprocess",
  "log",
  "nix 0.30.1",
- "object",
  "pmi",
  "rstest",
  "rustix",
@@ -535,6 +535,17 @@ name = "dillo-devtree"
 version = "0.1.0"
 dependencies = [
  "devtree",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dillo-launch"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "dillo-machine",
+ "object",
+ "pmi",
  "thiserror 2.0.18",
 ]
 

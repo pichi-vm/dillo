@@ -13,7 +13,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-dillo = { path = ".." }
+dillo-launch = { path = "../deps/dillo-launch" }
 dillo-virtio-net = { path = "../deps/dillo-virtio-net" }
 
 [[bin]]

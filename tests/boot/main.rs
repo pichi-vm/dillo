@@ -551,7 +551,7 @@ fn boots_arm_profile_payload(
     #[values("armv8.1-a", "armv8.2-a")] profile: &str,
     #[values(1, 2)] cpus: u32,
 ) {
-    use dillo::pmi_parse::{HostArch, ParseOptions, parse};
+    use dillo_launch::pmi_parse::{HostArch, ParseOptions, parse};
 
     assert!(
         hypervisor_available(),

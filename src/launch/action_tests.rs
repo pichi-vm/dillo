@@ -3,7 +3,7 @@
 
 use super::delegation_tests::{BaseChannel, base, image};
 use super::*;
-use dillo::pmi_parse::{self, Error as ParseError};
+use dillo_launch::pmi_parse::{self, Error as ParseError};
 use dillo_machine::{CpuProfile, LaunchConfig, Machine, Memory, RamRange, VcpuStop};
 use serde_json::json;
 

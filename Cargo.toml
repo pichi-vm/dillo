@@ -6,6 +6,7 @@ members = [
     "deps/dillo-storage",
     "deps/dillo-devtree",
     "deps/dillo-machine",
+    "deps/dillo-launch",
     "deps/dillo-runtime",
     "deps/dillo-machine-hvf",
     "deps/dillo-machine-kvm",
@@ -76,6 +77,7 @@ dillo-storage = { path = "deps/dillo-storage" }
 dillo-config = { path = "deps/dillo-config" }
 dillo-devtree = { path = "deps/dillo-devtree" }
 dillo-machine = { path = "deps/dillo-machine" }
+dillo-launch = { path = "deps/dillo-launch" }
 dillo-runtime = { path = "deps/dillo-runtime" }
 dillo-machine-hvf = { path = "deps/dillo-machine-hvf" }
 dillo-machine-kvm = { path = "deps/dillo-machine-kvm" }
@@ -187,6 +189,7 @@ tempfile.workspace = true
 dillo-storage.workspace = true
 imago.workspace = true
 dillo-machine.workspace = true
+dillo-launch.workspace = true
 dillo-runtime.workspace = true
 dillo-mmio.workspace = true
 dillo-mmio-uart.workspace = true
@@ -207,10 +210,8 @@ dillo-virtio-net.workspace = true
 dillo-config.workspace = true
 dillo-devtree.workspace = true
 pmi.workspace = true
-object.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-ciborium.workspace = true
 argh.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -232,6 +233,7 @@ dillo-machine-whp.workspace = true
 dillo-virtio-vsock.workspace = true
 
 [dev-dependencies]
+ciborium.workspace = true
 # Boot/e2e tests build a PMI with arma and assert on the Report that snuffler
 # emits from inside the guest.
 arma = { git = "https://github.com/pichi-vm/arma", rev = "79961028ec45966345043fe894c551e3fc3b48ba", artifact = "bin" } # image builder, host target
