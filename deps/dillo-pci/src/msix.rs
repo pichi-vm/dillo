@@ -420,7 +420,7 @@ impl MsixTable {
         }
     }
 }
-use dillo_mmio::Interrupt;
+use dillo_machine::interrupt::Interrupt;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

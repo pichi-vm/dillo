@@ -38,6 +38,7 @@ pub mod liveness;
 pub mod pipe;
 mod resize;
 
+use dillo_virtio::queue::PublicationError;
 use std::collections::VecDeque;
 use std::io::{self, BufWriter, Write};
 use std::sync::OnceLock;
@@ -46,7 +47,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use dillo_mmio::Interrupt;
+use dillo_machine::interrupt::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
 use dillo_virtio::{
     ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
@@ -94,10 +95,6 @@ const PIPE_CHUNK: usize = 16 * 1024;
 
 /// Cap on host→guest bytes held until the guest opens the port / drains RX.
 const RX_PENDING_LIMIT: usize = 1024 * 1024;
-
-/// Cap on guest→host bytes waiting on a pipe the host is not reading —
-/// backpressure instead of unbounded growth.
-const TX_BACKLOG_LIMIT: usize = 1024 * 1024;
 
 /// A named MULTIPORT port with its adopted host pipe ends. An omitted
 /// direction is closed: no backend, and no worker is spawned for it. The
@@ -352,14 +349,12 @@ impl VirtioDevice for VirtioConsole {
         let mut queues: Vec<Option<Queue>> = queues.into_iter().map(Some).collect();
         let mut queue_evts: Vec<Option<Kick>> = queue_evts.into_iter().map(Some).collect();
 
-        // Workers, plus the kick each one may be blocked on at shutdown.
+        // Each worker owns its shutdown wake, including during rollback.
         let mut workers: Vec<VirtioDeviceHandle> = Vec::new();
-        let mut wakes: Vec<Kick> = Vec::new();
 
         // --- port 0: the unnamed console, identical with or without MULTIPORT
         let tx_queue = take(&mut queues[1], "port 0 TX queue")?;
         let tx_evt = take(&mut queue_evts[1], "port 0 TX kick")?;
-        wakes.push(tx_evt.try_clone()?);
         workers.push(spawn_tx_worker(
             Arc::clone(&host),
             Arc::clone(&queue_memory),
@@ -371,7 +366,6 @@ impl VirtioDevice for VirtioConsole {
 
         let rx_queue = take(&mut queues[0], "port 0 RX queue")?;
         let rx_evt = take(&mut queue_evts[0], "port 0 RX kick")?;
-        wakes.push(rx_evt.try_clone()?);
         workers.push(spawn_rx_worker(
             Arc::clone(&host),
             Arc::clone(&queue_memory),
@@ -482,10 +476,6 @@ impl VirtioDevice for VirtioConsole {
                 {
                     handle.shutdown();
                 }
-                // Release any worker parked in a blocking `Kick::read`.
-                for wake in &wakes {
-                    let _ = wake.write(1);
-                }
             },
             move || {
                 let drained: Vec<_> = std::mem::take(
@@ -544,17 +534,22 @@ fn spawn_tx_worker(
     kick: Kick,
     call_interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        tx_worker(
-            queue_memory,
-            buffer_memory,
-            queue,
-            kick,
-            call_interrupt,
-            token,
-        );
-        Ok(())
-    }))
+    let wake = kick.clone();
+    host.spawn(
+        "console tx".into(),
+        Box::new(move |token| {
+            tx_worker(
+                queue_memory,
+                buffer_memory,
+                queue,
+                kick,
+                call_interrupt,
+                token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
+    .map(|handle| handle.with_shutdown_wake(wake))
 }
 
 fn spawn_rx_worker(
@@ -565,17 +560,22 @@ fn spawn_rx_worker(
     kick: Kick,
     call_interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        rx_worker(
-            queue_memory,
-            buffer_memory,
-            queue,
-            kick,
-            call_interrupt,
-            token,
-        );
-        Ok(())
-    }))
+    let wake = kick.clone();
+    host.spawn(
+        "console rx".into(),
+        Box::new(move |token| {
+            rx_worker(
+                queue_memory,
+                buffer_memory,
+                queue,
+                kick,
+                call_interrupt,
+                token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
+    .map(|handle| handle.with_shutdown_wake(wake))
 }
 
 /// Take one indexed activation input, naming it if it is somehow already gone.
@@ -598,20 +598,23 @@ fn spawn_control_worker(
     tx_call_interrupt: Option<Interrupt>,
     resize: Option<resize::Receiver>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        control_worker(
-            &plane,
-            &queue_memory,
-            &buffer_memory,
-            rx_queue,
-            tx_queue,
-            rx_call_interrupt.as_ref(),
-            tx_call_interrupt.as_ref(),
-            &token,
-            resize,
-        );
-        Ok(())
-    }))
+    host.spawn(
+        "console control".into(),
+        Box::new(move |token| {
+            control_worker(
+                &plane,
+                &queue_memory,
+                &buffer_memory,
+                rx_queue,
+                tx_queue,
+                rx_call_interrupt.as_ref(),
+                tx_call_interrupt.as_ref(),
+                &token,
+                resize,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
 }
 
 /// Spawn the host → guest worker for one named port: read its pipe, hand the
@@ -625,18 +628,21 @@ fn spawn_port_rx_worker(
     queue: Queue,
     call_interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        port_rx_worker(
-            &end,
-            &liveness,
-            &queue_memory,
-            &buffer_memory,
-            queue,
-            call_interrupt.as_ref(),
-            &token,
-        );
-        Ok(())
-    }))
+    host.spawn(
+        format!("console port {} RX", liveness.id),
+        Box::new(move |token| {
+            port_rx_worker(
+                &end,
+                &liveness,
+                &queue_memory,
+                &buffer_memory,
+                queue,
+                call_interrupt.as_ref(),
+                &token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
 }
 
 /// Spawn the guest → host worker for one named port: drain its transmitq and
@@ -650,18 +656,21 @@ fn spawn_port_tx_worker(
     queue: Queue,
     call_interrupt: Option<Interrupt>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        port_tx_worker(
-            &end,
-            &liveness,
-            &queue_memory,
-            &buffer_memory,
-            queue,
-            call_interrupt.as_ref(),
-            &token,
-        );
-        Ok(())
-    }))
+    host.spawn(
+        format!("console port {} TX", liveness.id),
+        Box::new(move |token| {
+            port_tx_worker(
+                &end,
+                &liveness,
+                &queue_memory,
+                &buffer_memory,
+                queue,
+                call_interrupt.as_ref(),
+                &token,
+            )
+            .map_err(|error| dillo_virtio::DeviceJoinError::Worker(error.to_string()))
+        }),
+    )
 }
 
 /// Drive the control plane until shutdown.
@@ -681,7 +690,7 @@ fn control_worker(
     tx_call_interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
     mut resize: Option<resize::Receiver>,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let rx_queue = Arc::new(Mutex::new(rx_queue));
     let tx_queue = Arc::new(Mutex::new(tx_queue));
     while !token.is_shutdown_requested() {
@@ -701,16 +710,22 @@ fn control_worker(
         }
 
         // Guest → device: DEVICE_READY, PORT_READY, PORT_OPEN.
-        for buf in drain_tx_buffers(queue_memory, buffer_memory, &tx_queue, tx_call_interrupt) {
-            progress = true;
-            match control::ControlMessage::decode(&buf) {
-                Some(msg) => plane.handle(&msg),
-                None => log::warn!(
-                    "virtio-console: control message of {} byte(s) is too short",
-                    buf.len()
-                ),
-            }
-        }
+        while consume_tx(
+            queue_memory,
+            buffer_memory,
+            &tx_queue,
+            tx_call_interrupt,
+            |buf| {
+                progress = true;
+                match control::ControlMessage::decode(&buf) {
+                    Some(msg) => plane.handle(&msg),
+                    None => log::warn!(
+                        "virtio-console: control message of {} byte(s) is too short",
+                        buf.len()
+                    ),
+                }
+            },
+        )? {}
 
         // Device → guest: whatever the state machine (or a disconnecting port)
         // has queued, one message per descriptor chain.
@@ -721,7 +736,7 @@ fn control_worker(
                 &rx_queue,
                 &msg.encode(),
                 rx_call_interrupt,
-            ) {
+            )? {
                 progress = true;
             } else {
                 // No guest buffer right now; keep the message and retry.
@@ -734,6 +749,7 @@ fn control_worker(
             thread::sleep(PIPE_POLL);
         }
     }
+    Ok(dillo_virtio::DeviceExit::Cancelled)
 }
 
 /// Host → guest for one named port.
@@ -745,7 +761,7 @@ fn port_rx_worker(
     queue: Queue,
     call_interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Arc::new(Mutex::new(queue));
     let mut pending: VecDeque<u8> = VecDeque::new();
     let mut host_open = true;
@@ -764,7 +780,7 @@ fn port_rx_worker(
                 Ok(pipe::Transfer::Closed) => host_open = false,
                 Err(e) => {
                     log::warn!("virtio-console: port {} rx read failed: {e}", liveness.id);
-                    host_open = false;
+                    return Err(e);
                 }
             }
         }
@@ -780,7 +796,7 @@ fn port_rx_worker(
                 &queue,
                 &mut pending,
                 call_interrupt,
-            )
+            )?
         {
             progress = true;
         }
@@ -793,12 +809,13 @@ fn port_rx_worker(
         // every other port untouched.
         if !host_open && pending.is_empty() {
             liveness.direction_closed(end.direction());
-            return;
+            return Ok(dillo_virtio::DeviceExit::EndpointClosed);
         }
         if !progress {
             thread::sleep(PIPE_POLL);
         }
     }
+    Ok(dillo_virtio::DeviceExit::Cancelled)
 }
 
 /// Guest → host for one named port.
@@ -810,28 +827,31 @@ fn port_tx_worker(
     queue: Queue,
     call_interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Arc::new(Mutex::new(queue));
     let mut backlog: VecDeque<u8> = VecDeque::new();
+    let mut pending: Option<TxCompletion> = None;
     let mut host_open = true;
     while !token.is_shutdown_requested() {
         let mut progress = false;
 
-        // Only pull more from the guest while the backlog is bounded —
-        // otherwise a host that never reads its pipe would grow it forever.
-        if backlog.len() < TX_BACKLOG_LIMIT {
-            for buf in drain_tx_buffers(queue_memory, buffer_memory, &queue, call_interrupt) {
-                progress = true;
-                if host_open {
-                    backlog.extend(&buf);
-                }
-                // With the host end gone the bytes are dropped, but the
-                // descriptors are still returned above so the guest's writes
-                // complete instead of hanging.
+        // Retain completion ownership while the nonblocking pipe applies
+        // backpressure. No later request can publish before this output ends.
+        if pending.is_none()
+            && let Some((message, completion)) =
+                take_tx_message(queue_memory, buffer_memory, &queue)
+        {
+            if host_open {
+                backlog.extend(message);
             }
+            pending = Some(completion);
+            progress = true;
         }
 
         while host_open && !backlog.is_empty() {
+            if token.is_shutdown_requested() {
+                return Ok(dillo_virtio::DeviceExit::Cancelled);
+            }
             let chunk: Vec<u8> = backlog.iter().take(PIPE_CHUNK).copied().collect();
             match end.write(&chunk) {
                 Ok(pipe::Transfer::Moved(n)) => {
@@ -846,17 +866,21 @@ fn port_tx_worker(
                 }
                 Err(e) => {
                     log::warn!("virtio-console: port {} tx write failed: {e}", liveness.id);
-                    host_open = false;
-                    backlog.clear();
-                    liveness.direction_closed(end.direction());
+                    return Err(e);
                 }
             }
         }
 
+        if backlog.is_empty()
+            && let Some(completion) = pending.take()
+        {
+            completion.publish(queue_memory, &queue, call_interrupt)?;
+        }
         if !progress {
             thread::sleep(PIPE_POLL);
         }
     }
+    Ok(dillo_virtio::DeviceExit::Cancelled)
 }
 
 fn tx_worker(
@@ -866,22 +890,22 @@ fn tx_worker(
     kick: Kick,
     call_interrupt: Option<Interrupt>,
     token: VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Arc::new(Mutex::new(queue));
     loop {
         if let Err(e) = kick.read() {
             log::error!("virtio-console TX: kick read error: {e}");
-            return;
+            return Err(e);
         }
         if token.is_shutdown_requested() {
-            return;
+            return Ok(dillo_virtio::DeviceExit::Cancelled);
         }
         drain_tx(
             &queue_memory,
             &buffer_memory,
             &queue,
             call_interrupt.as_ref(),
-        );
+        )?;
     }
 }
 
@@ -892,30 +916,36 @@ fn rx_worker(
     kick: Kick,
     call_interrupt: Option<Interrupt>,
     token: VirtioRunToken,
-) {
+) -> std::io::Result<dillo_virtio::DeviceExit> {
     let queue = Arc::new(Mutex::new(queue));
     let mut pending = VecDeque::new();
     loop {
-        if token.is_shutdown_requested() {
-            return;
+        let cancelled = token.is_shutdown_requested();
+        input::check_failure()?;
+        if cancelled {
+            return Ok(dillo_virtio::DeviceExit::Cancelled);
         }
         if pending.is_empty() {
             match input::next() {
-                Ok(Some(bytes)) => pending.extend(bytes),
+                Ok(Some(input::Input::Data(bytes))) => pending.extend(bytes),
+                Ok(Some(input::Input::Closed)) => {
+                    return Ok(dillo_virtio::DeviceExit::EndpointClosed);
+                }
                 Ok(None) => {
                     thread::sleep(PIPE_POLL);
                     continue;
                 }
                 Err(error) => {
-                    log::debug!("virtio-console stdin ended: {error}");
-                    return;
+                    return Err(error);
                 }
             }
         }
 
         while !pending.is_empty() {
-            if token.is_shutdown_requested() {
-                return;
+            let cancelled = token.is_shutdown_requested();
+            input::check_failure()?;
+            if cancelled {
+                return Ok(dillo_virtio::DeviceExit::Cancelled);
             }
             if drain_rx(
                 &queue_memory,
@@ -923,12 +953,12 @@ fn rx_worker(
                 &queue,
                 &mut pending,
                 call_interrupt.as_ref(),
-            ) {
+            )? {
                 continue;
             }
             if let Err(e) = kick.read() {
                 log::error!("virtio-console RX: kick read error: {e}");
-                return;
+                return Err(e);
             }
         }
     }
@@ -940,59 +970,65 @@ fn drain_rx(
     queue: &Arc<Mutex<Queue>>,
     pending: &mut VecDeque<u8>,
     call_interrupt: Option<&Interrupt>,
-) -> bool {
+) -> Result<bool, PublicationError> {
     let mut q = queue.lock().expect("virtio-console RX queue mutex");
     let mut signaled = false;
     let mut made_progress = false;
-    while !pending.is_empty() {
-        let Some(head) = q.pop(queue_memory) else {
-            break;
-        };
-        let head_index = head.index;
-        let mut written: u32 = 0;
-        let mut current = Some(head);
-        while let Some(desc) = current {
-            if desc.flags & VIRTQ_DESC_F_WRITE != 0 {
-                let n = pending.len().min(desc.len as usize);
-                if n != 0 {
-                    let chunk: Vec<u8> = pending.drain(..n).collect();
-                    match buffer_memory.write(desc.addr, &chunk) {
-                        Ok(bytes) => {
-                            written = written.saturating_add(bytes as u32);
-                            made_progress = true;
-                            if bytes < chunk.len() {
-                                for byte in chunk[bytes..].iter().rev() {
+    let result: Result<(), PublicationError> = (|| {
+        while !pending.is_empty() {
+            let Some(head) = q.pop(queue_memory) else {
+                break;
+            };
+            let head_index = head.index;
+            let mut written: u32 = 0;
+            let mut current = Some(head);
+            while let Some(desc) = current {
+                if desc.flags & VIRTQ_DESC_F_WRITE != 0 {
+                    let n = pending.len().min(desc.len as usize);
+                    if n != 0 {
+                        let chunk: Vec<u8> = pending.drain(..n).collect();
+                        match buffer_memory.write(desc.addr, &chunk) {
+                            Ok(bytes) => {
+                                written = written.saturating_add(bytes as u32);
+                                made_progress = true;
+                                if bytes < chunk.len() {
+                                    for byte in chunk[bytes..].iter().rev() {
+                                        pending.push_front(*byte);
+                                    }
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "virtio-console RX: guest write at {:#x}+{}: {e:?}",
+                                    desc.addr.0,
+                                    desc.len
+                                );
+                                for byte in chunk.iter().rev() {
                                     pending.push_front(*byte);
                                 }
                                 break;
                             }
                         }
-                        Err(e) => {
-                            log::warn!(
-                                "virtio-console RX: guest write at {:#x}+{}: {e:?}",
-                                desc.addr.0,
-                                desc.len
-                            );
-                            for byte in chunk.iter().rev() {
-                                pending.push_front(*byte);
-                            }
-                            break;
-                        }
                     }
                 }
+                if pending.is_empty() {
+                    break;
+                }
+                current = desc.next_desc(queue_memory);
             }
-            if pending.is_empty() {
-                break;
-            }
-            current = desc.next_desc(queue_memory);
+            q.add_used(queue_memory, head_index, written)?;
+            signaled = true;
         }
-        q.add_used(queue_memory, head_index, written);
-        signaled = true;
-    }
-    if signaled && let Some(intr) = call_interrupt {
+        Ok(())
+    })();
+    drop(q);
+    if (signaled || result.as_ref().is_err_and(PublicationError::is_published))
+        && let Some(intr) = call_interrupt
+    {
         intr.signal();
     }
-    made_progress
+    result.map(|()| made_progress)
 }
 
 fn drain_tx(
@@ -1000,61 +1036,100 @@ fn drain_tx(
     buffer_memory: &Arc<dyn VirtioMemory>,
     queue: &Arc<Mutex<Queue>>,
     call_interrupt: Option<&Interrupt>,
-) {
-    let buffers = drain_tx_buffers(queue_memory, buffer_memory, queue, call_interrupt);
-    if !buffers.is_empty() {
-        enqueue_output(buffers.concat());
+) -> Result<(), PublicationError> {
+    while consume_tx(
+        queue_memory,
+        buffer_memory,
+        queue,
+        call_interrupt,
+        enqueue_output,
+    )? {}
+    Ok(())
+}
+
+/// Deliver one owned message before publishing its chain. A later publication
+/// error cannot discard output from an earlier completed chain.
+struct TxCompletion {
+    head_index: u16,
+    written: u32,
+}
+
+impl TxCompletion {
+    // Consuming this owner prevents a second completion of the same output.
+    fn publish(
+        self,
+        queue_memory: &Arc<dyn QueueMemory>,
+        queue: &Arc<Mutex<Queue>>,
+        call_interrupt: Option<&Interrupt>,
+    ) -> Result<(), PublicationError> {
+        let result = queue
+            .lock()
+            .expect("virtio-console TX queue mutex")
+            .add_used(queue_memory, self.head_index, self.written);
+        if (result.is_ok() || result.as_ref().is_err_and(PublicationError::is_published))
+            && let Some(intr) = call_interrupt
+        {
+            intr.signal();
+        }
+        result
     }
 }
 
-/// Pop every available guest → host chain, returning **one buffer per chain**
-/// so a framed protocol (the control queue) keeps its message boundaries, and
-/// completing each chain on the used ring.
-fn drain_tx_buffers(
+fn take_tx_message(
+    queue_memory: &Arc<dyn QueueMemory>,
+    buffer_memory: &Arc<dyn VirtioMemory>,
+    queue: &Arc<Mutex<Queue>>,
+) -> Option<(Vec<u8>, TxCompletion)> {
+    let mut q = queue.lock().expect("virtio-console TX queue mutex");
+    let head = q.pop(queue_memory)?;
+    let head_index = head.index;
+    let mut written: u32 = 0;
+    let mut message = Vec::new();
+    // Walk the chain manually — DescriptorChain isn't an Iterator,
+    // it carries a `next_desc(mem)` accessor.
+    let mut current = Some(head);
+    while let Some(desc) = current {
+        // Device-readable = guest-to-host data (TX path).
+        if desc.flags & VIRTQ_DESC_F_WRITE == 0 {
+            let mut buf = vec![0u8; desc.len as usize];
+            match buffer_memory.read(desc.addr, &mut buf) {
+                Ok(n) => {
+                    message.extend_from_slice(&buf[..n]);
+                    written += n as u32;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "virtio-console TX: guest read at {:#x}+{}: {e:?}",
+                        desc.addr.0,
+                        desc.len
+                    );
+                }
+            }
+        }
+        current = desc.next_desc(queue_memory);
+    }
+    Some((
+        message,
+        TxCompletion {
+            head_index,
+            written,
+        },
+    ))
+}
+
+fn consume_tx(
     queue_memory: &Arc<dyn QueueMemory>,
     buffer_memory: &Arc<dyn VirtioMemory>,
     queue: &Arc<Mutex<Queue>>,
     call_interrupt: Option<&Interrupt>,
-) -> Vec<Vec<u8>> {
-    let mut q = queue.lock().expect("virtio-console TX queue mutex");
-    let mut out = Vec::new();
-    while let Some(head) = q.pop(queue_memory) {
-        let head_index = head.index;
-        let mut written: u32 = 0;
-        let mut message = Vec::new();
-        // Walk the chain manually — DescriptorChain isn't an Iterator,
-        // it carries a `next_desc(mem)` accessor.
-        let mut current = Some(head);
-        while let Some(desc) = current {
-            // Device-readable = guest-to-host data (TX path).
-            if desc.flags & VIRTQ_DESC_F_WRITE == 0 {
-                let mut buf = vec![0u8; desc.len as usize];
-                match buffer_memory.read(desc.addr, &mut buf) {
-                    Ok(n) => {
-                        message.extend_from_slice(&buf[..n]);
-                        written += n as u32;
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "virtio-console TX: guest read at {:#x}+{}: {e:?}",
-                            desc.addr.0,
-                            desc.len
-                        );
-                    }
-                }
-            }
-            current = desc.next_desc(queue_memory);
-        }
-        q.add_used(queue_memory, head_index, written);
-        out.push(message);
-    }
-    if !out.is_empty()
-        && let Some(intr) = call_interrupt
-    {
-        // Tell the guest one or more descriptors completed.
-        intr.signal();
-    }
-    out
+    consume: impl FnOnce(Vec<u8>),
+) -> Result<bool, PublicationError> {
+    let Some((message, completion)) = take_tx_message(queue_memory, buffer_memory, queue) else {
+        return Ok(false);
+    };
+    consume(message);
+    completion.publish(queue_memory, queue, call_interrupt)?;
+    Ok(true)
 }
 
 /// Write `payload` into one guest-provided writable chain on `queue`.
@@ -1069,10 +1144,10 @@ fn push_to_queue(
     queue: &Arc<Mutex<Queue>>,
     payload: &[u8],
     call_interrupt: Option<&Interrupt>,
-) -> bool {
+) -> Result<bool, PublicationError> {
     let mut q = queue.lock().expect("virtio-console queue mutex");
     let Some(head) = q.pop(queue_memory) else {
-        return false;
+        return Ok(false);
     };
     let head_index = head.index;
     let mut written: u32 = 0;
@@ -1108,17 +1183,22 @@ fn push_to_queue(
             remaining.len()
         );
     }
-    q.add_used(queue_memory, head_index, written);
-    if let Some(intr) = call_interrupt {
+    let result = q.add_used(queue_memory, head_index, written);
+    drop(q);
+    if (result.is_ok() || result.as_ref().is_err_and(PublicationError::is_published))
+        && let Some(intr) = call_interrupt
+    {
         intr.signal();
     }
-    true
+    result.map(|()| true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_machine::memory::{
+        AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
+    };
     use dillo_virtio::queue::VIRTQ_DESC_F_WRITE;
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
 
@@ -1337,13 +1417,7 @@ mod tests {
             Arc::new(SharedVirtioMemory::new(vec![buffer_shared]));
         let queue = Arc::new(Mutex::new(queue));
         let mut pending: VecDeque<u8> = b"abc".iter().copied().collect();
-        assert!(drain_rx(
-            &queue_memory,
-            &buffer_memory,
-            &queue,
-            &mut pending,
-            None
-        ));
+        assert!(drain_rx(&queue_memory, &buffer_memory, &queue, &mut pending, None).unwrap());
         assert!(pending.is_empty());
 
         let mut out = [0u8; 3];
@@ -1400,13 +1474,7 @@ mod tests {
 
         let queue = Arc::new(Mutex::new(queue));
         let mut pending: VecDeque<u8> = b"abc".iter().copied().collect();
-        assert!(drain_rx(
-            &queue_memory,
-            &buffer_memory,
-            &queue,
-            &mut pending,
-            None
-        ));
+        assert!(drain_rx(&queue_memory, &buffer_memory, &queue, &mut pending, None).unwrap());
 
         let mut out = [0u8; 3];
         Bytes::read(&mem, &mut out, GuestAddress(0x5000)).unwrap();
@@ -1462,13 +1530,7 @@ mod tests {
 
         let queue = Arc::new(Mutex::new(queue));
         let mut pending: VecDeque<u8> = b"abc".iter().copied().collect();
-        assert!(!drain_rx(
-            &queue_memory,
-            &buffer_memory,
-            &queue,
-            &mut pending,
-            None
-        ));
+        assert!(!drain_rx(&queue_memory, &buffer_memory, &queue, &mut pending, None).unwrap());
         assert_eq!(pending.iter().copied().collect::<Vec<_>>(), b"abc");
         assert_eq!(queue_memory.read_u16(GuestAddress(0x2002)), Some(1));
     }
@@ -1561,6 +1623,175 @@ mod tests {
     }
 
     #[test]
+    fn tx_delivers_owned_messages_once_before_any_later_publication_failure() {
+        for fail in 0..8 {
+            let mut tq = TestQueue::new(3, 8, false);
+            tq.queue.lock().unwrap().uses_notif_suppression = true;
+            for index in 0..3 {
+                tq.put(index, &[index as u8; 8]);
+            }
+            tq.queue_memory = Arc::new(dillo_virtio::test_support::FaultQueueMemory::new(
+                tq.queue_memory,
+                fail,
+            ));
+            let mut accepted = Vec::new();
+            let error = loop {
+                match consume_tx(
+                    &tq.queue_memory,
+                    &tq.buffer_memory,
+                    &tq.queue,
+                    None,
+                    |message| accepted.push(message),
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => panic!("failure must precede empty"),
+                    Err(error) => break error,
+                }
+            };
+            assert_eq!(accepted.len(), fail / 4 + 1);
+            for (index, message) in accepted.iter().enumerate() {
+                assert_eq!(message, &vec![index as u8; 8]);
+            }
+            assert_eq!(
+                tq.queue.lock().unwrap().next_avail.0 as usize,
+                accepted.len()
+            );
+            assert_eq!(
+                tq.used_idx() as usize,
+                fail / 4 + usize::from(fail % 4 == 3)
+            );
+            assert_eq!(error.is_published(), fail % 4 == 3);
+        }
+    }
+
+    #[test]
+    fn rx_and_control_publication_faults_do_not_restore_consumed_input() {
+        for control in [false, true] {
+            let mut tq = TestQueue::new(2, 16, true);
+            tq.queue.lock().unwrap().uses_notif_suppression = true;
+            tq.queue_memory = Arc::new(dillo_virtio::test_support::FaultQueueMemory::new(
+                tq.queue_memory,
+                3,
+            ));
+            let mut pending = VecDeque::from(*b"received");
+            let error = if control {
+                push_to_queue(
+                    &tq.queue_memory,
+                    &tq.buffer_memory,
+                    &tq.queue,
+                    b"received",
+                    None,
+                )
+                .unwrap_err()
+            } else {
+                drain_rx(
+                    &tq.queue_memory,
+                    &tq.buffer_memory,
+                    &tq.queue,
+                    &mut pending,
+                    None,
+                )
+                .unwrap_err()
+            };
+            assert!(error.is_published());
+            assert_eq!(tq.queue.lock().unwrap().next_avail.0, 1);
+            assert_eq!(tq.used_idx(), 1);
+            assert_eq!(tq.get(0, 8), b"received");
+            if !control {
+                assert!(pending.is_empty());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn named_tx_keeps_completion_pending_and_observes_cancel_under_backpressure() {
+        use nix::fcntl::{FcntlArg, OFlag, fcntl};
+        use std::os::fd::IntoRawFd;
+        let _fds = pipe::fd_table_lock();
+        let (_read_end, write_end) = nix::unistd::pipe().unwrap();
+        fcntl(&write_end, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
+        loop {
+            match nix::unistd::write(&write_end, &[0; 4096]) {
+                Ok(n) => assert!(n > 0),
+                Err(nix::errno::Errno::EAGAIN) => break,
+                Err(error) => panic!("fill pipe: {error}"),
+            }
+        }
+        let end =
+            pipe::PipeEnd::adopt("build", pipe::Direction::Tx, write_end.into_raw_fd() as u64)
+                .unwrap();
+        let mut tq = TestQueue::new(2, 8, false);
+        tq.put(0, b"pending!");
+        let fault = Arc::new(dillo_virtio::test_support::FaultQueueMemory::new(
+            tq.queue_memory,
+            0,
+        ));
+        tq.queue_memory = fault.clone();
+        let plane = plane_with_one_named_port();
+        let live = liveness(1, 1, &plane);
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        // First loop and first pipe attempt run; the next loop observes stop.
+        let token = VirtioRunToken::from_fn(move || checks.fetch_add(1, Ordering::Relaxed) >= 2);
+        let queue = tq.queue.lock().unwrap().clone();
+        let exit = port_tx_worker(
+            &end,
+            &live,
+            &tq.queue_memory,
+            &tq.buffer_memory,
+            queue,
+            None,
+            &token,
+        )
+        .unwrap();
+        assert_eq!(exit, dillo_virtio::DeviceExit::Cancelled);
+        assert_eq!(
+            fault.attempts(),
+            0,
+            "backpressured output was never published"
+        );
+        assert_eq!(tq.used_idx(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn named_tx_accepts_output_before_event_failure_and_never_sends_the_next_chain() {
+        use std::os::fd::IntoRawFd;
+        let _fds = pipe::fd_table_lock();
+        let (read_end, write_end) = nix::unistd::pipe().unwrap();
+        let end =
+            pipe::PipeEnd::adopt("build", pipe::Direction::Tx, write_end.into_raw_fd() as u64)
+                .unwrap();
+        let mut tq = TestQueue::new(2, 8, false);
+        tq.queue.lock().unwrap().uses_notif_suppression = true;
+        tq.put(0, b"accepted");
+        tq.put(1, b"not sent");
+        tq.queue_memory = Arc::new(dillo_virtio::test_support::FaultQueueMemory::new(
+            tq.queue_memory,
+            3,
+        ));
+        let plane = plane_with_one_named_port();
+        let live = liveness(1, 1, &plane);
+        let queue = tq.queue.lock().unwrap().clone();
+        let error = port_tx_worker(
+            &end,
+            &live,
+            &tq.queue_memory,
+            &tq.buffer_memory,
+            queue,
+            None,
+            &VirtioRunToken::from_fn(|| false),
+        )
+        .unwrap_err();
+        drop(end);
+        let mut received = [0; 16];
+        let count = nix::unistd::read(&read_end, &mut received).unwrap();
+        assert_eq!(&received[..count], b"accepted");
+        assert!(error.to_string().contains("AvailEvent"));
+        assert_eq!(tq.used_idx(), 1);
+    }
+
+    #[test]
     fn tx_buffers_keep_one_message_per_chain() {
         // The control queue is framed: two guest writes must not be glued
         // into one buffer the way raw console output legitimately is.
@@ -1574,7 +1805,16 @@ mod tests {
             &ControlMessage::new(1, control::event::PORT_READY, 1).encode(),
         );
 
-        let buffers = drain_tx_buffers(&tq.queue_memory, &tq.buffer_memory, &tq.queue, None);
+        let mut buffers = Vec::new();
+        while consume_tx(
+            &tq.queue_memory,
+            &tq.buffer_memory,
+            &tq.queue,
+            None,
+            |message| buffers.push(message),
+        )
+        .unwrap()
+        {}
         assert_eq!(buffers.len(), 2, "chains must stay separate messages");
         assert_eq!(
             ControlMessage::decode(&buffers[0]).unwrap().event,
@@ -1591,24 +1831,23 @@ mod tests {
     fn push_to_queue_writes_one_message_per_chain() {
         let tq = TestQueue::new(2, 16, true);
         let first = ControlMessage::port_name(1, "build").encode();
-        assert!(push_to_queue(
-            &tq.queue_memory,
-            &tq.buffer_memory,
-            &tq.queue,
-            &first,
-            None
-        ));
+        assert!(
+            push_to_queue(&tq.queue_memory, &tq.buffer_memory, &tq.queue, &first, None).unwrap()
+        );
         assert_eq!(tq.get(0, first.len()), first);
         assert_eq!(tq.used_idx(), 1);
 
         let second = ControlMessage::new(1, control::event::PORT_OPEN, 1).encode();
-        assert!(push_to_queue(
-            &tq.queue_memory,
-            &tq.buffer_memory,
-            &tq.queue,
-            &second,
-            None
-        ));
+        assert!(
+            push_to_queue(
+                &tq.queue_memory,
+                &tq.buffer_memory,
+                &tq.queue,
+                &second,
+                None
+            )
+            .unwrap()
+        );
         assert_eq!(tq.get(1, second.len()), second);
         assert_eq!(tq.used_idx(), 2);
 
@@ -1620,7 +1859,8 @@ mod tests {
                 &tq.queue,
                 &second,
                 None
-            ),
+            )
+            .unwrap(),
             "an empty avail ring must not consume the message"
         );
         assert_eq!(tq.used_idx(), 2, "nothing was completed");
@@ -1638,13 +1878,16 @@ mod tests {
         plane.handle(&ControlMessage::new(0, control::event::DEVICE_READY, 1));
 
         let msg = plane.pop_outbound().expect("PORT_ADD queued");
-        assert!(!push_to_queue(
-            &tq.queue_memory,
-            &tq.buffer_memory,
-            &tq.queue,
-            &msg.encode(),
-            None
-        ));
+        assert!(
+            !push_to_queue(
+                &tq.queue_memory,
+                &tq.buffer_memory,
+                &tq.queue,
+                &msg.encode(),
+                None
+            )
+            .unwrap()
+        );
         plane.requeue(msg.clone());
         assert_eq!(plane.pop_outbound(), Some(msg));
     }
@@ -1703,7 +1946,7 @@ mod tests {
         // Close the host end so the worker drains, reports the close, and
         // returns on its own rather than waiting for shutdown.
         drop(write_end);
-        port_rx_worker(
+        let exit = port_rx_worker(
             &end,
             &live,
             &tq.queue_memory,
@@ -1711,7 +1954,9 @@ mod tests {
             tq.queue.lock().expect("queue").clone(),
             None,
             &token(&stop),
-        );
+        )
+        .unwrap();
+        assert_eq!(exit, dillo_virtio::DeviceExit::EndpointClosed);
 
         assert_eq!(tq.get(0, 5), b"hello");
         assert_eq!(
@@ -1750,7 +1995,7 @@ mod tests {
             buf[..n].to_vec()
         });
 
-        port_tx_worker(
+        let exit = port_tx_worker(
             &end,
             &live,
             &tq.queue_memory,
@@ -1758,7 +2003,9 @@ mod tests {
             queue,
             None,
             &token(&stop),
-        );
+        )
+        .unwrap();
+        assert_eq!(exit, dillo_virtio::DeviceExit::Cancelled);
 
         assert_eq!(reader.join().expect("reader"), b"from guest\0\0\0\0\0\0");
     }
