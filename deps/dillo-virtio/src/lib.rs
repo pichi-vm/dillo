@@ -32,7 +32,7 @@ pub mod memory;
 pub mod queue;
 
 pub use device::{
-    ActivateError, DeviceJoinError, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
+    ActivateError, DeviceExit, DeviceJoinError, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
     VirtioDeviceHost, VirtioRunToken,
 };
 pub use features::{VIRTIO_F_RING_EVENT_IDX, VIRTIO_F_VERSION_1};
@@ -41,3 +41,7 @@ pub use memory::{SharedVirtioMemory, VirtioMemory, VirtioMemoryError};
 pub use queue::{
     DescriptorChain, Queue, QueueMemory, SharedQueueMemory, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
 };
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support;

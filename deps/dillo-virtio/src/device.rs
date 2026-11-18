@@ -5,8 +5,9 @@
 
 //! VirtioDevice trait defining the device contract for transport layers.
 
-use dillo_mmio::Interrupt;
-use dillo_mmio::SharedMemory;
+pub use dillo_machine::execution::DeviceExit;
+use dillo_machine::interrupt::Interrupt;
+use dillo_machine::memory::SharedMemory;
 
 use crate::kick::Kick;
 use crate::memory::{NullVirtioMemory, SharedVirtioMemory, VirtioMemory};
@@ -45,6 +46,9 @@ impl VirtioActivate {
     #[must_use]
     pub fn with_negotiated_features(mut self, features: u64) -> Self {
         self.negotiated_features = features;
+        for queue in &mut self.queues {
+            queue.uses_notif_suppression = features & crate::VIRTIO_F_RING_EVENT_IDX != 0;
+        }
         self
     }
     pub fn negotiated_features(&self) -> u64 {
@@ -231,7 +235,8 @@ pub trait VirtioDeviceHost: Send + Sync + std::fmt::Debug {
 
     fn spawn(
         &self,
-        run: Box<dyn FnOnce(VirtioRunToken) -> Result<(), DeviceJoinError> + Send>,
+        name: String,
+        run: Box<dyn FnOnce(VirtioRunToken) -> Result<DeviceExit, DeviceJoinError> + Send>,
     ) -> Result<VirtioDeviceHandle, ActivateError>;
 }
 
@@ -260,6 +265,20 @@ impl VirtioDeviceHandle {
 
     pub fn noop() -> Self {
         Self::new(|| {}, || Ok(()))
+    }
+
+    /// Wake a queue worker after requesting its shutdown, including on drop.
+    /// Install this before a later activation step can fail and drop the handle.
+    #[must_use]
+    pub fn with_shutdown_wake(mut self, kick: Kick) -> Self {
+        let shutdown = self.shutdown.take();
+        self.shutdown = Some(Box::new(move || {
+            if let Some(shutdown) = shutdown {
+                shutdown();
+            }
+            let _ = kick.write(1);
+        }));
+        self
     }
 
     pub fn shutdown(&mut self) {
@@ -334,7 +353,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use dillo_mmio::{AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement};
+    use dillo_machine::memory::{
+        AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
+    };
     use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
     use super::*;
@@ -345,12 +366,13 @@ mod tests {
     impl VirtioDeviceHost for TestDeviceHost {
         fn spawn(
             &self,
-            run: Box<dyn FnOnce(VirtioRunToken) -> Result<(), DeviceJoinError> + Send>,
+            _name: String,
+            run: Box<dyn FnOnce(VirtioRunToken) -> Result<DeviceExit, DeviceJoinError> + Send>,
         ) -> Result<VirtioDeviceHandle, ActivateError> {
             let shutdown = Arc::new(AtomicBool::new(false));
             let token_shutdown = Arc::clone(&shutdown);
             let token = VirtioRunToken::from_fn(move || token_shutdown.load(Ordering::Acquire));
-            let join = std::thread::spawn(move || run(token));
+            let join = std::thread::spawn(move || run(token).map(|_| ()));
             Ok(VirtioDeviceHandle::new(
                 move || shutdown.store(true, Ordering::Release),
                 move || match join.join() {
@@ -380,6 +402,47 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_wake_follows_cancellation_and_runs_once() {
+        use std::sync::Mutex;
+
+        #[derive(Debug)]
+        struct Wake(Arc<Mutex<Vec<&'static str>>>);
+        impl dillo_machine::notification::WriteNotification for Wake {
+            fn read(&self) -> std::io::Result<u64> {
+                unreachable!("only the shutdown wake is used")
+            }
+            fn write(&self, count: u64) -> std::io::Result<()> {
+                assert_eq!(count, 1);
+                self.0.lock().unwrap().push("wake");
+                Ok(())
+            }
+        }
+        for exit in 0..3 {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let shutdown_events = Arc::clone(&events);
+            let join_events = Arc::clone(&events);
+            let mut handle = VirtioDeviceHandle::new(
+                move || shutdown_events.lock().unwrap().push("cancel"),
+                move || {
+                    join_events.lock().unwrap().push("join");
+                    Ok(())
+                },
+            )
+            .with_shutdown_wake(Kick::from_notification(Arc::new(Wake(Arc::clone(&events)))));
+            match exit {
+                0 => {
+                    handle.shutdown();
+                    handle.shutdown();
+                    handle.join().unwrap();
+                }
+                1 => handle.join().unwrap(),
+                _ => drop(handle),
+            }
+            assert_eq!(*events.lock().unwrap(), ["cancel", "wake", "join"]);
+        }
+    }
+
+    #[test]
     fn noop_handle_joins() {
         VirtioDeviceHandle::noop().join().expect("noop join");
     }
@@ -388,12 +451,15 @@ mod tests {
     fn thread_host_reports_shutdown_to_worker() {
         let host = TestDeviceHost;
         let handle = host
-            .spawn(Box::new(|token| {
-                while !token.is_shutdown_requested() {
-                    std::thread::yield_now();
-                }
-                Ok(())
-            }))
+            .spawn(
+                "test".into(),
+                Box::new(|token| {
+                    while !token.is_shutdown_requested() {
+                        std::thread::yield_now();
+                    }
+                    Ok(DeviceExit::Cancelled)
+                }),
+            )
             .expect("spawned");
         let mut handle = handle;
         handle.shutdown();
@@ -408,7 +474,7 @@ mod tests {
             activation
                 .queue_memory()
                 .write_u16(GuestAddress(0x1000), 7)
-                .is_none()
+                .is_err()
         );
         assert!(
             activation
