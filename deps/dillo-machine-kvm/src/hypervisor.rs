@@ -168,8 +168,27 @@ pub enum Error {
         reason: &'static str,
     },
 
-    #[error("set TSS address: {0}")]
-    SetTss(std::io::Error),
+    #[cfg(target_arch = "x86_64")]
+    #[error(
+        "cannot identify the x86 KVM backend: host CPUID VMX={vmx}, SVM={svm}; expected exactly one"
+    )]
+    UnknownX86Backend { vmx: bool, svm: bool },
+
+    #[cfg(target_arch = "x86_64")]
+    #[error(
+        "Intel KVM unrestricted guest is disabled; enable kvm_intel ept and unrestricted_guest"
+    )]
+    UnrestrictedGuestDisabled,
+
+    #[cfg(target_arch = "x86_64")]
+    #[error(
+        "cannot verify Intel KVM unrestricted guest: {source}; expose readable sysfs at {path}"
+    )]
+    UnrestrictedGuestStatus {
+        path: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("allocate guest memory (2 MiB huge pages): {0:#}")]
     AllocateMemory(#[source] anyhow::Error),
@@ -252,6 +271,59 @@ pub(crate) fn guest_address_bits() -> Result<u32, Error> {
         let physical = dillo_machine::aarch64_pa_bits(u64::from_le_bytes(mmfr0))
             .ok_or_else(|| Error::AddressSpace("reserved guest PARange encoding".into()))?;
         Ok(ipa.min(physical))
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[derive(Debug, PartialEq, Eq)]
+enum X86Backend {
+    Vmx,
+    Svm,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl X86Backend {
+    const UNRESTRICTED_GUEST: &str = "/sys/module/kvm_intel/parameters/unrestricted_guest";
+
+    fn detect() -> Result<Self, Error> {
+        use core::arch::x86_64::__cpuid;
+
+        let vmx = __cpuid(0).eax >= 1 && __cpuid(1).ecx & (1 << 5) != 0;
+        let svm =
+            __cpuid(0x8000_0000).eax >= 0x8000_0001 && __cpuid(0x8000_0001).ecx & (1 << 2) != 0;
+        Self::from_features(vmx, svm)
+    }
+
+    fn from_features(vmx: bool, svm: bool) -> Result<Self, Error> {
+        match (vmx, svm) {
+            (true, false) => Ok(Self::Vmx),
+            (false, true) => Ok(Self::Svm),
+            _ => Err(Error::UnknownX86Backend { vmx, svm }),
+        }
+    }
+
+    fn admit(self) -> Result<(), Error> {
+        match self {
+            // The read-only parameter reports the effective VMX setting
+            // after KVM has accounted for EPT and CPU support.
+            Self::Vmx => Self::verify_unrestricted_guest(std::fs::read(Self::UNRESTRICTED_GUEST)),
+            Self::Svm => Ok(()),
+        }
+    }
+
+    fn verify_unrestricted_guest(status: std::io::Result<Vec<u8>>) -> Result<(), Error> {
+        let status_error = |source| Error::UnrestrictedGuestStatus {
+            path: Self::UNRESTRICTED_GUEST,
+            source,
+        };
+        match status.map_err(status_error)?.as_slice() {
+            b"Y\n" => Ok(()),
+            b"N\n" => Err(Error::UnrestrictedGuestDisabled),
+            _ => Err(status_error(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "expected kernel boolean Y or N",
+            ))),
+        }
     }
 }
 
@@ -420,6 +492,7 @@ impl Vm {
         if api != 12 {
             return Err(Error::ApiVersion(api));
         }
+        X86Backend::detect()?.admit()?;
         let vm = kvm.create_vm().map_err(io).map_err(Error::CreateVm)?;
 
         // In-kernel IRQchip (LAPIC + I/O APIC + PIC). Must be created
@@ -427,15 +500,6 @@ impl Vm {
         vm.create_irq_chip()
             .map_err(io)
             .map_err(Error::CreateIrqChip)?;
-        // KVM_SET_TSS_ADDR is required by Intel VMX (Intel CPUs that
-        // don't support unrestricted guest). AMD/SVM does not need it.
-        // Place at a low GPA below arma's first loaded section
-        // (which on x86 starts at 0x3EE00000) to avoid any memslot
-        // collision. AMD-SVM accepts and ignores the value.
-        vm.set_tss_address(0x3000_0000)
-            .map_err(io)
-            .map_err(Error::SetTss)?;
-
         Ok(Self {
             inner: Arc::new(VmInner {
                 kvm,
@@ -1248,6 +1312,66 @@ impl Drop for KickSignalMask {
 #[cfg(all(test, target_arch = "x86_64"))]
 mod bsp_tests {
     use super::*;
+
+    #[test]
+    fn identifies_native_x86_backend() {
+        assert_eq!(
+            X86Backend::from_features(true, false).unwrap(),
+            X86Backend::Vmx
+        );
+        assert_eq!(
+            X86Backend::from_features(false, true).unwrap(),
+            X86Backend::Svm
+        );
+        for present in [false, true] {
+            assert!(matches!(
+                X86Backend::from_features(present, present),
+                Err(Error::UnknownX86Backend { vmx, svm }) if vmx == present && svm == present
+            ));
+        }
+    }
+
+    #[test]
+    fn requires_effective_intel_unrestricted_guest() {
+        use std::io::{Error as IoError, ErrorKind};
+        X86Backend::verify_unrestricted_guest(Ok(b"Y\n".to_vec())).unwrap();
+        let disabled = X86Backend::verify_unrestricted_guest(Ok(b"N\n".to_vec())).unwrap_err();
+        assert!(matches!(disabled, Error::UnrestrictedGuestDisabled));
+        assert!(
+            disabled
+                .to_string()
+                .contains("enable kvm_intel ept and unrestricted_guest")
+        );
+
+        for (status, kind) in [
+            (Ok(b"?\n".to_vec()), ErrorKind::InvalidData),
+            (Err(IoError::from(ErrorKind::NotFound)), ErrorKind::NotFound),
+            (
+                Err(IoError::from(ErrorKind::PermissionDenied)),
+                ErrorKind::PermissionDenied,
+            ),
+        ] {
+            assert!(matches!(
+                X86Backend::verify_unrestricted_guest(status),
+                Err(Error::UnrestrictedGuestStatus { path, source })
+                    if path == X86Backend::UNRESTRICTED_GUEST && source.kind() == kind
+            ));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Intel KVM with effective unrestricted_guest=N"]
+    fn rejects_restricted_intel_before_vm_create() {
+        assert_eq!(X86Backend::detect().unwrap(), X86Backend::Vmx);
+        assert_eq!(
+            std::fs::read(X86Backend::UNRESTRICTED_GUEST).unwrap(),
+            b"N\n"
+        );
+        let intc = crate::intc_x86::X86Intc::new(0xfee0_0000, 0x1000, 0xfec0_0000, 0x1000).unwrap();
+        let error = Vm::new_with_intc(intc).unwrap_err();
+        assert!(matches!(error, Error::UnrestrictedGuestDisabled), "{error}");
+        eprintln!("{error}");
+    }
 
     #[test]
     fn fixed_bsp_state_and_repeated_ap_startup() {

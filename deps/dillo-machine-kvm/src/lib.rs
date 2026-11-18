@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Linux KVM machine backend.
+//!
+//! Intel VMX requires effective unrestricted guest mode. The kernel's readable
+//! `/sys/module/kvm_intel/parameters/unrestricted_guest` must report `Y` before
+//! Dillo creates a VM. KVM requires both EPT and CPU support for this mode.
+//! AMD SVM starts independently of this parameter.
+
 #![cfg(target_os = "linux")]
 
 #[cfg(target_arch = "x86_64")]
