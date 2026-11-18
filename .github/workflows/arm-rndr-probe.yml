@@ -1,0 +1,44 @@
+name: Arm entropy capability probe
+on:
+  push:
+    branches: [investigate/arm-rndr-capability]
+  workflow_dispatch:
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: KVM
+            runs_on: '["self-hosted","Linux","ARM64","bare-metal","aarch64","kvm"]'
+            package: dillo-machine-kvm
+            test: hypervisor::arm_bsp_tests::arm_fixed_bsp_state_matches_pmi_and_preserves_powered_off_ap
+          - backend: HVF
+            runs_on: '["self-hosted","macOS","ARM64","bare-metal","m1"]'
+            package: dillo-machine-hvf
+            test: hypervisor::tests::hvf_fixed_bsp_state_matches_pmi_and_preserves_guest_ap
+    runs-on: ${{ fromJSON(matrix.runs_on) }}
+    timeout-minutes: 10
+    env:
+      CARGO_BUILD_RUSTFLAGS: -D warnings
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Configure the pinned toolchain
+        shell: bash
+        run: |
+          mkdir -p .cargo
+          cp .copr/cargo-config.toml .cargo/config.toml
+          rustup show
+      - name: Read the native owner capability
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p ${{ matrix.package }} ${{ matrix.test }} -- --exact --nocapture 2>&1 | tee native-probe.log
+          python3 -c 'from pathlib import Path; assert "${{ matrix.backend }} pre-launch ISAR0=" in Path("native-probe.log").read_text()'
+      - name: Preserve probe output
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: arm-entropy-${{ matrix.backend }}
+          path: native-probe.log

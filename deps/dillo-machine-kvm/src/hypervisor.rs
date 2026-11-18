@@ -1537,6 +1537,11 @@ mod arm_bsp_tests {
             _vm: vm.clone(),
             idx: 0,
         };
+        let isar0 = bsp.native_register(sys_reg(3, 0, 0, 6, 0));
+        eprintln!(
+            "KVM pre-launch ISAR0={isar0:#018x} RNDR={}",
+            (isar0 >> 60) & 0xf
+        );
         init.features[0] |= 1 << KVM_ARM_VCPU_POWER_OFF;
         let ap = vm.fd().create_vcpu(1).expect("create AP");
         ap.vcpu_init(&init).expect("initialize powered-off AP");

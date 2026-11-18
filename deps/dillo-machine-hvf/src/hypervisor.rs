@@ -1526,6 +1526,14 @@ pub(crate) mod tests {
             prepared.recv().expect("AP preparation succeeds");
             let bsp = Vcpu::prepare(&vm.cpu_instance(), pmi::aarch64::Profile::V8_0)
                 .expect("create BSP on its owner thread");
+            let isar0 = bsp
+                .inner
+                .get_sys_reg(SysReg::ID_AA64ISAR0_EL1)
+                .expect("read native BSP ISAR0");
+            eprintln!(
+                "HVF pre-launch ISAR0={isar0:#018x} RNDR={}",
+                (isar0 >> 60) & 0xf
+            );
             bsp.prepare_affinity(0x8000_0000)
                 .expect("set logical BSP affinity");
             let (_, mpidr, redistributor, typer) = bsp.native_identity().unwrap();
