@@ -390,16 +390,26 @@ impl MappedSharedMemory {
     }
 
     fn guest_memory_ranges(memory: &GuestMemoryMmap) -> Vec<AddressRange> {
-        memory
-            .iter()
-            .filter_map(|region| {
-                let size = region.len();
-                (size > 0).then(|| AddressRange {
-                    base: region.start_addr().raw_value(),
-                    size,
-                })
-            })
-            .collect()
+        let mut ranges: Vec<AddressRange> = Vec::new();
+        // GuestMemoryMmap iterates its non-overlapping regions in GPA order.
+        for region in memory.iter() {
+            let range = AddressRange {
+                base: region.start_addr().raw_value(),
+                size: region.len(),
+            };
+            if range.size == 0 {
+                continue;
+            }
+            if let Some(previous) = ranges.last_mut()
+                && previous.end() == Some(range.base)
+                && let Some(size) = previous.size.checked_add(range.size)
+            {
+                previous.size = size;
+            } else {
+                ranges.push(range);
+            }
+        }
+        ranges
     }
 }
 
@@ -795,6 +805,84 @@ mod tests {
             })
             .expect_err("range crosses capability limits");
         assert!(matches!(err, SharedMemoryError::OutOfLimits));
+    }
+
+    #[test]
+    fn mapped_guest_memory_claims_contiguous_regions_without_widening_access() {
+        for base in [0, 0x1000] {
+            let memory = GuestMemoryMmap::from_ranges(&[
+                (GuestAddress(base), 3),
+                (GuestAddress(base + 3), 5),
+                (GuestAddress(base + 8), 8),
+                (GuestAddress(base + 32), 8),
+            ])
+            .unwrap();
+            let shared =
+                MappedSharedMemory::for_guest_memory(memory.clone(), SharedAccess::ReadWrite);
+            let region = shared
+                .region(SharedRange {
+                    gpa: base,
+                    size: 16,
+                    access: SharedAccess::ReadWrite,
+                })
+                .unwrap();
+            region.write(0, &[0x5a; 16]).unwrap();
+            // Contiguous guest addresses do not make a native scalar spanning
+            // two allocations indivisible.
+            assert!(matches!(
+                region.store_u32_le(0, 0),
+                Err(SharedMemoryError::Backing(_))
+            ));
+            let mut bytes = [0; 16];
+            memory.read_slice(&mut bytes, GuestAddress(base)).unwrap();
+            assert_eq!(bytes, [0x5a; 16]);
+            region.read(0, &mut bytes).unwrap();
+            assert_eq!(bytes, [0x5a; 16]);
+
+            assert!(matches!(
+                shared.region(SharedRange {
+                    gpa: base,
+                    size: 40,
+                    access: SharedAccess::ReadOnly,
+                }),
+                Err(SharedMemoryError::OutOfLimits)
+            ));
+            let separate = shared
+                .region(SharedRange {
+                    gpa: base + 32,
+                    size: 8,
+                    access: SharedAccess::WriteOnly,
+                })
+                .unwrap();
+            separate.write(0, &[0xa5; 8]).unwrap();
+            let mut bytes = [0; 8];
+            memory
+                .read_slice(&mut bytes, GuestAddress(base + 32))
+                .unwrap();
+            assert_eq!(bytes, [0xa5; 8]);
+
+            let readonly = MappedSharedMemory::for_guest_memory(memory, SharedAccess::ReadOnly);
+            assert!(matches!(
+                readonly.region(SharedRange {
+                    gpa: base,
+                    size: 16,
+                    access: SharedAccess::WriteOnly,
+                }),
+                Err(SharedMemoryError::AccessDenied)
+            ));
+            shared.shared.mark_private(AddressRange {
+                base: base + 4,
+                size: 4,
+            });
+            assert!(matches!(
+                shared.region(SharedRange {
+                    gpa: base,
+                    size: 16,
+                    access: SharedAccess::ReadOnly,
+                }),
+                Err(SharedMemoryError::NotShared)
+            ));
+        }
     }
 
     #[test]
