@@ -459,6 +459,17 @@ fn boot_with_env(
     extra: &[&str],
     env: &[(&str, &str)],
 ) -> String {
+    boot_child(pmi, mem_mib, cpus, dir, extra, env).0
+}
+
+fn boot_child(
+    pmi: &Path,
+    mem_mib: u32,
+    cpus: u32,
+    dir: &Path,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> (String, std::process::ExitStatus) {
     sign_dillo_for_hvf();
 
     let out_path = dir.join("console.out");
@@ -482,20 +493,19 @@ fn boot_with_env(
         .expect("spawn dillo");
     // wait_timeout closes Child::stdin; retain the console through guest exit.
     let _console_writer = child.stdin.take().expect("console writer");
-    if child
+    let Some(status) = child
         .wait_timeout(Duration::from_secs(120))
         .expect("wait dillo")
-        .is_none()
-    {
+    else {
         let _ = child.kill();
         let _ = child.wait();
         let mut s = std::fs::read_to_string(&out_path).unwrap_or_default();
         s.push_str(&std::fs::read_to_string(&err_path).unwrap_or_default());
         panic!("dillo boot timed out:\n{s}");
-    }
+    };
     let mut s = std::fs::read_to_string(&out_path).unwrap_or_default();
     s.push_str(&std::fs::read_to_string(&err_path).unwrap_or_default());
-    s
+    (s, status)
 }
 
 /// Extract snuffler's JSON `Report` from the console output, if present.
@@ -963,6 +973,118 @@ fn boots_with_raw_disk_over_mmio() {
         .expect("seq_write present (rw device)");
     assert_eq!(sw.errors, 0, "seq_write: {sw:?}");
     assert_eq!(sw.verified, Some(true), "seq_write not verified: {sw:?}");
+}
+
+#[cfg(all(
+    target_arch = "x86_64",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[rstest]
+#[case::pin_1(8, 1)]
+#[case::pin_8(13, 8)]
+#[case::pin_15(20, 15)]
+fn arma59_ioapic_disk_slot(#[case] slot: usize, #[case] pin: u32) {
+    const DISK_BYTES: u64 = 8 * 1024 * 1024;
+    assert!(hypervisor_available(), "native hypervisor is required");
+    let tmp = TempDir::new().unwrap();
+    let disk = make_raw(tmp.path(), "data.raw", DISK_BYTES);
+    let kernel = require(&["VIRTIO_MMIO", "VIRTIO_BLK", "VIRTIO_CONSOLE"], &["PCI"])
+        .expect("kernel DB: no MMIO-only virtio-blk kernel available");
+    let pmi = build_pmi_with_platform(
+        tmp.path(),
+        &kernel,
+        host::CONFIG_NOPCI,
+        host::PROFILE,
+        "console=hvc0 dillo.block_irq",
+        true,
+        &["--mmio-slots", "21"],
+    );
+    let blk = format!("path={},bus=mmio,slot={slot}", disk.display());
+    let boot = std::panic::catch_unwind(|| {
+        boot_child(
+            &pmi,
+            256,
+            1,
+            tmp.path(),
+            &["--console", "endpoint=stdio,bus=mmio,slot=0", "--blk", &blk],
+            &[],
+        )
+    });
+    if let Some(dir) = std::env::var_os("DILLO_IOAPIC_EVIDENCE_DIR") {
+        for file in ["console.out", "console.err"] {
+            let source = tmp.path().join(file);
+            if source.exists() {
+                std::fs::copy(source, Path::new(&dir).join(format!("slot{slot}-{file}")))
+                    .expect("retain raw child console");
+            }
+        }
+    }
+    let (output, status) = match boot {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    assert!(
+        status.success(),
+        "slot {slot}: dillo exited {status}:\n{output}"
+    );
+    let report = parse_report(&output)
+        .unwrap_or_else(|| panic!("slot {slot}: no snuffler report:\n{output}"));
+    assert!(
+        report.pci.is_empty(),
+        "expected a no-PCI guest: {:?}",
+        report.pci
+    );
+    assert!(
+        report
+            .consoles
+            .iter()
+            .any(|console| console.starts_with("hvc0"))
+    );
+    assert_eq!(report.cmdline, "earlycon console=hvc0 dillo.block_irq");
+    let mut disks = report
+        .block
+        .iter()
+        .filter(|disk| disk.size_bytes == DISK_BYTES);
+    let disk = disks
+        .next()
+        .unwrap_or_else(|| panic!("slot {slot}: no disk among {:?}", report.block));
+    assert!(disks.next().is_none());
+    assert!(!disk.ro);
+    let [before, after] = disk
+        .interrupts
+        .as_ref()
+        .expect("IRQ probe was not reported")
+        .as_ref()
+        .unwrap_or_else(|error| panic!("slot {slot} disk {}: {error}", disk.name));
+    eprintln!(
+        "slot {slot} pin {pin}, disk {}: {before:?} -> {after:?}",
+        disk.name
+    );
+    assert_eq!(before.acpi_path, format!("\\VM{slot:02}"));
+    assert_eq!(before.acpi_path, after.acpi_path);
+    assert_eq!(before.virtio_path, after.virtio_path);
+    assert_eq!(before.irq, after.irq);
+    assert_eq!([before.pin, after.pin], [pin; 2]);
+    assert!(after.count > before.count, "disk IRQ count did not rise");
+
+    let bench = disk.bench.as_ref().expect("required raw disk benchmark");
+    eprintln!("slot {slot} disk {} benchmark: {bench:?}", disk.name);
+    assert!(bench.error.is_none());
+    assert_eq!(bench.mode, "o_direct");
+    for read in [&bench.seq_read, &bench.rand_read] {
+        assert!(
+            read.bytes > 0 && read.ops > 0 && read.errors == 0,
+            "{read:?}"
+        );
+    }
+    for write in [&bench.seq_write, &bench.rand_write] {
+        let write = write.as_ref().expect("write operation required");
+        assert!(
+            write.bytes > 0 && write.ops > 0 && write.errors == 0,
+            "{write:?}"
+        );
+        assert_eq!(write.verified, Some(true), "{write:?}");
+    }
 }
 
 /// Two backing files combined via one `--gpt` (nested `partitions=[[…],[…]]`)

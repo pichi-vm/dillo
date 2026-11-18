@@ -31,9 +31,9 @@ use std::time::{Duration, Instant};
 use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
 use rustix::fs::{FileType, Mode, OFlags};
 use snuffler::{
-    BlockDevice, ClockInfo, ConsolePortProbe, CpuInfo, KernelLog, KernelLogEntry, MemoryInfo,
-    NetBench, NetIf, NetOp, NetProbe, PciDevice, REPORT_BEGIN, REPORT_END, Report, SerialPort,
-    VsockResult,
+    BlockDevice, BlockInterrupt, ClockInfo, ConsolePortProbe, CpuInfo, KernelLog, KernelLogEntry,
+    MemoryInfo, NetBench, NetIf, NetOp, NetProbe, PciDevice, REPORT_BEGIN, REPORT_END, Report,
+    SerialPort, VsockResult,
 };
 
 mod bench;
@@ -335,7 +335,11 @@ fn observe() -> Report {
         memory_probe: memory::probe(&cmdline),
         consoles: read_consoles(),
         pci: walk_pci(),
-        block: walk_block(),
+        block: walk_block(
+            cmdline
+                .split_whitespace()
+                .any(|arg| arg == "dillo.block_irq"),
+        ),
         net,
         serial: walk_serial(),
         clock: read_clock(),
@@ -1018,7 +1022,66 @@ fn read_hex(p: &Path) -> u32 {
     u32::from_str_radix(s, 16).unwrap_or(0)
 }
 
-fn walk_block() -> Vec<BlockDevice> {
+fn block_interrupt(block: &Path) -> Result<BlockInterrupt, String> {
+    let device = fs::canonicalize(block.join("device"))
+        .map_err(|e| format!("{} device link: {e}", block.display()))?;
+    let virtio = device
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| name.starts_with("virtio"))
+        .ok_or_else(|| format!("missing virtio identity for {}", device.display()))?;
+    let acpi = device
+        .parent()
+        .ok_or_else(|| format!("missing platform parent for {}", device.display()))?
+        .join("firmware_node/path");
+    let acpi_path = read_opt(&acpi).ok_or_else(|| format!("missing {}", acpi.display()))?;
+
+    let interrupts = fs::read_to_string("/proc/interrupts")
+        .map_err(|e| format!("read /proc/interrupts: {e}"))?;
+    let mut lines = interrupts.lines();
+    let cpus = lines
+        .next()
+        .map_or(0, |header| header.split_whitespace().count());
+    let mut matches = lines.filter_map(|row| {
+        let (irq, fields) = row.split_once(':')?;
+        let irq = irq.trim().parse::<u32>().ok()?;
+        (fields.split_whitespace().last() == Some(virtio)).then_some((irq, fields, row))
+    });
+    let (irq, fields, row) = matches
+        .next()
+        .ok_or_else(|| format!("missing /proc/interrupts action for {virtio} ({acpi_path})"))?;
+    let sysfs = Path::new("/sys/kernel/irq").join(irq.to_string());
+    if matches.next().is_some()
+        || read_opt(&sysfs.join("actions")).as_deref() != Some(virtio)
+        || read_opt(&sysfs.join("chip_name")).as_deref() != Some("IO-APIC")
+    {
+        return Err(format!(
+            "IRQ {irq} is not a dedicated IO-APIC interrupt for {virtio}: {row}"
+        ));
+    }
+    let pin = read_opt(&sysfs.join("hwirq"))
+        .and_then(|pin| pin.parse().ok())
+        .ok_or_else(|| format!("IRQ {irq} hardware pin unavailable: {row}"))?;
+    let counts = fields
+        .split_whitespace()
+        .take(cpus)
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("parse IRQ {irq} counters: {row}: {e}"))?;
+    if cpus == 0 || counts.len() != cpus {
+        return Err(format!("IRQ {irq} missing per-CPU counters: {row}"));
+    }
+    Ok(BlockInterrupt {
+        virtio_path: device.display().to_string(),
+        acpi_path,
+        irq,
+        pin,
+        count: counts.into_iter().sum(),
+        proc_row: row.to_owned(),
+    })
+}
+
+fn walk_block(observe_irq: bool) -> Vec<BlockDevice> {
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir("/sys/block") else {
         return out;
@@ -1038,7 +1101,16 @@ fn walk_block() -> Vec<BlockDevice> {
         let model = read_opt(&path.join("device/model"));
         let ro = read_opt(&path.join("ro")).as_deref() == Some("1");
         let size_bytes = size_sectors.saturating_mul(512);
-        let bench = Some(bench::benchmark_device(&name, size_bytes, ro));
+        let before = (observe_irq && size_bytes > 0).then(|| block_interrupt(&path));
+        let bench = if matches!(&before, Some(Err(_))) {
+            None
+        } else {
+            Some(bench::benchmark_device(&name, size_bytes, ro))
+        };
+        let interrupts = before.map(|before| {
+            let before = before?;
+            Ok([before, block_interrupt(&path)?])
+        });
         out.push(BlockDevice {
             name,
             size_bytes,
@@ -1046,6 +1118,7 @@ fn walk_block() -> Vec<BlockDevice> {
             model,
             ro,
             bench,
+            interrupts,
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));

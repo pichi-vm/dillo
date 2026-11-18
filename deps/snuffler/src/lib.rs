@@ -337,6 +337,19 @@ pub struct BlockDevice {
     /// [`BlkBench::error`] when present).
     #[serde(default)]
     pub bench: Option<BlkBench>,
+    /// Diagnostic snapshots around the benchmark, requested by dillo.block_irq.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupts: Option<Result<[BlockInterrupt; 2], String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockInterrupt {
+    pub virtio_path: String,
+    pub acpi_path: String,
+    pub irq: u32,
+    pub pin: u32,
+    pub count: u64,
+    pub proc_row: String,
 }
 
 /// Per-device raw I/O benchmark. snuffler measures throughput and verifies the

@@ -1,0 +1,171 @@
+name: Arma 59 x86 IOAPIC slots
+
+on:
+  workflow_dispatch:
+    inputs:
+      consumer_sha:
+        description: Exact Dillo diagnostic commit SHA
+        required: true
+        type: string
+  push:
+    branches: [diag/arma59-ioapic-slots]
+
+permissions:
+  contents: read
+
+env:
+  NIGHTLY: nightly-2026-07-06
+  ARMA_SHA: a02cb1f62c00f0409c748e04ebdae70b6df28ee4
+  PMI_SHA: 7a5028f15087652bc055f5b139efa48b8511c887
+  DILLO_BASE: 3c787ca3a304914b43c84db53636b428669e5534
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_BUILD_RUSTFLAGS: "-D warnings"
+
+jobs:
+  qualify:
+    name: ${{ matrix.backend }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: x86 KVM
+            os: ubuntu-24.04
+          - backend: x86 WHP
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact diagnostic source and dependency pins
+        shell: bash
+        env:
+          DISPATCH_SHA: ${{ inputs.consumer_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/diag/arma59-ioapic-slots
+          test "$(git rev-parse HEAD)" = "${DISPATCH_SHA:-$GITHUB_SHA}"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$DILLO_BASE" HEAD
+          mkdir -p target/arma59-evidence
+          {
+            git log -1 --format='Dillo %H'
+            echo "Dillo base $DILLO_BASE"
+            echo "Arma $ARMA_SHA"
+            echo "PMI $PMI_SHA"
+            python - <<'PY'
+          import os
+          import tomllib
+
+          arma = os.environ["ARMA_SHA"]
+          pmi = os.environ["PMI_SHA"]
+          arma_url = "https://github.com/pichi-vm/arma"
+          with open("Cargo.toml", "rb") as file:
+              dependency = tomllib.load(file)["dev-dependencies"]["arma"]
+          assert (dependency["git"], dependency["rev"]) == (arma_url, arma), dependency
+          with open("Cargo.lock", "rb") as file:
+              packages = tomllib.load(file)["package"]
+          sources = {
+              name: f"git+{arma_url}?rev={arma}#{arma}"
+              for name in ("arma", "tatu", "dtb2acpi", "dtb2e820")
+          }
+          sources["pmi"] = f"git+https://github.com/pichi-vm/pmi?branch=main#{pmi}"
+          for name, source in sources.items():
+              found = [package.get("source") for package in packages if package["name"] == name]
+              assert found == [source], (name, found)
+          PY
+          } | tee target/arma59-evidence/revisions.log
+
+      - name: Record host and require native KVM
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            uname -a
+            cat /etc/os-release
+            lscpu
+            test "$(uname -m)" = x86_64
+            test -c /dev/kvm
+            sudo chmod a+rw /dev/kvm
+            test -r /dev/kvm
+            test -w /dev/kvm
+            ls -l /dev/kvm
+            # The three cases run one 256 MiB guest at a time.
+            want=128
+            for attempt in 1 2 3; do
+              pages=$(sysctl -n vm.nr_hugepages)
+              if [ "$pages" -ge "$want" ]; then break; fi
+              sudo sysctl -w vm.nr_hugepages="$want"
+            done
+            awk '/^HugePages_/ || /^Hugepagesize:/ { print }' /proc/meminfo
+            awk '/^HugePages_Free:/ { free=$2 } /^HugePages_Rsvd:/ { reserved=$2 }
+                 END { exit !(free-reserved >= 128) }' /proc/meminfo
+          } 2>&1 | tee target/arma59-evidence/host.log
+
+      - name: Record host and require native WHP
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & {
+            Get-CimInstance Win32_OperatingSystem |
+              Format-List Caption, Version, BuildNumber, OSArchitecture
+            Get-CimInstance Win32_Processor | Format-List Name
+            if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw 'x86-64 Windows required' }
+            Add-Type @'
+          using System.Runtime.InteropServices;
+          public static class WhpCapability {
+              [DllImport("WinHvPlatform.dll", ExactSpelling = true)]
+              public static extern int WHvGetCapability(int code, out uint value,
+                                                       uint size, out uint written);
+          }
+          '@
+            [uint32]$present = 0
+            [uint32]$written = 0
+            $hr = [WhpCapability]::WHvGetCapability(0, [ref]$present, 4, [ref]$written)
+            "WHvGetCapability(HypervisorPresent) HRESULT=$hr present=$present bytes=$written"
+            if ($hr -ne 0 -or $present -ne 1 -or $written -ne 4) {
+              throw 'native WHP is required'
+            }
+          } *>&1 | Tee-Object -FilePath target/arma59-evidence/host.log
+
+      - name: Install pinned toolchain
+        shell: bash
+        run: |
+          rustup toolchain install "$NIGHTLY" --profile minimal --component rust-src
+          rustup target add --toolchain "$NIGHTLY" x86_64-unknown-none x86_64-unknown-linux-musl
+          {
+            rustc "+$NIGHTLY" -vV
+            cargo "+$NIGHTLY" --version
+          } | tee target/arma59-evidence/toolchain.log
+
+      - name: List and run the three exact native cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$PWD/target/arma59-evidence"
+          export DILLO_IOAPIC_EVIDENCE_DIR="$evidence"
+          if [ "$RUNNER_OS" = Windows ]; then
+            export DILLO_IOAPIC_EVIDENCE_DIR="$(cygpath -w "$evidence")"
+          fi
+          cmd=(cargo "+$NIGHTLY" --config .copr/cargo-config.toml test --locked -p dillo --features vm-tests --test boot)
+          "${cmd[@]}" arma59_ioapic_disk_slot -- --list 2>&1 | tee "$evidence/list.log"
+          grep -Fxq '3 tests, 0 benchmarks' "$evidence/list.log"
+          for suffix in case_1_pin_1 case_2_pin_8 case_3_pin_15; do
+            name="arma59_ioapic_disk_slot::$suffix"
+            grep -Fxq "$name: test" "$evidence/list.log"
+            "${cmd[@]}" "$name" -- --exact --test-threads=1 --nocapture 2>&1 | tee "$evidence/$suffix.log"
+            grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$evidence/$suffix.log"
+          done
+
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: arma59-${{ matrix.os }}
+          path: target/arma59-evidence
+          if-no-files-found: error

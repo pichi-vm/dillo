@@ -133,11 +133,12 @@ dependencies = [
 [[package]]
 name = "arma"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?rev=79961028ec45966345043fe894c551e3fc3b48ba#79961028ec45966345043fe894c551e3fc3b48ba"
+source = "git+https://github.com/pichi-vm/arma?rev=a02cb1f62c00f0409c748e04ebdae70b6df28ee4#a02cb1f62c00f0409c748e04ebdae70b6df28ee4"
 dependencies = [
  "anyhow",
  "ciborium",
  "clap",
+ "cpio",
  "devtree",
  "flate2",
  "goblin",
@@ -330,6 +331,12 @@ name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
+name = "cpio"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd609f59ec3371b104ae6b123ff63e89736dc50bae0bb6650295993487197f48"
 
 [[package]]
 name = "cpufeatures"
@@ -800,7 +807,7 @@ checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
 [[package]]
 name = "dtb2acpi"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?rev=79961028ec45966345043fe894c551e3fc3b48ba#79961028ec45966345043fe894c551e3fc3b48ba"
+source = "git+https://github.com/pichi-vm/arma?rev=a02cb1f62c00f0409c748e04ebdae70b6df28ee4#a02cb1f62c00f0409c748e04ebdae70b6df28ee4"
 dependencies = [
  "devtree",
  "zerocopy",
@@ -809,7 +816,7 @@ dependencies = [
 [[package]]
 name = "dtb2e820"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?rev=79961028ec45966345043fe894c551e3fc3b48ba#79961028ec45966345043fe894c551e3fc3b48ba"
+source = "git+https://github.com/pichi-vm/arma?rev=a02cb1f62c00f0409c748e04ebdae70b6df28ee4#a02cb1f62c00f0409c748e04ebdae70b6df28ee4"
 dependencies = [
  "devtree",
 ]
@@ -1573,7 +1580,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "pmi"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/pmi?branch=main#d6c2543129c3dad900d39a14ac9c4909bd39c0ac"
+source = "git+https://github.com/pichi-vm/pmi?branch=main#7a5028f15087652bc055f5b139efa48b8511c887"
 dependencies = [
  "flagset",
  "serde",
@@ -2042,7 +2049,7 @@ dependencies = [
 [[package]]
 name = "tatu"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?rev=79961028ec45966345043fe894c551e3fc3b48ba#79961028ec45966345043fe894c551e3fc3b48ba"
+source = "git+https://github.com/pichi-vm/arma?rev=a02cb1f62c00f0409c748e04ebdae70b6df28ee4#a02cb1f62c00f0409c748e04ebdae70b6df28ee4"
 dependencies = [
  "arrayvec",
  "devtree",
