@@ -982,6 +982,14 @@ impl Pcie {
                 });
             }
         };
+        let bus_count = u64::from(bus_max) - u64::from(bus_min) + 1;
+        if ecam_size < bus_count << 20 {
+            return Err(SurveyError::BadProperty {
+                node: "/pcie",
+                prop: "reg",
+                reason: "ECAM window cannot cover the declared bus range",
+            });
+        }
 
         pci.ack("device_type");
         pci.ack("dma-coherent");
@@ -1665,6 +1673,55 @@ mod tests {
                             })
                         ),
                         "{arch:?} {buses:?}: {result:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pci_ecam_covers_the_declared_bus_interval() {
+        for (arch, mut base, name) in [
+            (Arch::Aarch64, base_root(), "pcie@c000000"),
+            (Arch::X86_64, x86_base_root(), "pcie@b0000000"),
+        ] {
+            let original = base.remove_child(name).unwrap();
+            let mut pci = OwnedNode::new("pcie@100000000");
+            for property in original.properties() {
+                pci.set_property(property.clone());
+            }
+            base.set_child(pci);
+            for (buses, size, valid) in [
+                ([0, 0], 0, false),
+                ([0, 0], 0xF_FFFF, false),
+                ([0, 0], 0x10_0000, true),
+                ([8, 23], 0xFF_FFFF, false),
+                ([8, 23], 0x100_0000, true),
+                ([255, 255], 0x10_0000, true),
+                ([0, 255], 0xFFF_FFFF, false),
+                ([0, 255], 0x1000_0000, true),
+                ([0, 255], 0x2000_0000, true),
+            ] {
+                let mut root = base.clone();
+                let pci = root.child_mut("pcie@100000000").unwrap();
+                pci.set_property(OwnedProperty::new("bus-range").with_u32s(&buses));
+                pci.set_property(OwnedProperty::new("reg").with_u32s(&reg2(0x1_0000_0000, size)));
+                let result = Machine::survey(&dtb(root), arch);
+                if valid {
+                    let pci = result.expect("sufficient ECAM capacity").pcie;
+                    assert_eq!([u32::from(pci.bus_min), u32::from(pci.bus_max)], buses);
+                    assert_eq!((pci.ecam_base, pci.ecam_size), (0x1_0000_0000, size));
+                } else {
+                    assert!(
+                        matches!(
+                            result,
+                            Err(SurveyError::BadProperty {
+                                node: "/pcie",
+                                prop: "reg",
+                                ..
+                            })
+                        ),
+                        "{arch:?} {buses:?} {size:#x}: {result:?}"
                     );
                 }
             }
