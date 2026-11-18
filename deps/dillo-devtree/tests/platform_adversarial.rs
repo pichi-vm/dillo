@@ -95,13 +95,13 @@ impl SurveyFixture {
     }
 
     fn survey(&self) -> Result<Machine, SurveyError> {
-        Machine::survey(&self.bytes(), Arch::X86_64)
+        Machine::survey(self.bytes(), Arch::X86_64)
     }
 }
 
 #[test]
 fn empty_dtb_rejected() {
-    let err = Machine::survey(&[], Arch::X86_64).expect_err("0 bytes must not parse");
+    let err = Machine::survey(Vec::new(), Arch::X86_64).expect_err("0 bytes must not parse");
     assert!(matches!(err, SurveyError::Parse(_)), "got {err:?}");
 }
 
@@ -109,7 +109,7 @@ fn empty_dtb_rejected() {
 fn truncated_dtb_rejected() {
     // FDT header is 40 bytes; anything shorter can't even be sized.
     let bytes = vec![0u8; 16];
-    let err = Machine::survey(&bytes, Arch::X86_64).expect_err("16 bytes must not parse");
+    let err = Machine::survey(bytes, Arch::X86_64).expect_err("16 bytes must not parse");
     assert!(matches!(err, SurveyError::Parse(_)), "got {err:?}");
 }
 
@@ -118,22 +118,22 @@ fn garbage_with_wrong_magic_rejected() {
     let mut bytes = vec![0u8; 256];
     // Set first 4 bytes to non-FDT magic.
     bytes[0..4].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
-    let err = Machine::survey(&bytes, Arch::X86_64).expect_err("wrong magic must not parse");
+    let err = Machine::survey(bytes, Arch::X86_64).expect_err("wrong magic must not parse");
     assert!(matches!(err, SurveyError::Parse(_)), "got {err:?}");
 }
 
 #[test]
 fn generated_platform_surveys_declared_resources() {
     let platform = SurveyFixture::new().survey().unwrap();
-    assert!(platform.has_pcie);
-    assert_eq!(platform.pcie.ecam_base, 0xb000_0000);
-    assert_eq!(platform.pcie.mmio_base, 0xc000_0000);
-    let poweroff = platform.poweroff.expect("declared poweroff");
+    assert!(platform.has_pcie());
+    assert_eq!(platform.pcie().ecam_base, 0xb000_0000);
+    assert_eq!(platform.pcie().mmio_base, 0xc000_0000);
+    let poweroff = platform.poweroff().expect("declared poweroff");
     assert_eq!(
         (poweroff.base, poweroff.size, poweroff.value),
         (0x0901_0000, 4, 0x34)
     );
-    assert_eq!(platform.plan.regions().len(), 5);
+    assert_eq!(platform.plan().regions().len(), 5);
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn invalid_structure_token_rejected() {
     let structure = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
     bytes[structure..structure + 4].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(matches!(
-        Machine::survey(&bytes, Arch::X86_64),
+        Machine::survey(bytes, Arch::X86_64),
         Err(SurveyError::Parse(_))
     ));
 }

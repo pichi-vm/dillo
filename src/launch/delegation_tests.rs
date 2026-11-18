@@ -21,7 +21,7 @@ const CHANNELS: [BaseChannel; 3] = [
     BaseChannel::Optional,
 ];
 
-pub(super) fn base(arch: HostArchitecture, fixed_cpus: bool, fixed_memory: bool) -> Vec<u8> {
+pub(crate) fn base(arch: HostArchitecture, fixed_cpus: bool, fixed_memory: bool) -> Vec<u8> {
     let mut fdt = FdtBuilder::new();
     fdt.begin_node("");
     fdt.property_u32("#address-cells", 2);
@@ -334,7 +334,7 @@ fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
                 data, &snapshot,
                 "reboot uses owned launch bytes, not the file"
             );
-            assert_eq!(plan.merged_dtb, base);
+            assert_eq!(plan.platform.dtb(), base);
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
         }
         std::fs::write(&path, image(arch, BaseChannel::Bundled, &base, Some(4096))).unwrap();

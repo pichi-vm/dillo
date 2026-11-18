@@ -527,37 +527,26 @@ impl Topology {
     }
 }
 
-/// A fully surveyed machine: every base-DTB node was claimed, every region
-/// traces to a property, and the regions are pairwise disjoint. Backend
-/// substrate nodes are consumed for coverage and provenance here, but the
-/// launch-facing state exposes only the portable device facts that `dillo`
-/// composes: PCI windows, UART, virtio-mmio slots, syscon actions, and the
-/// resource plan.
-#[derive(Debug, Clone)]
+/// The exact base DTB and the portable platform facts derived by its survey.
+/// Device composition reads the surveyed facts, and native constructors can
+/// read the same base bytes to configure their substrate.
+#[derive(Debug)]
 pub struct Machine {
-    pub arch: Arch,
-    /// The PCIe host bridge. Valid only when [`has_pcie`](Self::has_pcie) is
-    /// true; a `--pci-slots 0` microVM declares no bridge, in which case this
-    /// is a zeroed sentinel ([`Pcie::ZEROED`]) the VMM must not install.
-    pub pcie: Pcie,
-    /// Whether the base declares a PCIe host bridge (false ⇒ virtio-mmio-only
-    /// microVM; skip all PCI fabric).
-    pub has_pcie: bool,
-    pub plan: ResourcePlan,
-    /// The `ns16550a` serial (MMIO), shared by both arches; `None` unless the
-    /// base was built with `--serial`.
-    pub uart: Option<Uart>,
-    /// virtio-mmio transport slots declared by the base DTB. The survey claims
-    /// all slots whether or not dillo currently plugs a device into each one.
-    pub virtio_mmio: Vec<VirtioMmio>,
-    pub poweroff: Option<Syscon>,
-    pub reboot: Option<Syscon>,
+    dtb: Vec<u8>,
+    arch: Arch,
+    pcie: Pcie,
+    has_pcie: bool,
+    plan: ResourcePlan,
+    uart: Option<Uart>,
+    virtio_mmio: Vec<VirtioMmio>,
+    poweroff: Option<Syscon>,
+    reboot: Option<Syscon>,
 }
 
 impl Machine {
-    /// Survey a base DTB into a `Machine`, proving total coverage.
-    pub fn survey(dtb: &[u8], arch: Arch) -> Result<Machine, SurveyError> {
-        let tree: Tree<'_> = Tree::parse(dtb).map_err(SurveyError::Parse)?;
+    /// Survey and retain the supplied base DTB.
+    pub fn survey(dtb: Vec<u8>, arch: Arch) -> Result<Self, SurveyError> {
+        let tree: Tree<'_> = Tree::parse(&dtb).map_err(SurveyError::Parse)?;
         let mut t = OwnedTree::materialize(&tree);
         if t.root().child("cpus").is_some() {
             return Err(SurveyError::BaseHasCpus);
@@ -600,7 +589,8 @@ impl Machine {
         // (b) declared regions are disjoint.
         plan.check_disjoint()?;
 
-        Ok(Machine {
+        Ok(Self {
+            dtb,
             arch,
             pcie,
             has_pcie,
@@ -610,6 +600,48 @@ impl Machine {
             poweroff,
             reboot,
         })
+    }
+
+    /// The exact base DTB bytes supplied to [`Self::survey`].
+    pub fn dtb(&self) -> &[u8] {
+        &self.dtb
+    }
+
+    pub fn arch(&self) -> Arch {
+        self.arch
+    }
+
+    /// The declared PCIe host bridge. When [`Self::has_pcie`] is false,
+    /// returns the [`Pcie::ZEROED`] sentinel.
+    pub fn pcie(&self) -> &Pcie {
+        &self.pcie
+    }
+
+    /// Whether the base declares a PCIe host bridge.
+    pub fn has_pcie(&self) -> bool {
+        self.has_pcie
+    }
+
+    pub fn plan(&self) -> &ResourcePlan {
+        &self.plan
+    }
+
+    /// The `ns16550a` MMIO UART, when declared.
+    pub fn uart(&self) -> Option<&Uart> {
+        self.uart.as_ref()
+    }
+
+    /// All declared virtio-mmio slots, including slots left empty at launch.
+    pub fn virtio_mmio(&self) -> &[VirtioMmio] {
+        &self.virtio_mmio
+    }
+
+    pub fn poweroff(&self) -> Option<Syscon> {
+        self.poweroff
+    }
+
+    pub fn reboot(&self) -> Option<Syscon> {
+        self.reboot
     }
 
     /// Declared non-RAM regions as `(base, size)` tuples for placement code.
@@ -1538,7 +1570,7 @@ mod tests {
                 pci.set_property(
                     OwnedProperty::new("reg").with_u32s(&reg2(0x1_0000_0000, 0x1000_0000)),
                 );
-                let result = Machine::survey(&dtb(root), arch);
+                let result = Machine::survey(dtb(root), arch);
                 if valid {
                     let pci = result.expect("valid bus interval").pcie;
                     assert_eq!([u32::from(pci.bus_min), u32::from(pci.bus_max)], buses);
@@ -1580,7 +1612,7 @@ mod tests {
                 let pci = root.child_mut(name).unwrap();
                 pci.set_property(OwnedProperty::new("bus-range").with_u32s(&buses));
                 pci.set_property(OwnedProperty::new("reg").with_u32s(&reg2(0x1_0000_0000, size)));
-                let result = Machine::survey(&dtb(root), arch);
+                let result = Machine::survey(dtb(root), arch);
                 if valid {
                     let pci = result.expect("sufficient ECAM capacity").pcie;
                     assert_eq!([u32::from(pci.bus_min), u32::from(pci.bus_max)], buses);
@@ -1604,7 +1636,12 @@ mod tests {
 
     #[test]
     fn base_drains_to_empty_and_binds_devices() {
-        let m = Machine::survey(&dtb(base_root()), Arch::Aarch64).expect("survey ok");
+        let bytes = dtb(base_root());
+        let expected = bytes.clone();
+        let address = bytes.as_ptr();
+        let m = Machine::survey(bytes, Arch::Aarch64).expect("survey ok");
+        assert_eq!(m.dtb(), expected);
+        assert_eq!(m.dtb().as_ptr(), address);
 
         let uart = m.uart.as_ref().expect("uart present");
         assert_eq!(uart.base, SERIAL_BASE);
@@ -1647,7 +1684,7 @@ mod tests {
     fn base_without_serial_has_no_uart_and_still_drains() {
         let mut root = base_root();
         root.remove_child("serial@9000000");
-        let m = Machine::survey(&dtb(root), Arch::Aarch64).expect("survey ok");
+        let m = Machine::survey(dtb(root), Arch::Aarch64).expect("survey ok");
         assert!(m.uart.is_none());
         // GICD, GICR, MSI frame, virtio-mmio, ECAM, PCI MMIO — no serial.
         assert_eq!(m.plan.regions().len(), 6);
@@ -1674,7 +1711,7 @@ mod tests {
                     ])),
             );
         }
-        let m = Machine::survey(&dtb(root), Arch::Aarch64).expect("survey ok");
+        let m = Machine::survey(dtb(root), Arch::Aarch64).expect("survey ok");
         assert!(!m.has_pcie);
         assert_eq!(m.pcie.ecam_base, 0); // ZEROED sentinel
         assert_eq!(m.virtio_mmio.len(), 4);
@@ -1700,7 +1737,7 @@ mod tests {
             .unwrap()
             .remove_property("interrupt-parent");
 
-        let err = Machine::survey(&dtb(root), Arch::Aarch64).unwrap_err();
+        let err = Machine::survey(dtb(root), Arch::Aarch64).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1722,7 +1759,7 @@ mod tests {
             .unwrap()
             .set_u32(99);
 
-        let err = Machine::survey(&dtb(root), Arch::Aarch64).unwrap_err();
+        let err = Machine::survey(dtb(root), Arch::Aarch64).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1745,7 +1782,7 @@ mod tests {
             .unwrap()
             .set_u32s(&[0, 16]);
 
-        let err = Machine::survey(&dtb(root), Arch::Aarch64).unwrap_err();
+        let err = Machine::survey(dtb(root), Arch::Aarch64).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1766,7 +1803,7 @@ mod tests {
             .unwrap()
             .remove_property("msi-parent");
 
-        let err = Machine::survey(&dtb(root), Arch::Aarch64).unwrap_err();
+        let err = Machine::survey(dtb(root), Arch::Aarch64).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1794,7 +1831,7 @@ mod tests {
             ]),
         );
 
-        let err = Machine::survey(&dtb(root), Arch::Aarch64).unwrap_err();
+        let err = Machine::survey(dtb(root), Arch::Aarch64).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1814,7 +1851,7 @@ mod tests {
         root.set_child(
             OwnedNode::new("bogus@0").with_property(OwnedProperty::new("foo").with_u32(1)),
         );
-        let err = Machine::survey(&dtb(root), Arch::Aarch64).unwrap_err();
+        let err = Machine::survey(dtb(root), Arch::Aarch64).unwrap_err();
         assert!(matches!(err, SurveyError::Uncovered(_)), "got {err:?}");
     }
 
@@ -1824,7 +1861,7 @@ mod tests {
             (Arch::Aarch64, base_root()),
             (Arch::X86_64, x86_base_root()),
         ] {
-            Machine::survey(&dtb(base.clone()), arch).expect("valid base");
+            Machine::survey(dtb(base.clone()), arch).expect("valid base");
             for node in [
                 OwnedNode::new("unknown"),
                 OwnedNode::new("distance-map"),
@@ -1833,7 +1870,7 @@ mod tests {
                 let name = node.name().to_string();
                 let mut root = base.clone();
                 root.set_child(node);
-                let error = Machine::survey(&dtb(root), arch)
+                let error = Machine::survey(dtb(root), arch)
                     .expect_err("empty declarations still require a handler");
                 assert!(
                     matches!(&error, SurveyError::Uncovered(report) if report.contains(&name)),
@@ -1849,10 +1886,10 @@ mod tests {
             (Arch::Aarch64, base_root()),
             (Arch::X86_64, x86_base_root()),
         ] {
-            let expected = Machine::survey(&dtb(root.clone()), arch).expect("valid base");
+            let expected = Machine::survey(dtb(root.clone()), arch).expect("valid base");
             root.set_child(OwnedNode::new("chosen"));
             root.set_child(OwnedNode::new("aliases"));
-            let actual = Machine::survey(&dtb(root), arch)
+            let actual = Machine::survey(dtb(root), arch)
                 .expect("known containers are explicitly consumed even when empty");
             assert_eq!(actual.plan.regions().len(), expected.plan.regions().len());
             for (actual, expected) in actual.plan.regions().iter().zip(expected.plan.regions()) {
@@ -1870,7 +1907,7 @@ mod tests {
         root.child_mut("timer")
             .unwrap()
             .set_property(OwnedProperty::new("surprise").with_u32(1));
-        let err = Machine::survey(&dtb(root), Arch::Aarch64).unwrap_err();
+        let err = Machine::survey(dtb(root), Arch::Aarch64).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1886,7 +1923,7 @@ mod tests {
         root.set_child(
             OwnedNode::new("cpus").with_property(OwnedProperty::new("#address-cells").with_u32(1)),
         );
-        let err = Machine::survey(&dtb(root), Arch::Aarch64).unwrap_err();
+        let err = Machine::survey(dtb(root), Arch::Aarch64).unwrap_err();
         assert!(matches!(err, SurveyError::BaseHasCpus), "got {err:?}");
     }
 
@@ -1899,7 +1936,7 @@ mod tests {
                 .property_mut("reg")
                 .unwrap()
                 .set_u32s(&reg2(base, 0));
-            let err = Machine::survey(&dtb(root), Arch::Aarch64).unwrap_err();
+            let err = Machine::survey(dtb(root), Arch::Aarch64).unwrap_err();
             assert!(
                 matches!(
                     err,
@@ -1923,13 +1960,13 @@ mod tests {
             .property_mut("reg")
             .unwrap()
             .set_u32s(&reg2(ECAM_BASE, 0x1000));
-        let err = Machine::survey(&dtb(root), Arch::Aarch64).unwrap_err();
+        let err = Machine::survey(dtb(root), Arch::Aarch64).unwrap_err();
         assert!(matches!(err, SurveyError::Overlap { .. }), "got {err:?}");
     }
 
     #[test]
     fn cross_validate_loads_rejects_declared_region_overlap() {
-        let m = Machine::survey(&dtb(base_root()), Arch::Aarch64).expect("survey ok");
+        let m = Machine::survey(dtb(base_root()), Arch::Aarch64).expect("survey ok");
 
         let pa_bits = m.min_addr_space_bits();
         let err = m
@@ -1953,7 +1990,7 @@ mod tests {
 
     #[test]
     fn cross_validate_loads_accepts_zero_sized_sections() {
-        let m = Machine::survey(&dtb(base_root()), Arch::Aarch64).expect("survey ok");
+        let m = Machine::survey(dtb(base_root()), Arch::Aarch64).expect("survey ok");
 
         let pa_bits = m.min_addr_space_bits();
         m.plan
@@ -1963,7 +2000,7 @@ mod tests {
 
     #[test]
     fn cross_validate_loads_rejects_address_above_guest_width() {
-        let m = Machine::survey(&dtb(base_root()), Arch::Aarch64).expect("survey ok");
+        let m = Machine::survey(dtb(base_root()), Arch::Aarch64).expect("survey ok");
 
         let pa_bits = 48;
         let err = m
@@ -1982,7 +2019,7 @@ mod tests {
 
     #[test]
     fn platform_minimum_does_not_overflow() {
-        let mut m = Machine::survey(&dtb(base_root()), Arch::Aarch64).unwrap();
+        let mut m = Machine::survey(dtb(base_root()), Arch::Aarch64).unwrap();
         m.pcie.mmio_base = u64::MAX;
         m.pcie.mmio_size = u64::MAX;
         assert_eq!(m.min_addr_space_bits(), 66);
@@ -2083,7 +2120,7 @@ mod tests {
 
     #[test]
     fn x86_base_drains_and_binds() {
-        let m = Machine::survey(&dtb(x86_base_root()), Arch::X86_64).expect("survey ok");
+        let m = Machine::survey(dtb(x86_base_root()), Arch::X86_64).expect("survey ok");
 
         let po = m.poweroff.expect("poweroff");
         assert_eq!((po.base, po.value, po.mask), (POWEROFF_BASE, 0x34, 0xFF));
@@ -2113,7 +2150,7 @@ mod tests {
                     .unwrap()
                     .set_property(OwnedProperty::new("reg").with_u32s(&reg2(base, size)));
                 assert!(matches!(
-                    Machine::survey(&dtb(root), Arch::X86_64),
+                    Machine::survey(dtb(root), Arch::X86_64),
                     Err(SurveyError::BadProperty { node, prop: "reg", .. }) if node == path
                 ));
             }
@@ -2124,7 +2161,7 @@ mod tests {
     fn x86_base_without_serial_has_no_uart_and_still_drains() {
         let mut root = x86_base_root();
         root.remove_child("serial@9000000");
-        let m = Machine::survey(&dtb(root), Arch::X86_64).expect("survey ok");
+        let m = Machine::survey(dtb(root), Arch::X86_64).expect("survey ok");
         assert!(m.uart.is_none());
     }
 
@@ -2139,7 +2176,7 @@ mod tests {
                 .with_property(OwnedProperty::new("interrupts").with_u32s(&[16, 1])),
         );
 
-        let m = Machine::survey(&dtb(root), Arch::X86_64).expect("survey ok");
+        let m = Machine::survey(dtb(root), Arch::X86_64).expect("survey ok");
         assert_eq!(m.virtio_mmio.len(), 1);
         assert_eq!(m.virtio_mmio[0].irq, 16);
     }
@@ -2153,7 +2190,7 @@ mod tests {
             .unwrap()
             .set_u32(1);
 
-        let err = Machine::survey(&dtb(root), Arch::X86_64).unwrap_err();
+        let err = Machine::survey(dtb(root), Arch::X86_64).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -2177,7 +2214,7 @@ mod tests {
             .unwrap()
             .set_u32s(&[4, 1, 0]);
 
-        let err = Machine::survey(&dtb(root), Arch::X86_64).unwrap_err();
+        let err = Machine::survey(dtb(root), Arch::X86_64).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -2197,7 +2234,7 @@ mod tests {
         root.set_child(
             OwnedNode::new("bogus@0").with_property(OwnedProperty::new("foo").with_u32(1)),
         );
-        let err = Machine::survey(&dtb(root), Arch::X86_64).unwrap_err();
+        let err = Machine::survey(dtb(root), Arch::X86_64).unwrap_err();
         assert!(matches!(err, SurveyError::Uncovered(_)), "got {err:?}");
     }
 }

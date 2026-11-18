@@ -366,6 +366,7 @@ impl Machine for TestMachine {
         self.device_failures.observer()
     }
     type Error = std::io::Error;
+    type Platform = ();
     type CpuPreparation = Input;
     type Memory = TestMemory;
     fn cpu_preparation(&mut self, index: u32, _: CpuProfile) -> Result<Input, Self::Error> {
@@ -393,7 +394,7 @@ impl Machine for TestMachine {
     fn guest_address_bits() -> Result<u32, Self::Error> {
         Ok(48)
     }
-    fn from_launch_config(_: LaunchConfig) -> Result<Self, Self::Error> {
+    fn from_launch_config(_: LaunchConfig<'_, Self::Platform>) -> Result<Self, Self::Error> {
         unreachable!("tests construct their receiver")
     }
     fn write_guest(&mut self, _: u64, _: &[u8]) -> Result<(), Self::Error> {

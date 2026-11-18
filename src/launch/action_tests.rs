@@ -175,6 +175,7 @@ impl Machine for RecordingMachine {
         dillo_machine::execution::DeviceFailureReporter::default().observer()
     }
     type Error = std::io::Error;
+    type Platform = ();
     type CpuPreparation = UnusedCpuInput;
     fn cpu_preparation(&mut self, _: u32, _: CpuProfile) -> Result<UnusedCpuInput, Self::Error> {
         Ok(UnusedCpuInput)
@@ -183,7 +184,7 @@ impl Machine for RecordingMachine {
     fn guest_address_bits() -> Result<u32, Self::Error> {
         Ok(48)
     }
-    fn from_launch_config(_: LaunchConfig) -> Result<Self, Self::Error> {
+    fn from_launch_config(_: LaunchConfig<'_, Self::Platform>) -> Result<Self, Self::Error> {
         Ok(Self::dirty(0xa5))
     }
     fn write_guest(&mut self, gpa: u64, bytes: &[u8]) -> Result<(), Self::Error> {
@@ -639,7 +640,7 @@ fn external_dt_and_bootconfig_keep_their_captured_identity_for_replay() {
         std::fs::remove_file(&config_path).unwrap();
         std::fs::write(&config_path, b"launch.identity = changed;").unwrap();
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(plan.merged_dtb, dtb);
+        assert_eq!(plan.platform.dtb(), dtb);
         let mut replacement = RecordingMachine::dirty(0x55);
         plan.recipe.apply(&mut replacement).unwrap();
         assert_eq!(replacement.operations, initial.operations);

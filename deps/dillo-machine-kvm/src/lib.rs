@@ -38,9 +38,12 @@ mod imp {
     use std::thread;
     use std::time::Duration;
 
-    use dillo_devtree::devtree::{OwnedTree, Tree};
     #[cfg(target_arch = "aarch64")]
     use dillo_devtree::{CompatMismatch, FromDevTree, NodeExt, OwnedNodeExt, PropExt};
+    use dillo_devtree::{
+        devtree::{OwnedTree, Tree},
+        platform::Machine as PlatformMachine,
+    };
     use dillo_machine::attachment::{Attach, DeviceAttachment};
     use dillo_machine::execution::{DeviceHandle, RunToken, SpawnError};
     use dillo_machine::interrupt::{
@@ -436,18 +439,11 @@ mod imp {
         pub(crate) spi_count: u32,
     }
 
-    #[derive(Debug, Clone)]
-    struct Config {
-        dtb: Vec<u8>,
-    }
-
-    impl TryFrom<Config> for Vm {
-        type Error = Error;
-
-        fn try_from(config: Config) -> Result<Self, Self::Error> {
+    impl Vm {
+        fn from_dtb(dtb: &[u8]) -> Result<Self, Error> {
             // The devicetree is the machine contract: the interrupt-controller
             // substrate is constructed from what it declares, on both arches.
-            let parsed: Tree<'_> = Tree::parse(&config.dtb).map_err(Error::ParseDtb)?;
+            let parsed: Tree<'_> = Tree::parse(dtb).map_err(Error::ParseDtb)?;
             let mut tree = OwnedTree::materialize(&parsed);
             #[cfg(target_arch = "x86_64")]
             let inner = {
@@ -574,6 +570,7 @@ mod imp {
         }
 
         type Error = Error;
+        type Platform = PlatformMachine;
         type CpuPreparation = CpuPreparation;
         type Memory = Memory;
 
@@ -605,13 +602,17 @@ mod imp {
             crate::hypervisor::guest_address_bits()
         }
 
-        fn from_launch_config(config: LaunchConfig) -> Result<Self, Self::Error> {
-            let vm = Self::try_from(Config { dtb: config.dtb })?;
+        fn from_launch_config(
+            config: LaunchConfig<'_, Self::Platform>,
+        ) -> Result<Self, Self::Error> {
+            let vm = Self::from_dtb(config.platform.dtb())?;
             let available = Self::guest_address_bits()?;
-            if config.min_addr_space_bits > available {
+            let required = config
+                .min_addr_space_bits
+                .max(config.platform.min_addr_space_bits());
+            if required > available {
                 return Err(Error::AddressSpace(format!(
-                    "launch requires {} bits; backend provides {available}",
-                    config.min_addr_space_bits
+                    "launch requires {required} bits; backend provides {available}"
                 )));
             }
             Ok(vm)
@@ -1375,12 +1376,8 @@ mod imp {
                     0x1400_0000u32.to_le_bytes().to_vec(),
                 )
             };
-            let mut vm = Vm::from_launch_config(LaunchConfig {
-                dtb: tree.encode().unwrap(),
-                vcpus: 2,
-                min_addr_space_bits: 32,
-            })
-            .expect("native KVM is required");
+            // The owner fixture supplies only the native controller substrate.
+            let mut vm = Vm::from_dtb(&tree.encode().unwrap()).expect("native KVM is required");
             vm.attach_mapped_memory(Arc::new(
                 memory::MappedMemory::test_backing(&[(base, 0x1000)]).unwrap(),
             ))
@@ -1595,6 +1592,10 @@ mod imp {
     #[cfg(all(test, target_arch = "x86_64"))]
     #[allow(clippy::unwrap_used, clippy::expect_used)]
     mod intc_realization_tests {
+        use dillo_devtree::{
+            devtree::{OwnedNode, OwnedProperty},
+            platform::Arch,
+        };
         use dillo_machine::Machine as _;
 
         use super::*;
@@ -1609,11 +1610,17 @@ mod imp {
             ioapic_base: u64,
             ioapic_size: u64,
         ) -> Result<Vm, Error> {
-            let dtb = tree(lapic_base, lapic_size, ioapic_base, ioapic_size)
-                .encode()
-                .expect("encode declaration");
+            let mut tree = tree(lapic_base, lapic_size, ioapic_base, ioapic_size);
+            tree.root_mut().set_child(
+                OwnedNode::new("poweroff@9010000")
+                    .with_property(OwnedProperty::new("compatible").with_str("syscon-poweroff"))
+                    .with_property(OwnedProperty::new("reg").with_u32s(&[0, 0x0901_0000, 0, 4]))
+                    .with_property(OwnedProperty::new("value").with_u32(0x34)),
+            );
+            let dtb = tree.encode().expect("encode declaration");
+            let platform = PlatformMachine::survey(dtb, Arch::X86_64).expect("survey declaration");
             Vm::from_launch_config(LaunchConfig {
-                dtb,
+                platform: &platform,
                 vcpus: 1,
                 min_addr_space_bits: 32,
             })
@@ -1730,12 +1737,7 @@ mod imp {
         fn missing_controller_declaration_is_refused() {
             let root = dillo_devtree::devtree::OwnedNode::new("");
             let dtb = OwnedTree::new(root).encode().expect("encode empty tree");
-            let err = Vm::from_launch_config(LaunchConfig {
-                dtb,
-                vcpus: 1,
-                min_addr_space_bits: 32,
-            })
-            .expect_err("undeclared controllers refused");
+            let err = Vm::from_dtb(&dtb).expect_err("native substrate refuses missing controllers");
             assert!(
                 matches!(err, Error::MissingSubstrate("/lapic")),
                 "unexpected error: {err}"

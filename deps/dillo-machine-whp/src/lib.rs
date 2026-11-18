@@ -33,6 +33,7 @@ mod imp {
     use dillo_devtree::{
         CompatMismatch, FromDevTree, NodeExt, OwnedNodeExt, PropExt,
         devtree::{OwnedTree, Tree},
+        platform::Machine as PlatformMachine,
     };
     use dillo_machine::attachment::{Attach, DeviceAttachment};
     use dillo_machine::execution::{DeviceHandle, RunToken, SpawnError};
@@ -196,30 +197,13 @@ mod imp {
         }
     }
 
-    #[derive(Debug, Clone)]
-    struct Config {
-        processor_count: u32,
-        dtb: Vec<u8>,
-    }
-
-    impl TryFrom<Config> for Vm {
-        type Error = Error;
-
-        fn try_from(config: Config) -> Result<Self, Self::Error> {
-            let parsed: Tree<'_> = Tree::parse(&config.dtb).map_err(Error::ParseDtb)?;
-            let mut tree = OwnedTree::materialize(&parsed);
-            let substrate = WhpX86Substrate::from_devtree(&mut tree)?
-                .ok_or(Error::MissingSubstrate("/ioapic"))?;
-            Self::new_x86_64(config.processor_count, Some(substrate.ioapic))
-        }
-    }
-
     impl dillo_machine::Machine for Vm {
         fn device_failures(&self) -> dillo_machine::execution::DeviceFailureObserver {
             self.device_failures.observer()
         }
 
         type Error = Error;
+        type Platform = PlatformMachine;
         type CpuPreparation = CpuPreparation;
         type Memory = Memory;
 
@@ -248,16 +232,21 @@ mod imp {
             crate::hypervisor::guest_address_bits()
         }
 
-        fn from_launch_config(config: LaunchConfig) -> Result<Self, Self::Error> {
-            let vm = Self::try_from(Config {
-                processor_count: config.vcpus,
-                dtb: config.dtb,
-            })?;
+        fn from_launch_config(
+            config: LaunchConfig<'_, Self::Platform>,
+        ) -> Result<Self, Self::Error> {
+            let parsed: Tree<'_> = Tree::parse(config.platform.dtb()).map_err(Error::ParseDtb)?;
+            let mut tree = OwnedTree::materialize(&parsed);
+            let substrate = WhpX86Substrate::from_devtree(&mut tree)?
+                .ok_or(Error::MissingSubstrate("/ioapic"))?;
+            let vm = Self::new_x86_64(config.vcpus, Some(substrate.ioapic))?;
             let available = Self::guest_address_bits()?;
-            if config.min_addr_space_bits > available {
+            let required = config
+                .min_addr_space_bits
+                .max(config.platform.min_addr_space_bits());
+            if required > available {
                 return Err(Error::AddressSpace(format!(
-                    "launch requires {} bits; backend provides {available}",
-                    config.min_addr_space_bits
+                    "launch requires {required} bits; backend provides {available}"
                 )));
             }
             Ok(vm)

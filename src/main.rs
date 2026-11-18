@@ -178,7 +178,6 @@ fn main() {
     let launch::LaunchPlan {
         parsed,
         platform,
-        merged_dtb,
         memory: memory_plan,
         recipe,
     } = launch;
@@ -198,7 +197,6 @@ fn main() {
     let preflight = runner::Preflight::new(
         parsed,
         platform,
-        merged_dtb,
         memory_plan.memslots.iter().map(|r| runner::RunRegion {
             gpa: r.gpa,
             size: r.size,
@@ -655,13 +653,13 @@ fn translate_forward(f: &dillo_config::ResolvedForward) -> dillo_virtio_net::For
 fn capacity_from_platform(platform: &dillo_devtree::platform::Machine) -> dillo_config::Capacity {
     // Each virtio PCI function consumes one 0x2000 BAR stride in the MMIO window.
     const BAR_STRIDE: u64 = 0x2000;
-    let pci = platform.has_pcie.then(|| {
-        let by_window = (platform.pcie.mmio_size / BAR_STRIDE) as u32;
+    let pci = platform.has_pcie().then(|| {
+        let by_window = (platform.pcie().mmio_size / BAR_STRIDE) as u32;
         by_window.min(31) // PCI device numbers 1..=31 (slot 0 = host bridge)
     });
     dillo_config::Capacity {
         pci,
-        mmio: platform.virtio_mmio.len() as u32,
+        mmio: platform.virtio_mmio().len() as u32,
     }
 }
 
@@ -1487,6 +1485,8 @@ mod launch {
     mod action_tests;
     #[cfg(test)]
     mod delegation_tests;
+    #[cfg(test)]
+    pub(crate) use delegation_tests::base as test_platform_base;
 
     use std::fs::File;
     use std::path::Path;
@@ -1556,7 +1556,6 @@ mod launch {
     #[derive(Debug)]
     pub(crate) struct LaunchPlan<S: LaunchInput = SelectedInput> {
         pub(crate) parsed: dillo_launch::pmi_parse::ParsedPmi,
-        pub(crate) merged_dtb: Vec<u8>,
         pub(crate) platform: PlatformMachine,
         pub(crate) memory: MemoryPlan,
         pub(crate) recipe: LaunchRecipe<S>,
@@ -1640,8 +1639,8 @@ mod launch {
                 })?),
                 None => None,
             };
-            let dtb = resolve_base(bytes, &parsed, oob_base.as_deref())?;
-            let platform = PlatformMachine::survey(&dtb, platform_arch(host_arch))
+            let dtb = resolve_base(bytes, &parsed, oob_base)?;
+            let platform = PlatformMachine::survey(dtb, platform_arch(host_arch))
                 .map_err(LaunchError::Coverage)?;
 
             // The survey supports delegated CPUs and memory only: fixed CPU
@@ -1676,7 +1675,7 @@ mod launch {
                 });
             }
             platform
-                .plan
+                .plan()
                 .cross_validate_loads(&load_ranges, address_bits)
                 .map_err(LaunchError::DtbCrossValidate)?;
 
@@ -1695,11 +1694,11 @@ mod launch {
                 bytes,
                 &parsed,
                 &memory,
-                platform.arch,
+                platform.arch(),
                 cpu_compatible,
                 vcpus,
                 FillInputs {
-                    base_dtb: &dtb,
+                    base_dtb: platform.dtb(),
                     bootconfig: bootconfig_path,
                 },
             )?;
@@ -1708,7 +1707,6 @@ mod launch {
             drop(view);
             Ok(LaunchPlan {
                 parsed,
-                merged_dtb: dtb,
                 platform,
                 memory,
                 recipe: LaunchRecipe {
@@ -1935,7 +1933,7 @@ mod launch {
     fn resolve_base(
         bytes: &[u8],
         parsed: &dillo_launch::pmi_parse::ParsedPmi,
-        oob: Option<&[u8]>,
+        oob: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, LaunchError> {
         let has_fill = parsed
             .actions
@@ -1943,7 +1941,7 @@ mod launch {
             .any(|action| action.kind() == ActionKind::Fill(FillKind::DtDtb));
         match oob {
             Some(_) if !has_fill => Err(LaunchError::UnexpectedBaseOverride),
-            Some(base) => Ok(base.to_vec()),
+            Some(base) => Ok(base),
             None => {
                 let src = parsed
                     .dt_dtb_source
@@ -2178,7 +2176,6 @@ mod machine_select {
         pub(crate) struct Preflight<S: dillo_machine::LaunchInput = <selected_machine::Vm as dillo_machine::Host>::LaunchInput> {
             parsed: dillo_launch::pmi_parse::ParsedPmi,
             platform: PlatformMachine,
-            dtb: Vec<u8>,
             memslots: Vec<RunRegion>,
             memory_nodes: Vec<RunRegion>,
             recipe: crate::launch::LaunchRecipe<S>,
@@ -2192,7 +2189,6 @@ mod machine_select {
             pub(crate) fn new(
                 parsed: dillo_launch::pmi_parse::ParsedPmi,
                 platform: PlatformMachine,
-                dtb: Vec<u8>,
                 memslots: impl IntoIterator<Item = RunRegion>,
                 memory_nodes: impl IntoIterator<Item = RunRegion>,
                 recipe: crate::launch::LaunchRecipe<S>,
@@ -2201,7 +2197,6 @@ mod machine_select {
                 Self {
                     parsed,
                     platform,
-                    dtb,
                     memslots: memslots.into_iter().collect(),
                     memory_nodes: memory_nodes.into_iter().collect(),
                     recipe,
@@ -2214,7 +2209,6 @@ mod machine_select {
             ) -> (
                 dillo_launch::pmi_parse::ParsedPmi,
                 PlatformMachine,
-                Vec<u8>,
                 RunMemoryPlan,
                 crate::launch::LaunchRecipe<S>,
                 Vec<DevicePlacement>,
@@ -2222,7 +2216,6 @@ mod machine_select {
                 (
                     self.parsed,
                     self.platform,
-                    self.dtb,
                     RunMemoryPlan {
                         memslots: self.memslots,
                         memory_nodes: self.memory_nodes,
@@ -2315,24 +2308,24 @@ mod machine_select {
                 placements.into_iter().partition(|p| p.bus == Bus::Pci);
 
             // Realize the declared root even when it has no attached endpoints.
-            if platform.has_pcie {
+            if platform.has_pcie() {
                 // Each virtio function uses BAR 0 (4 KiB cfg) + BAR 2 (4 KiB
                 // MSI-X) — one 0x2000 stride in the PCI MMIO window. Strides are
                 // packed in registration order; the PCI device number is the
                 // allocator-assigned slot.
                 const BAR_STRIDE: u64 = 0x2000;
-                let mmio_base = platform.pcie.mmio_base;
+                let mmio_base = platform.pcie().mmio_base;
                 pci.sort_by_key(|p| p.index);
 
                 let ecam = AddressRange {
-                    base: platform.pcie.ecam_base,
-                    size: platform.pcie.ecam_size,
+                    base: platform.pcie().ecam_base,
+                    size: platform.pcie().ecam_size,
                 };
                 // An empty root needs no message vectors. Registering endpoints
                 // grows the domain to their combined MSI-X table size.
                 let mut pci_root = PciRoot::with_interrupt_requirement(
                     ecam,
-                    optional_message_requirement(platform.pcie.msi.as_ref(), 0),
+                    optional_message_requirement(platform.pcie().msi.as_ref(), 0),
                 );
 
                 for (stride, placement) in pci.into_iter().enumerate() {
@@ -2358,7 +2351,7 @@ mod machine_select {
                 pci_root.set_attachment(attachment);
             }
 
-            for (index, slot) in platform.virtio_mmio.iter().enumerate() {
+            for (index, slot) in platform.virtio_mmio().iter().enumerate() {
                 if mmio
                     .iter()
                     .any(|placement| placement.index as usize == index)
@@ -2379,7 +2372,7 @@ mod machine_select {
 
             // --- MMIO: one transport per placement ---
             for placement in mmio {
-                let slot = &platform.virtio_mmio[placement.index as usize];
+                let slot = &platform.virtio_mmio()[placement.index as usize];
                 let int_status = Arc::new(AtomicU32::new(0));
                 let irq = dillo_mmio_virtio::WiredIrq::unresolved(slot.irq);
                 let transport =
@@ -2414,7 +2407,7 @@ mod machine_select {
             M: Machine<Error = E>,
             M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn DeviceAttachment>>,
         {
-            let Some(uart) = platform.uart.as_ref() else {
+            let Some(uart) = platform.uart() else {
                 // UART is optional; a virtio console can carry guest output.
                 log::debug!("platform declares no UART");
                 return Ok(());
@@ -2448,7 +2441,7 @@ mod machine_select {
             M: Machine<Error = E>,
             M: Attach<Arc<syscon::SysconDevice>, Error = E>,
         {
-            let Some(poweroff) = platform.poweroff else {
+            let Some(poweroff) = platform.poweroff() else {
                 return Ok(());
             };
             Attach::attach(
@@ -2462,7 +2455,7 @@ mod machine_select {
                 ),
             )
             .map_err(RunError::machine)?;
-            if let Some(reboot) = platform.reboot {
+            if let Some(reboot) = platform.reboot() {
                 Attach::attach(
                     vm,
                     Arc::new(
@@ -2501,7 +2494,7 @@ mod machine_select {
         ) -> Result<i32, RunError>
         where
             E: std::error::Error + Send + Sync + 'static,
-            M: Machine<Error = E> + dillo_machine::Host,
+            M: Machine<Error = E, Platform = PlatformMachine> + dillo_machine::Host,
             M: Attach<M::Memory, Error = E, Output = ()>,
             M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn DeviceAttachment>>,
             M: Attach<Arc<dillo_mmio_virtio::EmptySlot>, Error = E>,
@@ -2513,7 +2506,7 @@ mod machine_select {
             M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn DeviceAttachment>>,
             M: Attach<Arc<syscon::SysconDevice>, Error = E>,
         {
-            let (parsed, platform, dtb, plan, recipe, placements) = preflight.into_parts();
+            let (parsed, platform, plan, recipe, placements) = preflight.into_parts();
             log::debug!(
                 "PMI parsed: arch={:?}, {} actions, dt:dtb source={:?}",
                 parsed.arch,
@@ -2522,8 +2515,8 @@ mod machine_select {
             );
             log::debug!(
                 "coverage: base DTB fully claimed - {} declared region(s), pcie={}",
-                platform.plan.regions().len(),
-                platform.has_pcie
+                platform.plan().regions().len(),
+                platform.has_pcie()
             );
             let total_backed: u64 = plan.memslots.iter().map(|r| r.size).sum();
             log::debug!(
@@ -2537,15 +2530,14 @@ mod machine_select {
             }
 
             let mut vm = M::from_launch_config(LaunchConfig {
-                dtb,
+                platform: &platform,
                 vcpus,
-                min_addr_space_bits: platform.min_addr_space_bits().max(
-                    plan.memslots
-                        .iter()
-                        .map(|r| u64::BITS - (r.gpa + r.size - 1).leading_zeros())
-                        .max()
-                        .unwrap_or(0),
-                ),
+                min_addr_space_bits: plan
+                    .memslots
+                    .iter()
+                    .map(|r| u64::BITS - (r.gpa + r.size - 1).leading_zeros())
+                    .max()
+                    .unwrap_or(0),
             })
             .map_err(RunError::machine)?;
             let failures = vm.device_failures();
@@ -2563,6 +2555,7 @@ mod machine_select {
                 attach_uart(&mut vm, &platform)?;
                 attach_syscon(&mut vm, &platform)?;
                 attach_devices(&mut vm, &platform, placements)?;
+                drop(platform);
 
                 let control = Arc::new(SupervisorControl {
                     supervisor_shutdown,
@@ -2614,7 +2607,7 @@ mod machine_select {
         #[cfg(test)]
         mod tests {
             use super::*;
-            use dillo_devtree::devtree::{OwnedNode, OwnedProperty, OwnedTree};
+            use dillo_devtree::devtree::{OwnedNode, OwnedProperty, OwnedTree, Tree};
             use dillo_devtree::platform::Arch;
             use dillo_mmio::{MmioBus, MmioDevice, MmioWriteOutcome};
 
@@ -2684,6 +2677,7 @@ mod machine_select {
                     dillo_machine::execution::DeviceFailureReporter::default().observer()
                 }
                 type Error = std::io::Error;
+                type Platform = ();
                 type CpuPreparation = RefusedCpuInput;
                 fn cpu_preparation(
                     &mut self,
@@ -2697,7 +2691,9 @@ mod machine_select {
                 fn guest_address_bits() -> Result<u32, Self::Error> {
                     Ok(48)
                 }
-                fn from_launch_config(_: LaunchConfig) -> Result<Self, Self::Error> {
+                fn from_launch_config(
+                    _: LaunchConfig<'_, Self::Platform>,
+                ) -> Result<Self, Self::Error> {
                     Ok(Self { prepared: 0 })
                 }
                 fn write_guest(&mut self, _: u64, _: &[u8]) -> Result<(), Self::Error> {
@@ -2751,6 +2747,7 @@ mod machine_select {
 
             impl Machine for AttachedDevices {
                 type Error = std::io::Error;
+                type Platform = ();
                 type CpuPreparation = RefusedCpuInput;
                 type Memory = RefusedMemory;
 
@@ -2770,7 +2767,9 @@ mod machine_select {
                     Ok(48)
                 }
 
-                fn from_launch_config(_: LaunchConfig) -> Result<Self, Self::Error> {
+                fn from_launch_config(
+                    _: LaunchConfig<'_, Self::Platform>,
+                ) -> Result<Self, Self::Error> {
                     Ok(Self::default())
                 }
 
@@ -2821,63 +2820,59 @@ mod machine_select {
             #[test]
             fn pci_root_realization_follows_declaration_not_population() {
                 use dillo_config::Bus;
-                use dillo_devtree::platform::{
-                    ControllerKind, InterruptControllerRef, MsiControllerRef, Pcie, ResourcePlan,
-                    VirtioMmio,
-                };
 
                 const ECAM: u64 = 0x3000_0000;
-                const MMIO: u64 = 0xa00_0000;
+                const MMIO: u64 = 0x0a20_0000;
                 for (declared, placed_bus) in [
                     (true, None),
                     (true, Some(Bus::Mmio)),
                     (true, Some(Bus::Pci)),
                     (false, Some(Bus::Mmio)),
                 ] {
-                    let platform = PlatformMachine {
-                        arch: Arch::Aarch64,
-                        has_pcie: declared,
-                        pcie: if declared {
-                            Pcie {
-                                ecam_base: ECAM,
-                                ecam_size: 0x10_0000,
-                                bus_min: 0,
-                                bus_max: 0,
-                                mmio_base: 0x4000_0000,
-                                mmio_size: 0x100_0000,
-                                msi: Some(MsiParentage {
-                                    node: "/pcie@30000000".into(),
-                                    controller: MsiControllerRef {
-                                        node: "/msi-controller@a100000".into(),
-                                        phandle: 3,
-                                        kind: ControllerKind::GicV2mFrame,
-                                    },
-                                }),
-                            }
-                        } else {
-                            Pcie::ZEROED
-                        },
-                        plan: ResourcePlan::default(),
-                        uart: None,
-                        virtio_mmio: vec![VirtioMmio {
-                            base: MMIO,
-                            size: 0x200,
-                            irq: 16,
-                            interrupt: WiredInterrupt {
-                                node: "/virtio_mmio@a000000".into(),
-                                controller: InterruptControllerRef {
-                                    node: "/interrupt-controller@8000000".into(),
-                                    phandle: 1,
-                                    kind: ControllerKind::GicV3,
-                                    interrupt_cells: 3,
-                                },
-                                cells: vec![0, 16, 1],
-                                irq: 16,
-                            },
-                        }],
-                        poweroff: None,
-                        reboot: None,
-                    };
+                    let base = crate::launch::test_platform_base(
+                        dillo_machine::HostArchitecture::Aarch64,
+                        false,
+                        false,
+                    );
+                    let tree: Tree<'_> = Tree::parse(&base).expect("parse fixture base");
+                    let mut tree = OwnedTree::materialize(&tree);
+                    let root = tree.root_mut();
+                    root.set_child(
+                        OwnedNode::new(&format!("virtio_mmio@{MMIO:x}"))
+                            .with_property(OwnedProperty::new("compatible").with_str("virtio,mmio"))
+                            .with_property(reg(MMIO, 0x200))
+                            .with_property(OwnedProperty::new("interrupt-parent").with_u32(1))
+                            .with_property(OwnedProperty::new("interrupts").with_u32s(&[0, 16, 1])),
+                    );
+                    if declared {
+                        root.set_child(
+                            OwnedNode::new("pcie@30000000")
+                                .with_property(OwnedProperty::new("device_type").with_str("pci"))
+                                .with_property(OwnedProperty::new("#address-cells").with_u32(3))
+                                .with_property(OwnedProperty::new("#size-cells").with_u32(2))
+                                .with_property(
+                                    OwnedProperty::new("compatible")
+                                        .with_str("pci-host-ecam-generic"),
+                                )
+                                .with_property(reg(ECAM, 0x10_0000))
+                                .with_property(OwnedProperty::new("ranges").with_u32s(&[
+                                    0x0200_0000,
+                                    0,
+                                    0x4000_0000,
+                                    0,
+                                    0x4000_0000,
+                                    0,
+                                    0x100_0000,
+                                ]))
+                                .with_property(OwnedProperty::new("bus-range").with_u32s(&[0, 0]))
+                                .with_property(OwnedProperty::new("msi-parent").with_u32(3)),
+                        );
+                    }
+                    let platform = PlatformMachine::survey(
+                        tree.encode().expect("encode fixture platform"),
+                        Arch::Aarch64,
+                    )
+                    .expect("survey fixture platform");
                     let placements = placed_bus
                         .into_iter()
                         .map(|bus| DevicePlacement {
@@ -2907,7 +2902,7 @@ mod machine_select {
                         assert!(
                             !attached
                                 .bus
-                                .read(ECAM + platform.pcie.ecam_size, &mut value)
+                                .read(ECAM + platform.pcie().ecam_size, &mut value)
                         );
                     }
                     let domains: Vec<_> = attached
@@ -2967,16 +2962,16 @@ mod machine_select {
                         );
                     }
                     let dtb = OwnedTree::new(root).encode().expect("encode syscon DT");
-                    let platform = PlatformMachine::survey(&dtb, Arch::X86_64).expect("survey");
+                    let platform = PlatformMachine::survey(dtb, Arch::X86_64).expect("survey");
                     let mut bus = MmioBus::new();
                     for (register, action, outcome) in [
                         (
-                            platform.poweroff.unwrap(),
+                            platform.poweroff().unwrap(),
                             syscon::SysconAction::Poweroff,
                             MmioWriteOutcome::GuestPoweroff,
                         ),
                         (
-                            platform.reboot.unwrap(),
+                            platform.reboot().unwrap(),
                             syscon::SysconAction::Reboot,
                             MmioWriteOutcome::GuestReset,
                         ),
@@ -2989,7 +2984,7 @@ mod machine_select {
                         assert_eq!(window.size, size);
                         assert!(
                             platform
-                                .plan
+                                .plan()
                                 .regions()
                                 .iter()
                                 .any(|region| region.gpa == window.base

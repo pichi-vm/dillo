@@ -36,6 +36,7 @@ mod imp {
     use dillo_devtree::{
         CompatMismatch, FromDevTree, NodeExt, OwnedNodeExt, PropExt,
         devtree::{OwnedTree, Tree},
+        platform::Machine as PlatformMachine,
     };
     use dillo_machine::attachment::{Attach, DeviceAttachment};
     use dillo_machine::execution::{DeviceHandle, RunToken, SpawnError};
@@ -240,25 +241,6 @@ mod imp {
 
         fn install_signal_watchers(supervisor_shutdown: &'static AtomicBool) {
             install_signal_watchers(supervisor_shutdown);
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    struct Config {
-        dtb: Vec<u8>,
-        vcpus: u32,
-        min_addr_space_bits: u32,
-    }
-
-    impl TryFrom<Config> for Vm {
-        type Error = Error;
-
-        fn try_from(config: Config) -> Result<Self, Self::Error> {
-            let parsed: Tree<'_> = Tree::parse(&config.dtb).map_err(Error::ParseDtb)?;
-            let mut tree = OwnedTree::materialize(&parsed);
-            let gic = crate::hypervisor::GicParams::from_devtree(&mut tree)?
-                .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
-            Self::new(&gic, config.min_addr_space_bits, config.vcpus)
         }
     }
 
@@ -497,6 +479,7 @@ mod imp {
         }
 
         type Error = Error;
+        type Platform = PlatformMachine;
         type CpuPreparation = CpuPreparation;
         type Memory = Memory;
 
@@ -537,12 +520,17 @@ mod imp {
             crate::hypervisor::guest_address_bits()
         }
 
-        fn from_launch_config(config: LaunchConfig) -> Result<Self, Self::Error> {
-            Self::try_from(Config {
-                dtb: config.dtb,
-                vcpus: config.vcpus,
-                min_addr_space_bits: config.min_addr_space_bits,
-            })
+        fn from_launch_config(
+            config: LaunchConfig<'_, Self::Platform>,
+        ) -> Result<Self, Self::Error> {
+            let parsed: Tree<'_> = Tree::parse(config.platform.dtb()).map_err(Error::ParseDtb)?;
+            let mut tree = OwnedTree::materialize(&parsed);
+            let gic = crate::hypervisor::GicParams::from_devtree(&mut tree)?
+                .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
+            let required = config
+                .min_addr_space_bits
+                .max(config.platform.min_addr_space_bits());
+            Self::new(&gic, required, config.vcpus)
         }
 
         fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Self::Error> {
