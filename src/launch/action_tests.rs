@@ -229,7 +229,7 @@ fn repeated_sources_keep_order_full_contents_and_neighbor_bytes_on_fresh_machine
         );
         assert!(
             plan.memory
-                .memslots
+                .ranges()
                 .iter()
                 .any(|r| r.gpa <= 0x30_0000 && r.gpa + r.size >= 0x30_e000)
         );
@@ -394,7 +394,7 @@ fn action_address_width_and_large_section_alignment_are_checked() {
         ))
     ));
     let plan = image.plan(49).unwrap();
-    assert!(plan.memory.memslots.iter().any(|r| r.gpa == 1 << 48));
+    assert!(plan.memory.ranges().iter().any(|r| r.gpa == 1 << 48));
 
     let mut image = ActionImage::new(HostArchitecture::X86_64);
     image.load(".padded", 0x40_1000);

@@ -194,20 +194,7 @@ fn main() {
         }
     };
 
-    let preflight = runner::Preflight::new(
-        parsed,
-        platform,
-        memory_plan.memslots.iter().map(|r| runner::RunRegion {
-            gpa: r.gpa,
-            size: r.size,
-        }),
-        memory_plan.memory_nodes.iter().map(|r| runner::RunRegion {
-            gpa: r.gpa,
-            size: r.size,
-        }),
-        recipe,
-        placements,
-    );
+    let preflight = runner::Preflight::new(parsed, platform, memory_plan, recipe, placements);
     boot_trace::mark("preflight");
 
     // Per ARCH §13.5: if stdin is a TTY, enter raw mode for the
@@ -800,16 +787,10 @@ mod fdt_writer {
 
 mod placement {
 
+    use dillo_machine::RamRange;
     use thiserror::Error;
 
     const HUGE_PAGE: u64 = 2 << 20;
-
-    /// One contiguous region for either a memslot or a `/memory@N` node.
-    #[derive(Debug, Clone, Copy)]
-    pub(crate) struct Region {
-        pub(crate) gpa: u64,
-        pub(crate) size: u64,
-    }
 
     #[derive(Debug, Clone, Copy)]
     struct Interval {
@@ -817,11 +798,20 @@ mod placement {
         end: u64, // exclusive
     }
 
-    /// The full memory plan: memslots == memory_nodes by construction.
+    /// The RAM extents used for both native registration and the guest overlay.
     #[derive(Debug)]
     pub(crate) struct MemoryPlan {
-        pub(crate) memslots: Vec<Region>,
-        pub(crate) memory_nodes: Vec<Region>,
+        ranges: Vec<RamRange>,
+    }
+
+    impl MemoryPlan {
+        pub(crate) fn ranges(&self) -> &[RamRange] {
+            &self.ranges
+        }
+
+        pub(crate) fn into_ranges(self) -> Vec<RamRange> {
+            self.ranges
+        }
     }
 
     #[derive(Debug, Error)]
@@ -964,11 +954,17 @@ mod placement {
 
         // ── 3. Assemble final region set ─────────────────────────────
         merge_intervals(&mut ranges);
-        let regions: Vec<Region> = ranges.iter().map(to_region).collect();
+        let regions: Vec<_> = ranges
+            .into_iter()
+            .map(|interval| RamRange {
+                gpa: interval.start,
+                size: interval.end - interval.start,
+            })
+            .collect();
 
         // Section-byte validation cannot see devices in the padding added by
         // hugepage rounding. Check every final RAM extent before publishing
-        // either backend memslots or overlay memory nodes.
+        // the plan.
         for ram in &regions {
             let ram_end = ram.gpa + ram.size;
             for &(device_start, device_size) in &device_regions {
@@ -985,10 +981,7 @@ mod placement {
             }
         }
 
-        Ok(MemoryPlan {
-            memslots: regions.clone(),
-            memory_nodes: regions,
-        })
+        Ok(MemoryPlan { ranges: regions })
     }
 
     /// Device MMIO regions, rounded outward to 2 MiB.
@@ -1012,13 +1005,6 @@ mod placement {
             start: base & !(HUGE_PAGE - 1),
             end,
         })
-    }
-
-    fn to_region(i: &Interval) -> Region {
-        Region {
-            gpa: i.start,
-            size: i.end - i.start,
-        }
     }
 
     /// Merge overlapping or touching intervals in-place. Result is sorted.
@@ -1055,7 +1041,7 @@ mod placement {
                 let plan = plan_around_regions(36, &[(0, HUGE_PAGE)], memory_mib, [])
                     .expect("budget fits guest width");
                 assert_eq!(
-                    plan.memslots.iter().map(|r| r.size).sum::<u64>(),
+                    plan.ranges().iter().map(|r| r.size).sum::<u64>(),
                     u64::from(memory_mib) << 20
                 );
             }
@@ -1065,7 +1051,7 @@ mod placement {
         fn width_bounds_islands_even_when_no_ram_remains() {
             let top = 1 << 36;
             let plan = plan_around_regions(36, &[(top - HUGE_PAGE, HUGE_PAGE)], 2, []).unwrap();
-            assert_eq!(plan.memslots[0].gpa + plan.memslots[0].size, top);
+            assert_eq!(plan.ranges()[0].gpa + plan.ranges()[0].size, top);
             assert!(matches!(
                 plan_around_regions(36, &[(top - HUGE_PAGE, HUGE_PAGE + 1)], 4, []),
                 Err(PlanError::OutOfRange { .. })
@@ -1079,7 +1065,7 @@ mod placement {
         #[test]
         fn exact_address_space_capacity_and_one_page_more() {
             let plan = plan_around_regions(23, &[], 8, []).unwrap();
-            assert_eq!(plan.memslots[0].size, 8 << 20);
+            assert_eq!(plan.ranges()[0].size, 8 << 20);
             assert!(matches!(
                 plan_around_regions(23, &[], 10, []),
                 Err(PlanError::InsufficientCapacity { .. })
@@ -1099,7 +1085,7 @@ mod placement {
             let devices = [(2 << 20, 2 << 20), (6 << 20, 2 << 20), (12 << 20, 2 << 20)];
             let plan = plan_around_regions(24, &[(8 << 20, 1)], 10, devices).unwrap();
             let ranges = plan
-                .memslots
+                .ranges()
                 .iter()
                 .map(|r| (r.gpa, r.size))
                 .collect::<Vec<_>>();
@@ -1111,13 +1097,6 @@ mod placement {
                     (8 << 20, 4 << 20),
                     (14 << 20, 2 << 20)
                 ]
-            );
-            assert_eq!(
-                ranges,
-                plan.memory_nodes
-                    .iter()
-                    .map(|r| (r.gpa, r.size))
-                    .collect::<Vec<_>>()
             );
             assert!(matches!(
                 plan_around_regions(24, &[(8 << 20, 1)], 12, devices),
@@ -1148,10 +1127,10 @@ mod placement {
                     }
                     let plan = result.unwrap();
                     assert_eq!(
-                        plan.memslots.iter().map(|r| r.size).sum::<u64>(),
+                        plan.ranges().iter().map(|r| r.size).sum::<u64>(),
                         u64::from(pages) * HUGE_PAGE
                     );
-                    for range in plan.memslots {
+                    for range in plan.ranges() {
                         for page in range.gpa / HUGE_PAGE..(range.gpa + range.size) / HUGE_PAGE {
                             assert!(page < 8 && mask & (1 << page) == 0);
                         }
@@ -1168,16 +1147,16 @@ mod placement {
                 Err(PlanError::TooLittleMemory { islands_mib: 4, .. })
             ));
             let plan = plan_around_regions(32, &islands, 5, []).unwrap();
-            assert_eq!(plan.memslots.len(), 1);
-            assert_eq!((plan.memslots[0].gpa, plan.memslots[0].size), (0, 6 << 20));
+            assert_eq!(plan.ranges().len(), 1);
+            assert_eq!((plan.ranges()[0].gpa, plan.ranges()[0].size), (0, 6 << 20));
         }
 
         #[test]
         fn four_gib_budget_fills_both_sides_of_device_holes() {
             let devices = [(0xfec0_0000, 0x1000), (0xfee0_0000, 0x1000)];
             let plan = plan_around_regions(36, &[(0x100_0000, HUGE_PAGE)], 4096, devices).unwrap();
-            assert_eq!(plan.memslots.iter().map(|r| r.size).sum::<u64>(), 1 << 32);
-            assert!(plan.memslots.iter().any(|r| r.gpa + r.size > 1 << 32));
+            assert_eq!(plan.ranges().iter().map(|r| r.size).sum::<u64>(), 1 << 32);
+            assert!(plan.ranges().iter().any(|r| r.gpa + r.size > 1 << 32));
             assert!(matches!(
                 plan_around_regions(32, &[(0x100_0000, HUGE_PAGE)], 4096, devices),
                 Err(PlanError::InsufficientCapacity {
@@ -1219,11 +1198,11 @@ mod placement {
             let plan = plan_around_regions(32, &[(0, 0x20_0000)], 8, [(0x20_0000, 0x20_0000)])
                 .expect("placement");
 
-            assert_eq!(plan.memslots.len(), 2);
-            assert_eq!(plan.memslots[0].gpa, 0);
-            assert_eq!(plan.memslots[0].size, 0x20_0000);
-            assert_eq!(plan.memslots[1].gpa, 0x40_0000);
-            assert_eq!(plan.memslots[1].size, 0x60_0000);
+            assert_eq!(plan.ranges().len(), 2);
+            assert_eq!(plan.ranges()[0].gpa, 0);
+            assert_eq!(plan.ranges()[0].size, 0x20_0000);
+            assert_eq!(plan.ranges()[1].gpa, 0x40_0000);
+            assert_eq!(plan.ranges()[1].size, 0x60_0000);
         }
 
         #[test]
@@ -1281,15 +1260,13 @@ mod placement {
             for memory_mib in [2, 8] {
                 let plan = plan_around_regions(32, &[(0x20_1000, 0x1000)], memory_mib, devices)
                     .expect("devices outside the rounded section");
-                assert_eq!(plan.memslots[0].gpa, 0x20_0000);
-                assert_eq!(plan.memslots[0].size, 0x20_0000);
+                assert_eq!(plan.ranges()[0].gpa, 0x20_0000);
+                assert_eq!(plan.ranges()[0].size, 0x20_0000);
                 assert_eq!(
-                    plan.memslots.iter().map(|r| r.size).sum::<u64>(),
+                    plan.ranges().iter().map(|r| r.size).sum::<u64>(),
                     u64::from(memory_mib) << 20
                 );
-                assert_eq!(plan.memslots.len(), plan.memory_nodes.len());
-                for (ram, node) in plan.memslots.iter().zip(&plan.memory_nodes) {
-                    assert_eq!((ram.gpa, ram.size), (node.gpa, node.size));
+                for ram in plan.ranges() {
                     for (base, size) in devices {
                         assert!(ram.gpa + ram.size <= base || base + size <= ram.gpa);
                     }
@@ -1306,9 +1283,9 @@ mod placement {
                 [(0x10_0000, 4), (0x20_1000, 0)],
             )
             .expect("empty sections and device regions do not overlap RAM");
-            assert_eq!(plan.memslots.len(), 1);
-            assert_eq!(plan.memslots[0].gpa, 0x20_0000);
-            assert_eq!(plan.memslots[0].size, 0x20_0000);
+            assert_eq!(plan.ranges().len(), 1);
+            assert_eq!(plan.ranges()[0].gpa, 0x20_0000);
+            assert_eq!(plan.ranges()[0].size, 0x20_0000);
         }
     }
 }
@@ -1316,12 +1293,12 @@ mod placement {
 mod overlay {
 
     use anyhow::{Result, anyhow};
+    use dillo_machine::RamRange;
 
     use crate::fdt_writer::FdtBuilder;
-    use crate::placement::Region;
 
     pub(crate) fn synthesize_dtbo(
-        regions: &[Region],
+        regions: &[RamRange],
         vcpus: u32,
         enable_method: Option<&str>,
         cpu_compatible: Option<&str>,
@@ -1863,7 +1840,7 @@ mod launch {
                     ),
                     ActionKind::Fill(FillKind::DtDtbo) => WriteSrc::Owned(
                         crate::overlay::synthesize_dtbo(
-                            &memory.memory_nodes,
+                            memory.ranges(),
                             vcpus,
                             arch.cpu_enable_method(),
                             cpu_compatible,
@@ -2117,37 +2094,14 @@ mod machine_select {
             InterruptRequirement, InterruptSource, MessageInterruptSource,
         };
         use dillo_machine::memory::AddressRange;
-        use dillo_machine::{LaunchConfig, Machine, Memory as MachineMemory, RamRange, VcpuStop};
+        use dillo_machine::{LaunchConfig, Machine, Memory as MachineMemory, VcpuStop};
         use dillo_mmio::syscon;
         use dillo_pci::PciRoot;
         use dillo_pci_virtio::VirtioPciAdapter;
 
+        use crate::placement::MemoryPlan;
+
         pub(crate) use self::error::RunError;
-
-        /// One launch-derived RAM region passed in by the top-level `dillo` launcher.
-        #[derive(Debug, Clone, Copy)]
-        pub(crate) struct RunRegion {
-            pub(crate) gpa: u64,
-            pub(crate) size: u64,
-        }
-
-        #[derive(Debug)]
-        struct RunMemoryPlan {
-            memslots: Vec<RunRegion>,
-            memory_nodes: Vec<RunRegion>,
-        }
-
-        impl RunMemoryPlan {
-            fn ram_ranges(&self) -> Vec<RamRange> {
-                self.memslots
-                    .iter()
-                    .map(|range| RamRange {
-                        gpa: range.gpa,
-                        size: range.size,
-                    })
-                    .collect()
-            }
-        }
 
         /// One device with its allocated bus + slot, ready to attach. Built by
         /// `build_placements` (console + each virtio-blk/gpt device).
@@ -2176,29 +2130,23 @@ mod machine_select {
         pub(crate) struct Preflight<S: dillo_machine::LaunchInput = <selected_machine::Vm as dillo_machine::Host>::LaunchInput> {
             parsed: dillo_launch::pmi_parse::ParsedPmi,
             platform: PlatformMachine,
-            memslots: Vec<RunRegion>,
-            memory_nodes: Vec<RunRegion>,
+            memory: MemoryPlan,
             recipe: crate::launch::LaunchRecipe<S>,
             placements: Vec<DevicePlacement>,
         }
 
         impl<S: dillo_machine::LaunchInput> Preflight<S> {
-            // Aggregates the target-neutral launch facts; the fields are
-            // genuinely distinct inputs, so a builder would add noise here.
-            #[allow(clippy::too_many_arguments)]
             pub(crate) fn new(
                 parsed: dillo_launch::pmi_parse::ParsedPmi,
                 platform: PlatformMachine,
-                memslots: impl IntoIterator<Item = RunRegion>,
-                memory_nodes: impl IntoIterator<Item = RunRegion>,
+                memory: MemoryPlan,
                 recipe: crate::launch::LaunchRecipe<S>,
                 placements: Vec<DevicePlacement>,
             ) -> Self {
                 Self {
                     parsed,
                     platform,
-                    memslots: memslots.into_iter().collect(),
-                    memory_nodes: memory_nodes.into_iter().collect(),
+                    memory,
                     recipe,
                     placements,
                 }
@@ -2209,17 +2157,14 @@ mod machine_select {
             ) -> (
                 dillo_launch::pmi_parse::ParsedPmi,
                 PlatformMachine,
-                RunMemoryPlan,
+                MemoryPlan,
                 crate::launch::LaunchRecipe<S>,
                 Vec<DevicePlacement>,
             ) {
                 (
                     self.parsed,
                     self.platform,
-                    RunMemoryPlan {
-                        memslots: self.memslots,
-                        memory_nodes: self.memory_nodes,
-                    },
+                    self.memory,
                     self.recipe,
                     self.placements,
                 )
@@ -2518,22 +2463,22 @@ mod machine_select {
                 platform.plan().regions().len(),
                 platform.has_pcie()
             );
-            let total_backed: u64 = plan.memslots.iter().map(|r| r.size).sum();
+            let ranges = plan.ranges();
+            let total_backed: u64 = ranges.iter().map(|r| r.size).sum();
             log::debug!(
                 "memslots: {} region(s), {} bytes",
-                plan.memslots.len(),
+                ranges.len(),
                 total_backed
             );
-            log::debug!("/memory@N nodes: {} region(s)", plan.memory_nodes.len());
-            for r in &plan.memory_nodes {
+            log::debug!("/memory@N nodes: {} region(s)", ranges.len());
+            for r in ranges {
                 log::debug!("  [{:#x}..{:#x}) ({} bytes)", r.gpa, r.gpa + r.size, r.size);
             }
 
             let mut vm = M::from_launch_config(LaunchConfig {
                 platform: &platform,
                 vcpus,
-                min_addr_space_bits: plan
-                    .memslots
+                min_addr_space_bits: ranges
                     .iter()
                     .map(|r| u64::BITS - (r.gpa + r.size - 1).leading_zeros())
                     .max()
@@ -2544,7 +2489,7 @@ mod machine_select {
             let result = (|| {
                 crate::boot_trace::mark("vm_created");
                 let memory =
-                    M::Memory::from_ranges(&plan.ram_ranges()).map_err(RunError::machine)?;
+                    M::Memory::from_ranges(&plan.into_ranges()).map_err(RunError::machine)?;
                 Attach::attach(&mut vm, memory).map_err(RunError::machine)?;
                 crate::boot_trace::mark("mem_attached");
                 recipe
@@ -2609,6 +2554,7 @@ mod machine_select {
             use super::*;
             use dillo_devtree::devtree::{OwnedNode, OwnedProperty, OwnedTree, Tree};
             use dillo_devtree::platform::Arch;
+            use dillo_machine::RamRange;
             use dillo_mmio::{MmioBus, MmioDevice, MmioWriteOutcome};
 
             #[test]

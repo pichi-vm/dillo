@@ -219,7 +219,7 @@ fn load_validation_uses_guest_capacity_not_platform_minimum() {
         let path = dir.path().join("high.pmi");
         std::fs::write(&path, &bytes).unwrap();
         let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 4, 1, None, None).unwrap();
-        assert!(plan.memory.memslots.iter().any(|r| r.gpa == 1u64 << 40));
+        assert!(plan.memory.ranges().iter().any(|r| r.gpa == 1u64 << 40));
         assert!(matches!(
             LaunchPlan::read(&path, arch, None, || Ok(40), 4, 1, None, None),
             Err(LaunchError::DtbCrossValidate(
@@ -435,7 +435,7 @@ fn delegated_allocation_is_delivered_in_reserved_overlay() {
                     .collect();
                 let planned: Vec<_> = plan
                     .memory
-                    .memory_nodes
+                    .ranges()
                     .iter()
                     .map(|region| (region.gpa, region.size))
                     .collect();
