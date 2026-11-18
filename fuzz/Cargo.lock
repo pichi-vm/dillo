@@ -1096,7 +1096,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pmi"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/pmi?rev=b345e89b42dbb13572879102ece515726db701ed#b345e89b42dbb13572879102ece515726db701ed"
+source = "git+https://github.com/pichi-vm/pmi?branch=main#7a5028f15087652bc055f5b139efa48b8511c887"
 dependencies = [
  "flagset",
  "serde",

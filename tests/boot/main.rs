@@ -1891,7 +1891,6 @@ fn build_pmi_mode(dir: &Path, cmdline: &str, dtb: Option<&str>) -> PathBuf {
     let mut cmd = Command::new(env!("CARGO_BIN_FILE_ARMA_arma"));
     cmd.arg("build")
         .args(["--cmdline", cmdline])
-        .args(["--profile", host::PROFILE])
         .arg("--config")
         .arg(&cfg)
         .arg("--kernel")
