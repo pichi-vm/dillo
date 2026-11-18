@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use dillo_mmio::{Interrupt, InterruptError};
+use dillo_machine::interrupt::{Interrupt, InterruptError};
 
 // Model the delivery checks used by HVF/WHP, including handles obtained before
 // later enable/mask changes. KVM currently only logs enable notifications.
@@ -85,10 +85,10 @@ impl PciDevice for TestFunction {
 }
 
 #[derive(Debug)]
-struct TestAttachment(Vec<MmioInterrupt>);
+struct TestAttachment(Vec<InterruptResource>);
 
-impl MmioAttachment for TestAttachment {
-    fn interrupts(&self) -> &[MmioInterrupt] {
+impl DeviceAttachment for TestAttachment {
+    fn interrupts(&self) -> &[InterruptResource] {
         &self.0
     }
 
@@ -96,8 +96,8 @@ impl MmioAttachment for TestAttachment {
         &[]
     }
 
-    fn spawn(self: Arc<Self>, _run: MmioDeviceRun) -> Result<MmioDeviceHandle, MmioSpawnError> {
-        Ok(MmioDeviceHandle::noop())
+    fn spawn(self: Arc<Self>, _run: DeviceRun) -> Result<DeviceHandle, SpawnError> {
+        Ok(DeviceHandle::noop())
     }
 }
 
@@ -125,7 +125,7 @@ fn shared_domain_keeps_function_enable_and_masks_independent() {
         ])),
         ..TestDomain::default()
     });
-    let mut root = PciRoot::new(MmioWindow {
+    let mut root = PciRoot::new(AddressRange {
         base: 0,
         size: 0x1000_0000,
     });
@@ -139,7 +139,7 @@ fn shared_domain_keeps_function_enable_and_masks_independent() {
         );
     }
     root.set_attachment(Arc::new(TestAttachment(vec![
-        MmioInterrupt::MessageDomain(domain.clone()),
+        InterruptResource::MessageDomain(domain.clone()),
     ])));
 
     // Program both functions while disabled, unmasking both local vectors.

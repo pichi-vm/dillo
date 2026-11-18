@@ -2197,15 +2197,16 @@ mod machine_select {
         use super::machine as selected_machine;
         use dillo_devtree::platform::Machine as PlatformMachine;
         use dillo_devtree::platform::{MsiParentage, WiredInterrupt};
+        use dillo_machine::attachment::{Attach, DeviceAttachment};
+        use dillo_machine::interrupt::{
+            InterruptRequirement, InterruptSource, MessageInterruptSource,
+        };
+        use dillo_machine::memory::AddressRange;
         use dillo_machine::{
             BootVcpuState, Cpu as MachineCpu, CpuState as MachineCpuState, LaunchConfig, Machine,
             Memory as MachineMemory, RamRange, VcpuStop,
         };
         use dillo_mmio::syscon;
-        use dillo_mmio::{
-            Attach, InterruptSource, MessageInterruptSource, MmioAttachment,
-            MmioInterruptRequirement, MmioWindow,
-        };
         use dillo_pci::PciRoot;
         use dillo_pci_virtio::VirtioPciAdapter;
 
@@ -2366,14 +2367,14 @@ mod machine_select {
             }
         }
 
-        fn line_requirement(interrupt: &WiredInterrupt) -> MmioInterruptRequirement {
-            MmioInterruptRequirement::Line {
+        fn line_requirement(interrupt: &WiredInterrupt) -> InterruptRequirement {
+            InterruptRequirement::Line {
                 source: interrupt_source(interrupt),
             }
         }
 
-        fn message_requirement(msi: &MsiParentage, vectors: u16) -> MmioInterruptRequirement {
-            MmioInterruptRequirement::MessageDomain {
+        fn message_requirement(msi: &MsiParentage, vectors: u16) -> InterruptRequirement {
+            InterruptRequirement::MessageDomain {
                 source: Some(MessageInterruptSource {
                     controller: msi.controller.phandle,
                 }),
@@ -2384,10 +2385,10 @@ mod machine_select {
         fn optional_message_requirement(
             msi: Option<&MsiParentage>,
             vectors: u16,
-        ) -> MmioInterruptRequirement {
+        ) -> InterruptRequirement {
             match msi {
                 Some(msi) => message_requirement(msi, vectors),
-                None => MmioInterruptRequirement::MessageDomain {
+                None => InterruptRequirement::MessageDomain {
                     source: None,
                     vectors,
                 },
@@ -2407,12 +2408,12 @@ mod machine_select {
         where
             E: std::error::Error + Send + Sync + 'static,
             M: Machine<Error = E>,
-            M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn MmioAttachment>>,
+            M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn DeviceAttachment>>,
             M: Attach<Arc<dillo_mmio_virtio::EmptySlot>, Error = E>,
             M: Attach<
                     Arc<dillo_mmio_virtio::VirtioMmio>,
                     Error = E,
-                    Output = Arc<dyn MmioAttachment>,
+                    Output = Arc<dyn DeviceAttachment>,
                 >,
         {
             use dillo_config::Bus;
@@ -2430,7 +2431,7 @@ mod machine_select {
                 let mmio_base = platform.pcie.mmio_base;
                 pci.sort_by_key(|p| p.index);
 
-                let ecam = MmioWindow {
+                let ecam = AddressRange {
                     base: platform.pcie.ecam_base,
                     size: platform.pcie.ecam_size,
                 };
@@ -2474,7 +2475,7 @@ mod machine_select {
                 Attach::attach(
                     vm,
                     Arc::new(dillo_mmio_virtio::EmptySlot {
-                        window: MmioWindow {
+                        window: AddressRange {
                             base: slot.base,
                             size: slot.size,
                         },
@@ -2490,7 +2491,7 @@ mod machine_select {
                 let irq = dillo_mmio_virtio::WiredIrq::unresolved(slot.irq);
                 let transport =
                     Arc::new(dillo_mmio_virtio::VirtioMmio::with_interrupt_requirement(
-                        MmioWindow {
+                        AddressRange {
                             base: slot.base,
                             size: slot.size,
                         },
@@ -2518,7 +2519,7 @@ mod machine_select {
         where
             E: std::error::Error + Send + Sync + 'static,
             M: Machine<Error = E>,
-            M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn MmioAttachment>>,
+            M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn DeviceAttachment>>,
         {
             let Some(uart) = platform.uart.as_ref() else {
                 // UART is optional; a virtio console can carry guest output.
@@ -2526,7 +2527,7 @@ mod machine_select {
                 return Ok(());
             };
             let serial = Arc::new(dillo_mmio_uart::Ns16550::with_interrupt_requirement(
-                MmioWindow {
+                AddressRange {
                     base: uart.base,
                     size: uart.size,
                 },
@@ -2724,14 +2725,14 @@ mod machine_select {
             M: Machine<Error = E>,
             M: Attach<M::Memory, Error = E, Output = ()>,
             M: Attach<M::CpuState, Error = E, Output = Arc<M::Cpu>>,
-            M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn MmioAttachment>>,
+            M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn DeviceAttachment>>,
             M: Attach<Arc<dillo_mmio_virtio::EmptySlot>, Error = E>,
             M: Attach<
                     Arc<dillo_mmio_virtio::VirtioMmio>,
                     Error = E,
-                    Output = Arc<dyn MmioAttachment>,
+                    Output = Arc<dyn DeviceAttachment>,
                 >,
-            M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn MmioAttachment>>,
+            M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn DeviceAttachment>>,
             M: Attach<Arc<syscon::SysconDevice>, Error = E>,
         {
             let (parsed, platform, dtb, plan, guest_writes, placements, mut pmi) =

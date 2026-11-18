@@ -10,7 +10,7 @@ description = "In-process virtio-blk device for dillo (VirtioDevice transport-ag
 [dependencies]
 dillo-storage.workspace = true
 dillo-virtio.workspace = true
-dillo-mmio.workspace = true
+dillo-machine.workspace = true
 vm-memory.workspace = true
 log.workspace = true
 thiserror.workspace = true

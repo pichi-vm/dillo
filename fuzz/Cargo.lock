@@ -172,15 +172,7 @@ dependencies = [
 name = "dillo-machine"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
  "pmi",
-]
-
-[[package]]
-name = "dillo-mmio"
-version = "0.1.0"
-dependencies = [
- "log",
  "thiserror",
  "vm-memory 0.17.2",
 ]
@@ -189,7 +181,7 @@ dependencies = [
 name = "dillo-virtio"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
+ "dillo-machine",
  "log",
  "thiserror",
  "vm-memory 0.17.2",
@@ -200,7 +192,7 @@ name = "dillo-virtio-net"
 version = "0.1.0"
 dependencies = [
  "block2",
- "dillo-mmio",
+ "dillo-machine",
  "dillo-virtio",
  "libc",
  "log",
