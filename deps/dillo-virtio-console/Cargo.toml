@@ -9,7 +9,7 @@ description = "virtio-console device implementing dillo_virtio::VirtioDevice. Dr
 [dependencies]
 dillo-config.workspace = true
 interprocess = "=2.4.7"
-dillo-mmio.workspace = true
+dillo-machine.workspace = true
 dillo-virtio.workspace = true
 vm-memory.workspace = true
 log.workspace = true
@@ -36,6 +36,7 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+dillo-virtio = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

@@ -15,10 +15,11 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use dillo_mmio::{
-    Interrupt, MmioAttachment, MmioDevice, MmioError, MmioInterrupt, MmioInterruptRequirement,
-    MmioJoinError, MmioWindow, MmioWriteOutcome, SharedMemory,
-};
+use dillo_machine::attachment::DeviceAttachment;
+use dillo_machine::execution::JoinError;
+use dillo_machine::interrupt::{Interrupt, InterruptRequirement, InterruptResource};
+use dillo_machine::memory::{AddressRange, SharedMemory};
+use dillo_mmio::{MmioDevice, MmioError, MmioWriteOutcome};
 use dillo_virtio::queue::Queue;
 use dillo_virtio::{
     ActivateError, DeviceJoinError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
@@ -64,15 +65,15 @@ const INT_VRING: u32 = 0x1;
 /// An unoccupied, declared virtio-mmio slot (Virtio 1.2, section 4.2.2).
 #[derive(Debug)]
 pub struct EmptySlot {
-    pub window: MmioWindow,
+    pub window: AddressRange,
 }
 
 impl MmioDevice for EmptySlot {
-    fn windows(&self) -> &[MmioWindow] {
+    fn windows(&self) -> &[AddressRange] {
         std::slice::from_ref(&self.window)
     }
 
-    fn read(&self, _window: MmioWindow, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
+    fn read(&self, _window: AddressRange, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
         let value: u32 = match offset {
             MAGIC => MAGIC_VALUE,
             VERSION => 2,
@@ -87,7 +88,7 @@ impl MmioDevice for EmptySlot {
 
     fn write(
         &self,
-        _window: MmioWindow,
+        _window: AddressRange,
         _offset: u64,
         _data: &[u8],
     ) -> Result<MmioWriteOutcome, MmioError> {
@@ -180,8 +181,8 @@ struct Inner {
 
 /// A single virtio-mmio transport slot bound to one [`VirtioDevice`].
 pub struct VirtioMmio {
-    window: MmioWindow,
-    interrupts: Vec<MmioInterruptRequirement>,
+    window: AddressRange,
+    interrupts: Vec<InterruptRequirement>,
     inner: Mutex<Inner>,
     /// Shared with the device's interrupt closure (raised on the worker thread,
     /// read here on `INTERRUPT_STATUS`).
@@ -202,7 +203,7 @@ impl std::fmt::Debug for VirtioMmio {
 
 impl VirtioMmio {
     pub fn new(
-        window: MmioWindow,
+        window: AddressRange,
         device: Box<dyn VirtioDevice>,
         int_status: std::sync::Arc<AtomicU32>,
         irq: WiredIrq,
@@ -211,21 +212,21 @@ impl VirtioMmio {
     }
 
     pub fn with_interrupt_requirement(
-        window: MmioWindow,
+        window: AddressRange,
         device: Box<dyn VirtioDevice>,
         int_status: std::sync::Arc<AtomicU32>,
         irq: WiredIrq,
-        interrupt: MmioInterruptRequirement,
+        interrupt: InterruptRequirement,
     ) -> Self {
         Self::with_interrupt_requirements(window, device, int_status, irq, vec![interrupt])
     }
 
     fn with_interrupt_requirements(
-        window: MmioWindow,
+        window: AddressRange,
         device: Box<dyn VirtioDevice>,
         int_status: std::sync::Arc<AtomicU32>,
         irq: WiredIrq,
-        interrupts: Vec<MmioInterruptRequirement>,
+        interrupts: Vec<InterruptRequirement>,
     ) -> Self {
         let device_id = device.device_type();
         let device_features = device.features();
@@ -261,8 +262,8 @@ impl VirtioMmio {
         }
     }
 
-    pub fn set_attachment(&self, attachment: Arc<dyn MmioAttachment>) {
-        if let Some(MmioInterrupt::Line(interrupt)) = attachment.interrupts().first() {
+    pub fn set_attachment(&self, attachment: Arc<dyn DeviceAttachment>) {
+        if let Some(InterruptResource::Line(interrupt)) = attachment.interrupts().first() {
             self.irq.set_interrupt(interrupt.clone());
         }
         self.inner
@@ -295,11 +296,7 @@ impl VirtioMmio {
             QUEUE_READY => g.queues.get(sel).map_or(0, |q| u32::from(q.ready)),
             INTERRUPT_STATUS => self.int_status.load(Ordering::SeqCst),
             STATUS => g.status,
-            // Config never changes mid-flight, so the generation is always 0.
-            // Kept as a named arm (not folded into the wildcard) to document the
-            // register map; its body coincides with the unhandled-register case.
-            #[allow(clippy::match_same_arms)]
-            CONFIG_GENERATION => 0,
+            CONFIG_GENERATION => g.device.config_generation(),
             // No shared memory regions: virtio 1.2 §4.2.2 requires all ones.
             SHM_LEN_LOW | SHM_LEN_HIGH | SHM_BASE_LOW | SHM_BASE_HIGH => u32::MAX,
             _ => 0,
@@ -391,8 +388,8 @@ impl VirtioMmio {
     pub fn interrupt(
         int_status: std::sync::Arc<AtomicU32>,
         irq: WiredIrq,
-    ) -> dillo_mmio::Interrupt {
-        dillo_mmio::Interrupt::from_fn(move || {
+    ) -> dillo_machine::interrupt::Interrupt {
+        dillo_machine::interrupt::Interrupt::from_fn(move || {
             int_status.fetch_or(INT_VRING, Ordering::SeqCst);
             irq.set(true);
         })
@@ -410,15 +407,15 @@ impl Drop for VirtioMmio {
 }
 
 impl MmioDevice for VirtioMmio {
-    fn windows(&self) -> &[MmioWindow] {
+    fn windows(&self) -> &[AddressRange] {
         std::slice::from_ref(&self.window)
     }
 
-    fn interrupts(&self) -> &[MmioInterruptRequirement] {
+    fn interrupts(&self) -> &[InterruptRequirement] {
         &self.interrupts
     }
 
-    fn read(&self, _window: MmioWindow, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
+    fn read(&self, _window: AddressRange, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
         Self::read(self, offset, data)
             .then_some(())
             .ok_or(MmioError::Unsupported)
@@ -426,7 +423,7 @@ impl MmioDevice for VirtioMmio {
 
     fn write(
         &self,
-        _window: MmioWindow,
+        _window: AddressRange,
         offset: u64,
         data: &[u8],
     ) -> Result<MmioWriteOutcome, MmioError> {
@@ -450,7 +447,7 @@ fn set_hi(g: &mut Inner, sel: usize, field: impl Fn(&mut QueueCfg) -> &mut u64, 
     }
 }
 
-fn maybe_activate(g: &mut Inner, window: MmioWindow, interrupt: Interrupt) {
+fn maybe_activate(g: &mut Inner, window: AddressRange, interrupt: Interrupt) {
     if g.activated || g.status & STATUS_DRIVER_OK == 0 {
         return;
     }
@@ -511,7 +508,7 @@ fn maybe_activate(g: &mut Inner, window: MmioWindow, interrupt: Interrupt) {
 
 #[derive(Debug)]
 struct MmioVirtioHost {
-    attachment: Arc<dyn MmioAttachment>,
+    attachment: Arc<dyn DeviceAttachment>,
 }
 
 impl VirtioDeviceHost for MmioVirtioHost {
@@ -521,15 +518,21 @@ impl VirtioDeviceHost for MmioVirtioHost {
 
     fn spawn(
         &self,
-        run: Box<dyn FnOnce(VirtioRunToken) -> Result<(), DeviceJoinError> + Send>,
+        name: String,
+        run: Box<
+            dyn FnOnce(VirtioRunToken) -> Result<dillo_virtio::DeviceExit, DeviceJoinError> + Send,
+        >,
     ) -> Result<VirtioDeviceHandle, ActivateError> {
         let handle = Arc::clone(&self.attachment)
-            .spawn(Box::new(move |token| {
-                run(VirtioRunToken::from_fn(move || {
-                    token.is_shutdown_requested()
-                }))
-                .map_err(|e| MmioJoinError::Host(e.to_string()))
-            }))
+            .spawn(
+                name,
+                Box::new(move |token| {
+                    run(VirtioRunToken::from_fn(move || {
+                        token.is_shutdown_requested()
+                    }))
+                    .map_err(|e| JoinError::Host(e.to_string()))
+                }),
+            )
             .map_err(|e| ActivateError::InvalidConfig(format!("spawn virtio worker: {e}")))?;
         let handle = Arc::new(Mutex::new(Some(handle)));
         let shutdown_handle = Arc::clone(&handle);
@@ -570,7 +573,7 @@ mod tests {
     #[derive(Debug)]
     struct TestNotification(Kick);
 
-    impl dillo_mmio::WriteNotification for TestNotification {
+    impl dillo_machine::notification::WriteNotification for TestNotification {
         fn read(&self) -> std::io::Result<u64> {
             self.0.read()
         }
@@ -579,8 +582,8 @@ mod tests {
         }
     }
 
-    impl MmioAttachment for TestAttachment {
-        fn interrupts(&self) -> &[MmioInterrupt] {
+    impl DeviceAttachment for TestAttachment {
+        fn interrupts(&self) -> &[InterruptResource] {
             &[]
         }
         fn shared_memory(&self) -> &[Arc<dyn SharedMemory>] {
@@ -588,16 +591,19 @@ mod tests {
         }
         fn spawn(
             self: Arc<Self>,
-            _: dillo_mmio::MmioDeviceRun,
-        ) -> Result<dillo_mmio::MmioDeviceHandle, dillo_mmio::MmioSpawnError> {
+            _: String,
+            _: dillo_machine::execution::DeviceRun,
+        ) -> Result<dillo_machine::execution::DeviceHandle, dillo_machine::execution::SpawnError>
+        {
             unreachable!("test device starts no workers")
         }
         fn write_notification(
             &self,
-            window: MmioWindow,
+            window: AddressRange,
             offset: u64,
             value: u32,
-        ) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
+        ) -> std::io::Result<Option<Arc<dyn dillo_machine::notification::WriteNotification>>>
+        {
             if self.registration_error {
                 return Err(std::io::ErrorKind::OutOfMemory.into());
             }
@@ -615,8 +621,10 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct TestDevice {
         fail: bool,
+        generation: u32,
     }
 
     impl VirtioDevice for TestDevice {
@@ -653,7 +661,31 @@ mod tests {
             ))
         }
         fn read_config(&self, _: u64, _: &mut [u8]) {}
-        fn write_config(&mut self, _: u64, _: &[u8]) {}
+        fn config_generation(&self) -> u32 {
+            self.generation
+        }
+        fn write_config(&mut self, _: u64, data: &[u8]) {
+            self.generation = u32::from_le_bytes(data.try_into().unwrap());
+        }
+    }
+
+    #[test]
+    fn config_generation_reads_current_device_value_at_mmio_width() {
+        let transport = VirtioMmio::new(
+            AddressRange {
+                base: 0x1000,
+                size: 0x1000,
+            },
+            Box::new(TestDevice::default()),
+            Arc::new(AtomicU32::new(0)),
+            WiredIrq::unresolved(1),
+        );
+        for generation in [0u32, 0x1234_56ff, 0x1234_5700, u32::MAX, 0] {
+            transport.write(CONFIG, &generation.to_le_bytes());
+            let mut bytes = [0; 4];
+            transport.read(CONFIG_GENERATION, &mut bytes);
+            assert_eq!(u32::from_le_bytes(bytes), generation);
+        }
     }
 
     #[test]
@@ -664,11 +696,14 @@ mod tests {
                 ..Default::default()
             });
             let transport = VirtioMmio::new(
-                MmioWindow {
+                AddressRange {
                     base: 0x1000,
                     size: 0x1000,
                 },
-                Box::new(TestDevice { fail }),
+                Box::new(TestDevice {
+                    fail,
+                    ..Default::default()
+                }),
                 Arc::new(AtomicU32::new(0)),
                 WiredIrq::unresolved(1),
             );
@@ -697,11 +732,11 @@ mod tests {
                 ..Default::default()
             });
             let transport = VirtioMmio::new(
-                MmioWindow {
+                AddressRange {
                     base: 0x1000,
                     size: 0x1000,
                 },
-                Box::new(TestDevice { fail: false }),
+                Box::new(TestDevice::default()),
                 Arc::new(AtomicU32::new(0)),
                 WiredIrq::unresolved(1),
             );
@@ -719,7 +754,7 @@ mod tests {
     #[test]
     fn empty_slot_passes_transport_probe_without_a_device() {
         let slot = EmptySlot {
-            window: MmioWindow {
+            window: AddressRange {
                 base: 0x1000,
                 size: 0x1000,
             },

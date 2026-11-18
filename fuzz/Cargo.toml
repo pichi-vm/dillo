@@ -53,3 +53,7 @@ bench = false
 
 [lints.clippy]
 self_named_module_files = "deny"
+
+# Temporary staging revision pending upstream integration.
+[patch.crates-io]
+vm-memory = { git = "https://github.com/pichi-vm/vm-memory", rev = "940b3327919f441eea38d48c67f32fdb7125871c" }
