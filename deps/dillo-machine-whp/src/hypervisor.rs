@@ -2581,12 +2581,15 @@ mod tests {
         }
         let high = 0xffff_f100u32;
         let low = 0x1_0100u32;
-        // Same physical operand in all cases. Each access is followed by HLT,
+        let before_high = high - 5;
+        let ram_value = 0xa55a_1234u32;
+        // Same MMIO operand in all cases. Each access is followed by HLT,
         // although the callback deliberately fails before guest continuation.
         let read: &[u8] = &[0xa1, 0, 0, 0, 0x0b, 0xf4];
         let write: &[u8] = &[0xc7, 0x05, 0, 0, 0, 0x0b, 0x78, 0x56, 0x34, 0x12, 0xf4];
         for (label, efer, ds_selector, entry, code) in [
             ("fixed-read", 0x901, 0, high, read),
+            ("read-after-native-ram", 0x901, 0, before_high, read),
             ("fixed-write", 0x901, 0, high, write),
             ("read-LME-clear", 0x801, 0, high, read),
             ("read-DS-selector-8", 0x901, 8, high, read),
@@ -2609,9 +2612,15 @@ mod tests {
                         size: 0x1000,
                     },
                 ])?)?;
-                // Identical mapping topology and code bytes in every case.
+                // Seed both code locations in the same two RAM mappings.
                 vm.write_guest(u64::from(low), code)?;
                 vm.write_guest(u64::from(high), code)?;
+                if entry == before_high {
+                    // Native mov eax, moffs32 through the same DS to existing
+                    // RAM. It ends exactly where the unchanged MMIO read begins.
+                    vm.write_guest(0x1_0000, &ram_value.to_le_bytes())?;
+                    vm.write_guest(u64::from(before_high), &[0xa1, 0, 0, 1, 0])?;
+                }
                 let mut trampoline = vec![0xe9];
                 trampoline.extend_from_slice(&entry.wrapping_sub(0xffff_fff5).to_le_bytes());
                 vm.write_guest(0xffff_fff0, &trampoline)?;
@@ -2706,6 +2715,12 @@ mod tests {
                     reads.get(),
                     writes.get()
                 );
+                if entry == before_high {
+                    let eax = cpu.native_register_words(WHvX64RegisterRax)[0];
+                    eprintln!(
+                        "WHP entry experiment {label}: EAX after exit={eax:#x}, RAM value={ram_value:#x}"
+                    );
+                }
                 // No next run, even if emulation unexpectedly succeeds.
                 Ok(())
             })();
