@@ -15,7 +15,7 @@ use dillo_devtree::platform::{Arch, Machine, SurveyError};
 
 #[test]
 fn empty_dtb_rejected() {
-    let err = Machine::survey(&[], Arch::X86_64).expect_err("0 bytes must not parse");
+    let err = Machine::survey(Vec::new(), Arch::X86_64).expect_err("0 bytes must not parse");
     assert!(matches!(err, SurveyError::Parse(_)), "got {err:?}");
 }
 
@@ -23,7 +23,7 @@ fn empty_dtb_rejected() {
 fn truncated_dtb_rejected() {
     // FDT header is 40 bytes; anything shorter can't even be sized.
     let bytes = vec![0u8; 16];
-    let err = Machine::survey(&bytes, Arch::X86_64).expect_err("16 bytes must not parse");
+    let err = Machine::survey(bytes, Arch::X86_64).expect_err("16 bytes must not parse");
     assert!(matches!(err, SurveyError::Parse(_)), "got {err:?}");
 }
 
@@ -32,7 +32,7 @@ fn garbage_with_wrong_magic_rejected() {
     let mut bytes = vec![0u8; 256];
     // Set first 4 bytes to non-FDT magic.
     bytes[0..4].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
-    let err = Machine::survey(&bytes, Arch::X86_64).expect_err("wrong magic must not parse");
+    let err = Machine::survey(bytes, Arch::X86_64).expect_err("wrong magic must not parse");
     assert!(matches!(err, SurveyError::Parse(_)), "got {err:?}");
 }
 
@@ -70,7 +70,7 @@ fn real_pmi_dtb_parses_clean() {
         return;
     };
     // Positive control: the workspace's real DTB MUST parse cleanly.
-    Machine::survey(&dtb, Arch::X86_64).expect("real PMI's .dtb must survey cleanly");
+    Machine::survey(dtb, Arch::X86_64).expect("real PMI's .dtb must survey cleanly");
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn dtb_with_random_byte_flipped_fails_safely() {
     // 40-byte header) — likely trips parse or rule checks.
     let mid = dtb.len() / 2;
     dtb[mid] ^= 0xFF;
-    let result = Machine::survey(&dtb, Arch::X86_64);
+    let result = Machine::survey(dtb, Arch::X86_64);
     // We don't care which error — only that it's an error, not a
     // panic or accept. Either outcome (Ok or Err) is fine as long
     // as no panic occurred (the extract call returning at all
@@ -136,7 +136,7 @@ fn non_allowlisted_intc_compatible_rejected() {
         eprintln!("skipping: dtc not available");
         return;
     };
-    let err = Machine::survey(&dtb, Arch::X86_64).expect_err("bogus intc compat must fail");
+    let err = Machine::survey(dtb, Arch::X86_64).expect_err("bogus intc compat must fail");
     // Any error in [DtbParse, IntcNotAllowed, missing nodes] is OK —
     // we're proving the validation chain rejects.
     let _ = err;
@@ -158,7 +158,7 @@ fn non_allowlisted_pcie_compatible_rejected() {
         eprintln!("skipping: dtc not available");
         return;
     };
-    let _ = Machine::survey(&dtb, Arch::X86_64).expect_err("bogus pcie compat must fail");
+    let _ = Machine::survey(dtb, Arch::X86_64).expect_err("bogus pcie compat must fail");
 }
 
 #[test]
@@ -177,7 +177,7 @@ fn non_allowlisted_syscon_compatible_rejected() {
         eprintln!("skipping: dtc not available");
         return;
     };
-    let _ = Machine::survey(&dtb, Arch::X86_64).expect_err("bogus syscon compat must fail");
+    let _ = Machine::survey(dtb, Arch::X86_64).expect_err("bogus syscon compat must fail");
 }
 
 #[test]
@@ -199,7 +199,7 @@ fn pcie_ecam_mmio_overlap_rejected() {
         eprintln!("skipping: dtc not available");
         return;
     };
-    let _ = Machine::survey(&dtb, Arch::X86_64).expect_err("overlap must fail");
+    let _ = Machine::survey(dtb, Arch::X86_64).expect_err("overlap must fail");
 }
 
 #[test]
@@ -214,7 +214,7 @@ fn address_cells_size_cells_not_two_rejected() {
         eprintln!("skipping: dtc not available");
         return;
     };
-    Machine::survey(&dtb, Arch::X86_64).expect_err("address-cells=1 must fail");
+    Machine::survey(dtb, Arch::X86_64).expect_err("address-cells=1 must fail");
 }
 
 #[test]
@@ -236,6 +236,6 @@ fn base_with_cpus_node_rejected() {
         eprintln!("skipping: dtc not available");
         return;
     };
-    let err = Machine::survey(&dtb, Arch::X86_64).expect_err("base with /cpus must be rejected");
+    let err = Machine::survey(dtb, Arch::X86_64).expect_err("base with /cpus must be rejected");
     assert!(matches!(err, SurveyError::BaseHasCpus), "got {err:?}");
 }

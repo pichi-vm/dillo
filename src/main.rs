@@ -178,7 +178,6 @@ fn main() {
     let launch::LaunchPlan {
         parsed,
         platform,
-        merged_dtb,
         memory: memory_plan,
         guest_writes,
         pmi: pmi_image,
@@ -199,7 +198,6 @@ fn main() {
     let preflight = runner::Preflight::new(
         parsed,
         platform,
-        merged_dtb,
         memory_plan.memslots.iter().map(|r| runner::RunRegion {
             gpa: r.gpa,
             size: r.size,
@@ -661,13 +659,13 @@ fn translate_forward(f: &dillo_config::ResolvedForward) -> dillo_virtio_net::For
 fn capacity_from_platform(platform: &dillo_devtree::platform::Machine) -> dillo_config::Capacity {
     // Each virtio PCI function consumes one 0x2000 BAR stride in the MMIO window.
     const BAR_STRIDE: u64 = 0x2000;
-    let pci = platform.has_pcie.then(|| {
-        let by_window = (platform.pcie.mmio_size / BAR_STRIDE) as u32;
+    let pci = platform.has_pcie().then(|| {
+        let by_window = (platform.pcie().mmio_size / BAR_STRIDE) as u32;
         by_window.min(31) // PCI device numbers 1..=31 (slot 0 = host bridge)
     });
     dillo_config::Capacity {
         pci,
-        mmio: platform.virtio_mmio.len() as u32,
+        mmio: platform.virtio_mmio().len() as u32,
     }
 }
 
@@ -1631,7 +1629,6 @@ mod launch {
     #[derive(Debug)]
     pub(crate) struct LaunchPlan {
         pub(crate) parsed: dillo_launch::pmi_parse::ParsedPmi,
-        pub(crate) merged_dtb: Vec<u8>,
         pub(crate) platform: PlatformMachine,
         pub(crate) memory: MemoryPlan,
         pub(crate) guest_writes: Vec<GuestWrite>,
@@ -1707,8 +1704,8 @@ mod launch {
                 })?),
                 None => None,
             };
-            let dtb = resolve_base(bytes, &parsed, oob_base.as_deref())?;
-            let platform = PlatformMachine::survey(&dtb, platform_arch(host_arch))
+            let dtb = resolve_base(bytes, &parsed, oob_base)?;
+            let platform = PlatformMachine::survey(dtb, platform_arch(host_arch))
                 .map_err(LaunchError::Coverage)?;
 
             // The survey supports delegated CPUs and memory only: fixed CPU
@@ -1741,7 +1738,7 @@ mod launch {
                 });
             }
             platform
-                .plan
+                .plan()
                 .cross_validate_loads(&load_ranges, address_bits)
                 .map_err(LaunchError::DtbCrossValidate)?;
 
@@ -1760,11 +1757,11 @@ mod launch {
                 bytes,
                 &parsed,
                 &memory,
-                platform.arch,
+                platform.arch(),
                 cpu_compatible,
                 vcpus,
                 FillInputs {
-                    base_dtb: &dtb,
+                    base_dtb: platform.dtb(),
                     bootconfig: bootconfig_path,
                 },
             )?;
@@ -1775,7 +1772,6 @@ mod launch {
             // copied straight from it into guest RAM at apply time (single copy).
             Ok(Self {
                 parsed,
-                merged_dtb: dtb,
                 platform,
                 memory,
                 guest_writes,
@@ -1994,7 +1990,7 @@ mod launch {
     fn resolve_base(
         bytes: &[u8],
         parsed: &dillo_launch::pmi_parse::ParsedPmi,
-        oob: Option<&[u8]>,
+        oob: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, LaunchError> {
         let has_fill = parsed.actions.iter().any(|a| {
             matches!(
@@ -2007,7 +2003,7 @@ mod launch {
         });
         match oob {
             Some(_) if !has_fill => Err(LaunchError::UnexpectedBaseOverride),
-            Some(base) => Ok(base.to_vec()),
+            Some(base) => Ok(base),
             None => {
                 let src = parsed
                     .dt_dtb_source
@@ -2271,7 +2267,6 @@ mod machine_select {
         pub(crate) struct Preflight {
             parsed: dillo_launch::pmi_parse::ParsedPmi,
             platform: PlatformMachine,
-            dtb: Vec<u8>,
             memslots: Vec<RunRegion>,
             memory_nodes: Vec<RunRegion>,
             guest_writes: Vec<RunWrite>,
@@ -2286,7 +2281,6 @@ mod machine_select {
             pub(crate) fn new(
                 parsed: dillo_launch::pmi_parse::ParsedPmi,
                 platform: PlatformMachine,
-                dtb: Vec<u8>,
                 memslots: impl IntoIterator<Item = RunRegion>,
                 memory_nodes: impl IntoIterator<Item = RunRegion>,
                 guest_writes: impl IntoIterator<Item = RunWrite>,
@@ -2296,7 +2290,6 @@ mod machine_select {
                 Self {
                     parsed,
                     platform,
-                    dtb,
                     memslots: memslots.into_iter().collect(),
                     memory_nodes: memory_nodes.into_iter().collect(),
                     guest_writes: guest_writes.into_iter().collect(),
@@ -2310,7 +2303,6 @@ mod machine_select {
             ) -> (
                 dillo_launch::pmi_parse::ParsedPmi,
                 PlatformMachine,
-                Vec<u8>,
                 RunMemoryPlan,
                 Vec<RunWrite>,
                 Vec<DevicePlacement>,
@@ -2319,7 +2311,6 @@ mod machine_select {
                 (
                     self.parsed,
                     self.platform,
-                    self.dtb,
                     RunMemoryPlan {
                         memslots: self.memslots,
                         memory_nodes: self.memory_nodes,
@@ -2427,18 +2418,18 @@ mod machine_select {
                 // packed in registration order; the PCI device number is the
                 // allocator-assigned slot.
                 const BAR_STRIDE: u64 = 0x2000;
-                let mmio_base = platform.pcie.mmio_base;
+                let mmio_base = platform.pcie().mmio_base;
                 pci.sort_by_key(|p| p.index);
 
                 let ecam = MmioWindow {
-                    base: platform.pcie.ecam_base,
-                    size: platform.pcie.ecam_size,
+                    base: platform.pcie().ecam_base,
+                    size: platform.pcie().ecam_size,
                 };
                 // PciRoot recomputes the MSI-X domain size from registered
                 // devices, so the seed vector count here is irrelevant.
                 let mut pci_root = PciRoot::with_interrupt_requirement(
                     ecam,
-                    optional_message_requirement(platform.pcie.msi.as_ref(), 0),
+                    optional_message_requirement(platform.pcie().msi.as_ref(), 0),
                 );
 
                 for (stride, placement) in pci.into_iter().enumerate() {
@@ -2464,7 +2455,7 @@ mod machine_select {
                 pci_root.set_attachment(attachment);
             }
 
-            for (index, slot) in platform.virtio_mmio.iter().enumerate() {
+            for (index, slot) in platform.virtio_mmio().iter().enumerate() {
                 if mmio
                     .iter()
                     .any(|placement| placement.index as usize == index)
@@ -2485,7 +2476,7 @@ mod machine_select {
 
             // --- MMIO: one transport per placement ---
             for placement in mmio {
-                let slot = &platform.virtio_mmio[placement.index as usize];
+                let slot = &platform.virtio_mmio()[placement.index as usize];
                 let int_status = Arc::new(AtomicU32::new(0));
                 let irq = dillo_mmio_virtio::WiredIrq::unresolved(slot.irq);
                 let transport =
@@ -2520,7 +2511,7 @@ mod machine_select {
             M: Machine<Error = E>,
             M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn MmioAttachment>>,
         {
-            let Some(uart) = platform.uart.as_ref() else {
+            let Some(uart) = platform.uart() else {
                 // UART is optional; a virtio console can carry guest output.
                 log::debug!("platform declares no UART");
                 return Ok(());
@@ -2554,7 +2545,7 @@ mod machine_select {
             M: Machine<Error = E>,
             M: Attach<Arc<syscon::SysconDevice>, Error = E>,
         {
-            let Some(poweroff) = platform.poweroff else {
+            let Some(poweroff) = platform.poweroff() else {
                 return Ok(());
             };
             Attach::attach(
@@ -2568,7 +2559,7 @@ mod machine_select {
                 ),
             )
             .map_err(RunError::machine)?;
-            if let Some(reboot) = platform.reboot {
+            if let Some(reboot) = platform.reboot() {
                 Attach::attach(
                     vm,
                     Arc::new(
@@ -2721,7 +2712,7 @@ mod machine_select {
         ) -> Result<i32, RunError>
         where
             E: std::error::Error + Send + Sync + 'static,
-            M: Machine<Error = E>,
+            M: Machine<Error = E, Platform = PlatformMachine>,
             M: Attach<M::Memory, Error = E, Output = ()>,
             M: Attach<M::CpuState, Error = E, Output = Arc<M::Cpu>>,
             M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn MmioAttachment>>,
@@ -2734,7 +2725,7 @@ mod machine_select {
             M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn MmioAttachment>>,
             M: Attach<Arc<syscon::SysconDevice>, Error = E>,
         {
-            let (parsed, platform, dtb, plan, guest_writes, placements, mut pmi) =
+            let (parsed, platform, plan, guest_writes, placements, mut pmi) =
                 preflight.into_parts();
             log::debug!(
                 "PMI parsed: arch={:?}, {} actions, dt:dtb source={:?}",
@@ -2744,8 +2735,8 @@ mod machine_select {
             );
             log::debug!(
                 "coverage: base DTB fully claimed - {} declared region(s), pcie={}",
-                platform.plan.regions().len(),
-                platform.has_pcie
+                platform.plan().regions().len(),
+                platform.has_pcie()
             );
             let total_backed: u64 = plan.memslots.iter().map(|r| r.size).sum();
             log::debug!(
@@ -2759,15 +2750,14 @@ mod machine_select {
             }
 
             let mut vm = M::from_launch_config(LaunchConfig {
-                dtb,
+                platform: &platform,
                 vcpus,
-                min_addr_space_bits: platform.min_addr_space_bits().max(
-                    plan.memslots
-                        .iter()
-                        .map(|r| u64::BITS - (r.gpa + r.size - 1).leading_zeros())
-                        .max()
-                        .unwrap_or(0),
-                ),
+                min_addr_space_bits: plan
+                    .memslots
+                    .iter()
+                    .map(|r| u64::BITS - (r.gpa + r.size - 1).leading_zeros())
+                    .max()
+                    .unwrap_or(0),
             })
             .map_err(RunError::machine)?;
             crate::boot_trace::mark("vm_created");
@@ -2783,6 +2773,7 @@ mod machine_select {
             attach_uart(&mut vm, &platform)?;
             attach_syscon(&mut vm, &platform)?;
             attach_devices(&mut vm, &platform, placements)?;
+            drop(platform);
 
             let control = Arc::new(SupervisorControl {
                 supervisor_shutdown,
@@ -2883,16 +2874,16 @@ mod machine_select {
                         );
                     }
                     let dtb = OwnedTree::new(root).encode().expect("encode syscon DT");
-                    let platform = PlatformMachine::survey(&dtb, Arch::X86_64).expect("survey");
+                    let platform = PlatformMachine::survey(dtb, Arch::X86_64).expect("survey");
                     let mut bus = MmioBus::new();
                     for (register, action, outcome) in [
                         (
-                            platform.poweroff.unwrap(),
+                            platform.poweroff().unwrap(),
                             syscon::SysconAction::Poweroff,
                             MmioWriteOutcome::GuestPoweroff,
                         ),
                         (
-                            platform.reboot.unwrap(),
+                            platform.reboot().unwrap(),
                             syscon::SysconAction::Reboot,
                             MmioWriteOutcome::GuestReset,
                         ),
@@ -2905,7 +2896,7 @@ mod machine_select {
                         assert_eq!(window.size, size);
                         assert!(
                             platform
-                                .plan
+                                .plan()
                                 .regions()
                                 .iter()
                                 .any(|region| region.gpa == window.base
