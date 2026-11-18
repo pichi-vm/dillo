@@ -20,5 +20,13 @@ applevisor.workspace = true
 applevisor-sys.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+tempfile = "3"
+wait-timeout = "0.2"
+
+[dev-dependencies]
+dillo-virtio = { workspace = true, features = ["test-support"] }
+dillo-runtime.workspace = true
+
 [lints]
 workspace = true

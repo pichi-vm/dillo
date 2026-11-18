@@ -3,32 +3,16 @@
 
 //! Memfd + mmap plumbing for guest memory.
 
-use std::ffi::CString;
-use std::num::NonZeroUsize;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::fs::File;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-
-use std::os::fd::{AsRawFd, FromRawFd};
 
 use anyhow::{Context, Result, anyhow, bail};
 use nix::fcntl::{FallocateFlags, fallocate};
 use nix::sys::memfd::{MFdFlags, memfd_create};
-use nix::sys::mman::{MapFlags, ProtFlags, mmap};
 use nix::unistd::ftruncate;
 use vm_memory::mmap::MmapRegionBuilder;
-use vm_memory::{FileOffset, GuestAddress, GuestMemoryMmap, GuestRegionMmap};
-
-/// Owned memfd.
-#[derive(Debug)]
-struct Memfd {
-    fd: std::os::fd::OwnedFd,
-}
-
-impl AsFd for Memfd {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
-    }
-}
+use vm_memory::{Bytes, FileOffset, GuestAddress, GuestMemoryMmap, GuestRegionMmap};
 
 /// Whether to eagerly commit all guest RAM at creation. Default off:
 /// pages commit lazily on first touch, which is faster to boot and lets
@@ -41,115 +25,6 @@ static PREALLOCATE: AtomicBool = AtomicBool::new(false);
 /// `--preallocate` is passed, before any VM is constructed.
 pub fn set_preallocate(on: bool) {
     PREALLOCATE.store(on, Ordering::Relaxed);
-}
-
-/// Create a memfd and size it to `total_bytes`, committing pages eagerly
-/// only when preallocation is enabled.
-///
-/// Per ARCHITECTURE.md §8.1, guest memory is backed by 2 MiB huge pages
-/// exclusively (`MFD_HUGETLB | MFD_HUGE_2MB`). By default pages are
-/// committed lazily on first touch — faster boot, denser warm pools —
-/// which means an exhausted hugepage pool surfaces as a **SIGBUS in the
-/// guest at run time**, not a launch error. With [`set_preallocate`] on,
-/// every page is `fallocate`d up front (~22ms/256MB) so pool exhaustion
-/// fails cleanly at boot; use it when you don't own the pool's capacity
-/// math. Either way the pool must have enough pages, or `memfd_create`
-/// (or the first fault) fails.
-fn create_and_size(total_bytes: u64) -> Result<Memfd> {
-    let name = CString::new("dillo-guest").expect("static C string");
-    let fd = memfd_create(
-        name.as_c_str(),
-        MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_HUGETLB | MFdFlags::MFD_HUGE_2MB,
-    )
-    .context("memfd_create (need 2 MiB huge pages; check vm.nr_hugepages)")?;
-    let len = i64::try_from(total_bytes).context("memfd size > i64::MAX")?;
-    ftruncate(&fd, len).context("ftruncate memfd")?;
-    if PREALLOCATE.load(Ordering::Relaxed) {
-        fallocate(&fd, FallocateFlags::FALLOC_FL_KEEP_SIZE, 0, len)
-            .context("fallocate memfd (2 MiB hugepage pool exhausted?)")?;
-    }
-    Ok(Memfd { fd })
-}
-
-/// mmap a contiguous range of the memfd into the process address space.
-/// Leaks the mapping for the VM's lifetime.
-fn mmap_range(memfd: &Memfd, fd_offset: u64, size: u64) -> Result<u64> {
-    if size == 0 {
-        bail!("mmap_range: size = 0");
-    }
-    let len = NonZeroUsize::new(size as usize).expect("size > 0 checked above");
-    let off = i64::try_from(fd_offset).context("memfd offset > i64::MAX")?;
-    // nix's mmap is unsafe (caller owns aliasing/lifetime). We leak the
-    // mapping for the VM's lifetime — dropping while KVM holds the
-    // memslot would be unsound. Cleanup at process exit.
-    #[allow(unsafe_code)]
-    let host = unsafe {
-        mmap(
-            None,
-            len,
-            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-            MapFlags::MAP_SHARED,
-            memfd,
-            off,
-        )
-        .context("mmap memfd")?
-    };
-    Ok(host.as_ptr() as u64)
-}
-
-/// Build a `vm_memory::GuestMemoryMmap` over the already-mmap'd memfd
-/// regions. The returned regions are **non-owning** wrappers around
-/// the raw pointers — the underlying mmap is owned by `mmap_range`'s
-/// leaked allocation, alive for the VM's lifetime.
-///
-/// Used by virtio transports and device backends that need typed
-/// guest-memory access.
-fn build_guest_memory(
-    memfd: &Memfd,
-    regions: &[(u64, u64, u64)], // (gpa, host_addr, size) — same shape GpaMap takes
-) -> Result<GuestMemoryMmap> {
-    let mut built: Vec<GuestRegionMmap> = Vec::with_capacity(regions.len());
-    let mut file_offset: u64 = 0;
-    for &(gpa, host_addr, size) in regions {
-        // FileOffset wants an owned File; clone the memfd via dup() so
-        // the FileOffset's Arc<File> doesn't double-close the underlying
-        // descriptor on Drop. Stays alive for the GuestMemoryMmap's
-        // lifetime.
-        // SAFETY: dup returns a fresh OS file-descriptor pointing at the
-        // same kernel object; from_raw_fd takes ownership of that fresh
-        // fd. No aliasing.
-        #[allow(unsafe_code)]
-        let owned_dup = unsafe {
-            let raw = libc::dup(memfd.fd.as_raw_fd());
-            if raw < 0 {
-                return Err(anyhow!("dup memfd: {}", std::io::Error::last_os_error()));
-            }
-            std::fs::File::from_raw_fd(raw)
-        };
-        let fo = FileOffset::new(owned_dup, file_offset);
-
-        // Non-owning mmap region wrapped around our existing host
-        // pointer. `with_raw_mmap_pointer` triggers MmapRegionBuilder's
-        // owned=false path so Drop won't munmap.
-        // SAFETY: the host_addr region is alive for the VM's lifetime —
-        // mmap_range leaked it. Size matches what we mapped.
-        #[allow(unsafe_code)]
-        let region = unsafe {
-            MmapRegionBuilder::new(size as usize).with_raw_mmap_pointer(host_addr as *mut u8)
-        }
-        .with_mmap_prot(libc::PROT_READ | libc::PROT_WRITE)
-        .with_mmap_flags(libc::MAP_SHARED)
-        .with_file_offset(fo)
-        .build()
-        .map_err(|e| anyhow!("MmapRegionBuilder: {e}"))?;
-
-        let gr = GuestRegionMmap::new(region, GuestAddress(gpa))
-            .ok_or_else(|| anyhow!("GuestRegionMmap: gpa+size overflow for {:#x}+{}", gpa, size))?;
-        built.push(gr);
-
-        file_offset += size;
-    }
-    GuestMemoryMmap::from_regions(built).map_err(|e| anyhow!("GuestMemoryMmap: {e:?}"))
 }
 
 /// Maps GPA → (host_addr, size). Used to translate guest-physical
@@ -178,39 +53,75 @@ impl MappedRegion {
 /// KVM-owned standard-VM guest memory backing.
 #[derive(Debug)]
 pub(crate) struct MappedMemory {
-    _memfd: Memfd,
     regions: Vec<MappedRegion>,
-    gpa_map: GpaMap,
     guest_memory: GuestMemoryMmap,
 }
 
 impl MappedMemory {
     pub(crate) fn new(regions: impl IntoIterator<Item = (u64, u64)>) -> Result<Self> {
         let requested = regions.into_iter().collect::<Vec<_>>();
-        let total_bytes = requested.iter().map(|(_, size)| *size).sum();
-        let memfd = create_and_size(total_bytes)?;
-        let mut gpa_map = GpaMap::new();
-        let mut mapped = Vec::with_capacity(requested.len());
-        let mut host_base = 0;
+        let total_bytes = requested.iter().try_fold(0u64, |total, (_, size)| {
+            total.checked_add(*size).context("guest RAM size overflow")
+        })?;
+        // Preserve the existing hugepage and optional eager-commit policy.
+        let fd = memfd_create(
+            c"dillo-guest",
+            MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_HUGETLB | MFdFlags::MFD_HUGE_2MB,
+        )
+        .context("memfd_create (need 2 MiB huge pages; check vm.nr_hugepages)")?;
+        let len = i64::try_from(total_bytes).context("memfd size > i64::MAX")?;
+        ftruncate(&fd, len).context("ftruncate memfd")?;
+        if PREALLOCATE.load(Ordering::Relaxed) {
+            fallocate(&fd, FallocateFlags::FALLOC_FL_KEEP_SIZE, 0, len)
+                .context("fallocate memfd (2 MiB hugepage pool exhausted?)")?;
+        }
+        Self::map(requested, Arc::new(File::from(fd)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_backing(regions: &[(u64, u64)]) -> Result<Self> {
+        // Exercise production mapping and registration before CI provisions
+        // hugepages; only this test allocation uses an ordinary memfd.
+        let fd = memfd_create(c"dillo-test-guest", MFdFlags::MFD_CLOEXEC)?;
+        ftruncate(
+            &fd,
+            i64::try_from(regions.iter().map(|(_, size)| *size).sum::<u64>())?,
+        )?;
+        Self::map(regions.to_vec(), Arc::new(File::from(fd)))
+    }
+
+    fn map(requested: Vec<(u64, u64)>, file: Arc<File>) -> Result<Self> {
+        let mut views = Vec::with_capacity(requested.len());
+        let mut regions = Vec::with_capacity(requested.len());
+        let mut file_offset = 0u64;
         for (gpa, size) in requested {
-            let host_addr = mmap_range(&memfd, host_base, size)?;
-            gpa_map.add(gpa, host_addr, size);
-            mapped.push(MappedRegion {
+            let size_usize = usize::try_from(size).context("guest RAM region exceeds usize")?;
+            // This builder creates and owns its mapping. Cloned guest-memory
+            // views retain the same owner; the final owner actually munmaps it.
+            let region = MmapRegionBuilder::new(size_usize)
+                .with_file_offset(FileOffset::from_arc(Arc::clone(&file), file_offset))
+                .with_mmap_prot(libc::PROT_READ | libc::PROT_WRITE)
+                .with_mmap_flags(libc::MAP_SHARED)
+                .build()
+                .with_context(|| format!("mmap memfd region at file offset {file_offset:#x}"))?;
+            regions.push(MappedRegion {
                 gpa,
-                host_addr,
+                host_addr: region.as_ptr() as u64,
                 size,
             });
-            host_base += size;
+            views.push(
+                GuestRegionMmap::new(region, GuestAddress(gpa)).ok_or_else(|| {
+                    anyhow!("GuestRegionMmap: gpa+size overflow for {gpa:#x}+{size}")
+                })?,
+            );
+            file_offset = file_offset
+                .checked_add(size)
+                .context("memfd offset overflow")?;
         }
-        let tuples = mapped
-            .iter()
-            .map(|region| (region.gpa, region.host_addr, region.size))
-            .collect::<Vec<_>>();
-        let guest_memory = build_guest_memory(&memfd, &tuples)?;
+        let guest_memory = GuestMemoryMmap::from_regions(views)
+            .map_err(|error| anyhow!("GuestMemoryMmap: {error:?}"))?;
         Ok(Self {
-            _memfd: memfd,
-            regions: mapped,
-            gpa_map,
+            regions,
             guest_memory,
         })
     }
@@ -219,54 +130,199 @@ impl MappedMemory {
         &self.regions
     }
 
-    pub(crate) fn gpa_map(&self) -> &GpaMap {
-        &self.gpa_map
-    }
-
     pub(crate) fn guest_memory(&self) -> GuestMemoryMmap {
         self.guest_memory.clone()
     }
-}
 
-#[derive(Debug, Default, Clone)]
-pub(crate) struct GpaMap {
-    regions: Vec<(u64, u64, u64)>, // (gpa, host_addr, size)
-}
-
-impl GpaMap {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-    pub(crate) fn add(&mut self, gpa: u64, host_addr: u64, size: u64) {
-        self.regions.push((gpa, host_addr, size));
-    }
-
-    /// Copy `src` into guest memory starting at `gpa`. Errors if the
-    /// destination range spans regions or falls outside any region.
-    pub(crate) fn write(&self, gpa: u64, src: &[u8]) -> Result<()> {
-        for &(rg, ra, rs) in &self.regions {
-            if gpa >= rg && gpa < rg + rs {
-                let off = gpa - rg;
-                if off + src.len() as u64 > rs {
-                    return Err(anyhow!(
-                        "write spans region boundary: gpa={:#x} len={} region={:#x}+{}",
-                        gpa,
-                        src.len(),
-                        rg,
-                        rs
-                    ));
+    /// Copy through the owning guest-memory view, preserving the existing
+    /// single-region range check and allowing concurrently mutable guest RAM.
+    pub(crate) fn write(&self, gpa: u64, source: &[u8]) -> Result<()> {
+        for region in &self.regions {
+            if gpa >= region.gpa && gpa - region.gpa < region.size {
+                if source.len() as u64 > region.size - (gpa - region.gpa) {
+                    bail!(
+                        "write spans region boundary: gpa={gpa:#x} len={} region={:#x}+{}",
+                        source.len(),
+                        region.gpa,
+                        region.size
+                    );
                 }
-                // SAFETY: ra+off..+src.len() lies inside the mmap'd
-                // region we registered with KVM; the mapping is alive
-                // for the VM's lifetime.
-                #[allow(unsafe_code)]
-                unsafe {
-                    let dst = (ra + off) as *mut u8;
-                    std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
-                }
+                self.guest_memory.write_slice(source, GuestAddress(gpa))?;
                 return Ok(());
             }
         }
-        Err(anyhow!("no region contains GPA {:#x}", gpa))
+        bail!("no region contains GPA {gpa:#x}")
+    }
+}
+
+/// Keeps the backing file identity alive while observing real kernel mappings;
+/// inode/device matching cannot mistake another allocation reusing an address.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct MappingProbe {
+    file: Arc<File>,
+    device: String,
+    inode: u64,
+}
+
+#[cfg(test)]
+impl MappingProbe {
+    fn from_file(file: Arc<File>) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata().unwrap();
+        Self {
+            device: format!(
+                "{:02x}:{:02x}",
+                libc::major(metadata.dev()),
+                libc::minor(metadata.dev())
+            ),
+            inode: metadata.ino(),
+            file,
+        }
+    }
+
+    pub(crate) fn new(memory: &MappedMemory) -> Self {
+        Self::from_view(&memory.guest_memory)
+    }
+
+    pub(crate) fn from_view(memory: &GuestMemoryMmap) -> Self {
+        use vm_memory::GuestMemory;
+        let file = memory
+            .iter()
+            .next()
+            .unwrap()
+            .file_offset()
+            .unwrap()
+            .file()
+            .try_clone()
+            .unwrap();
+        Self::from_file(Arc::new(file))
+    }
+
+    pub(crate) fn mappings(&self) -> usize {
+        std::fs::read_to_string("/proc/self/maps")
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                let mut fields = line.split_whitespace();
+                fields.nth(3) == Some(self.device.as_str())
+                    && fields.next().and_then(|inode| inode.parse::<u64>().ok()) == Some(self.inode)
+            })
+            .count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dillo_machine::memory::{MappedSharedMemory, SharedAccess, SharedMemory, SharedRange};
+    use std::os::unix::fs::FileExt;
+    use vm_memory::{GuestMemory, GuestMemoryRegion, MmapRegion};
+
+    #[test]
+    fn owning_views_preserve_file_offsets_and_reclaim_after_last_region() {
+        let memory = MappedMemory::test_backing(&[(0, 0x1000), (0x4000, 0x1000)]).unwrap();
+        let probe = MappingProbe::new(&memory);
+        let view = memory.guest_memory();
+        memory.write(0x4000, b"shared without copying").unwrap();
+        let mut bytes = [0u8; 22];
+        probe.file.read_exact_at(&mut bytes, 0x1000).unwrap();
+        assert_eq!(&bytes, b"shared without copying");
+        let (_, region) = view.remove_region(GuestAddress(0x4000), 0x1000).unwrap();
+        assert_eq!(region.file_offset().unwrap().start(), 0x1000);
+        drop(memory);
+        drop(view);
+        assert!(probe.mappings() > 0);
+        region
+            .read_slice(&mut bytes, vm_memory::MemoryRegionAddress(0))
+            .unwrap();
+        assert_eq!(&bytes, b"shared without copying");
+        drop(region);
+        assert_eq!(probe.mappings(), 0);
+    }
+
+    #[test]
+    fn mapping_failure_unmaps_successful_earlier_regions() {
+        let file = Arc::new(tempfile::tempfile().unwrap());
+        file.set_len(0x3000).unwrap();
+        let probe = MappingProbe::from_file(Arc::clone(&file));
+        let error = MappedMemory::map(vec![(0, 0x1001), (0x4000, 0x1000)], file).unwrap_err();
+        // The second mapping's unaligned file offset fails after the first
+        // native mmap succeeds; its contextual error identifies that branch.
+        assert!(
+            error.to_string().contains("file offset 0x1001"),
+            "{error:#}"
+        );
+        assert_eq!(probe.mappings(), 0);
+    }
+
+    #[test]
+    fn invalid_layout_reclaims_already_mapped_regions() {
+        let file = Arc::new(tempfile::tempfile().unwrap());
+        file.set_len(0x2000).unwrap();
+        let probe = MappingProbe::from_file(Arc::clone(&file));
+        let error = MappedMemory::map(vec![(0, 0x1000), (0, 0x1000)], file).unwrap_err();
+        assert!(error.to_string().contains("GuestMemoryMmap"), "{error:#}");
+        assert_eq!(probe.mappings(), 0);
+    }
+
+    #[test]
+    fn writes_preserve_region_bounds_without_overflow() {
+        let memory = MappedMemory::test_backing(&[(0, 0x1000), (0x1000, 0x1000)]).unwrap();
+        assert!(memory.write(0xfff, &[1, 2]).is_err());
+        assert!(memory.write(u64::MAX, &[1]).is_err());
+        memory.write(0xfff, &[3]).unwrap();
+        assert_eq!(
+            memory
+                .guest_memory()
+                .read_obj::<u8>(GuestAddress(0xfff))
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn atomic_metadata_uses_independent_views_of_original_memfd() {
+        let backing = MappedMemory::new([(0x20_0000, 0x20_0000)])
+            .expect("native hugepage-backed Machine RAM is required");
+        let original = backing.guest_memory();
+        let first = original.iter().next().unwrap();
+        let alias =
+            MmapRegion::<()>::from_file(first.file_offset().unwrap().clone(), first.len() as usize)
+                .unwrap();
+        assert_ne!(
+            alias.as_ptr(),
+            first.as_ptr(),
+            "independent host mapping required"
+        );
+        let alias = GuestMemoryMmap::from_regions(vec![
+            GuestRegionMmap::new(alias, first.start_addr()).unwrap(),
+        ])
+        .unwrap();
+        original
+            .store(
+                0x8877_6655_4433_2211u64.to_le(),
+                GuestAddress(0x20_0010),
+                Ordering::Relaxed,
+            )
+            .unwrap();
+        let capability = MappedSharedMemory::for_guest_memory(original, SharedAccess::ReadWrite);
+        let independent = MappedSharedMemory::for_guest_memory(alias, SharedAccess::ReadWrite);
+        let range = SharedRange {
+            gpa: 0x20_0000,
+            size: 0x20,
+            access: SharedAccess::ReadWrite,
+        };
+        let first = capability.region(range).unwrap();
+        let second = independent.region(range).unwrap();
+        first.store_u16_le(0, 0x00ff).unwrap();
+        first.store_u32_le(4, 0x89ab_cdef).unwrap();
+        assert_eq!(second.load_u16_le(0).unwrap(), 0x00ff);
+        assert_eq!(second.load_u32_le(4).unwrap(), 0x89ab_cdef);
+        assert_eq!(second.load_u64_le(0x10).unwrap(), 0x8877_6655_4433_2211);
+        second.store_u16_le(0, 0x0100).unwrap();
+        second.store_u32_le(4, 0x0123_4567).unwrap();
+        assert_eq!(first.load_u16_le(0).unwrap(), 0x0100);
+        assert_eq!(first.load_u32_le(4).unwrap(), 0x0123_4567);
     }
 }

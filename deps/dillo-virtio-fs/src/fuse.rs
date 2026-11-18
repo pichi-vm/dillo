@@ -73,10 +73,10 @@ const FUSE_ACCESS: u32 = 34;
 // --- errno values returned to the guest (negated on the wire) -------------
 const EPERM: i32 = 1;
 const ENOENT: i32 = 2;
-const EIO: i32 = 5;
+pub(crate) const EIO: i32 = 5;
 const EBADF: i32 = 9;
 const EACCES: i32 = 13;
-const EINVAL: i32 = 22;
+pub(crate) const EINVAL: i32 = 22;
 const EROFS: i32 = 30;
 const ERANGE: i32 = 34;
 const ENOSYS: i32 = 38;
@@ -86,7 +86,7 @@ const EISDIR: i32 = 21;
 const ENOTEMPTY: i32 = 39;
 const EOPNOTSUPP: i32 = 95;
 
-const FUSE_IN_HEADER_LEN: usize = 40;
+pub(crate) const FUSE_IN_HEADER_LEN: usize = 40;
 const FUSE_OUT_HEADER_LEN: usize = 16;
 const FUSE_NAME_OFFSET: usize = 24; // offsetof(fuse_dirent, name)
 const FUSE_ROOT_ID: u64 = 1;
@@ -169,6 +169,18 @@ fn error_reply(unique: u64, errno: i32) -> Vec<u8> {
     buf[4..8].copy_from_slice(&(-errno).to_le_bytes());
     buf[8..16].copy_from_slice(&unique.to_le_bytes());
     buf
+}
+
+/// Reject input using only an already copied complete common header.
+/// Replyless requests must not acquire a response just because they are invalid.
+pub(crate) fn reject_request(input: &[u8], errno: i32) -> Option<Vec<u8>> {
+    if input.len() < FUSE_IN_HEADER_LEN {
+        return None;
+    }
+    match rd_u32(input, 4)? {
+        FUSE_FORGET | FUSE_BATCH_FORGET | FUSE_INTERRUPT => None,
+        _ => Some(error_reply(rd_u64(input, 8)?, errno)),
+    }
 }
 
 fn errno_of(e: &io::Error) -> i32 {
@@ -502,6 +514,9 @@ pub(crate) fn dispatch(
     if input.len() < FUSE_IN_HEADER_LEN {
         // Can't even read a header → nothing addressable to reply to.
         return None;
+    }
+    if rd_u32(input, 0)? as usize != input.len() {
+        return reject_request(input, EINVAL);
     }
     let opcode = rd_u32(input, 4)?;
     let unique = rd_u64(input, 8)?;
@@ -895,10 +910,15 @@ fn handle_write(state: &mut FsState, backend: &dyn FsBackend, unique: u64, args:
     else {
         return error_reply(unique, EINVAL);
     };
-    let size = size.min(MAX_PAYLOAD) as usize;
-    let available = args.len().saturating_sub(FUSE_WRITE_IN_LEN);
-    let take = size.min(available);
-    let data = &args[FUSE_WRITE_IN_LEN..FUSE_WRITE_IN_LEN + take];
+    if size > MAX_PAYLOAD {
+        return error_reply(unique, EINVAL);
+    }
+    let Some(data) = args.get(FUSE_WRITE_IN_LEN..) else {
+        return error_reply(unique, EINVAL);
+    };
+    if data.len() != size as usize {
+        return error_reply(unique, EINVAL);
+    }
 
     let rel = match state.handles.get(&fh) {
         Some(Handle::File(rel)) => rel.clone(),
@@ -2386,6 +2406,71 @@ mod tests {
         assert_eq!(out_error(&reply), 0);
         let fh = open_node(&mut state, &fs, node);
         assert_read(&mut state, &fs, node, fh, b"same");
+    }
+
+    #[test]
+    fn write_requires_exact_input_and_preserves_backend_short_writes() {
+        struct ShortWrite {
+            fs: MapFs,
+            writes: std::sync::Mutex<Vec<Vec<u8>>>,
+        }
+        impl FsBackend for ShortWrite {
+            fn stat(&self, rel: &Path) -> io::Result<Attr> {
+                self.fs.stat(rel)
+            }
+            fn readdir(&self, rel: &Path) -> io::Result<Vec<crate::backend::DirEntry>> {
+                self.fs.readdir(rel)
+            }
+            fn read(&self, rel: &Path, offset: u64, size: u32) -> io::Result<Vec<u8>> {
+                self.fs.read(rel, offset, size)
+            }
+            fn readlink(&self, rel: &Path) -> io::Result<Vec<u8>> {
+                self.fs.readlink(rel)
+            }
+            fn write(&self, _: &Path, _: u64, data: &[u8]) -> io::Result<u32> {
+                self.writes.lock().unwrap().push(data.to_vec());
+                Ok(data.len().min(2) as u32)
+            }
+        }
+        let mut state = FsState::new(false);
+        let fs = ShortWrite {
+            fs: MapFs::new().with_file("file", "data"),
+            writes: std::sync::Mutex::new(Vec::new()),
+        };
+        let node = lookup_node(&mut state, &fs, FUSE_ROOT_ID, "file");
+        let handle = open_node(&mut state, &fs, node);
+        for length in 20..FUSE_WRITE_IN_LEN {
+            let mut args = write_in(handle, 0, &[]);
+            args.truncate(length);
+            let reply = dispatch(&mut state, &fs, &request(FUSE_WRITE, 3, node, &args)).unwrap();
+            assert_eq!(out_error(&reply), -EINVAL);
+        }
+        for requested in [0, 3, 5, MAX_PAYLOAD + 1] {
+            let mut args = write_in(handle, 0, b"abcd");
+            args[16..20].copy_from_slice(&requested.to_le_bytes());
+            let reply = dispatch(&mut state, &fs, &request(FUSE_WRITE, 3, node, &args)).unwrap();
+            assert_eq!(out_error(&reply), -EINVAL);
+        }
+        assert!(fs.writes.lock().unwrap().is_empty());
+        let reply = dispatch(
+            &mut state,
+            &fs,
+            &request(FUSE_WRITE, 3, node, &write_in(handle, 0, b"abcd")),
+        )
+        .unwrap();
+        assert_eq!(*fs.writes.lock().unwrap(), vec![b"abcd".to_vec()]);
+        assert_eq!(out_error(&reply), 0);
+        assert_eq!(rd_u32(&reply, FUSE_OUT_HEADER_LEN), Some(2));
+
+        let reply = dispatch(
+            &mut state,
+            &fs,
+            &request(FUSE_WRITE, 3, node, &write_in(handle, 0, b"")),
+        )
+        .unwrap();
+        assert_eq!(*fs.writes.lock().unwrap(), vec![b"abcd".to_vec(), vec![]]);
+        assert_eq!(out_error(&reply), 0);
+        assert_eq!(rd_u32(&reply, FUSE_OUT_HEADER_LEN), Some(0));
     }
 
     #[test]
