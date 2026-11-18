@@ -339,7 +339,7 @@ impl PciBus {
 
 /// PCIe root complex declared by the base DTB.
 ///
-/// The root owns the ECAM MMIO window and the single downstream PCI bus.
+/// The root owns the ECAM MMIO window and its first relative PCI bus.
 /// Legacy CF8/CFC PIO is intentionally absent so x86 guests use ECAM.
 pub struct PciRoot {
     window: AddressRange,
@@ -586,7 +586,13 @@ impl MmioDevice for PciRoot {
     fn read(&self, window: AddressRange, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
         if window.base == self.window.base && window.size == self.window.size {
             let (bus, device, function, reg_idx, in_dword) = Self::decode_ecam(offset);
-            let value = self.config_read(bus, device, function, reg_idx);
+            // Only the first relative bus is populated. Bound the full offset
+            // so a larger window cannot alias it through the eight-bit decoder.
+            let value = if offset < 1 << 20 {
+                self.config_read(bus, device, function, reg_idx)
+            } else {
+                u32::MAX
+            };
             let bytes = value.to_le_bytes();
             for (i, slot) in data.iter_mut().enumerate() {
                 *slot = *bytes.get(in_dword + i).unwrap_or(&0xFF);
@@ -611,7 +617,9 @@ impl MmioDevice for PciRoot {
     ) -> Result<MmioWriteOutcome, MmioError> {
         if window.base == self.window.base && window.size == self.window.size {
             let (bus, device, function, reg_idx, in_dword) = Self::decode_ecam(offset);
-            self.config_write(bus, device, function, reg_idx, in_dword as u64, data);
+            if offset < 1 << 20 {
+                self.config_write(bus, device, function, reg_idx, in_dword as u64, data);
+            }
             return Ok(MmioWriteOutcome::Continue);
         }
 
@@ -728,6 +736,33 @@ mod tests {
 
         assert_eq!(u32::from_le_bytes(data), root.config_read(0, 0, 0, 0));
         assert_eq!(data, [0x86, 0x80, 0x37, 0x12]);
+    }
+
+    #[test]
+    fn ecam_offsets_cannot_alias_the_first_bus() {
+        let window = AddressRange {
+            base: 0x4000_0000,
+            size: 0x2000_0000,
+        };
+        let root = Arc::new(PciRoot::new(window));
+        let mut mmio = dillo_mmio::MmioBus::new();
+        mmio.register_device(Arc::clone(&root));
+        let mut data = [0u8; 4];
+        assert!(mmio.read(window.base, &mut data));
+        assert_eq!(data, [0x86, 0x80, 0x37, 0x12]);
+        assert!(mmio.write(window.base + 4, &[7, 0]).is_some());
+        assert_eq!(root.config_read(0, 0, 0, 1), 7);
+
+        for offset in [0x10_0000, 0xff0_0000, 0x1000_0000, 0x1ff0_0000] {
+            assert!(mmio.read(window.base + offset, &mut data));
+            assert_eq!(data, [0xff; 4], "offset {offset:#x}");
+            assert!(mmio.write(window.base + offset + 4, &[0, 0]).is_some());
+            assert_eq!(root.config_read(0, 0, 0, 1), 7, "offset {offset:#x}");
+        }
+        for address in [window.base - 4, window.base + window.size] {
+            assert!(!mmio.read(address, &mut data));
+            assert!(mmio.write(address, &[0, 0]).is_none());
+        }
     }
 
     #[test]
