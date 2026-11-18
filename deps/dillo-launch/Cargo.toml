@@ -1,0 +1,17 @@
+[package]
+name = "dillo-launch"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "PMI launch interpretation for Dillo."
+
+[dependencies]
+dillo-machine.workspace = true
+pmi.workspace = true
+object.workspace = true
+ciborium.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

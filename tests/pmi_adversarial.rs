@@ -4,7 +4,7 @@
 //! ARCHITECTURE.md §27.2 defensive-parsing test corpus for dillo PMI parsing.
 //!
 //! Each test feeds an adversarial input and asserts the specific
-//! [`dillo::pmi_parse::Error`] variant it should produce. Together these
+//! [`dillo_launch::pmi_parse::Error`] variant it should produce. Together these
 //! pin the validation chain so a regression in any single check
 //! shows up as a failed test rather than a silent acceptance.
 //!
@@ -13,7 +13,7 @@
 //! with `#[ignore]` and a TODO — they need an arma-produced
 //! fixture that the workspace test runner builds on demand.
 
-use dillo::pmi_parse::{Error, HostArch, ParseOptions, parse};
+use dillo_launch::pmi_parse::{Error, HostArch, ParseOptions, parse};
 
 fn opts() -> ParseOptions {
     ParseOptions {
@@ -116,7 +116,7 @@ fn random_garbage_under_section_cap() {
 #[test]
 fn manifest_size_cap_triggers_on_oversized_section() {
     // Build a minimal PE whose `.pmi.vm` section is larger than
-    // dillo::pmi_parse::caps::MAX_MANIFEST_SIZE. Needs a real PE builder;
+    // dillo_launch::pmi_parse::caps::MAX_MANIFEST_SIZE. Needs a real PE builder;
     // not in this test file.
     //
     // TODO(Phase 5 follow-up): add a workspace-level

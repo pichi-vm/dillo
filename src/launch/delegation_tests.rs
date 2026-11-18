@@ -340,7 +340,7 @@ fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
 
 #[test]
 fn bootconfig_invalid_reservations_fail_preflight() {
-    use dillo::pmi_parse::Error;
+    use dillo_launch::pmi_parse::Error;
     for arch in ARCHES {
         let base = image(
             arch,
@@ -359,23 +359,23 @@ fn bootconfig_invalid_reservations_fail_preflight() {
         ] {
             let bytes = with_bootconfig(base.clone(), &gpas, capacity, raw_size);
             assert!(matches!(
-                dillo::pmi_parse::parse(&bytes, &opts),
+                dillo_launch::pmi_parse::parse(&bytes, &opts),
                 Err(Error::BootconfigFill(_))
             ));
         }
         let bytes = with_bootconfig(base.clone(), &[0x20_2001], 4096, 0);
         assert!(matches!(
-            dillo::pmi_parse::parse(&bytes, &opts),
+            dillo_launch::pmi_parse::parse(&bytes, &opts),
             Err(Error::AlignmentViolation { .. })
         ));
         let bytes = with_bootconfig(base.clone(), &[0x20_1000], 4096, 0);
         assert!(matches!(
-            dillo::pmi_parse::parse(&bytes, &opts),
+            dillo_launch::pmi_parse::parse(&bytes, &opts),
             Err(Error::SectionsOverlap { .. })
         ));
         let bytes = with_bootconfig(base, &[0x40_0000], 4 * 1024 * 1024, 0);
         assert!(
-            dillo::pmi_parse::parse(&bytes, &opts).is_err(),
+            dillo_launch::pmi_parse::parse(&bytes, &opts).is_err(),
             "reservation exceeds guest memory budget"
         );
     }
@@ -478,7 +478,7 @@ fn overlay_reservation_bounds_are_enforced() {
         assert!(
             matches!(
                 err,
-                LaunchError::PmiParse(dillo::pmi_parse::Error::DtboSizeOutOfRange { .. })
+                LaunchError::PmiParse(dillo_launch::pmi_parse::Error::DtboSizeOutOfRange { .. })
             ),
             "{err}"
         );
