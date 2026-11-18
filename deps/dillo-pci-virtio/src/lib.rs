@@ -82,11 +82,12 @@ impl VirtioPciAdapter {
 }
 
 impl PciDevice for VirtioPciAdapter {
-    fn config_read(&self, reg_idx: usize) -> u32 {
-        self.inner
+    fn config_read(&self, reg_idx: usize) -> Result<u32, PciError> {
+        Ok(self
+            .inner
             .lock()
             .expect("virtio PCI transport poisoned")
-            .config_read(reg_idx)
+            .config_read(reg_idx))
     }
 
     fn config_write(&self, reg_idx: usize, offset: u64, data: &[u8]) -> Result<(), PciError> {

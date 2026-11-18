@@ -39,6 +39,8 @@ use crate::cpuid_x86;
 /// Hypervisor / VM errors.
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("{0}")]
+    Mmio(#[from] dillo_mmio::AccessError),
     #[error("Arm CPU admission: {0}")]
     ArmAdmission(#[from] dillo_machine::aarch64::AdmissionError),
     #[error("KVM guest address space: {0}")]
@@ -707,10 +709,8 @@ impl Vcpu {
     /// this call returns so the guest sees the value at its next
     /// instruction.
     ///
-    /// `mmio_read(addr, &mut data)` returns `true` if the read was
-    /// handled (`data` filled). `false` leaves the KVM-supplied
-    /// zero-fill in place — equivalent to "device not present" /
-    /// real-hardware all-zeros for unmapped MMIO.
+    /// A mapped failure returns before re-entering KVM. Only an unmapped
+    /// access receives the existing zero response.
     ///
     /// `KVM_RUN` returning `EAGAIN` is not a real failure — per
     /// `Documentation/virt/kvm/api.rst`, "the call may be retried." In
@@ -723,7 +723,7 @@ impl Vcpu {
     pub(crate) fn run(
         &mut self,
         pio_read: impl Fn(u16, u8) -> u32,
-        mmio_read: impl Fn(u64, &mut [u8]) -> bool,
+        mmio_read: impl Fn(u64, &mut [u8]) -> Result<Option<()>, dillo_mmio::AccessError>,
         termination: &dyn dillo_machine::CpuTermination,
     ) -> Result<VmExit, Error> {
         let exit = loop {
@@ -762,7 +762,7 @@ impl Vcpu {
         // Handle MMIO read in-place.
         if let kvm_ioctls::VcpuExit::MmioRead(addr, data) = exit {
             let size = data.len() as u8;
-            if !mmio_read(addr, data) {
+            if mmio_read(addr, data)?.is_none() {
                 // Leave KVM's pre-zeroed buffer — matches real hardware
                 // "no device" all-zeros on unmapped MMIO.
                 for slot in data.iter_mut() {
@@ -1139,7 +1139,7 @@ mod bsp_tests {
         let exit = bsp
             .run(
                 |_, _| 0,
-                |_, _| false,
+                |_, _| Ok(None),
                 &std::sync::atomic::AtomicBool::new(false),
             )
             .unwrap();
@@ -1222,7 +1222,7 @@ mod arm_bsp_tests {
                         }
                         cpu.run(
                             |_, _| 0,
-                            |_, _| false,
+                            |_, _| Ok(None),
                             &std::sync::atomic::AtomicBool::new(false),
                         )
                         .map(Some)
@@ -1329,7 +1329,7 @@ mod arm_bsp_tests {
                 }
                 let exit = cpu.run(
                     |_, _| 0,
-                    |_, _| false,
+                    |_, _| Ok(None),
                     &std::sync::atomic::AtomicBool::new(false),
                 );
                 Some((admitted.value(Register::Mmfr1).unwrap(), v81, exit))
@@ -1444,7 +1444,7 @@ mod arm_bsp_tests {
             let exit = cpu
                 .run(
                     |_, _| 0,
-                    |_, _| false,
+                    |_, _| Ok(None),
                     &std::sync::atomic::AtomicBool::new(false),
                 )
                 .unwrap();

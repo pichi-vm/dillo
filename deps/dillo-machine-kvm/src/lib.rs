@@ -7,6 +7,10 @@
 mod amd_tsc;
 #[cfg(target_arch = "x86_64")]
 mod cpuid_x86;
+#[cfg(test)]
+#[path = "../../dillo-machine/tests/fixtures/mapped_io.rs"]
+mod mapped_io;
+
 mod hypervisor;
 mod launch_input;
 
@@ -1094,6 +1098,52 @@ mod imp {
         use dillo_machine::{CpuInterrupt as _, CpuPreparation as _, CpuRunner as _, Machine as _};
 
         #[test]
+        fn mapped_io_failure_stops_native_owners_without_replay() {
+            use crate::mapped_io::{Fault, Fixture};
+            use dillo_machine::memory::{SharedAccess, SharedRange};
+            use std::sync::mpsc;
+            use std::time::Duration;
+
+            for fault in [Fault::Read, Fault::Write] {
+                let (mut vm, profile, base) = machine_fixture();
+                let retained = vm.shared_memory[0]
+                    .region(SharedRange {
+                        gpa: base,
+                        size: 0x1000,
+                        access: SharedAccess::ReadWrite,
+                    })
+                    .unwrap();
+                let fixture = Fixture::new(retained, base, fault);
+                let _attachment = vm.attach(fixture.device()).unwrap();
+                let shutdown = Arc::new(AtomicBool::new(false));
+                let rescue_shutdown = Arc::clone(&shutdown);
+                let (done, completed) = mpsc::channel();
+                let rescue = thread::spawn(move || {
+                    let rescued = completed.recv_timeout(Duration::from_secs(5)).is_err();
+                    if rescued {
+                        rescue_shutdown.store(true, Ordering::Release);
+                    }
+                    rescued
+                });
+                // Preparation and run own both CPUs through their final joins.
+                // Only the BSP executes the fixture; the peer remains parked.
+                let result = dillo_runtime::PreparingCpus::spawn(&mut vm, 2, profile)
+                    .and_then(|cpus| cpus.prepare(shutdown.as_ref()))
+                    .and_then(|cpus| cpus.run(shutdown.as_ref()));
+                let _ = done.send(());
+                assert!(
+                    !rescue.join().unwrap(),
+                    "mapped failure required operator rescue"
+                );
+                let error = result.unwrap_err().to_string();
+                fixture.verify(&error);
+                eprintln!(
+                    "native mapped {fault:?} failure: both owners joined, no post-failure guest marker, effects exactly once: {error}"
+                );
+            }
+        }
+
+        #[test]
         fn attached_worker_failure_stops_native_cpus_and_preserves_retained_ram() {
             use dillo_machine::execution::JoinError;
             use dillo_machine::memory::{AddressRange, SharedAccess, SharedRange};
@@ -1500,15 +1550,18 @@ mod imp {
                 let exit = self.inner.run(
                     |_port, _size| u32::MAX,
                     move |addr, data| {
-                        let handled = bus.lock().expect("MMIO bus lock poisoned").read(addr, data);
-                        if !handled {
+                        let handled = bus
+                            .lock()
+                            .expect("MMIO bus lock poisoned")
+                            .read(addr, data)?;
+                        if handled.is_none() {
                             log::debug!(
                                 "MMIO read from unmapped {:#x} (size {}); returning zeros",
                                 addr,
                                 data.len(),
                             );
                         }
-                        handled
+                        Ok(handled)
                     },
                     termination,
                 )?;
@@ -1529,7 +1582,7 @@ mod imp {
                             .mmio_bus
                             .lock()
                             .expect("MMIO bus lock poisoned")
-                            .write(addr, &data[..size as usize]);
+                            .write(addr, &data[..size as usize])?;
                         let Some(outcome) = outcome else {
                             // Unmapped probes are non-fatal, like reads above.
                             // Keep their details available in diagnostic logs.

@@ -2892,22 +2892,39 @@ mod machine_select {
                     let result = attach_devices(&mut attached, &platform, placements);
                     result.expect("realize declared devices");
                     let mut value = [0; 4];
-                    assert_eq!(attached.bus.read(ECAM, &mut value), declared);
+                    assert_eq!(
+                        attached.bus.read(ECAM, &mut value).unwrap().is_some(),
+                        declared
+                    );
                     if declared {
                         assert_eq!(value, [0x86, 0x80, 0x37, 0x12]);
-                        assert!(attached.bus.read(ECAM + (1 << 15), &mut value));
+                        assert!(
+                            attached
+                                .bus
+                                .read(ECAM + (1 << 15), &mut value)
+                                .unwrap()
+                                .is_some()
+                        );
                         if placed_bus == Some(Bus::Pci) {
                             assert_eq!(u16::from_le_bytes([value[0], value[1]]), 0x1af4);
                         } else {
                             assert_eq!(value, [0xff; 4]);
                         }
-                        assert!(attached.bus.read(ECAM + (2 << 15), &mut value));
-                        assert_eq!(value, [0xff; 4]);
-                        assert!(!attached.bus.read(ECAM - 4, &mut value));
                         assert!(
-                            !attached
+                            attached
+                                .bus
+                                .read(ECAM + (2 << 15), &mut value)
+                                .unwrap()
+                                .is_some()
+                        );
+                        assert_eq!(value, [0xff; 4]);
+                        assert!(attached.bus.read(ECAM - 4, &mut value).unwrap().is_none());
+                        assert!(
+                            attached
                                 .bus
                                 .read(ECAM + platform.pcie.ecam_size, &mut value)
+                                .unwrap()
+                                .is_none()
                         );
                     }
                     let domains: Vec<_> = attached
@@ -2927,7 +2944,7 @@ mod machine_select {
                         vec![]
                     };
                     assert_eq!(domains, expected_domains);
-                    assert!(attached.bus.read(MMIO + 8, &mut value));
+                    assert!(attached.bus.read(MMIO + 8, &mut value).unwrap().is_some());
                     assert_eq!(
                         u32::from_le_bytes(value),
                         if placed_bus == Some(Bus::Mmio) { 3 } else { 0 }
@@ -2997,18 +3014,19 @@ mod machine_select {
                         );
                         bus.register_device(device);
                         assert_eq!(
-                            bus.write(register.base, &register.value.to_le_bytes()),
+                            bus.write(register.base, &register.value.to_le_bytes())
+                                .unwrap(),
                             Some(outcome)
                         );
                     }
                     let mut data = [0xff; 4];
-                    assert!(bus.read(BASE + size - 4, &mut data));
+                    assert!(bus.read(BASE + size - 4, &mut data).unwrap().is_some());
                     assert_eq!(data, [0; 4]);
-                    assert!(!bus.read(BASE + size - 1, &mut [0; 2]));
-                    assert_eq!(bus.write(BASE + size - 1, &[0; 2]), None);
-                    assert!(!bus.read(BASE + 2 * size, &mut [0; 1]));
-                    assert_eq!(bus.write(BASE + 2 * size, &[0; 1]), None);
-                    assert!(!bus.read(BASE - 1, &mut [0; 1]));
+                    assert!(bus.read(BASE + size - 1, &mut [0; 2]).unwrap().is_none());
+                    assert_eq!(bus.write(BASE + size - 1, &[0; 2]).unwrap(), None);
+                    assert!(bus.read(BASE + 2 * size, &mut [0; 1]).unwrap().is_none());
+                    assert_eq!(bus.write(BASE + 2 * size, &[0; 1]).unwrap(), None);
+                    assert!(bus.read(BASE - 1, &mut [0; 1]).unwrap().is_none());
                 }
             }
         }

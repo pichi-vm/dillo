@@ -278,7 +278,8 @@ mod tests {
         let exit = cpu
             .run(
                 |_, _| 0,
-                |_, _| false,
+                |_, _| Ok(None),
+                |_, _| Ok(None),
                 &std::sync::atomic::AtomicBool::new(false),
             )
             .unwrap();

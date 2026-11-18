@@ -15,6 +15,21 @@ pub mod syscon;
 pub enum MmioError {
     #[error("MMIO access is unsupported by the routed device")]
     Unsupported,
+
+    #[error("{0}")]
+    Device(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// Failure of an access to a routed device, including its original cause.
+#[derive(Debug, thiserror::Error)]
+#[error("MMIO {operation} at {address:#x} ({size} bytes, window {window:?}): {source}")]
+pub struct AccessError {
+    pub operation: &'static str,
+    pub address: u64,
+    pub size: usize,
+    pub window: AddressRange,
+    #[source]
+    pub source: MmioError,
 }
 
 /// Device-visible outcome of one guest MMIO write.
@@ -108,20 +123,40 @@ impl MmioBus {
         }
     }
 
-    /// Dispatch a guest MMIO read.
-    pub fn read(&self, addr: u64, data: &mut [u8]) -> bool {
-        if let Some(r) = self.find(addr, data.len() as u64) {
-            return r.device.read(r.window, addr - r.window.base, data).is_ok();
-        }
-        false
+    /// Dispatch a guest MMIO read; `Ok(None)` means no routed window.
+    /// A mapped error may follow a partial output update and must not be completed.
+    pub fn read(&self, addr: u64, data: &mut [u8]) -> Result<Option<()>, AccessError> {
+        let Some(r) = self.find(addr, data.len() as u64) else {
+            return Ok(None);
+        };
+        r.device
+            .read(r.window, addr - r.window.base, data)
+            .map(Some)
+            .map_err(|source| AccessError {
+                operation: "read",
+                address: addr,
+                size: data.len(),
+                window: r.window,
+                source,
+            })
     }
 
-    /// Dispatch a guest MMIO write.
-    pub fn write(&self, addr: u64, data: &[u8]) -> Option<MmioWriteOutcome> {
-        if let Some(r) = self.find(addr, data.len() as u64) {
-            return r.device.write(r.window, addr - r.window.base, data).ok();
-        }
-        None
+    /// Dispatch a guest MMIO write; `Ok(None)` means no routed window.
+    /// A mapped error may follow accepted effects and does not permit replay.
+    pub fn write(&self, addr: u64, data: &[u8]) -> Result<Option<MmioWriteOutcome>, AccessError> {
+        let Some(r) = self.find(addr, data.len() as u64) else {
+            return Ok(None);
+        };
+        r.device
+            .write(r.window, addr - r.window.base, data)
+            .map(Some)
+            .map_err(|source| AccessError {
+                operation: "write",
+                address: addr,
+                size: data.len(),
+                window: r.window,
+                source,
+            })
     }
 
     fn find(&self, addr: u64, len: u64) -> Option<&Range> {
@@ -186,9 +221,9 @@ mod tests {
         let mut bus = MmioBus::new();
         bus.register_device(Arc::new(TestDevice::new(0x1000, 0x100)));
         let mut buf = [0u8; 4];
-        assert!(bus.read(0x1042, &mut buf));
+        assert!(bus.read(0x1042, &mut buf).unwrap().is_some());
         assert_eq!(buf, [0x42; 4]);
-        assert!(!bus.read(0x900, &mut buf));
+        assert!(bus.read(0x900, &mut buf).unwrap().is_none());
     }
 
     #[test]
@@ -197,7 +232,7 @@ mod tests {
         let mut bus = MmioBus::new();
         bus.register_device(Arc::clone(&device));
         assert_eq!(
-            bus.write(0x2080, &[0xAA, 0xBB]),
+            bus.write(0x2080, &[0xAA, 0xBB]).unwrap(),
             Some(MmioWriteOutcome::Continue)
         );
         assert_eq!(device.written.load(Ordering::SeqCst) & 0xFFFF_FFFF, 0x80);
@@ -209,9 +244,9 @@ mod tests {
         bus.register_device(Arc::new(TestDevice::new(0x3000, 0x100)));
 
         let mut buf = [0u8; 4];
-        assert!(bus.read(0x3042, &mut buf));
+        assert!(bus.read(0x3042, &mut buf).unwrap().is_some());
         assert_eq!(buf, [0x42; 4]);
-        assert!(!bus.read(0x2fff, &mut buf));
+        assert!(bus.read(0x2fff, &mut buf).unwrap().is_none());
     }
 
     #[test]
@@ -221,7 +256,7 @@ mod tests {
         bus.register_device(Arc::clone(&device));
 
         assert_eq!(
-            bus.write(0x4080, &[0xAA, 0xBB]),
+            bus.write(0x4080, &[0xAA, 0xBB]).unwrap(),
             Some(MmioWriteOutcome::Continue)
         );
         assert_eq!(device.written.load(Ordering::SeqCst) & 0xFFFF_FFFF, 0x80);

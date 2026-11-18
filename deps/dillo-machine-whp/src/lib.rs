@@ -4,6 +4,10 @@
 #![cfg(target_os = "windows")]
 
 mod cpuid_x86;
+#[cfg(test)]
+#[path = "../../dillo-machine/tests/fixtures/mapped_io.rs"]
+mod mapped_io;
+
 mod hypervisor;
 mod launch_input;
 mod memory;
@@ -16,10 +20,25 @@ mod ioapic;
 /// Reasons a WHP vCPU run returned to backend code.
 #[derive(Debug)]
 enum VmExit {
-    MmioRead { addr: u64, size: u8 },
-    MmioWrite { addr: u64, data: [u8; 8], size: u8 },
-    PioRead { port: u16, size: u8 },
-    PioWrite { port: u16, data: [u8; 4], size: u8 },
+    MmioRead {
+        addr: u64,
+        size: u8,
+    },
+    MmioWrite {
+        addr: u64,
+        data: [u8; 8],
+        size: u8,
+        outcome: dillo_mmio::MmioWriteOutcome,
+    },
+    PioRead {
+        port: u16,
+        size: u8,
+    },
+    PioWrite {
+        port: u16,
+        data: [u8; 4],
+        size: u8,
+    },
     Shutdown,
     Interrupted,
     Halted,
@@ -798,18 +817,37 @@ mod imp {
         ) -> Result<VcpuExit, Error> {
             loop {
                 let bus = Arc::clone(&self.mmio_bus);
+                let write_bus = Arc::clone(&self.mmio_bus);
                 let exit = self.inner.run(
                     |_port, _size| u32::MAX,
                     move |addr, data| {
-                        let handled = bus.lock().expect("MMIO bus lock poisoned").read(addr, data);
-                        if !handled {
+                        let handled = bus
+                            .lock()
+                            .expect("MMIO bus lock poisoned")
+                            .read(addr, data)?;
+                        if handled.is_none() {
                             log::debug!(
                                 "WHP MMIO read from unmapped {:#x} (size {}); returning zeros",
                                 addr,
                                 data.len(),
                             );
                         }
-                        handled
+                        Ok(handled)
+                    },
+                    move |addr, data| {
+                        let outcome = write_bus
+                            .lock()
+                            .expect("MMIO bus lock poisoned")
+                            .write(addr, data)?;
+                        if outcome.is_none() {
+                            log::warn!(
+                                "WHP MMIO write to unmapped {:#x} (size {}, data {:02x?})",
+                                addr,
+                                data.len(),
+                                data
+                            );
+                        }
+                        Ok(outcome)
                     },
                     termination,
                 )?;
@@ -825,21 +863,12 @@ mod imp {
                     VmExit::PioWrite { port, data, size } => {
                         let _ = (port, data, size);
                     }
-                    VmExit::MmioWrite { addr, data, size } => {
-                        let outcome = self
-                            .mmio_bus
-                            .lock()
-                            .expect("MMIO bus lock poisoned")
-                            .write(addr, &data[..size as usize]);
-                        let Some(outcome) = outcome else {
-                            log::warn!(
-                                "WHP MMIO write to unmapped {:#x} (size {}, data {:02x?})",
-                                addr,
-                                size,
-                                &data[..size as usize],
-                            );
-                            return Ok(VcpuExit::MmioWrite { addr, data, size });
-                        };
+                    VmExit::MmioWrite {
+                        addr,
+                        data,
+                        size,
+                        outcome,
+                    } => {
                         match outcome {
                             MmioWriteOutcome::Continue => {}
                             MmioWriteOutcome::GuestPoweroff => return Ok(VcpuExit::GuestPoweroff),
@@ -885,6 +914,69 @@ mod imp {
             CpuInterrupt as _, CpuPreparation as _, CpuRunner as _, Machine as _, Memory as _,
         };
         use std::thread;
+
+        #[test]
+        fn mapped_io_failure_stops_native_owners_without_replay() {
+            use crate::mapped_io::{Fault, Fixture};
+            use dillo_machine::memory::{SharedAccess, SharedRange};
+            use std::sync::mpsc;
+            use std::time::Duration;
+            let _guard = crate::hypervisor::whp_test_lock();
+            if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
+                crate::hypervisor::memory_tests::NativeMemoryTest::spawn(
+                    "imp::owner_tests::mapped_io_failure_stops_native_owners_without_replay",
+                )
+                .verify();
+                return;
+            }
+            for fault in [Fault::Read, Fault::Write] {
+                let mut vm = Vm::new_x86_64(2, None).expect("native WHP is required");
+                let base = 0xffff_f000;
+                vm.attach(
+                    Memory::from_ranges(&[RamRange {
+                        gpa: base,
+                        size: 0x1000,
+                    }])
+                    .unwrap(),
+                )
+                .unwrap();
+                let profile = dillo_machine::CpuProfile::X86_64(pmi::x86_64::Profile::V1);
+                let retained = vm.shared_memory[0]
+                    .region(SharedRange {
+                        gpa: base,
+                        size: 0x1000,
+                        access: SharedAccess::ReadWrite,
+                    })
+                    .unwrap();
+                let fixture = Fixture::new(retained, base, fault);
+                let _attachment = vm.attach(fixture.device()).unwrap();
+                let shutdown = Arc::new(AtomicBool::new(false));
+                let rescue_shutdown = Arc::clone(&shutdown);
+                let (done, completed) = mpsc::channel();
+                let rescue = thread::spawn(move || {
+                    let rescued = completed.recv_timeout(Duration::from_secs(5)).is_err();
+                    if rescued {
+                        rescue_shutdown.store(true, Ordering::Release);
+                    }
+                    rescued
+                });
+                // Preparation and run own both CPUs through their final joins.
+                // Only the BSP executes the fixture; the peer remains parked.
+                let result = dillo_runtime::PreparingCpus::spawn(&mut vm, 2, profile)
+                    .and_then(|cpus| cpus.prepare(shutdown.as_ref()))
+                    .and_then(|cpus| cpus.run(shutdown.as_ref()));
+                let _ = done.send(());
+                assert!(
+                    !rescue.join().unwrap(),
+                    "mapped failure required operator rescue"
+                );
+                let error = result.unwrap_err().to_string();
+                fixture.verify(&error);
+                eprintln!(
+                    "native mapped {fault:?} failure: both owners joined, no post-failure guest marker, effects exactly once: {error}"
+                );
+            }
+        }
 
         #[test]
         fn attached_worker_failure_stops_native_cpus_and_preserves_retained_ram() {
@@ -1164,7 +1256,7 @@ mod imp {
                     let marker = runner
                         .vcpu
                         .inner
-                        .run(|_, _| 0, |_, _| false, token.as_ref())
+                        .run(|_, _| 0, |_, _| Ok(None), |_, _| Ok(None), token.as_ref())
                         .unwrap();
                     assert!(
                         matches!(
@@ -1181,7 +1273,7 @@ mod imp {
                     let exit = runner
                         .vcpu
                         .inner
-                        .run(|_, _| 0, |_, _| false, token.as_ref())
+                        .run(|_, _| 0, |_, _| Ok(None), |_, _| Ok(None), token.as_ref())
                         .unwrap();
                     assert!(matches!(exit, VmExit::Interrupted), "{exit:?}");
                     assert!(

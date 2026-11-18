@@ -10,6 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use dillo_mmio::{AccessError, MmioWriteOutcome};
 use thiserror::Error;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 use windows_sys::Win32::System::Hypervisor::{WHV_REGISTER_NAME, WHV_REGISTER_VALUE};
@@ -19,6 +20,8 @@ use crate::{Memory, VmExit};
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("{0}")]
+    Mmio(#[from] AccessError),
     #[error("WHP guest address space: {0}")]
     AddressSpace(String),
     #[error("WHP capability HypervisorPresent query failed: {0}")]
@@ -707,7 +710,8 @@ impl Vcpu {
     pub(crate) fn run(
         &mut self,
         pio_read: impl Fn(u16, u8) -> u32,
-        mmio_read: impl Fn(u64, &mut [u8]) -> bool,
+        mmio_read: impl Fn(u64, &mut [u8]) -> Result<Option<()>, AccessError>,
+        mmio_write: impl Fn(u64, &[u8]) -> Result<Option<MmioWriteOutcome>, AccessError>,
         termination: &dyn dillo_machine::CpuTermination,
     ) -> Result<VmExit, Error> {
         let exit = raw::run_virtual_processor(
@@ -715,18 +719,25 @@ impl Vcpu {
             self.idx,
             &pio_read,
             &mmio_read,
+            &mmio_write,
             termination,
-        )
-        .map_err(|hr| Error::RunVcpu {
-            idx: self.idx,
-            hr: status(hr),
-        })?;
+        )?;
         Ok(match exit {
             raw::RunExit::Halted => VmExit::Halted,
             raw::RunExit::PioRead { port, size } => VmExit::PioRead { port, size },
             raw::RunExit::PioWrite { port, data, size } => VmExit::PioWrite { port, data, size },
             raw::RunExit::MmioRead { addr, size } => VmExit::MmioRead { addr, size },
-            raw::RunExit::MmioWrite { addr, data, size } => VmExit::MmioWrite { addr, data, size },
+            raw::RunExit::MmioWrite {
+                addr,
+                data,
+                size,
+                outcome,
+            } => VmExit::MmioWrite {
+                addr,
+                data,
+                size,
+                outcome,
+            },
             raw::RunExit::Shutdown => VmExit::Shutdown,
             raw::RunExit::Canceled => VmExit::Interrupted,
             raw::RunExit::Unknown(reason) => VmExit::Unknown(reason),
@@ -817,6 +828,7 @@ mod raw {
     };
 
     use super::{HResult, failed, hyperv_leaf1_cpuid};
+    use dillo_mmio::{AccessError, MmioWriteOutcome};
 
     pub(super) type PartitionHandle = WHV_PARTITION_HANDLE;
 
@@ -852,12 +864,28 @@ mod raw {
         pub edx: u32,
     }
 
+    #[derive(Debug)]
     pub(super) enum RunExit {
         Halted,
-        PioRead { port: u16, size: u8 },
-        PioWrite { port: u16, data: [u8; 4], size: u8 },
-        MmioRead { addr: u64, size: u8 },
-        MmioWrite { addr: u64, data: [u8; 8], size: u8 },
+        PioRead {
+            port: u16,
+            size: u8,
+        },
+        PioWrite {
+            port: u16,
+            data: [u8; 4],
+            size: u8,
+        },
+        MmioRead {
+            addr: u64,
+            size: u8,
+        },
+        MmioWrite {
+            addr: u64,
+            data: [u8; 8],
+            size: u8,
+            outcome: MmioWriteOutcome,
+        },
         Shutdown,
         Canceled,
         Unknown(String),
@@ -1241,9 +1269,10 @@ mod raw {
         partition: PartitionHandle,
         idx: u32,
         pio_read: &dyn Fn(u16, u8) -> u32,
-        mmio_read: &dyn Fn(u64, &mut [u8]) -> bool,
+        mmio_read: &dyn Fn(u64, &mut [u8]) -> Result<Option<()>, AccessError>,
+        mmio_write: &dyn Fn(u64, &[u8]) -> Result<Option<MmioWriteOutcome>, AccessError>,
         termination: &dyn dillo_machine::CpuTermination,
-    ) -> Result<RunExit, HResult> {
+    ) -> Result<RunExit, super::Error> {
         loop {
             if termination.is_requested() {
                 return Ok(RunExit::Canceled);
@@ -1260,17 +1289,27 @@ mod raw {
                 )
             };
             if failed(hr) {
-                return Err(HResult(hr));
+                return Err(super::Error::RunVcpu {
+                    idx,
+                    hr: super::status(HResult(hr)),
+                });
             }
 
             match exit.ExitReason {
-                EXIT_X64_CPUID => emulate_cpuid_exit(partition, idx, &exit)?,
+                EXIT_X64_CPUID => emulate_cpuid_exit(partition, idx, &exit).map_err(|hr| {
+                    super::Error::RunVcpu {
+                        idx,
+                        hr: super::status(hr),
+                    }
+                })?,
                 EXIT_X64_HALT => return Ok(RunExit::Halted),
                 EXIT_X64_IO_PORT_ACCESS => {
-                    return emulate_io_exit(partition, idx, &exit, pio_read, mmio_read);
+                    return emulate_io_exit(partition, idx, &exit, pio_read, mmio_read, mmio_write);
                 }
                 EXIT_MEMORY_ACCESS => {
-                    return emulate_mmio_exit(partition, idx, &exit, pio_read, mmio_read);
+                    return emulate_mmio_exit(
+                        partition, idx, &exit, pio_read, mmio_read, mmio_write,
+                    );
                 }
                 EXIT_UNRECOVERABLE_EXCEPTION => return Ok(RunExit::Shutdown),
                 EXIT_CANCELED => return Ok(RunExit::Canceled),
@@ -1315,15 +1354,21 @@ mod raw {
         idx: u32,
         exit: &WHV_RUN_VP_EXIT_CONTEXT,
         pio_read: &dyn Fn(u16, u8) -> u32,
-        mmio_read: &dyn Fn(u64, &mut [u8]) -> bool,
-    ) -> Result<RunExit, HResult> {
-        let emulator = Emulator::new()?;
+        mmio_read: &dyn Fn(u64, &mut [u8]) -> Result<Option<()>, AccessError>,
+        mmio_write: &dyn Fn(u64, &[u8]) -> Result<Option<MmioWriteOutcome>, AccessError>,
+    ) -> Result<RunExit, super::Error> {
+        let emulator = Emulator::new().map_err(|hr| super::Error::RunVcpu {
+            idx,
+            hr: super::status(hr),
+        })?;
         let mut context = EmulationContext {
             partition,
             idx,
             pio_read,
             mmio_read,
+            mmio_write,
             exit: None,
+            failure: None,
         };
         let mut status = WHV_EMULATOR_STATUS::default();
         // SAFETY: IoPortAccess is valid for the active exit reason and all
@@ -1337,10 +1382,7 @@ mod raw {
                 &raw mut status,
             )
         };
-        if failed(hr) {
-            return Err(HResult(hr));
-        }
-        Ok(emulated_exit(status, context.exit))
+        context.finish(hr, status)
     }
 
     fn emulate_mmio_exit(
@@ -1348,15 +1390,21 @@ mod raw {
         idx: u32,
         exit: &WHV_RUN_VP_EXIT_CONTEXT,
         pio_read: &dyn Fn(u16, u8) -> u32,
-        mmio_read: &dyn Fn(u64, &mut [u8]) -> bool,
-    ) -> Result<RunExit, HResult> {
-        let emulator = Emulator::new()?;
+        mmio_read: &dyn Fn(u64, &mut [u8]) -> Result<Option<()>, AccessError>,
+        mmio_write: &dyn Fn(u64, &[u8]) -> Result<Option<MmioWriteOutcome>, AccessError>,
+    ) -> Result<RunExit, super::Error> {
+        let emulator = Emulator::new().map_err(|hr| super::Error::RunVcpu {
+            idx,
+            hr: super::status(hr),
+        })?;
         let mut context = EmulationContext {
             partition,
             idx,
             pio_read,
             mmio_read,
+            mmio_write,
             exit: None,
+            failure: None,
         };
         let mut status = WHV_EMULATOR_STATUS::default();
         // SAFETY: MemoryAccess is valid for the active exit reason and all
@@ -1370,10 +1418,7 @@ mod raw {
                 &raw mut status,
             )
         };
-        if failed(hr) {
-            return Err(HResult(hr));
-        }
-        Ok(emulated_exit(status, context.exit))
+        context.finish(hr, status)
     }
 
     fn emulated_exit(status: WHV_EMULATOR_STATUS, exit: Option<RunExit>) -> RunExit {
@@ -1428,21 +1473,90 @@ mod raw {
         partition: PartitionHandle,
         idx: u32,
         pio_read: &'a dyn Fn(u16, u8) -> u32,
-        mmio_read: &'a dyn Fn(u64, &mut [u8]) -> bool,
+        mmio_read: &'a dyn Fn(u64, &mut [u8]) -> Result<Option<()>, AccessError>,
+        mmio_write: &'a dyn Fn(u64, &[u8]) -> Result<Option<MmioWriteOutcome>, AccessError>,
         exit: Option<RunExit>,
+        failure: Option<super::Error>,
+    }
+
+    impl EmulationContext<'_> {
+        fn terminal(&self) -> bool {
+            matches!(
+                self.exit,
+                Some(RunExit::MmioWrite {
+                    outcome: MmioWriteOutcome::GuestPoweroff | MmioWriteOutcome::GuestReset,
+                    ..
+                })
+            )
+        }
+
+        fn invoke(&mut self, action: impl FnOnce(&mut Self) -> Result<(), super::Error>) -> i32 {
+            if self.failure.is_some() || self.terminal() {
+                return E_FAIL;
+            }
+            let result = catch_unwind(AssertUnwindSafe(|| action(self)));
+            match result {
+                Ok(Ok(())) => S_OK,
+                Ok(Err(error)) => {
+                    self.failure = Some(error);
+                    E_FAIL
+                }
+                Err(_) => {
+                    self.failure = Some(super::Error::UnhandledExit(
+                        "WHP emulator callback panicked".into(),
+                    ));
+                    E_FAIL
+                }
+            }
+        }
+
+        fn native_result(&self, hr: i32) -> Result<(), super::Error> {
+            if failed(hr) {
+                Err(super::Error::RunVcpu {
+                    idx: self.idx,
+                    hr: super::status(HResult(hr)),
+                })
+            } else {
+                Ok(())
+            }
+        }
+
+        fn finish(mut self, hr: i32, status: WHV_EMULATOR_STATUS) -> Result<RunExit, super::Error> {
+            if let Some(error) = self.failure.take() {
+                return Err(error);
+            }
+            // A device has accepted a terminal request. Later callbacks were
+            // deliberately refused; do not resume or replay this instruction.
+            if self.terminal() {
+                return Ok(self.exit.take().unwrap());
+            }
+            // The extended emulator status is valid only for S_OK.
+            if hr != S_OK {
+                return Err(super::Error::RunVcpu {
+                    idx: self.idx,
+                    hr: super::status(HResult(hr)),
+                });
+            }
+            Ok(emulated_exit(status, self.exit))
+        }
     }
 
     unsafe extern "system" fn io_port_callback(
         context: *const c_void,
         io_access: *mut WHV_EMULATOR_IO_ACCESS_INFO,
     ) -> i32 {
-        callback_guard(|| {
-            let context = unsafe { &mut *(context.cast_mut().cast::<EmulationContext<'_>>()) };
+        let context = unsafe { &mut *(context.cast_mut().cast::<EmulationContext<'_>>()) };
+        context.invoke(|context| {
             let io = unsafe { &mut *io_access };
-            let size = (io.AccessSize as u8).min(4);
+            if !matches!(io.AccessSize, 1 | 2 | 4) {
+                return Err(super::Error::UnhandledExit(format!(
+                    "WHP PIO width {} is unsupported",
+                    io.AccessSize
+                )));
+            }
+            let size = io.AccessSize as u8;
             if io.Direction == 0 {
-                let value = (context.pio_read)(io.Port, size);
-                io.Data = value;
+                io.Data = (context.pio_read)(io.Port, size);
                 context.exit = Some(RunExit::PioRead {
                     port: io.Port,
                     size,
@@ -1456,7 +1570,7 @@ mod raw {
                     size,
                 });
             }
-            S_OK
+            Ok(())
         })
     }
 
@@ -1464,13 +1578,19 @@ mod raw {
         context: *const c_void,
         memory_access: *mut WHV_EMULATOR_MEMORY_ACCESS_INFO,
     ) -> i32 {
-        callback_guard(|| {
-            let context = unsafe { &mut *(context.cast_mut().cast::<EmulationContext<'_>>()) };
+        let context = unsafe { &mut *(context.cast_mut().cast::<EmulationContext<'_>>()) };
+        context.invoke(|context| {
             let memory = unsafe { &mut *memory_access };
-            let size = memory.AccessSize.min(8);
+            let size = memory.AccessSize;
+            if size == 0 || usize::from(size) > memory.Data.len() {
+                return Err(super::Error::UnhandledExit(format!(
+                    "WHP memory access at {:#x} has unsupported width {size}",
+                    memory.GpaAddress
+                )));
+            }
             if memory.Direction == 0 {
                 let data = &mut memory.Data[..size as usize];
-                if !(context.mmio_read)(memory.GpaAddress, data) {
+                if (context.mmio_read)(memory.GpaAddress, data)?.is_none() {
                     data.fill(0);
                 }
                 context.exit = Some(RunExit::MmioRead {
@@ -1478,15 +1598,19 @@ mod raw {
                     size,
                 });
             } else {
-                let mut data = [0u8; 8];
+                let outcome =
+                    (context.mmio_write)(memory.GpaAddress, &memory.Data[..size as usize])?
+                        .unwrap_or(MmioWriteOutcome::Continue);
+                let mut data = [0; 8];
                 data[..size as usize].copy_from_slice(&memory.Data[..size as usize]);
                 context.exit = Some(RunExit::MmioWrite {
                     addr: memory.GpaAddress,
                     data,
                     size,
+                    outcome,
                 });
             }
-            S_OK
+            Ok(())
         })
     }
 
@@ -1496,8 +1620,8 @@ mod raw {
         count: u32,
         values: *mut WHV_REGISTER_VALUE,
     ) -> i32 {
-        callback_guard(|| {
-            let context = unsafe { &*(context.cast::<EmulationContext<'_>>()) };
+        let context = unsafe { &mut *(context.cast_mut().cast::<EmulationContext<'_>>()) };
+        context.invoke(|context| {
             let hr = unsafe {
                 WHvGetVirtualProcessorRegisters(
                     context.partition,
@@ -1507,7 +1631,7 @@ mod raw {
                     values,
                 )
             };
-            if failed(hr) { hr } else { S_OK }
+            context.native_result(hr)
         })
     }
 
@@ -1517,8 +1641,8 @@ mod raw {
         count: u32,
         values: *const WHV_REGISTER_VALUE,
     ) -> i32 {
-        callback_guard(|| {
-            let context = unsafe { &*(context.cast::<EmulationContext<'_>>()) };
+        let context = unsafe { &mut *(context.cast_mut().cast::<EmulationContext<'_>>()) };
+        context.invoke(|context| {
             let hr = unsafe {
                 WHvSetVirtualProcessorRegisters(
                     context.partition,
@@ -1528,7 +1652,7 @@ mod raw {
                     values,
                 )
             };
-            if failed(hr) { hr } else { S_OK }
+            context.native_result(hr)
         })
     }
 
@@ -1539,8 +1663,8 @@ mod raw {
         translation_result: *mut WHV_TRANSLATE_GVA_RESULT_CODE,
         gpa: *mut u64,
     ) -> i32 {
-        callback_guard(|| {
-            let context = unsafe { &*(context.cast::<EmulationContext<'_>>()) };
+        let context = unsafe { &mut *(context.cast_mut().cast::<EmulationContext<'_>>()) };
+        context.invoke(|context| {
             let mut result = WHV_TRANSLATE_GVA_RESULT::default();
             let mut translated_gpa = 0;
             let hr = unsafe {
@@ -1553,22 +1677,13 @@ mod raw {
                     &raw mut translated_gpa,
                 )
             };
-            if failed(hr) {
-                return hr;
-            }
+            context.native_result(hr)?;
             unsafe {
                 *translation_result = result.ResultCode;
                 *gpa = translated_gpa;
             }
-            S_OK
+            Ok(())
         })
-    }
-
-    fn callback_guard(action: impl FnOnce() -> i32) -> i32 {
-        match catch_unwind(AssertUnwindSafe(action)) {
-            Ok(hr) => hr,
-            Err(_) => E_FAIL,
-        }
     }
 
     #[cfg(test)]
@@ -1636,6 +1751,107 @@ mod raw {
             return Err(HResult(hr));
         }
         Ok(value)
+    }
+    #[cfg(test)]
+    mod callback_tests {
+        use super::*;
+        use dillo_machine::memory::AddressRange;
+        use std::cell::Cell;
+
+        #[test]
+        fn first_callback_failure_prevents_later_effects_and_survives_status() {
+            let effects = Cell::new(0);
+            let write = |address, data: &[u8]| {
+                effects.set(effects.get() + 1);
+                Err(AccessError {
+                    operation: "write",
+                    address,
+                    size: data.len(),
+                    window: AddressRange {
+                        base: 0x2000,
+                        size: 0x1000,
+                    },
+                    source: dillo_mmio::MmioError::Device(Box::new(std::io::Error::other(
+                        "first callback failure",
+                    ))),
+                })
+            };
+            let mut context = EmulationContext {
+                partition: 0,
+                idx: 0,
+                pio_read: &|_, _| 0,
+                mmio_read: &|_, _| Ok(None),
+                mmio_write: &write,
+                exit: None,
+                failure: None,
+            };
+            let mut access = WHV_EMULATOR_MEMORY_ACCESS_INFO {
+                GpaAddress: 0x2000,
+                Direction: 1,
+                AccessSize: 1,
+                ..Default::default()
+            };
+            // Exercise the ABI callback itself, separately from native emulator tests.
+            let result =
+                unsafe { memory_callback(ptr::from_mut(&mut context).cast(), &raw mut access) };
+            assert_eq!(result, E_FAIL);
+            let result =
+                unsafe { memory_callback(ptr::from_mut(&mut context).cast(), &raw mut access) };
+            assert_eq!(result, E_FAIL);
+            assert_eq!(effects.get(), 1);
+            let error = context
+                .finish(E_FAIL, WHV_EMULATOR_STATUS::default())
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("first callback failure"),
+                "{error}"
+            );
+            assert!(matches!(error, super::super::Error::Mmio(_)));
+        }
+
+        #[test]
+        fn accepted_terminal_callback_prevents_later_effects_and_retains_outcome() {
+            for outcome in [
+                MmioWriteOutcome::GuestPoweroff,
+                MmioWriteOutcome::GuestReset,
+            ] {
+                let effects = Cell::new(0);
+                let write = |_, _: &[u8]| {
+                    effects.set(effects.get() + 1);
+                    Ok(Some(outcome))
+                };
+                let mut context = EmulationContext {
+                    partition: 0,
+                    idx: 0,
+                    pio_read: &|_, _| 0,
+                    mmio_read: &|_, _| Ok(None),
+                    mmio_write: &write,
+                    exit: None,
+                    failure: None,
+                };
+                let mut access = WHV_EMULATOR_MEMORY_ACCESS_INFO {
+                    GpaAddress: 0x2000,
+                    Direction: 1,
+                    AccessSize: 1,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    unsafe { memory_callback(ptr::from_mut(&mut context).cast(), &raw mut access) },
+                    S_OK
+                );
+                assert_eq!(
+                    unsafe { memory_callback(ptr::from_mut(&mut context).cast(), &raw mut access) },
+                    E_FAIL
+                );
+                assert_eq!(effects.get(), 1);
+                let exit = context
+                    .finish(E_FAIL, WHV_EMULATOR_STATUS::default())
+                    .unwrap();
+                assert!(
+                    matches!(exit, RunExit::MmioWrite { outcome: observed, .. } if observed == outcome)
+                );
+            }
+        }
     }
 }
 
@@ -1982,7 +2198,8 @@ mod tests {
         let exit = vcpu
             .run(
                 |_, _| 0,
-                |_, _| false,
+                |_, _| Ok(None),
+                |_, _| Ok(None),
                 &std::sync::atomic::AtomicBool::new(false),
             )
             .expect("run vCPU");
@@ -2009,7 +2226,8 @@ mod tests {
         let exit = vcpu
             .run(
                 |_, _| 0,
-                |_, _| false,
+                |_, _| Ok(None),
+                |_, _| Ok(None),
                 &std::sync::atomic::AtomicBool::new(false),
             )
             .expect("run out");
@@ -2025,7 +2243,8 @@ mod tests {
         let exit = vcpu
             .run(
                 |_, _| 0,
-                |_, _| false,
+                |_, _| Ok(None),
+                |_, _| Ok(None),
                 &std::sync::atomic::AtomicBool::new(false),
             )
             .expect("run hlt");
@@ -2050,12 +2269,15 @@ mod tests {
         let exit = vcpu
             .run(
                 |_, _| 0,
-                |_, _| false,
+                |_, _| Ok(None),
+                |_, _| Ok(None),
                 &std::sync::atomic::AtomicBool::new(false),
             )
             .expect("run mmio write");
         match exit {
-            VmExit::MmioWrite { addr, data, size } => {
+            VmExit::MmioWrite {
+                addr, data, size, ..
+            } => {
                 assert_eq!(addr, 0x2000);
                 assert_eq!(size, 1);
                 assert_eq!(data[0], 0xA5);
@@ -2066,11 +2288,104 @@ mod tests {
         let exit = vcpu
             .run(
                 |_, _| 0,
-                |_, _| false,
+                |_, _| Ok(None),
+                |_, _| Ok(None),
                 &std::sync::atomic::AtomicBool::new(false),
             )
             .expect("run hlt");
         assert!(matches!(exit, VmExit::Halted), "expected HLT, got {exit:?}");
+    }
+
+    #[test]
+    fn whp_native_split_and_rep_preserve_earlier_effects_on_later_failure() {
+        use dillo_machine::memory::AddressRange;
+        use dillo_mmio::{AccessError, MmioError, MmioWriteOutcome};
+        use std::cell::RefCell;
+
+        let _guard = whp_test_lock();
+        if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
+            super::memory_tests::NativeMemoryTest::spawn("hypervisor::tests::whp_native_split_and_rep_preserve_earlier_effects_on_later_failure").verify();
+            return;
+        }
+        for (label, code, expected) in [
+            // mov dword ptr [0x2ffe], eax: the emulator splits at the page boundary.
+            (
+                "split store",
+                vec![0x66, 0xa3, 0xfe, 0x2f],
+                vec![(0x2ffe, 2), (0x3000, 2)],
+            ),
+            // mov di,0x2000; mov cx,3; rep stosb.
+            (
+                "REP store",
+                vec![0xbf, 0x00, 0x20, 0xb9, 0x03, 0x00, 0xf3, 0xaa],
+                vec![(0x2000, 1), (0x2001, 1), (0x2002, 1)],
+            ),
+        ] {
+            let mut vm = Vm::new().expect("native WHP is required");
+            let code_base = 0x3_0000;
+            vm.add_memory(code_base, 0x1000).unwrap();
+            let mut payload = code;
+            // A marker in BL followed by HLT must never execute after failure.
+            payload.extend_from_slice(&[0xb3, 0x77, 0xf4]);
+            vm.write_guest(code_base, &payload).unwrap();
+            let mut cpu = vm.create_vcpu(0, "x86-64-v1").unwrap();
+            cpu.initialize_test_real_mode(code_base, 0x1234_5678)
+                .unwrap();
+            let attempts = RefCell::new(Vec::new());
+            let failure_address = expected.last().unwrap().0;
+            let write = |address, data: &[u8]| {
+                attempts.borrow_mut().push((address, data.len()));
+                if address == failure_address {
+                    Err(AccessError {
+                        operation: "write",
+                        address,
+                        size: data.len(),
+                        window: AddressRange {
+                            base: 0x2000,
+                            size: 0x2000,
+                        },
+                        source: MmioError::Device(Box::new(std::io::Error::other(
+                            "later native callback failure",
+                        ))),
+                    })
+                } else {
+                    Ok(Some(MmioWriteOutcome::Continue))
+                }
+            };
+            let termination = std::sync::atomic::AtomicBool::new(false);
+            let mut failure = None;
+            for _ in 0..4 {
+                match cpu.run(|_, _| 0, |_, _| Ok(None), write, &termination) {
+                    Err(error) => {
+                        failure = Some(error);
+                        break;
+                    }
+                    Ok(VmExit::MmioWrite { .. }) => {}
+                    other => panic!("{label}: expected mapped callback failure, got {other:?}"),
+                }
+            }
+            let failure = failure.expect("native emulator must reach the later failing access");
+            assert!(
+                failure
+                    .to_string()
+                    .contains("later native callback failure"),
+                "{label}: {failure}"
+            );
+            assert_eq!(
+                *attempts.borrow(),
+                expected,
+                "{label}: effects cannot be lost or replayed"
+            );
+            assert_eq!(
+                cpu.native_register_words(WHvX64RegisterRbx)[0] & 0xff,
+                0,
+                "{label}: post-failure marker"
+            );
+            eprintln!(
+                "WHP native {label}: accesses {:?}, retained failure {failure}, no post-failure marker",
+                attempts.borrow()
+            );
+        }
     }
 
     impl Vcpu {
@@ -2258,7 +2573,12 @@ pub(crate) mod memory_tests {
         let mut cpu = vm.create_vcpu(0, "x86-64-v1").unwrap();
         cpu.initialize_test_real_mode(0x10000, 0).unwrap();
         let exit = cpu
-            .run(|_, _| 0, |_, _| false, &AtomicBool::new(false))
+            .run(
+                |_, _| 0,
+                |_, _| Ok(None),
+                |_, _| Ok(None),
+                &AtomicBool::new(false),
+            )
             .unwrap();
         assert!(matches!(exit, VmExit::Halted), "{exit:?}");
         let mut bytes = [0; 3];
@@ -2328,7 +2648,12 @@ pub(crate) mod memory_tests {
         let mut cpu = vm.create_vcpu(0, "x86-64-v1").unwrap();
         cpu.initialize_test_real_mode(0x10000, 0).unwrap();
         let exit = cpu
-            .run(|_, _| 0, |_, _| false, &AtomicBool::new(false))
+            .run(
+                |_, _| 0,
+                |_, _| Ok(None),
+                |_, _| Ok(None),
+                &AtomicBool::new(false),
+            )
             .unwrap();
         assert!(matches!(exit, VmExit::Halted), "{exit:?}");
         let service = vm.interrupt_controller();

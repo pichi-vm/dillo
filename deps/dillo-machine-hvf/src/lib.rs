@@ -3,6 +3,10 @@
 
 #![cfg(target_os = "macos")]
 
+#[cfg(test)]
+#[path = "../../dillo-machine/tests/fixtures/mapped_io.rs"]
+mod mapped_io;
+
 mod hypervisor;
 mod launch_input;
 mod memory;
@@ -874,7 +878,7 @@ mod imp {
                         self.mmio_bus
                             .lock()
                             .expect("MMIO bus lock poisoned")
-                            .read(addr, &mut data[..size]);
+                            .read(addr, &mut data[..size])?;
                         self.inner.complete_mmio_read(u64::from_le_bytes(data))?;
                     }
                     VmExit::MmioWrite { addr, data, size } => {
@@ -883,7 +887,8 @@ mod imp {
                             .mmio_bus
                             .lock()
                             .expect("MMIO bus lock poisoned")
-                            .write(addr, &data[..size]);
+                            .write(addr, &data[..size])?;
+                        self.inner.complete_mmio_write()?;
                         let Some(outcome) = outcome else {
                             log::warn!(
                                 "HVF MMIO write to unmapped {:#x} (size {}, data {:02x?})",
@@ -1187,6 +1192,75 @@ mod imp {
 
         use super::*;
         use vm_memory::{Bytes, GuestAddress};
+
+        #[test]
+        fn mapped_io_failure_stops_native_owners_without_replay() {
+            use crate::mapped_io::{Fault, Fixture};
+            use dillo_machine::memory::{SharedAccess, SharedRange};
+            use std::sync::mpsc;
+            use std::time::Duration;
+            if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
+                crate::hypervisor::tests::SignedNativeTest::spawn(
+                    "imp::tests::mapped_io_failure_stops_native_owners_without_replay",
+                )
+                .verify();
+                return;
+            }
+            for fault in [Fault::Read, Fault::Write] {
+                let gic = crate::hypervisor::GicParams {
+                    dist_base: 0x0800_0000,
+                    redist_base: 0x0810_0000,
+                    msi_base: 0x0a10_0000,
+                    msi_intid_base: 64,
+                    msi_intid_count: 32,
+                };
+                let mut vm = Vm::new(&gic, 36, 2).expect("native HVF/GIC is required");
+                let base = 0;
+                vm.attach(
+                    <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
+                        gpa: base,
+                        size: 0x4000,
+                    }])
+                    .unwrap(),
+                )
+                .unwrap();
+                let profile = dillo_machine::CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0);
+                let retained = vm.shared_memory[0]
+                    .region(SharedRange {
+                        gpa: base,
+                        size: 0x1000,
+                        access: SharedAccess::ReadWrite,
+                    })
+                    .unwrap();
+                let fixture = Fixture::new(retained, base, fault);
+                let _attachment = vm.attach(fixture.device()).unwrap();
+                let shutdown = Arc::new(AtomicBool::new(false));
+                let rescue_shutdown = Arc::clone(&shutdown);
+                let (done, completed) = mpsc::channel();
+                let rescue = thread::spawn(move || {
+                    let rescued = completed.recv_timeout(Duration::from_secs(5)).is_err();
+                    if rescued {
+                        rescue_shutdown.store(true, Ordering::Release);
+                    }
+                    rescued
+                });
+                // Preparation and run own both CPUs through their final joins.
+                // Only the BSP executes the fixture; the peer remains parked.
+                let result = dillo_runtime::PreparingCpus::spawn(&mut vm, 2, profile)
+                    .and_then(|cpus| cpus.prepare(shutdown.as_ref()))
+                    .and_then(|cpus| cpus.run(shutdown.as_ref()));
+                let _ = done.send(());
+                assert!(
+                    !rescue.join().unwrap(),
+                    "mapped failure required operator rescue"
+                );
+                let error = result.unwrap_err().to_string();
+                fixture.verify(&error);
+                eprintln!(
+                    "native mapped {fault:?} failure: both owners joined, no post-failure guest marker, effects exactly once: {error}"
+                );
+            }
+        }
 
         #[test]
         fn attached_worker_failure_stops_native_cpus_and_preserves_retained_ram() {

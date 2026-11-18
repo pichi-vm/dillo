@@ -45,6 +45,8 @@ pub(crate) struct GicParams {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("{0}")]
+    Mmio(#[from] dillo_mmio::AccessError),
     #[error("Arm CPU admission: {0}")]
     ArmAdmission(#[from] dillo_machine::aarch64::AdmissionError),
     #[error("hvf: {0}")]
@@ -610,6 +612,11 @@ impl Vcpu {
         })
     }
 
+    /// Complete a write only after its device dispatch succeeded.
+    pub(crate) fn complete_mmio_write(&self) -> Result<(), Error> {
+        self.advance_pc()
+    }
+
     /// Complete an [`VmExit::MmioRead`] by writing the bus-provided value into
     /// the destination register and advancing past the load instruction.
     pub(crate) fn complete_mmio_read(&self, value: u64) -> Result<(), Error> {
@@ -691,8 +698,6 @@ impl Vcpu {
             } else {
                 self.inner.get_reg(gpr(srt))?
             };
-            // Writes advance PC immediately (no completion step).
-            self.advance_pc()?;
             Ok(VmExit::MmioWrite {
                 addr: ipa,
                 data: value.to_le_bytes(),

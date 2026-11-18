@@ -47,8 +47,8 @@ impl std::fmt::Debug for TestFunction {
 }
 
 impl PciDevice for TestFunction {
-    fn config_read(&self, _reg_idx: usize) -> u32 {
-        0
+    fn config_read(&self, _reg_idx: usize) -> Result<u32, PciError> {
+        Ok(0)
     }
 
     fn config_write(&self, _reg_idx: usize, _offset: u64, data: &[u8]) -> Result<(), PciError> {
@@ -166,7 +166,8 @@ fn shared_domain_keeps_function_enable_and_masks_independent() {
     assert_delivery(&domain, &handles, &[]);
     let control = |slot, value: u16| {
         root.bus
-            .config_write(0, slot, 0, 0, 0, &value.to_le_bytes());
+            .config_write(0, slot, 0, 0, 0, &value.to_le_bytes())
+            .unwrap();
     };
     control(1, 0x8000);
     control(2, 0x8000);
@@ -242,8 +243,8 @@ fn worker_failure_keeps_the_actual_sparse_pci_slot_and_task_role() {
     #[derive(Debug)]
     struct Function;
     impl PciDevice for Function {
-        fn config_read(&self, _: usize) -> u32 {
-            0
+        fn config_read(&self, _: usize) -> Result<u32, PciError> {
+            Ok(0)
         }
         fn config_write(&self, _: usize, _: u64, _: &[u8]) -> Result<(), PciError> {
             Ok(())
