@@ -1505,7 +1505,7 @@ mod launch {
     use thiserror::Error;
 
     use crate::placement::{self, MemoryPlan};
-    use dillo::pmi_parse::{Action as PmiAction, FillKind, HostArch, ParseOptions};
+    use dillo_launch::pmi_parse::{Action as PmiAction, FillKind, HostArch, ParseOptions};
 
     /// The PMI byte source. Raw section loads are copied straight from it into
     /// guest RAM (one copy) instead of being staged into owned `Vec`s (two
@@ -1630,7 +1630,7 @@ mod launch {
     /// Target-neutral launch facts derived before backend construction.
     #[derive(Debug)]
     pub(crate) struct LaunchPlan {
-        pub(crate) parsed: dillo::pmi_parse::ParsedPmi,
+        pub(crate) parsed: dillo_launch::pmi_parse::ParsedPmi,
         pub(crate) merged_dtb: Vec<u8>,
         pub(crate) platform: PlatformMachine,
         pub(crate) memory: MemoryPlan,
@@ -1674,7 +1674,7 @@ mod launch {
 
             crate::boot_trace::mark("pmi_read");
             let pmi_arch = pmi_arch(host_arch);
-            let parsed = dillo::pmi_parse::parse(
+            let parsed = dillo_launch::pmi_parse::parse(
                 bytes,
                 &ParseOptions {
                     host_arch: pmi_arch,
@@ -1816,7 +1816,7 @@ mod launch {
         },
 
         #[error("PMI parse: {0}")]
-        PmiParse(#[from] dillo::pmi_parse::Error),
+        PmiParse(#[from] dillo_launch::pmi_parse::Error),
 
         #[error("read base DTB {path}: {source}")]
         ReadBaseDtb {
@@ -1897,7 +1897,7 @@ mod launch {
 
     fn guest_writes(
         bytes: &[u8],
-        parsed: &dillo::pmi_parse::ParsedPmi,
+        parsed: &dillo_launch::pmi_parse::ParsedPmi,
         memory: &MemoryPlan,
         arch: Arch,
         cpu_compatible: Option<&str>,
@@ -1993,7 +1993,7 @@ mod launch {
     /// a bundled image, whose base is loaded and measured.
     fn resolve_base(
         bytes: &[u8],
-        parsed: &dillo::pmi_parse::ParsedPmi,
+        parsed: &dillo_launch::pmi_parse::ParsedPmi,
         oob: Option<&[u8]>,
     ) -> Result<Vec<u8>, LaunchError> {
         let has_fill = parsed.actions.iter().any(|a| {
@@ -2110,7 +2110,7 @@ mod machine_select {
                 },
 
                 #[error("PMI parse: {0}")]
-                PmiParse(#[from] dillo::pmi_parse::Error),
+                PmiParse(#[from] dillo_launch::pmi_parse::Error),
 
                 // ── exit 11 — DTB parse / validation ───────────────────────────
                 #[error("base DTB extraction: {0}")]
@@ -2269,7 +2269,7 @@ mod machine_select {
         /// Target-neutral launch facts already derived by `dillo`.
         #[derive(Debug)]
         pub(crate) struct Preflight {
-            parsed: dillo::pmi_parse::ParsedPmi,
+            parsed: dillo_launch::pmi_parse::ParsedPmi,
             platform: PlatformMachine,
             dtb: Vec<u8>,
             memslots: Vec<RunRegion>,
@@ -2284,7 +2284,7 @@ mod machine_select {
             // genuinely distinct inputs, so a builder would add noise here.
             #[allow(clippy::too_many_arguments)]
             pub(crate) fn new(
-                parsed: dillo::pmi_parse::ParsedPmi,
+                parsed: dillo_launch::pmi_parse::ParsedPmi,
                 platform: PlatformMachine,
                 dtb: Vec<u8>,
                 memslots: impl IntoIterator<Item = RunRegion>,
@@ -2308,7 +2308,7 @@ mod machine_select {
             fn into_parts(
                 self,
             ) -> (
-                dillo::pmi_parse::ParsedPmi,
+                dillo_launch::pmi_parse::ParsedPmi,
                 PlatformMachine,
                 Vec<u8>,
                 RunMemoryPlan,
