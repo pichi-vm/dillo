@@ -757,7 +757,6 @@ pub(crate) mod tests {
 
     #[test]
     fn hvf_v82_native_operations_for_one_and_two_owners() {
-        use dillo_machine::aarch64::{AdmissionError, Register};
         if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
             SignedNativeTest::spawn(
                 "hypervisor::tests::hvf_v82_native_operations_for_one_and_two_owners",
@@ -765,6 +764,32 @@ pub(crate) mod tests {
             .verify();
             return;
         }
+        hvf_native_operations(pmi::aarch64::Profile::V8_2);
+    }
+
+    #[test]
+    fn hvf_applicable_feature_operations_for_one_and_two_owners() {
+        if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
+            SignedNativeTest::spawn(
+                "hypervisor::tests::hvf_applicable_feature_operations_for_one_and_two_owners",
+            )
+            .verify();
+            return;
+        }
+        eprintln!(
+            "HVF applicable-feature execution on armv8.1-a owners; this does not qualify armv8.2-a admission"
+        );
+        hvf_native_operations(pmi::aarch64::Profile::V8_1);
+    }
+
+    fn hvf_native_operations(profile: pmi::aarch64::Profile) {
+        use dillo_machine::aarch64::{AdmissionError, Register};
+        let applicable_features = profile == pmi::aarch64::Profile::V8_1;
+        let label = if applicable_features {
+            "HVF applicable features under armv8.1-a"
+        } else {
+            "HVF"
+        };
         for count in [1u32, 2] {
             let gic = GicParams {
                 dist_base: 0x0800_0000,
@@ -792,11 +817,36 @@ pub(crate) mod tests {
                     releases.push(release);
                     owners.push(scope.spawn(move || {
                         let prepared = (|| {
-                            let mut cpu = Vcpu::prepare(&native, pmi::aarch64::Profile::V8_2)?;
+                            let mut cpu = Vcpu::prepare(&native, profile)?;
                             eprintln!(
-                                "HVF native operations owner {index} admission: {:?}",
+                                "{label} native operations owner {index} admission: {:?}",
                                 cpu.admitted
                             );
+                            if applicable_features {
+                                // Require the operations this fixture executes, without
+                                // promoting the owner to a different architectural profile.
+                                for (register, shift, minimum, feature) in [
+                                    (Register::Isar1, 0, 1, "FEAT_DPB"),
+                                    (Register::Mmfr1, 20, 2, "FEAT_PAN2"),
+                                    (Register::Pfr0, 28, 1, "FEAT_RAS"),
+                                    (Register::Mmfr2, 0, 1, "FEAT_TTCNP"),
+                                    (Register::Mmfr2, 4, 1, "FEAT_UAO"),
+                                ] {
+                                    let observed = (cpu.admitted.value(register)? >> shift) & 15;
+                                    eprintln!(
+                                        "{label} owner {index}: {feature} observed={observed}, minimum={minimum}"
+                                    );
+                                    if observed < minimum {
+                                        return Err(AdmissionError::MissingField {
+                                            feature,
+                                            register,
+                                            observed,
+                                            minimum,
+                                        }
+                                        .into());
+                                    }
+                                }
+                            }
                             let (owner, owners) = probe
                                 .entry_arguments(index, &cpu.admitted)
                                 .map_err(|message| Error::Hv(message.into()))?;
@@ -835,9 +885,13 @@ pub(crate) mod tests {
                 (all_ready, results)
             });
             for (owner, result) in results.iter().enumerate() {
-                eprintln!("HVF native operations owner {owner} exit: {result:?}");
+                eprintln!("{label} native operations owner {owner} exit: {result:?}");
             }
-            probe.report("HVF");
+            probe.report(label);
+            if applicable_features && !all_ready {
+                probe.verify_unexecuted();
+                panic!("applicable-feature execution requires every native owner to prepare");
+            }
             if !all_ready {
                 let mut deficient = false;
                 for result in results {
@@ -880,6 +934,11 @@ pub(crate) mod tests {
                 );
             }
             probe.verify();
+            if applicable_features {
+                eprintln!(
+                    "HVF applicable-feature execution verified for {count} owners; armv8.2-a profile qualification is unchanged"
+                );
+            }
         }
     }
 
