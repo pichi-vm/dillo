@@ -161,31 +161,7 @@ jobs:
         if: runner.os == 'Linux'
         run: ls -l /dev/kvm && sudo chmod 666 /dev/kvm || true
 
-      - name: Test (Linux, full workspace)
-        if: runner.os == 'Linux'
-        shell: bash
-        env:
-          CARGO_BUILD_RUSTFLAGS: "-D warnings"
-        run: cargo test --workspace
-
-      - name: Test (Windows, workspace minus Unix-only crates)
-        if: runner.os == 'Windows'
-        shell: bash
-        env:
-          CARGO_BUILD_RUSTFLAGS: "-D warnings"
-        run: |
-          # dillo-virtio-vsock bridges vsock to host Unix sockets (UnixStream),
-          # so it is Unix-only; dillo depends on it via cfg(unix) and never
-          # builds it on Windows. snuffler is the Linux guest probe.
-          cargo test --workspace --exclude snuffler --exclude dillo-virtio-vsock
-
-      - name: Test (macOS, workspace minus Linux-only crates)
-        if: runner.os == 'macOS'
-        shell: bash
-        env:
-          CARGO_BUILD_RUSTFLAGS: "-D warnings"
-        run: cargo test --workspace --exclude snuffler
-
+      # Native workspace backing tests require the same pool as guest boots.
       - name: Reserve hugepages for guest RAM (Linux/KVM)
         if: runner.os == 'Linux'
         shell: bash
@@ -212,6 +188,31 @@ jobs:
             exit 1
           fi
           grep -i huge /proc/meminfo
+
+      - name: Test (Linux, full workspace)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+        run: cargo test --workspace -- --show-output
+
+      - name: Test (Windows, workspace minus Unix-only crates)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+        run: |
+          # dillo-virtio-vsock bridges vsock to host Unix sockets (UnixStream),
+          # so it is Unix-only; dillo depends on it via cfg(unix) and never
+          # builds it on Windows. snuffler is the Linux guest probe.
+          cargo test --workspace --exclude snuffler --exclude dillo-virtio-vsock
+
+      - name: Test (macOS, workspace minus Linux-only crates)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+        run: cargo test --workspace --exclude snuffler
 
       - name: Boot tests (KVM / WHP / HVF)
         shell: bash

@@ -7,7 +7,9 @@
 //! value to the declared register and the run loop observes the resulting
 //! structured action.
 
-use crate::{MmioDevice, MmioError, MmioWindow, MmioWriteOutcome};
+use dillo_machine::memory::AddressRange;
+
+use crate::{MmioDevice, MmioError, MmioWriteOutcome};
 
 /// Invalid syscon register declaration.
 #[derive(Debug, thiserror::Error)]
@@ -27,7 +29,7 @@ pub enum SysconAction {
 
 #[derive(Debug)]
 pub struct SysconDevice {
-    window: MmioWindow,
+    window: AddressRange,
     offset: u64,
     value: u32,
     mask: u32,
@@ -57,7 +59,7 @@ impl SysconDevice {
             return Err(SysconError::RegisterOutOfBounds);
         }
         Ok(Self {
-            window: MmioWindow {
+            window: AddressRange {
                 base: syscon.base,
                 size: syscon.size,
             },
@@ -98,11 +100,11 @@ impl SysconDevice {
 }
 
 impl MmioDevice for SysconDevice {
-    fn windows(&self) -> &[MmioWindow] {
+    fn windows(&self) -> &[AddressRange] {
         std::slice::from_ref(&self.window)
     }
 
-    fn read(&self, window: MmioWindow, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
+    fn read(&self, window: AddressRange, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
         if window != self.window || !self.contains_access(offset, data.len()) {
             return Err(MmioError::Unsupported);
         }
@@ -112,7 +114,7 @@ impl MmioDevice for SysconDevice {
 
     fn write(
         &self,
-        window: MmioWindow,
+        window: AddressRange,
         offset: u64,
         data: &[u8],
     ) -> Result<MmioWriteOutcome, MmioError> {
@@ -181,7 +183,7 @@ mod tests {
                 (SysconAction::Reboot, MmioWriteOutcome::GuestReset),
             ] {
                 let device = SysconDevice::new(register, action).expect("valid syscon");
-                let window = MmioWindow {
+                let window = AddressRange {
                     base: register.base,
                     size,
                 };

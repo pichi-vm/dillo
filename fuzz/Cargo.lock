@@ -76,8 +76,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 [[package]]
 name = "applevisor"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "139a0fe60afd3e8c3a42fc0265caf4eb04b84a8b760623f7a6229174c18e4e36"
+source = "git+https://github.com/pichi-vm/applevisor?rev=1f60794ae520bc5701ea9d35ca2c2048e3c76923#1f60794ae520bc5701ea9d35ca2c2048e3c76923"
 dependencies = [
  "applevisor-sys",
 ]
@@ -356,6 +355,7 @@ dependencies = [
  "dillo-mmio-virtio",
  "dillo-pci",
  "dillo-pci-virtio",
+ "dillo-runtime",
  "dillo-storage",
  "dillo-virtio",
  "dillo-virtio-blk",
@@ -367,7 +367,6 @@ dependencies = [
  "env_logger",
  "imago",
  "log",
- "mmarinus",
  "object",
  "pmi",
  "serde",
@@ -411,8 +410,9 @@ dependencies = [
 name = "dillo-machine"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
  "pmi",
+ "thiserror 2.0.18",
+ "vm-memory 0.17.2",
 ]
 
 [[package]]
@@ -443,8 +443,11 @@ dependencies = [
  "kvm-ioctls",
  "libc",
  "log",
+ "mmarinus",
  "nix",
  "pmi",
+ "rustix",
+ "tempfile",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
  "vmm-sys-util",
@@ -468,15 +471,16 @@ dependencies = [
 name = "dillo-mmio"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "log",
  "thiserror 2.0.18",
- "vm-memory 0.17.2",
 ]
 
 [[package]]
 name = "dillo-mmio-uart"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "dillo-mmio",
  "vm-superio",
 ]
@@ -485,6 +489,7 @@ dependencies = [
 name = "dillo-mmio-virtio"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "dillo-mmio",
  "dillo-virtio",
  "log",
@@ -495,6 +500,7 @@ dependencies = [
 name = "dillo-pci"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "dillo-mmio",
  "log",
 ]
@@ -503,11 +509,18 @@ dependencies = [
 name = "dillo-pci-virtio"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
+ "dillo-machine",
  "dillo-pci",
  "dillo-virtio",
  "log",
  "vm-memory 0.17.2",
+]
+
+[[package]]
+name = "dillo-runtime"
+version = "0.1.0"
+dependencies = [
+ "dillo-machine",
 ]
 
 [[package]]
@@ -521,7 +534,7 @@ dependencies = [
 name = "dillo-virtio"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
+ "dillo-machine",
  "log",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
@@ -531,7 +544,7 @@ dependencies = [
 name = "dillo-virtio-blk"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
+ "dillo-machine",
  "dillo-storage",
  "dillo-virtio",
  "log",
@@ -544,7 +557,7 @@ name = "dillo-virtio-console"
 version = "0.1.0"
 dependencies = [
  "dillo-config",
- "dillo-mmio",
+ "dillo-machine",
  "dillo-virtio",
  "interprocess",
  "log",
@@ -561,7 +574,7 @@ dependencies = [
 name = "dillo-virtio-fs"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
+ "dillo-machine",
  "dillo-virtio",
  "libc",
  "log",
@@ -588,7 +601,7 @@ name = "dillo-virtio-net"
 version = "0.1.0"
 dependencies = [
  "block2",
- "dillo-mmio",
+ "dillo-machine",
  "dillo-virtio",
  "libc",
  "log",
@@ -601,7 +614,7 @@ dependencies = [
 name = "dillo-virtio-vsock"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
+ "dillo-machine",
  "dillo-virtio",
  "log",
 ]
@@ -656,6 +669,15 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[package]]
+name = "flagset"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "futures-core"
@@ -1074,8 +1096,9 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pmi"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/pmi?branch=main#5d6fe93b87d5af20d7387491f97aa89f31361ef9"
+source = "git+https://github.com/pichi-vm/pmi?branch=main#d6c2543129c3dad900d39a14ac9c4909bd39c0ac"
 dependencies = [
+ "flagset",
  "serde",
 ]
 
@@ -1489,8 +1512,7 @@ dependencies = [
 [[package]]
 name = "vm-memory"
 version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b55e753c7725603745cb32b2287ef7ef3da05c03c7702cda3fa8abe25ae0465"
+source = "git+https://github.com/pichi-vm/vm-memory?rev=940b3327919f441eea38d48c67f32fdb7125871c#940b3327919f441eea38d48c67f32fdb7125871c"
 dependencies = [
  "arc-swap",
  "libc",
