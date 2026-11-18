@@ -418,6 +418,10 @@ impl SharedMemory for MappedSharedMemory {
         if !self.shared.contains(range.gpa, range.size) {
             return Err(SharedMemoryError::NotShared);
         }
+        let size = usize::try_from(range.size).map_err(|_| SharedMemoryError::OutOfLimits)?;
+        if !self.memory.check_range(GuestAddress(range.gpa), size) {
+            return Err(SharedMemoryError::OutOfLimits);
+        }
         Ok(SharedRegion::new(Arc::new(MappedSharedRegion {
             memory: self.memory.clone(),
             gpa: range.gpa,
@@ -615,6 +619,127 @@ mod tests {
         let mut bytes = [0; 16];
         memory.read_slice(&mut bytes, GuestAddress(0x1000)).unwrap();
         assert_eq!(bytes, [0x5a; 16]);
+    }
+
+    #[test]
+    fn mapped_shared_memory_refuses_unbacked_claims_before_access() {
+        let memory = GuestMemoryMmap::from_ranges(&[
+            (GuestAddress(0x1000), 0x1000),
+            (GuestAddress(0x3000), 0x1000),
+        ])
+        .unwrap();
+        for base in [0x1000, 0x3000] {
+            memory
+                .write_slice(&[0x5a; 0x1000], GuestAddress(base))
+                .unwrap();
+        }
+        let shared = MappedSharedMemory::new(
+            memory.clone(),
+            SharedMemoryRequirement {
+                range: AddressRange {
+                    base: 0,
+                    size: 0x5000,
+                },
+                access: SharedAccess::ReadWrite,
+            },
+        );
+        for (gpa, size) in [(0x1ff8, 0x1010), (0x3ff8, 16), (0, 1)] {
+            assert!(matches!(
+                shared.region(SharedRange {
+                    gpa,
+                    size,
+                    access: SharedAccess::ReadWrite
+                }),
+                Err(SharedMemoryError::OutOfLimits)
+            ));
+        }
+        for base in [0x1000, 0x3000] {
+            let mut bytes = [0; 0x1000];
+            memory.read_slice(&mut bytes, GuestAddress(base)).unwrap();
+            assert_eq!(bytes, [0x5a; 0x1000]);
+        }
+        // Empty claims have no backing bytes to cover, even inside the hole
+        // or at the capability's exclusive end.
+        for gpa in [0x2000, 0x5000] {
+            shared
+                .region(SharedRange {
+                    gpa,
+                    size: 0,
+                    access: SharedAccess::ReadWrite,
+                })
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn mapped_shared_memory_claims_contiguous_backing_at_zero_and_nonzero_gpas() {
+        for base in [0, 0x1000] {
+            let memory = GuestMemoryMmap::from_ranges(&[
+                (GuestAddress(base), 8),
+                (GuestAddress(base + 8), 8),
+            ])
+            .unwrap();
+            let shared = MappedSharedMemory::new(
+                memory,
+                SharedMemoryRequirement {
+                    range: AddressRange { base, size: 16 },
+                    access: SharedAccess::ReadWrite,
+                },
+            );
+            let region = shared
+                .region(SharedRange {
+                    gpa: base,
+                    size: 16,
+                    access: SharedAccess::ReadWrite,
+                })
+                .unwrap();
+            region.write(0, &[0x5a; 16]).unwrap();
+            let mut bytes = [0; 16];
+            region.read(0, &mut bytes).unwrap();
+            assert_eq!(bytes, [0x5a; 16]);
+        }
+    }
+
+    #[test]
+    fn mapped_shared_memory_keeps_refusal_precedence_for_unbacked_ranges() {
+        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
+        let shared = MappedSharedMemory::with_shared_ranges(
+            memory,
+            SharedMemoryRequirement {
+                range: AddressRange {
+                    base: 0,
+                    size: 0x2000,
+                },
+                access: SharedAccess::ReadOnly,
+            },
+            Vec::new(),
+        );
+        assert!(matches!(
+            shared.region(SharedRange {
+                gpa: 0x1000,
+                size: 1,
+                access: SharedAccess::WriteOnly
+            }),
+            Err(SharedMemoryError::AccessDenied)
+        ));
+        assert!(matches!(
+            shared.region(SharedRange {
+                gpa: 0x1000,
+                size: 1,
+                access: SharedAccess::ReadOnly
+            }),
+            Err(SharedMemoryError::NotShared)
+        ));
+        for (gpa, size) in [(0x2000, 1), (0x1000, u64::MAX)] {
+            assert!(matches!(
+                shared.region(SharedRange {
+                    gpa,
+                    size,
+                    access: SharedAccess::ReadOnly
+                }),
+                Err(SharedMemoryError::OutOfLimits)
+            ));
+        }
     }
 
     #[test]
