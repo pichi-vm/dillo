@@ -9,12 +9,13 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
-pub use dillo_mmio::{
-    MessageInterrupt, MessageInterruptDomain, MmioAttachment, MmioDeviceHandle, MmioDeviceRun,
-    MmioInterrupt, MmioInterruptRequirement, MmioJoinError, MmioSpawnError, MmioWriteOutcome,
-    SharedMemory,
+use dillo_machine::attachment::DeviceAttachment;
+use dillo_machine::execution::{DeviceHandle, DeviceRun, SpawnError};
+use dillo_machine::interrupt::{
+    InterruptRequirement, InterruptResource, MessageInterrupt, MessageInterruptDomain,
 };
-use dillo_mmio::{MmioDevice, MmioError, MmioWindow};
+use dillo_machine::memory::{AddressRange, SharedMemory};
+use dillo_mmio::{MmioDevice, MmioError, MmioWriteOutcome};
 
 /// ECAM MMIO address decoding.
 pub mod address;
@@ -48,23 +49,62 @@ pub struct BarRegion {
 #[derive(Debug)]
 pub enum PciError {
     Unsupported,
+    Device(Box<dyn std::error::Error + Send + Sync>),
+    Config {
+        bus: u8,
+        device: u8,
+        function: u8,
+        offset: u64,
+        source: Box<PciError>,
+    },
+    Bar {
+        slot: u8,
+        bar: u8,
+        offset: u64,
+        source: Box<PciError>,
+    },
 }
 
 impl std::fmt::Display for PciError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unsupported => f.write_str("PCI access is unsupported by the routed endpoint"),
+            Self::Device(source) => write!(f, "{source}"),
+            Self::Config {
+                bus,
+                device,
+                function,
+                offset,
+                source,
+            } => write!(
+                f,
+                "PCI {bus:02x}:{device:02x}.{function} config offset {offset:#x}: {source}"
+            ),
+            Self::Bar {
+                slot,
+                bar,
+                offset,
+                source,
+            } => write!(f, "PCI slot {slot} BAR {bar} offset {offset:#x}: {source}"),
         }
     }
 }
 
-impl std::error::Error for PciError {}
+impl std::error::Error for PciError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unsupported => None,
+            Self::Device(source) => Some(source.as_ref()),
+            Self::Config { source, .. } | Self::Bar { source, .. } => Some(source.as_ref()),
+        }
+    }
+}
 
 /// PCI device attached to the bus. One per slot.
 pub trait PciDevice: Send + Sync + std::fmt::Debug {
     /// Read a 32-bit configuration register (`reg_idx` is the dword
     /// offset, not the byte offset).
-    fn config_read(&self, reg_idx: usize) -> u32;
+    fn config_read(&self, reg_idx: usize) -> Result<u32, PciError>;
 
     /// Write to a configuration register. `offset` is the byte offset
     /// within the dword (for unaligned writes like a single u8 to the
@@ -89,12 +129,12 @@ pub trait PciDevice: Send + Sync + std::fmt::Debug {
         0
     }
 
-    /// MMIO read on a BAR range. Default: ignored.
+    /// MMIO read on a BAR range. Default: unsupported.
     fn bar_read(&self, _bar_idx: u8, _offset: u64, _data: &mut [u8]) -> Result<(), PciError> {
         Err(PciError::Unsupported)
     }
 
-    /// MMIO write on a BAR range. Default: ignored.
+    /// MMIO write on a BAR range. Default: unsupported.
     fn bar_write(&self, _bar_idx: u8, _offset: u64, _data: &[u8]) -> Result<(), PciError> {
         Err(PciError::Unsupported)
     }
@@ -111,7 +151,7 @@ pub trait PciDeviceHost: Send + Sync + std::fmt::Debug {
         None
     }
 
-    fn spawn(&self, run: MmioDeviceRun) -> Result<MmioDeviceHandle, MmioSpawnError>;
+    fn spawn(&self, name: String, run: DeviceRun) -> Result<DeviceHandle, SpawnError>;
 }
 
 /// PCI MSI-X table adapter backed by a machine-owned message-interrupt domain.
@@ -132,7 +172,7 @@ impl MsixInterruptAdapter {
     }
 
     /// Interrupt for a device completion on `vector`.
-    pub fn interrupt_for(&self, vector: u16) -> Option<dillo_mmio::Interrupt> {
+    pub fn interrupt_for(&self, vector: u16) -> Option<dillo_machine::interrupt::Interrupt> {
         self.domain.interrupt(vector)
     }
 }
@@ -157,7 +197,7 @@ impl MsixNotifier for MsixInterruptAdapter {
         }
     }
 
-    fn interrupt_for(&self, vector: u16) -> Option<dillo_mmio::Interrupt> {
+    fn interrupt_for(&self, vector: u16) -> Option<dillo_machine::interrupt::Interrupt> {
         MsixInterruptAdapter::interrupt_for(self, vector)
     }
 }
@@ -239,13 +279,19 @@ impl PciBus {
         // alias in that pool. Wrap zero-vector functions too, so they cannot
         // access vectors belonging to other functions.
         let mut base: u16 = 0;
-        for device in self.slots.iter().flatten() {
+        for (slot, device) in self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, device)| device.as_ref().map(|device| (slot, device)))
+        {
             let n = device.msix_vectors();
             let next_base = base
                 .checked_add(n)
                 .expect("PCI MSI-X vector count exceeds shared domain capacity");
             device.set_host(Arc::new(OffsetPciDeviceHost {
                 inner: Arc::clone(&host),
+                slot,
                 vector_base: base,
                 vector_count: n,
             }));
@@ -256,13 +302,27 @@ impl PciBus {
     /// Read a config register. Single-bus, single-function only:
     /// `bus != 0` or `function != 0` returns the all-1s "no device"
     /// response, matching real hardware for unpopulated addresses.
-    pub fn config_read(&self, bus: u8, device: u8, function: u8, reg_idx: usize) -> u32 {
+    pub fn config_read(
+        &self,
+        bus: u8,
+        device: u8,
+        function: u8,
+        reg_idx: usize,
+    ) -> Result<u32, PciError> {
         if bus != 0 || function != 0 || (device as usize) >= NUM_SLOTS {
-            return 0xFFFF_FFFF;
+            return Ok(0xFFFF_FFFF);
         }
         match &self.slots[device as usize] {
-            None => 0xFFFF_FFFF,
-            Some(device) => device.config_read(reg_idx),
+            None => Ok(0xFFFF_FFFF),
+            Some(endpoint) => endpoint
+                .config_read(reg_idx)
+                .map_err(|source| PciError::Config {
+                    bus,
+                    device,
+                    function,
+                    offset: reg_idx as u64 * 4,
+                    source: Box::new(source),
+                }),
         }
     }
 
@@ -274,13 +334,22 @@ impl PciBus {
         reg_idx: usize,
         offset: u64,
         data: &[u8],
-    ) {
+    ) -> Result<(), PciError> {
         if bus != 0 || function != 0 || (device as usize) >= NUM_SLOTS {
-            return;
+            return Ok(());
         }
-        if let Some(device) = &self.slots[device as usize] {
-            let _ = device.config_write(reg_idx, offset, data);
+        if let Some(endpoint) = &self.slots[device as usize] {
+            endpoint
+                .config_write(reg_idx, offset, data)
+                .map_err(|source| PciError::Config {
+                    bus,
+                    device,
+                    function,
+                    offset: reg_idx as u64 * 4 + offset,
+                    source: Box::new(source),
+                })?;
         }
+        Ok(())
     }
 
     /// Walk every populated slot and return each BAR's `(slot, region)`.
@@ -312,7 +381,16 @@ impl PciBus {
     ) -> Result<(), PciError> {
         match &self.slots.get(slot as usize).and_then(|s| s.as_ref()) {
             None => Err(PciError::Unsupported),
-            Some(device) => device.bar_read(bar_idx, offset, data),
+            Some(device) => {
+                device
+                    .bar_read(bar_idx, offset, data)
+                    .map_err(|source| PciError::Bar {
+                        slot,
+                        bar: bar_idx,
+                        offset,
+                        source: Box::new(source),
+                    })
+            }
         }
     }
 
@@ -325,7 +403,16 @@ impl PciBus {
     ) -> Result<(), PciError> {
         match &self.slots.get(slot as usize).and_then(|s| s.as_ref()) {
             None => Err(PciError::Unsupported),
-            Some(device) => device.bar_write(bar_idx, offset, data),
+            Some(device) => {
+                device
+                    .bar_write(bar_idx, offset, data)
+                    .map_err(|source| PciError::Bar {
+                        slot,
+                        bar: bar_idx,
+                        offset,
+                        source: Box::new(source),
+                    })
+            }
         }
     }
 }
@@ -335,9 +422,9 @@ impl PciBus {
 /// The root owns the ECAM MMIO window and the single downstream PCI bus.
 /// Legacy CF8/CFC PIO is intentionally absent so x86 guests use ECAM.
 pub struct PciRoot {
-    window: MmioWindow,
-    windows: Vec<MmioWindow>,
-    interrupts: Vec<MmioInterruptRequirement>,
+    window: AddressRange,
+    windows: Vec<AddressRange>,
+    interrupts: Vec<InterruptRequirement>,
     bus: PciBus,
 }
 
@@ -352,7 +439,7 @@ impl std::fmt::Debug for PciRoot {
 }
 
 impl PciRoot {
-    pub fn new(window: MmioWindow) -> Self {
+    pub fn new(window: AddressRange) -> Self {
         Self {
             window,
             windows: vec![window],
@@ -362,8 +449,8 @@ impl PciRoot {
     }
 
     pub fn with_interrupt_requirement(
-        window: MmioWindow,
-        interrupt: MmioInterruptRequirement,
+        window: AddressRange,
+        interrupt: InterruptRequirement,
     ) -> Self {
         Self {
             window,
@@ -379,11 +466,17 @@ impl PciRoot {
         self.refresh_interrupts();
     }
 
-    pub fn set_attachment(&self, attachment: Arc<dyn MmioAttachment>) {
+    pub fn set_attachment(&self, attachment: Arc<dyn DeviceAttachment>) {
         self.bus.set_host(Arc::new(PciRootHost { attachment }));
     }
 
-    pub fn config_read(&self, bus: u8, device: u8, function: u8, reg_idx: usize) -> u32 {
+    pub fn config_read(
+        &self,
+        bus: u8,
+        device: u8,
+        function: u8,
+        reg_idx: usize,
+    ) -> Result<u32, PciError> {
         self.bus.config_read(bus, device, function, reg_idx)
     }
 
@@ -395,9 +488,9 @@ impl PciRoot {
         reg_idx: usize,
         offset: u64,
         data: &[u8],
-    ) {
+    ) -> Result<(), PciError> {
         self.bus
-            .config_write(bus, device, function, reg_idx, offset, data);
+            .config_write(bus, device, function, reg_idx, offset, data)
     }
 
     pub fn enumerate_bars(&self) -> Vec<(u8, BarRegion)> {
@@ -430,8 +523,8 @@ impl PciRoot {
         (bus, device, function, reg_byte >> 2, reg_byte & 0x3)
     }
 
-    fn bar_window(_slot: u8, bar: &BarRegion) -> MmioWindow {
-        MmioWindow {
+    fn bar_window(_slot: u8, bar: &BarRegion) -> AddressRange {
+        AddressRange {
             base: bar.base_gpa,
             size: bar.size,
         }
@@ -453,13 +546,13 @@ impl PciRoot {
     fn refresh_interrupts(&mut self) {
         let total = self.bus.total_msix_vectors();
         for req in &mut self.interrupts {
-            if let MmioInterruptRequirement::MessageDomain { vectors, .. } = req {
+            if let InterruptRequirement::MessageDomain { vectors, .. } = req {
                 *vectors = total;
             }
         }
     }
 
-    fn bar_route(&self, window: MmioWindow) -> Option<(u8, u8)> {
+    fn bar_route(&self, window: AddressRange) -> Option<(u8, u8)> {
         self.enumerate_bars()
             .into_iter()
             .find(|(_, bar)| bar.base_gpa == window.base && bar.size == window.size)
@@ -469,7 +562,7 @@ impl PciRoot {
 
 #[derive(Debug)]
 struct PciRootHost {
-    attachment: Arc<dyn MmioAttachment>,
+    attachment: Arc<dyn DeviceAttachment>,
 }
 
 impl PciDeviceHost for PciRootHost {
@@ -482,16 +575,16 @@ impl PciDeviceHost for PciRootHost {
             .interrupts()
             .iter()
             .find_map(|interrupt| match interrupt {
-                MmioInterrupt::MessageDomain(domain) => {
+                InterruptResource::MessageDomain(domain) => {
                     Some(Arc::new(MsixInterruptAdapter::new(Arc::clone(domain)))
                         as Arc<dyn MsixNotifier>)
                 }
-                MmioInterrupt::Line(_) => None,
+                InterruptResource::Line(_) => None,
             })
     }
 
-    fn spawn(&self, run: MmioDeviceRun) -> Result<MmioDeviceHandle, MmioSpawnError> {
-        Arc::clone(&self.attachment).spawn(run)
+    fn spawn(&self, name: String, run: DeviceRun) -> Result<DeviceHandle, SpawnError> {
+        Arc::clone(&self.attachment).spawn(name, run)
     }
 }
 
@@ -504,6 +597,7 @@ const MSI_NO_VECTOR: u16 = 0xFFFF;
 /// slot dimension; this extends the same per-slot isolation to MSI-X.
 #[derive(Debug)]
 struct OffsetPciDeviceHost {
+    slot: usize,
     inner: Arc<dyn PciDeviceHost>,
     vector_base: u16,
     vector_count: u16,
@@ -524,8 +618,9 @@ impl PciDeviceHost for OffsetPciDeviceHost {
         })
     }
 
-    fn spawn(&self, run: MmioDeviceRun) -> Result<MmioDeviceHandle, MmioSpawnError> {
-        self.inner.spawn(run)
+    fn spawn(&self, name: String, run: DeviceRun) -> Result<DeviceHandle, SpawnError> {
+        self.inner
+            .spawn(format!("PCI slot {}/{}", self.slot, name), run)
     }
 }
 
@@ -560,24 +655,26 @@ impl MsixNotifier for OffsetMsixNotifier {
             .msix_enabled(vector.saturating_add(self.vector_base), enabled);
     }
 
-    fn interrupt_for(&self, vector: u16) -> Option<dillo_mmio::Interrupt> {
+    fn interrupt_for(&self, vector: u16) -> Option<dillo_machine::interrupt::Interrupt> {
         self.inner.interrupt_for(self.domain_vector(vector)?)
     }
 }
 
 impl MmioDevice for PciRoot {
-    fn windows(&self) -> &[MmioWindow] {
+    fn windows(&self) -> &[AddressRange] {
         &self.windows
     }
 
-    fn interrupts(&self) -> &[MmioInterruptRequirement] {
+    fn interrupts(&self) -> &[InterruptRequirement] {
         &self.interrupts
     }
 
-    fn read(&self, window: MmioWindow, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
+    fn read(&self, window: AddressRange, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
         if window.base == self.window.base && window.size == self.window.size {
             let (bus, device, function, reg_idx, in_dword) = Self::decode_ecam(offset);
-            let value = self.config_read(bus, device, function, reg_idx);
+            let value = self
+                .config_read(bus, device, function, reg_idx)
+                .map_err(|source| MmioError::Device(Box::new(source)))?;
             let bytes = value.to_le_bytes();
             for (i, slot) in data.iter_mut().enumerate() {
                 *slot = *bytes.get(in_dword + i).unwrap_or(&0xFF);
@@ -588,7 +685,7 @@ impl MmioDevice for PciRoot {
         if let Some((slot, bar_idx)) = self.bar_route(window) {
             return self
                 .bar_read(slot, bar_idx, offset, data)
-                .map_err(|_| MmioError::Unsupported);
+                .map_err(|source| MmioError::Device(Box::new(source)));
         }
 
         Err(MmioError::Unsupported)
@@ -596,19 +693,20 @@ impl MmioDevice for PciRoot {
 
     fn write(
         &self,
-        window: MmioWindow,
+        window: AddressRange,
         offset: u64,
         data: &[u8],
     ) -> Result<MmioWriteOutcome, MmioError> {
         if window.base == self.window.base && window.size == self.window.size {
             let (bus, device, function, reg_idx, in_dword) = Self::decode_ecam(offset);
-            self.config_write(bus, device, function, reg_idx, in_dword as u64, data);
+            self.config_write(bus, device, function, reg_idx, in_dword as u64, data)
+                .map_err(|source| MmioError::Device(Box::new(source)))?;
             return Ok(MmioWriteOutcome::Continue);
         }
 
         if let Some((slot, bar_idx)) = self.bar_route(window) {
             self.bar_write(slot, bar_idx, offset, data)
-                .map_err(|_| MmioError::Unsupported)?;
+                .map_err(|source| MmioError::Device(Box::new(source)))?;
             return Ok(MmioWriteOutcome::Continue);
         }
 
@@ -649,11 +747,12 @@ impl HostBridge {
 }
 
 impl PciDevice for HostBridge {
-    fn config_read(&self, reg_idx: usize) -> u32 {
-        self.config
+    fn config_read(&self, reg_idx: usize) -> Result<u32, PciError> {
+        Ok(self
+            .config
             .lock()
             .expect("host bridge config poisoned")
-            .read_reg(reg_idx)
+            .read_reg(reg_idx))
     }
     fn config_write(&self, reg_idx: usize, offset: u64, data: &[u8]) -> Result<(), PciError> {
         self.config
@@ -679,36 +778,120 @@ mod tests {
     }];
 
     #[test]
+    fn mapped_endpoint_failures_preserve_context_and_accepted_effects() {
+        use std::sync::atomic::AtomicUsize;
+
+        #[derive(Debug)]
+        struct FailingEndpoint(Arc<AtomicUsize>);
+        impl FailingEndpoint {
+            fn failure() -> PciError {
+                PciError::Device(Box::new(std::io::Error::other("distinct endpoint failure")))
+            }
+        }
+        impl PciDevice for FailingEndpoint {
+            fn config_read(&self, _: usize) -> Result<u32, PciError> {
+                Err(Self::failure())
+            }
+            fn config_write(&self, _: usize, _: u64, _: &[u8]) -> Result<(), PciError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(Self::failure())
+            }
+            fn name(&self) -> &'static str {
+                "failing endpoint"
+            }
+            fn bar_regions(&self) -> &[BarRegion] {
+                &BAR_REGIONS
+            }
+            fn bar_read(&self, _: u8, _: u64, data: &mut [u8]) -> Result<(), PciError> {
+                data[0] = 0x5a;
+                Err(Self::failure())
+            }
+            fn bar_write(&self, _: u8, _: u64, _: &[u8]) -> Result<(), PciError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(Self::failure())
+            }
+        }
+        let effects = Arc::new(AtomicUsize::new(0));
+        let mut root = PciRoot::new(AddressRange {
+            base: 0x3000_0000,
+            size: 0x1000_0000,
+        });
+        root.register(1, Box::new(FailingEndpoint(Arc::clone(&effects))));
+        let mut bus = dillo_mmio::MmioBus::new();
+        bus.register_device(Arc::new(root));
+        for (address, context) in [
+            (0x3000_8010, "PCI 00:01.0 config offset 0x10"),
+            (0x8000_0010, "PCI slot 1 BAR 2 offset 0x10"),
+        ] {
+            let mut data = [0; 4];
+            let read = bus.read(address, &mut data).unwrap_err();
+            assert_eq!(
+                (read.operation, read.address, read.size),
+                ("read", address, 4)
+            );
+            assert!(read.to_string().contains(context), "{read}");
+            assert!(
+                read.to_string().contains("distinct endpoint failure"),
+                "{read}"
+            );
+            let mut source: &dyn std::error::Error = &read;
+            while let Some(next) = source.source() {
+                source = next;
+            }
+            assert!(source.downcast_ref::<std::io::Error>().is_some());
+            let write = bus.write(address, &[1, 2, 3, 4]).unwrap_err();
+            assert_eq!(
+                (write.operation, write.address, write.size),
+                ("write", address, 4)
+            );
+            assert!(write.to_string().contains(context), "{write}");
+            assert!(
+                write.to_string().contains("distinct endpoint failure"),
+                "{write}"
+            );
+        }
+        assert_eq!(effects.load(Ordering::SeqCst), 2);
+        let mut absent = [0; 4];
+        assert!(bus.read(0x3001_0000, &mut absent).unwrap().is_some());
+        assert_eq!(absent, [0xff; 4]);
+        assert_eq!(
+            bus.write(0x3001_0000, &[1]).unwrap(),
+            Some(MmioWriteOutcome::Continue)
+        );
+        assert!(bus.read(0x2000_0000, &mut absent).unwrap().is_none());
+    }
+
+    #[test]
     fn empty_slots_return_all_ones() {
         let bus = PciBus::new();
-        assert_eq!(bus.config_read(0, 0, 0, 0), 0xFFFF_FFFF);
-        assert_eq!(bus.config_read(0, 31, 0, 0), 0xFFFF_FFFF);
+        assert_eq!(bus.config_read(0, 0, 0, 0).unwrap(), 0xFFFF_FFFF);
+        assert_eq!(bus.config_read(0, 31, 0, 0).unwrap(), 0xFFFF_FFFF);
     }
 
     #[test]
     fn host_bridge_vendor_device() {
         let bus = PciBus::new_with_host_bridge();
         // Reg 0 = vendor (low 16) + device (high 16).
-        let val = bus.config_read(0, 0, 0, 0);
+        let val = bus.config_read(0, 0, 0, 0).unwrap();
         assert_eq!(val, 0x1237_8086);
     }
 
     #[test]
     fn non_zero_bus_function_returns_all_ones() {
         let bus = PciBus::new_with_host_bridge();
-        assert_eq!(bus.config_read(1, 0, 0, 0), 0xFFFF_FFFF);
-        assert_eq!(bus.config_read(0, 0, 1, 0), 0xFFFF_FFFF);
+        assert_eq!(bus.config_read(1, 0, 0, 0).unwrap(), 0xFFFF_FFFF);
+        assert_eq!(bus.config_read(0, 0, 1, 0).unwrap(), 0xFFFF_FFFF);
     }
 
     #[test]
     fn out_of_range_device_returns_all_ones() {
         let bus = PciBus::new_with_host_bridge();
-        assert_eq!(bus.config_read(0, 32, 0, 0), 0xFFFF_FFFF);
+        assert_eq!(bus.config_read(0, 32, 0, 0).unwrap(), 0xFFFF_FFFF);
     }
 
     #[test]
     fn pci_root_ecam_reads_host_bridge_config() {
-        let root = PciRoot::new(MmioWindow {
+        let root = PciRoot::new(AddressRange {
             base: 0x3000_0000,
             size: 0x1000_0000,
         });
@@ -717,13 +900,16 @@ mod tests {
         root.read(root.window, 0, &mut data)
             .expect("host bridge read");
 
-        assert_eq!(u32::from_le_bytes(data), root.config_read(0, 0, 0, 0));
+        assert_eq!(
+            u32::from_le_bytes(data),
+            root.config_read(0, 0, 0, 0).unwrap()
+        );
         assert_eq!(data, [0x86, 0x80, 0x37, 0x12]);
     }
 
     #[test]
     fn pci_root_ecam_reads_unaligned_bytes() {
-        let root = PciRoot::new(MmioWindow {
+        let root = PciRoot::new(AddressRange {
             base: 0x3000_0000,
             size: 0x1000_0000,
         });
@@ -746,8 +932,8 @@ mod tests {
         }
 
         impl PciDevice for BarDevice {
-            fn config_read(&self, _reg_idx: usize) -> u32 {
-                0
+            fn config_read(&self, _reg_idx: usize) -> Result<u32, PciError> {
+                Ok(0)
             }
 
             fn config_write(
@@ -768,7 +954,7 @@ mod tests {
             }
         }
 
-        let mut root = PciRoot::new(MmioWindow {
+        let mut root = PciRoot::new(AddressRange {
             base: 0x3000_0000,
             size: 0x1000_0000,
         });
@@ -795,8 +981,8 @@ mod tests {
         }
 
         impl PciDevice for BarDevice {
-            fn config_read(&self, _reg_idx: usize) -> u32 {
-                0
+            fn config_read(&self, _reg_idx: usize) -> Result<u32, PciError> {
+                Ok(0)
             }
 
             fn config_write(
@@ -823,7 +1009,7 @@ mod tests {
             }
         }
 
-        let mut root = PciRoot::new(MmioWindow {
+        let mut root = PciRoot::new(AddressRange {
             base: 0x3000_0000,
             size: 0x1000_0000,
         });
@@ -847,20 +1033,21 @@ mod tests {
         #[derive(Debug)]
         struct FakeAttachment;
 
-        impl MmioAttachment for FakeAttachment {
-            fn interrupts(&self) -> &[dillo_mmio::MmioInterrupt] {
+        impl DeviceAttachment for FakeAttachment {
+            fn interrupts(&self) -> &[dillo_machine::interrupt::InterruptResource] {
                 &[]
             }
 
-            fn shared_memory(&self) -> &[Arc<dyn dillo_mmio::SharedMemory>] {
+            fn shared_memory(&self) -> &[Arc<dyn dillo_machine::memory::SharedMemory>] {
                 &[]
             }
 
             fn spawn(
                 self: Arc<Self>,
-                _run: dillo_mmio::MmioDeviceRun,
-            ) -> Result<MmioDeviceHandle, MmioSpawnError> {
-                Ok(MmioDeviceHandle::noop())
+                _name: String,
+                _run: dillo_machine::execution::DeviceRun,
+            ) -> Result<DeviceHandle, SpawnError> {
+                Ok(DeviceHandle::noop())
             }
         }
 
@@ -875,8 +1062,8 @@ mod tests {
         }
 
         impl PciDevice for HostAwareDevice {
-            fn config_read(&self, _reg_idx: usize) -> u32 {
-                0
+            fn config_read(&self, _reg_idx: usize) -> Result<u32, PciError> {
+                Ok(0)
             }
 
             fn config_write(
@@ -898,7 +1085,7 @@ mod tests {
         }
 
         let observed_host = Arc::new(AtomicBool::new(false));
-        let mut root = PciRoot::new(MmioWindow {
+        let mut root = PciRoot::new(AddressRange {
             base: 0x3000_0000,
             size: 0x1000_0000,
         });
@@ -916,7 +1103,7 @@ mod tests {
 
     mod msix_bounds {
         use super::*;
-        use dillo_mmio::{Interrupt, InterruptError, MmioInterrupt};
+        use dillo_machine::interrupt::{Interrupt, InterruptError, InterruptResource};
 
         #[derive(Default)]
         struct RecordingDomain {
@@ -943,10 +1130,10 @@ mod tests {
 
         #[derive(Debug)]
         struct FakeAttachment {
-            interrupts: Vec<MmioInterrupt>,
+            interrupts: Vec<InterruptResource>,
         }
-        impl MmioAttachment for FakeAttachment {
-            fn interrupts(&self) -> &[MmioInterrupt] {
+        impl DeviceAttachment for FakeAttachment {
+            fn interrupts(&self) -> &[InterruptResource] {
                 &self.interrupts
             }
             fn shared_memory(&self) -> &[Arc<dyn SharedMemory>] {
@@ -954,9 +1141,10 @@ mod tests {
             }
             fn spawn(
                 self: Arc<Self>,
-                _run: dillo_mmio::MmioDeviceRun,
-            ) -> Result<MmioDeviceHandle, MmioSpawnError> {
-                Ok(MmioDeviceHandle::noop())
+                _name: String,
+                _run: dillo_machine::execution::DeviceRun,
+            ) -> Result<DeviceHandle, SpawnError> {
+                Ok(DeviceHandle::noop())
             }
         }
 
@@ -972,8 +1160,8 @@ mod tests {
             }
         }
         impl PciDevice for RecordingDevice {
-            fn config_read(&self, _reg_idx: usize) -> u32 {
-                0
+            fn config_read(&self, _reg_idx: usize) -> Result<u32, PciError> {
+                Ok(0)
             }
             fn config_write(
                 &self,
@@ -999,11 +1187,11 @@ mod tests {
             let domain = Arc::new(RecordingDomain::default());
 
             let mut root = PciRoot::with_interrupt_requirement(
-                MmioWindow {
+                AddressRange {
                     base: 0x3000_0000,
                     size: 0x1000_0000,
                 },
-                MmioInterruptRequirement::MessageDomain {
+                InterruptRequirement::MessageDomain {
                     source: None,
                     vectors: 0,
                 },
@@ -1037,11 +1225,11 @@ mod tests {
             // The root sized its requested domain to the sum of both functions.
             assert!(matches!(
                 root.interrupts(),
-                [MmioInterruptRequirement::MessageDomain { vectors: 5, .. }]
+                [InterruptRequirement::MessageDomain { vectors: 5, .. }]
             ));
 
             root.set_attachment(Arc::new(FakeAttachment {
-                interrupts: vec![MmioInterrupt::MessageDomain(domain.clone())],
+                interrupts: vec![InterruptResource::MessageDomain(domain.clone())],
             }));
 
             let entry = MsixTableEntry::default();
@@ -1144,7 +1332,7 @@ mod tests {
                 &self,
                 vector: u16,
                 msg: MessageInterrupt,
-            ) -> Result<(), dillo_mmio::InterruptError> {
+            ) -> Result<(), dillo_machine::interrupt::InterruptError> {
                 self.updates
                     .lock()
                     .expect("updates lock poisoned")
@@ -1156,13 +1344,13 @@ mod tests {
                 &self,
                 vector: u16,
                 enabled: bool,
-            ) -> Result<(), dillo_mmio::InterruptError> {
+            ) -> Result<(), dillo_machine::interrupt::InterruptError> {
                 assert_eq!(vector, 2);
                 self.enabled.store(enabled, Ordering::Release);
                 Ok(())
             }
 
-            fn interrupt(&self, _vector: u16) -> Option<dillo_mmio::Interrupt> {
+            fn interrupt(&self, _vector: u16) -> Option<dillo_machine::interrupt::Interrupt> {
                 None
             }
         }

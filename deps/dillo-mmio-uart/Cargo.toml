@@ -7,6 +7,7 @@ license.workspace = true
 description = "MMIO ns16550a UART device for dillo."
 
 [dependencies]
+dillo-machine.workspace = true
 dillo-mmio.workspace = true
 vm-superio.workspace = true
 

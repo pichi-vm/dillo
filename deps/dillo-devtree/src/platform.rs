@@ -906,6 +906,13 @@ impl Pcie {
             prop: "reg",
             reason: "missing ECAM pair",
         })?;
+        if ecam_size == 0 {
+            return Err(SurveyError::BadProperty {
+                node: "/pcie",
+                prop: "reg",
+                reason: "ECAM window is empty",
+            });
+        }
         plan.declare_from(&reg, "/pcie", ecam_base, ecam_size, RegionKind::EcamWindow);
 
         let ranges = pci.require("ranges", "/pcie")?;
@@ -959,8 +966,8 @@ impl Pcie {
     }
 }
 
-/// The general device: runs last, claims root's own grammar and `/chosen`,
-/// rejects a base `/cpus`, and sweeps any now-empty containers.
+/// The general device: runs last, claims root's own grammar and the known
+/// informational containers, and rejects a base `/cpus`.
 struct CoreVm;
 
 impl CoreVm {
@@ -990,15 +997,6 @@ impl CoreVm {
             aliases.ensure_drained()?;
         }
 
-        // Sweep now-empty containers a leaf device may have emptied.
-        let empties: Vec<String> = root
-            .children()
-            .filter(|c| c.properties().next().is_none() && c.children().next().is_none())
-            .map(|c| c.name().to_string())
-            .collect();
-        for name in empties {
-            root.remove_child(&name);
-        }
         Ok(())
     }
 }
@@ -1722,6 +1720,52 @@ mod tests {
     }
 
     #[test]
+    fn empty_unhandled_nodes_remain_uncovered() {
+        for (arch, base) in [
+            (Arch::Aarch64, base_root()),
+            (Arch::X86_64, x86_base_root()),
+        ] {
+            Machine::survey(&dtb(base.clone()), arch).expect("valid base");
+            for node in [
+                OwnedNode::new("unknown"),
+                OwnedNode::new("distance-map"),
+                OwnedNode::new("unknown-container").with_child(OwnedNode::new("empty-child")),
+            ] {
+                let name = node.name().to_string();
+                let mut root = base.clone();
+                root.set_child(node);
+                let error = Machine::survey(&dtb(root), arch)
+                    .expect_err("empty declarations still require a handler");
+                assert!(
+                    matches!(&error, SurveyError::Uncovered(report) if report.contains(&name)),
+                    "{arch:?} {name}: {error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicitly_handled_empty_containers_preserve_resources() {
+        for (arch, mut root) in [
+            (Arch::Aarch64, base_root()),
+            (Arch::X86_64, x86_base_root()),
+        ] {
+            let expected = Machine::survey(&dtb(root.clone()), arch).expect("valid base");
+            root.set_child(OwnedNode::new("chosen"));
+            root.set_child(OwnedNode::new("aliases"));
+            let actual = Machine::survey(&dtb(root), arch)
+                .expect("known containers are explicitly consumed even when empty");
+            assert_eq!(actual.plan.regions().len(), expected.plan.regions().len());
+            for (actual, expected) in actual.plan.regions().iter().zip(expected.plan.regions()) {
+                assert_eq!(
+                    (actual.gpa, actual.size, actual.kind, &actual.origin),
+                    (expected.gpa, expected.size, expected.kind, &expected.origin)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn extra_property_is_left_over() {
         let mut root = base_root();
         root.child_mut("timer")
@@ -1745,6 +1789,30 @@ mod tests {
         );
         let err = Machine::survey(&dtb(root), Arch::Aarch64).unwrap_err();
         assert!(matches!(err, SurveyError::BaseHasCpus), "got {err:?}");
+    }
+
+    #[test]
+    fn empty_ecam_windows_are_rejected() {
+        for base in [ECAM_BASE, SERIAL_BASE + 0x100] {
+            let mut root = base_root();
+            root.child_mut("pcie@c000000")
+                .unwrap()
+                .property_mut("reg")
+                .unwrap()
+                .set_u32s(&reg2(base, 0));
+            let err = Machine::survey(&dtb(root), Arch::Aarch64).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    SurveyError::BadProperty {
+                        node: "/pcie",
+                        prop: "reg",
+                        reason: "ECAM window is empty",
+                    }
+                ),
+                "got {err:?}"
+            );
+        }
     }
 
     #[test]
