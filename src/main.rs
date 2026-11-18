@@ -180,8 +180,7 @@ fn main() {
         platform,
         merged_dtb,
         memory: memory_plan,
-        guest_writes,
-        pmi: pmi_image,
+        recipe,
     } = launch;
     boot_trace::mark("launch_read");
 
@@ -208,13 +207,8 @@ fn main() {
             gpa: r.gpa,
             size: r.size,
         }),
-        guest_writes.into_iter().map(|w| runner::RunWrite {
-            section: w.section,
-            gpa: w.gpa,
-            data: w.data,
-        }),
+        recipe,
         placements,
-        pmi_image,
     );
     boot_trace::mark("preflight");
 
@@ -1490,152 +1484,82 @@ mod launch {
     mod bootconfig;
 
     #[cfg(test)]
+    mod action_tests;
+    #[cfg(test)]
     mod delegation_tests;
 
-    // The PMI File (fd) is held for the VM lifetime so the mapping — and any
-    // reboot re-map — is pinned to that inode, not re-resolved by path. Read/Seek
-    // are only used by the non-Linux read_to_end fallback (Linux mmaps the fd).
     use std::fs::File;
-    #[cfg(not(target_os = "linux"))]
-    use std::io::{Read, Seek};
     use std::path::Path;
 
     use dillo_devtree::platform::{Arch, Machine as PlatformMachine, SurveyError};
-    use dillo_machine::HostArchitecture;
+    use dillo_machine::{HostArchitecture, LaunchInput};
     use thiserror::Error;
 
     use crate::placement::{self, MemoryPlan};
-    use dillo::pmi_parse::{Action as PmiAction, FillKind, HostArch, ParseOptions};
+    use dillo::pmi_parse::{ActionKind, FillKind, HostArch, ParseOptions};
 
-    /// The PMI byte source. Raw section loads are copied straight from it into
-    /// guest RAM (one copy) instead of being staged into owned `Vec`s (two
-    /// copies). On Linux the backing is an mmap; elsewhere a `read_to_end`
-    /// buffer. The backing is resident only while sections are being copied:
-    /// after the initial load the caller [`release`](Pmi::release)s it so
-    /// the mapping does not stay resident for the VM's lifetime, and the rare
-    /// guest-reboot replay [`remap`](Pmi::remap)s it from `path`.
-    pub(crate) struct Pmi {
-        /// Held open for the VM lifetime: the mapping and any reboot re-map are
-        /// pinned to this fd's inode, so a replay is always the exact bytes that
-        /// were loaded and measured — never whatever the path resolves to later.
-        file: File,
-        /// Retained for error messages only; never used to re-open the file.
+    type SelectedInput = <crate::machine::Vm as dillo_machine::Host>::LaunchInput;
+
+    /// Captured, unvalidated PMI bytes. Validation consumes this owner and puts
+    /// it inside the resulting recipe, so source identity cannot be replaced.
+    #[derive(Debug)]
+    struct Pmi<S: LaunchInput> {
+        source: S,
         path: std::path::PathBuf,
-        backing: Option<PmiBacking>,
     }
 
-    enum PmiBacking {
-        #[cfg(target_os = "linux")]
-        Mapped(mmarinus::Map<mmarinus::perms::Read>),
-        #[cfg(not(target_os = "linux"))]
-        Owned(Vec<u8>),
-    }
-
-    impl Pmi {
-        /// Open the PMI at `path`, hold the fd, and map (Linux) / read (other) it
-        /// resident.
-        pub(crate) fn open(path: &Path) -> Result<Self, LaunchError> {
-            let file = File::open(path).map_err(|source| LaunchError::ReadPmi {
+    impl<S: LaunchInput> Pmi<S> {
+        fn open(path: &Path) -> Result<Self, LaunchError> {
+            let read_error = |source| LaunchError::ReadPmi {
                 path: path.display().to_string(),
                 source,
-            })?;
-            let mut img = Pmi {
-                file,
-                path: path.to_path_buf(),
-                backing: None,
             };
-            img.remap()?;
-            Ok(img)
+            let source = S::capture(
+                File::open(path).map_err(read_error)?,
+                dillo::pmi_parse::caps::MAX_FILE_SIZE,
+            )
+            .map_err(read_error)?;
+            Ok(Self {
+                source,
+                path: path.to_path_buf(),
+            })
         }
 
-        /// (Re-)acquire the backing store from the held fd. Used for the initial
-        /// load and to replay launch writes on guest reboot after a [`release`].
-        pub(crate) fn remap(&mut self) -> Result<(), LaunchError> {
-            // Owned label up front so the error path doesn't borrow `self` while
-            // we mutably borrow `self.file` for the mapping.
-            let path = self.path.display().to_string();
-            #[cfg(target_os = "linux")]
-            {
-                let len = self
-                    .file
-                    .metadata()
-                    .map_err(|source| LaunchError::ReadPmi {
-                        path: path.clone(),
-                        source,
-                    })?
-                    .len() as usize;
-                let m = mmarinus::Map::bytes(len)
-                    .anywhere()
-                    .from(&mut self.file, 0)
-                    .with(mmarinus::perms::Read)
-                    .map_err(|e| LaunchError::ReadPmi {
-                        path: path.clone(),
-                        source: std::io::Error::other(format!("mmap: {e:?}")),
-                    })?;
-                self.backing = Some(PmiBacking::Mapped(m));
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                self.file.rewind().map_err(|source| LaunchError::ReadPmi {
-                    path: path.clone(),
-                    source,
-                })?;
-                let mut b = Vec::new();
-                self.file
-                    .read_to_end(&mut b)
-                    .map_err(|source| LaunchError::ReadPmi {
-                        path: path.clone(),
-                        source,
-                    })?;
-                self.backing = Some(PmiBacking::Owned(b));
-            }
-            Ok(())
-        }
-
-        /// Drop the backing store (munmap on Linux), freeing its resident pages
-        /// while keeping the fd open for a possible reboot re-map. Safe to call
-        /// once sections have been copied into guest RAM.
-        pub(crate) fn release(&mut self) {
-            self.backing = None;
-        }
-
-        pub(crate) fn bytes(&self) -> &[u8] {
-            match self.backing.as_ref().expect("PMI backing released") {
-                #[cfg(target_os = "linux")]
-                PmiBacking::Mapped(m) => &m[..],
-                #[cfg(not(target_os = "linux"))]
-                PmiBacking::Owned(v) => v,
-            }
+        fn view(&self) -> Result<S::View<'_>, LaunchError> {
+            self.source.view().map_err(|source| LaunchError::ReadPmi {
+                path: self.path.display().to_string(),
+                source,
+            })
         }
     }
 
-    impl std::fmt::Debug for Pmi {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match &self.backing {
-                Some(_) => write!(f, "Pmi({} bytes, resident)", self.bytes().len()),
-                None => write!(f, "Pmi(released)"),
-            }
-        }
-    }
-
-    /// Source of a launch-time write's bytes: either bytes derived by dillo
-    /// (DTB overlay, cmdline, cpu bootstate), or a byte range of the PMI image
-    /// (raw `load` sections — copied directly from [`Pmi`], never staged).
+    /// One operation's contents: retained derived bytes, an image range copied
+    /// directly from the retained PMI capture, or an explicit zero extent.
     #[derive(Debug, Clone)]
     pub(crate) enum WriteSrc {
         Owned(Vec<u8>),
         Image { offset: usize, len: usize },
+        Zero { len: u64 },
+    }
+
+    impl WriteSrc {
+        fn len(&self) -> u64 {
+            match self {
+                Self::Owned(bytes) => bytes.len() as u64,
+                Self::Image { len, .. } => *len as u64,
+                Self::Zero { len } => *len,
+            }
+        }
     }
 
     /// Target-neutral launch facts derived before backend construction.
     #[derive(Debug)]
-    pub(crate) struct LaunchPlan {
+    pub(crate) struct LaunchPlan<S: LaunchInput = SelectedInput> {
         pub(crate) parsed: dillo::pmi_parse::ParsedPmi,
         pub(crate) merged_dtb: Vec<u8>,
         pub(crate) platform: PlatformMachine,
         pub(crate) memory: MemoryPlan,
-        pub(crate) guest_writes: Vec<GuestWrite>,
-        pub(crate) pmi: Pmi,
+        pub(crate) recipe: LaunchRecipe<S>,
     }
 
     /// One launch-time write into guest RAM.
@@ -1646,7 +1570,7 @@ mod launch {
         pub(crate) data: WriteSrc,
     }
 
-    impl LaunchPlan {
+    impl LaunchPlan<SelectedInput> {
         /// Read a PMI file, validate target-neutral launch facts, and compute RAM
         /// placement from the DTB-declared platform.
         #[allow(clippy::too_many_arguments)]
@@ -1660,17 +1584,32 @@ mod launch {
             base_dtb_path: Option<&Path>,
             bootconfig_path: Option<&Path>,
         ) -> Result<Self, LaunchError> {
-            // Map the PMI read-only rather than reading it whole. The PMI
-            // granularity spec places sections at aligned offsets precisely so a
-            // VMM can map the file and touch only the section bytes; a 70MB PMI is
-            // mostly 2M zero padding that read_to_end would copy needlessly. On
-            // Linux we mmap via mmarinus (safe wrapper — no caller unsafe, so the
-            // workspace unsafe_code=deny lint still holds); other hosts fall back
-            // to read_to_end. `bytes` borrows the backing store, which lives for
-            // the rest of this function (its data is copied into owned buffers by
-            // parse/guest_writes before we return), so nothing escapes the map.
-            let pmi = Pmi::open(pmi_path)?;
-            let bytes: &[u8] = pmi.bytes();
+            Pmi::<SelectedInput>::open(pmi_path)?.validate(
+                host_arch,
+                cpu_compatible,
+                address_bits,
+                memory_mib,
+                vcpus,
+                base_dtb_path,
+                bootconfig_path,
+            )
+        }
+    }
+
+    impl<S: LaunchInput> Pmi<S> {
+        #[allow(clippy::too_many_arguments)]
+        fn validate(
+            self,
+            host_arch: HostArchitecture,
+            cpu_compatible: Option<&str>,
+            address_bits: impl FnOnce() -> anyhow::Result<u32>,
+            memory_mib: u32,
+            vcpus: u32,
+            base_dtb_path: Option<&Path>,
+            bootconfig_path: Option<&Path>,
+        ) -> Result<LaunchPlan<S>, LaunchError> {
+            let view = self.view()?;
+            let bytes = view.as_ref();
 
             crate::boot_trace::mark("pmi_read");
             let pmi_arch = pmi_arch(host_arch);
@@ -1681,17 +1620,11 @@ mod launch {
                     memory_mib,
                 },
             )?;
-            validate_cpu_profile(parsed.cpu_profile.as_str(), pmi_arch)?;
             if bootconfig_path.is_some()
-                && !parsed.actions.iter().any(|action| {
-                    matches!(
-                        action,
-                        PmiAction::Fill {
-                            kind: FillKind::LbcBootconfig,
-                            ..
-                        }
-                    )
-                })
+                && !parsed
+                    .actions
+                    .iter()
+                    .any(|action| action.kind() == ActionKind::Fill(FillKind::LbcBootconfig))
             {
                 return Err(bootconfig::Error::Undeclared.into());
             }
@@ -1714,24 +1647,26 @@ mod launch {
             // The survey supports delegated CPUs and memory only: fixed CPU
             // declarations are rejected, and fixed memory is unclaimed. Require
             // the channel that delivers their allocation before planning RAM.
-            if !parsed.actions.iter().any(|action| {
-                matches!(
-                    action,
-                    PmiAction::Fill {
-                        kind: FillKind::DtDtbo,
-                        ..
-                    }
-                )
-            }) {
+            if !parsed
+                .actions
+                .iter()
+                .any(|action| action.kind() == ActionKind::Fill(FillKind::DtDtbo))
+            {
                 return Err(LaunchError::DelegatedAllocationRequiresDtbo);
             }
 
             // Invalid images must still fail without requiring a hypervisor.
             let address_bits = address_bits().map_err(LaunchError::AddressSpaceProbe)?;
             let load_ranges: Vec<(String, u64, u64)> = parsed
-                .sections
+                .actions
                 .iter()
-                .map(|(name, section)| (name.clone(), section.gpa, section.virtual_size))
+                .map(|action| {
+                    (
+                        action.section().to_string(),
+                        action.gpa(),
+                        action.memory_size(),
+                    )
+                })
                 .collect();
             let required_bits = platform.min_addr_space_bits();
             if required_bits > address_bits {
@@ -1746,9 +1681,9 @@ mod launch {
                 .map_err(LaunchError::DtbCrossValidate)?;
 
             let must_cover: Vec<(u64, u64)> = parsed
-                .sections
-                .values()
-                .map(|section| (section.gpa, section.virtual_size))
+                .actions
+                .iter()
+                .map(|action| (action.gpa(), action.memory_size()))
                 .collect();
             let memory = placement::plan_around_regions(
                 address_bits,
@@ -1756,7 +1691,7 @@ mod launch {
                 memory_mib,
                 platform.placement_regions(),
             )?;
-            let guest_writes = guest_writes(
+            let operations = LaunchRecipe::<S>::resolve(
                 bytes,
                 &parsed,
                 &memory,
@@ -1770,16 +1705,16 @@ mod launch {
             )?;
             crate::boot_trace::mark("guest_writes_built");
 
-            // `bytes` (a borrow of `pmi`) is unused past here, so `pmi` can move
-            // into the plan: raw section loads reference it by offset and are
-            // copied straight from it into guest RAM at apply time (single copy).
-            Ok(Self {
+            drop(view);
+            Ok(LaunchPlan {
                 parsed,
                 merged_dtb: dtb,
                 platform,
                 memory,
-                guest_writes,
-                pmi,
+                recipe: LaunchRecipe {
+                    pmi: self,
+                    operations,
+                },
             })
         }
     }
@@ -1855,9 +1790,6 @@ mod launch {
         #[error("memory placement: {0}")]
         Placement(#[from] placement::PlanError),
 
-        #[error("unrecognized cpu:profile {0:?} for {1:?}")]
-        UnknownCpuProfile(String, HostArch),
-
         #[error("load section `{0}` lies outside the PMI file")]
         MalformedLoadSection(String),
 
@@ -1885,7 +1817,6 @@ mod launch {
                 | Self::DtboSynth(_)
                 | Self::Bootconfig(_) => 11,
                 Self::Placement(_) | Self::AddressSpace { .. } | Self::AddressSpaceProbe(_) => 13,
-                Self::UnknownCpuProfile(_, _) => 12,
             }
         }
     }
@@ -1895,94 +1826,104 @@ mod launch {
         bootconfig: Option<&'a Path>,
     }
 
-    fn guest_writes(
-        bytes: &[u8],
-        parsed: &dillo::pmi_parse::ParsedPmi,
-        memory: &MemoryPlan,
-        arch: Arch,
-        cpu_compatible: Option<&str>,
-        vcpus: u32,
-        inputs: FillInputs<'_>,
-    ) -> Result<Vec<GuestWrite>, LaunchError> {
-        let base_dtb = inputs.base_dtb;
-        let mut writes = Vec::new();
-        for action in &parsed.actions {
-            match action {
-                PmiAction::Fill {
-                    section,
-                    kind: FillKind::LbcBootconfig,
-                } => {
-                    let target = &parsed.sections[section];
-                    let reservation =
-                        bootconfig::Reservation::read(target.virtual_size, inputs.bootconfig)?;
-                    writes.push(GuestWrite {
-                        section: section.clone(),
-                        gpa: target.gpa,
-                        data: WriteSrc::Owned(reservation.bytes),
-                    });
-                }
-                PmiAction::Load { section } => {
-                    let s = &parsed.sections[section];
-                    if s.file_size == 0 {
-                        continue;
+    /// A retained, ordered recipe of complete guest-memory operations.
+    #[derive(Debug)]
+    pub(crate) struct LaunchRecipe<S: LaunchInput = SelectedInput> {
+        pmi: Pmi<S>,
+        operations: Vec<GuestWrite>,
+    }
+
+    impl<S: LaunchInput> LaunchRecipe<S> {
+        fn resolve(
+            bytes: &[u8],
+            parsed: &dillo::pmi_parse::ParsedPmi,
+            memory: &MemoryPlan,
+            arch: Arch,
+            cpu_compatible: Option<&str>,
+            vcpus: u32,
+            inputs: FillInputs<'_>,
+        ) -> Result<Vec<GuestWrite>, LaunchError> {
+            let mut operations = Vec::new();
+            for action in &parsed.actions {
+                let source = action.source();
+                let data = match action.kind() {
+                    ActionKind::Load if source.file_size == 0 => WriteSrc::Zero {
+                        len: action.memory_size(),
+                    },
+                    ActionKind::Load => {
+                        read_section(bytes, source.file_offset, source.file_size).ok_or_else(
+                            || LaunchError::MalformedLoadSection(action.section().into()),
+                        )?;
+                        WriteSrc::Image {
+                            offset: source.file_offset as usize,
+                            len: source.file_size as usize,
+                        }
                     }
-                    // Bounds-check the section against the image (as the old copy
-                    // path did), but record the byte range instead of copying it:
-                    // apply_load_sections copies it straight from the PMI image
-                    // into guest RAM (one copy, not two).
-                    read_section(bytes, s.file_offset, s.file_size)
-                        .ok_or_else(|| LaunchError::MalformedLoadSection(section.clone()))?;
-                    writes.push(GuestWrite {
-                        section: section.clone(),
-                        gpa: s.gpa,
-                        data: WriteSrc::Image {
-                            offset: s.file_offset as usize,
-                            len: s.file_size as usize,
-                        },
-                    });
-                }
-                PmiAction::Fill {
-                    section,
-                    kind: FillKind::DtDtbo,
-                } => {
-                    let s = &parsed.sections[section];
-                    let data = crate::overlay::synthesize_dtbo(
-                        &memory.memory_nodes,
-                        vcpus,
-                        arch.cpu_enable_method(),
-                        cpu_compatible,
-                        s.virtual_size,
-                    )
-                    .map_err(LaunchError::DtboSynth)?;
-                    writes.push(GuestWrite {
-                        section: section.clone(),
-                        gpa: s.gpa,
-                        data: WriteSrc::Owned(data),
-                    });
-                }
-                PmiAction::Fill {
-                    section,
-                    kind: FillKind::DtDtb,
-                } => {
-                    // Deliver the resolved measured base into its reserved Zero
-                    // section (detached/optional). The base was resolved once in
-                    // `read` (out-of-band `--dtb`, or the bundled fallback).
-                    let target = &parsed.sections[section];
-                    if base_dtb.len() as u64 > target.virtual_size {
-                        return Err(LaunchError::BaseDtbTooLarge {
-                            actual: base_dtb.len() as u64,
-                            cap: target.virtual_size,
-                        });
+                    ActionKind::Fill(FillKind::LbcBootconfig) => WriteSrc::Owned(
+                        bootconfig::Reservation::read(source.virtual_size, inputs.bootconfig)?
+                            .bytes,
+                    ),
+                    ActionKind::Fill(FillKind::DtDtbo) => WriteSrc::Owned(
+                        crate::overlay::synthesize_dtbo(
+                            &memory.memory_nodes,
+                            vcpus,
+                            arch.cpu_enable_method(),
+                            cpu_compatible,
+                            source.virtual_size,
+                        )
+                        .map_err(LaunchError::DtboSynth)?,
+                    ),
+                    ActionKind::Fill(FillKind::DtDtb) => {
+                        if inputs.base_dtb.len() as u64 > source.virtual_size {
+                            return Err(LaunchError::BaseDtbTooLarge {
+                                actual: inputs.base_dtb.len() as u64,
+                                cap: source.virtual_size,
+                            });
+                        }
+                        WriteSrc::Owned(inputs.base_dtb.to_vec())
                     }
-                    writes.push(GuestWrite {
-                        section: section.clone(),
-                        gpa: target.gpa,
-                        data: WriteSrc::Owned(base_dtb.to_vec()),
+                };
+                let initialized = data.len();
+                if initialized > 0 {
+                    operations.push(GuestWrite {
+                        section: action.section().into(),
+                        gpa: action.gpa(),
+                        data,
+                    });
+                }
+                let remaining = action.memory_size() - initialized;
+                if remaining > 0 {
+                    operations.push(GuestWrite {
+                        section: action.section().into(),
+                        gpa: action.gpa() + initialized,
+                        data: WriteSrc::Zero { len: remaining },
                     });
                 }
             }
+            Ok(operations)
         }
-        Ok(writes)
+
+        pub(crate) fn apply<M: dillo_machine::Machine>(
+            &self,
+            machine: &mut M,
+        ) -> anyhow::Result<()> {
+            let view = self.pmi.view()?;
+            let image = view.as_ref();
+            for operation in &self.operations {
+                match &operation.data {
+                    WriteSrc::Zero { len } => machine.zero_guest(operation.gpa, *len)?,
+                    WriteSrc::Owned(data) => machine.write_guest(operation.gpa, data)?,
+                    WriteSrc::Image { offset, len } => {
+                        let data =
+                            read_section(image, *offset as u64, *len as u64).ok_or_else(|| {
+                                LaunchError::MalformedLoadSection(operation.section.clone())
+                            })?;
+                        machine.write_guest(operation.gpa, data)?;
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 
     /// Resolve the launch base DTB for this channel mode. An out-of-band base
@@ -1996,15 +1937,10 @@ mod launch {
         parsed: &dillo::pmi_parse::ParsedPmi,
         oob: Option<&[u8]>,
     ) -> Result<Vec<u8>, LaunchError> {
-        let has_fill = parsed.actions.iter().any(|a| {
-            matches!(
-                a,
-                PmiAction::Fill {
-                    kind: FillKind::DtDtb,
-                    ..
-                }
-            )
-        });
+        let has_fill = parsed
+            .actions
+            .iter()
+            .any(|action| action.kind() == ActionKind::Fill(FillKind::DtDtb));
         match oob {
             Some(_) if !has_fill => Err(LaunchError::UnexpectedBaseOverride),
             Some(base) => Ok(base.to_vec()),
@@ -2027,50 +1963,9 @@ mod launch {
         bytes.get(start..end)
     }
 
-    /// Validate the `cpu:profile` name against the PMI machine architecture.
-    pub(crate) fn validate_cpu_profile(profile: &str, arch: HostArch) -> Result<(), LaunchError> {
-        let recognized = match arch {
-            HostArch::Aarch64 => parse_armv_profile(profile).is_some(),
-            HostArch::X86_64 => matches!(
-                profile,
-                "x86-64-v1" | "x86-64-v2" | "x86-64-v3" | "x86-64-v4"
-            ),
-        };
-        if recognized {
-            Ok(())
-        } else {
-            Err(LaunchError::UnknownCpuProfile(profile.to_string(), arch))
-        }
-    }
-
-    fn parse_armv_profile(s: &str) -> Option<(u32, u32)> {
-        let body = s.strip_prefix("armv")?.strip_suffix("-a")?;
-        let (major, minor) = body.split_once('.')?;
-        Some((major.parse().ok()?, minor.parse().ok()?))
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
-
-        #[test]
-        fn cpu_profile_validation_accepts_known_x86_levels() {
-            for profile in ["x86-64-v1", "x86-64-v2", "x86-64-v3", "x86-64-v4"] {
-                validate_cpu_profile(profile, HostArch::X86_64).expect(profile);
-            }
-        }
-
-        #[test]
-        fn cpu_profile_validation_accepts_armv_profiles() {
-            validate_cpu_profile("armv8.0-a", HostArch::Aarch64).expect("armv8.0-a");
-            validate_cpu_profile("armv9.2-a", HostArch::Aarch64).expect("armv9.2-a");
-        }
-
-        #[test]
-        fn cpu_profile_validation_rejects_arch_mismatch() {
-            assert!(validate_cpu_profile("armv8.0-a", HostArch::X86_64).is_err());
-            assert!(validate_cpu_profile("x86-64-v2", HostArch::Aarch64).is_err());
-        }
 
         #[test]
         fn read_section_checks_bounds() {
@@ -2140,6 +2035,13 @@ mod machine_select {
                 #[error("machine: {0}")]
                 Machine(String),
 
+                #[error("{failure}")]
+                DeviceFailure {
+                    #[source]
+                    source: Box<Self>,
+                    failure: dillo_machine::execution::DeviceFailure,
+                },
+
                 #[error("write load section `{section}` to GPA {gpa:#x}: {source}")]
                 SectionWrite {
                     section: String,
@@ -2172,6 +2074,21 @@ mod machine_select {
                     Self::Machine(source.to_string())
                 }
 
+                pub(crate) fn with_device_failure(
+                    self,
+                    failure: dillo_machine::execution::DeviceFailure,
+                ) -> Self {
+                    // CPU arbitration may already include this sticky failure.
+                    if self.to_string().contains(&failure.to_string()) {
+                        self
+                    } else {
+                        Self::DeviceFailure {
+                            source: Box::new(self),
+                            failure,
+                        }
+                    }
+                }
+
                 /// Map to the documented exit code from ARCH §13.4.
                 #[must_use]
                 pub(crate) fn exit_code(&self) -> i32 {
@@ -2185,27 +2102,25 @@ mod machine_select {
                         | Self::DtboWrite { .. } => 11,
                         Self::Machine(_) | Self::SectionWrite { .. } => 12,
                         Self::HostRam { .. } | Self::Placement { .. } => 13,
+                        Self::DeviceFailure { source, .. } => source.exit_code(),
                     }
                 }
             }
         }
 
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-        use std::thread;
+        use std::sync::atomic::{AtomicBool, AtomicU32};
 
         use super::machine as selected_machine;
         use dillo_devtree::platform::Machine as PlatformMachine;
         use dillo_devtree::platform::{MsiParentage, WiredInterrupt};
-        use dillo_machine::{
-            BootVcpuState, Cpu as MachineCpu, CpuState as MachineCpuState, LaunchConfig, Machine,
-            Memory as MachineMemory, RamRange, VcpuStop,
+        use dillo_machine::attachment::{Attach, DeviceAttachment};
+        use dillo_machine::interrupt::{
+            InterruptRequirement, InterruptSource, MessageInterruptSource,
         };
+        use dillo_machine::memory::AddressRange;
+        use dillo_machine::{LaunchConfig, Machine, Memory as MachineMemory, RamRange, VcpuStop};
         use dillo_mmio::syscon;
-        use dillo_mmio::{
-            Attach, InterruptSource, MessageInterruptSource, MmioAttachment,
-            MmioInterruptRequirement, MmioWindow,
-        };
         use dillo_pci::PciRoot;
         use dillo_pci_virtio::VirtioPciAdapter;
 
@@ -2216,14 +2131,6 @@ mod machine_select {
         pub(crate) struct RunRegion {
             pub(crate) gpa: u64,
             pub(crate) size: u64,
-        }
-
-        /// One launch-time write into guest RAM, already derived by `dillo`.
-        #[derive(Debug)]
-        pub(crate) struct RunWrite {
-            pub(crate) section: String,
-            pub(crate) gpa: u64,
-            pub(crate) data: crate::launch::WriteSrc,
         }
 
         #[derive(Debug)]
@@ -2268,18 +2175,17 @@ mod machine_select {
 
         /// Target-neutral launch facts already derived by `dillo`.
         #[derive(Debug)]
-        pub(crate) struct Preflight {
+        pub(crate) struct Preflight<S: dillo_machine::LaunchInput = <selected_machine::Vm as dillo_machine::Host>::LaunchInput> {
             parsed: dillo::pmi_parse::ParsedPmi,
             platform: PlatformMachine,
             dtb: Vec<u8>,
             memslots: Vec<RunRegion>,
             memory_nodes: Vec<RunRegion>,
-            guest_writes: Vec<RunWrite>,
+            recipe: crate::launch::LaunchRecipe<S>,
             placements: Vec<DevicePlacement>,
-            pmi: crate::launch::Pmi,
         }
 
-        impl Preflight {
+        impl<S: dillo_machine::LaunchInput> Preflight<S> {
             // Aggregates the target-neutral launch facts; the fields are
             // genuinely distinct inputs, so a builder would add noise here.
             #[allow(clippy::too_many_arguments)]
@@ -2289,9 +2195,8 @@ mod machine_select {
                 dtb: Vec<u8>,
                 memslots: impl IntoIterator<Item = RunRegion>,
                 memory_nodes: impl IntoIterator<Item = RunRegion>,
-                guest_writes: impl IntoIterator<Item = RunWrite>,
+                recipe: crate::launch::LaunchRecipe<S>,
                 placements: Vec<DevicePlacement>,
-                pmi: crate::launch::Pmi,
             ) -> Self {
                 Self {
                     parsed,
@@ -2299,9 +2204,8 @@ mod machine_select {
                     dtb,
                     memslots: memslots.into_iter().collect(),
                     memory_nodes: memory_nodes.into_iter().collect(),
-                    guest_writes: guest_writes.into_iter().collect(),
+                    recipe,
                     placements,
-                    pmi,
                 }
             }
 
@@ -2312,9 +2216,8 @@ mod machine_select {
                 PlatformMachine,
                 Vec<u8>,
                 RunMemoryPlan,
-                Vec<RunWrite>,
+                crate::launch::LaunchRecipe<S>,
                 Vec<DevicePlacement>,
-                crate::launch::Pmi,
             ) {
                 (
                     self.parsed,
@@ -2324,9 +2227,8 @@ mod machine_select {
                         memslots: self.memslots,
                         memory_nodes: self.memory_nodes,
                     },
-                    self.guest_writes,
+                    self.recipe,
                     self.placements,
-                    self.pmi,
                 )
             }
         }
@@ -2334,14 +2236,6 @@ mod machine_select {
         #[derive(Debug)]
         struct SupervisorControl {
             supervisor_shutdown: &'static AtomicBool,
-        }
-
-        impl SupervisorControl {
-            fn stop_requested(&self) -> Option<VcpuStop> {
-                self.supervisor_shutdown
-                    .load(Ordering::Acquire)
-                    .then_some(VcpuStop::Stopped)
-            }
         }
 
         fn syscon_register(syscon: dillo_devtree::platform::Syscon) -> syscon::SysconRegister {
@@ -2366,14 +2260,14 @@ mod machine_select {
             }
         }
 
-        fn line_requirement(interrupt: &WiredInterrupt) -> MmioInterruptRequirement {
-            MmioInterruptRequirement::Line {
+        fn line_requirement(interrupt: &WiredInterrupt) -> InterruptRequirement {
+            InterruptRequirement::Line {
                 source: interrupt_source(interrupt),
             }
         }
 
-        fn message_requirement(msi: &MsiParentage, vectors: u16) -> MmioInterruptRequirement {
-            MmioInterruptRequirement::MessageDomain {
+        fn message_requirement(msi: &MsiParentage, vectors: u16) -> InterruptRequirement {
+            InterruptRequirement::MessageDomain {
                 source: Some(MessageInterruptSource {
                     controller: msi.controller.phandle,
                 }),
@@ -2384,10 +2278,10 @@ mod machine_select {
         fn optional_message_requirement(
             msi: Option<&MsiParentage>,
             vectors: u16,
-        ) -> MmioInterruptRequirement {
+        ) -> InterruptRequirement {
             match msi {
                 Some(msi) => message_requirement(msi, vectors),
-                None => MmioInterruptRequirement::MessageDomain {
+                None => InterruptRequirement::MessageDomain {
                     source: None,
                     vectors,
                 },
@@ -2407,12 +2301,12 @@ mod machine_select {
         where
             E: std::error::Error + Send + Sync + 'static,
             M: Machine<Error = E>,
-            M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn MmioAttachment>>,
+            M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn DeviceAttachment>>,
             M: Attach<Arc<dillo_mmio_virtio::EmptySlot>, Error = E>,
             M: Attach<
                     Arc<dillo_mmio_virtio::VirtioMmio>,
                     Error = E,
-                    Output = Arc<dyn MmioAttachment>,
+                    Output = Arc<dyn DeviceAttachment>,
                 >,
         {
             use dillo_config::Bus;
@@ -2420,8 +2314,8 @@ mod machine_select {
             let (mut pci, mmio): (Vec<DevicePlacement>, Vec<DevicePlacement>) =
                 placements.into_iter().partition(|p| p.bus == Bus::Pci);
 
-            // --- PCI: one root, one function per placement ---
-            if !pci.is_empty() {
+            // Realize the declared root even when it has no attached endpoints.
+            if platform.has_pcie {
                 // Each virtio function uses BAR 0 (4 KiB cfg) + BAR 2 (4 KiB
                 // MSI-X) — one 0x2000 stride in the PCI MMIO window. Strides are
                 // packed in registration order; the PCI device number is the
@@ -2430,12 +2324,12 @@ mod machine_select {
                 let mmio_base = platform.pcie.mmio_base;
                 pci.sort_by_key(|p| p.index);
 
-                let ecam = MmioWindow {
+                let ecam = AddressRange {
                     base: platform.pcie.ecam_base,
                     size: platform.pcie.ecam_size,
                 };
-                // PciRoot recomputes the MSI-X domain size from registered
-                // devices, so the seed vector count here is irrelevant.
+                // An empty root needs no message vectors. Registering endpoints
+                // grows the domain to their combined MSI-X table size.
                 let mut pci_root = PciRoot::with_interrupt_requirement(
                     ecam,
                     optional_message_requirement(platform.pcie.msi.as_ref(), 0),
@@ -2474,7 +2368,7 @@ mod machine_select {
                 Attach::attach(
                     vm,
                     Arc::new(dillo_mmio_virtio::EmptySlot {
-                        window: MmioWindow {
+                        window: AddressRange {
                             base: slot.base,
                             size: slot.size,
                         },
@@ -2490,7 +2384,7 @@ mod machine_select {
                 let irq = dillo_mmio_virtio::WiredIrq::unresolved(slot.irq);
                 let transport =
                     Arc::new(dillo_mmio_virtio::VirtioMmio::with_interrupt_requirement(
-                        MmioWindow {
+                        AddressRange {
                             base: slot.base,
                             size: slot.size,
                         },
@@ -2518,7 +2412,7 @@ mod machine_select {
         where
             E: std::error::Error + Send + Sync + 'static,
             M: Machine<Error = E>,
-            M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn MmioAttachment>>,
+            M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn DeviceAttachment>>,
         {
             let Some(uart) = platform.uart.as_ref() else {
                 // UART is optional; a virtio console can carry guest output.
@@ -2526,7 +2420,7 @@ mod machine_select {
                 return Ok(());
             };
             let serial = Arc::new(dillo_mmio_uart::Ns16550::with_interrupt_requirement(
-                MmioWindow {
+                AddressRange {
                     base: uart.base,
                     size: uart.size,
                 },
@@ -2584,158 +2478,42 @@ mod machine_select {
             Ok(())
         }
 
-        fn apply_load_sections<M: Machine>(
-            vm: &mut M,
-            guest_writes: &[RunWrite],
-            pmi_bytes: &[u8],
-        ) -> Result<(), RunError> {
-            use crate::launch::WriteSrc;
-            for write in guest_writes {
-                // Raw `load` sections are copied straight from the PMI image;
-                // derived writes (DTB overlay, cmdline, cpu state) carry owned bytes.
-                let data: &[u8] = match &write.data {
-                    WriteSrc::Owned(v) => v,
-                    WriteSrc::Image { offset, len } => pmi_bytes
-                        .get(*offset..offset.saturating_add(*len))
-                        .ok_or_else(|| {
-                            RunError::Machine(format!(
-                                "launch section `{}` range {:#x}+{:#x} out of PMI bounds",
-                                write.section, offset, len
-                            ))
-                        })?,
-                };
-                log::debug!(
-                    "writing launch section `{}` to GPA {:#x} ({} bytes)",
-                    write.section,
-                    write.gpa,
-                    data.len()
-                );
-                vm.write_guest(write.gpa, data).map_err(RunError::machine)?;
-            }
-            Ok(())
-        }
-
         fn run_vcpus<M, E>(
             vm: &mut M,
             count: u32,
-            cpu_profile: &str,
-            boot_state: &dyn BootVcpuState,
+            cpu_profile: dillo_machine::CpuProfile,
             control: Arc<SupervisorControl>,
         ) -> Result<VcpuStop, RunError>
         where
             E: std::error::Error + Send + Sync + 'static,
             M: Machine<Error = E>,
-            M: Attach<M::CpuState, Error = E, Output = Arc<M::Cpu>>,
         {
-            let mut cpus = Vec::with_capacity(count as usize);
-            for index in 0..count {
-                let state = M::CpuState::new(index, cpu_profile, Some(boot_state))
-                    .map_err(RunError::machine)?;
-                cpus.push(Attach::attach(vm, state).map_err(RunError::machine)?);
-            }
-            vm.prepare_vcpu_run().map_err(RunError::machine)?;
-
-            let shutdown = Arc::new(AtomicBool::new(false));
-            let mut first_stop = VcpuStop::Stopped;
-            let mut first_error = None;
-
-            thread::scope(|scope| {
-                let mut joins = Vec::with_capacity(cpus.len());
-                for cpu in &cpus {
-                    let cpu = Arc::clone(cpu);
-                    let all_cpus = cpus.clone();
-                    let shutdown = Arc::clone(&shutdown);
-                    joins.push(scope.spawn(move || -> Result<VcpuStop, String> {
-                        if shutdown.load(Ordering::Acquire) {
-                            return Ok(VcpuStop::Stopped);
-                        }
-                        let result = cpu.run().map_err(|e| e.to_string());
-                        shutdown.store(true, Ordering::Release);
-                        for cpu in &all_cpus {
-                            let _ = cpu.stop();
-                        }
-                        result
-                    }));
-                }
-
-                let monitor = {
-                    let control = Arc::clone(&control);
-                    let cpus = cpus.clone();
-                    let shutdown = Arc::clone(&shutdown);
-                    scope.spawn(move || {
-                        let mut stop_requested = false;
-                        while !shutdown.load(Ordering::Acquire) {
-                            if stop_requested || control.stop_requested().is_some() {
-                                stop_requested = true;
-                                for cpu in &cpus {
-                                    let _ = cpu.stop();
-                                }
-                            }
-                            thread::sleep(std::time::Duration::from_millis(10));
-                        }
-                    })
-                };
-
-                for join in joins {
-                    match join.join() {
-                        Ok(Ok(stop)) => {
-                            if matches!(stop, VcpuStop::GuestReset | VcpuStop::GuestPoweroff) {
-                                first_stop = stop;
-                            }
-                            for cpu in &cpus {
-                                let _ = cpu.stop();
-                            }
-                        }
-                        Ok(Err(error)) => {
-                            first_error.get_or_insert(error);
-                            for cpu in &cpus {
-                                let _ = cpu.stop();
-                            }
-                        }
-                        Err(_) => {
-                            first_error.get_or_insert_with(|| "vCPU thread panicked".to_string());
-                            for cpu in &cpus {
-                                let _ = cpu.stop();
-                            }
-                        }
-                    }
-                }
-                shutdown.store(true, Ordering::Release);
-                monitor.join().expect("vCPU stop monitor panicked");
-                if let Some(stop) = control.stop_requested() {
-                    first_stop = stop;
-                }
-                Ok::<(), RunError>(())
-            })?;
-
-            if let Some(error) = first_error {
-                return Err(RunError::Machine(error));
-            }
-            Ok(first_stop)
+            dillo_runtime::PreparingCpus::spawn(vm, count, cpu_profile)
+                .and_then(|owners| owners.prepare(control.supervisor_shutdown))
+                .and_then(|owners| owners.run(control.supervisor_shutdown))
+                .map_err(RunError::machine)
         }
 
         fn run_selected<M, E>(
-            preflight: Preflight,
+            preflight: Preflight<M::LaunchInput>,
             vcpus: u32,
             supervisor_shutdown: &'static AtomicBool,
         ) -> Result<i32, RunError>
         where
             E: std::error::Error + Send + Sync + 'static,
-            M: Machine<Error = E>,
+            M: Machine<Error = E> + dillo_machine::Host,
             M: Attach<M::Memory, Error = E, Output = ()>,
-            M: Attach<M::CpuState, Error = E, Output = Arc<M::Cpu>>,
-            M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn MmioAttachment>>,
+            M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn DeviceAttachment>>,
             M: Attach<Arc<dillo_mmio_virtio::EmptySlot>, Error = E>,
             M: Attach<
                     Arc<dillo_mmio_virtio::VirtioMmio>,
                     Error = E,
-                    Output = Arc<dyn MmioAttachment>,
+                    Output = Arc<dyn DeviceAttachment>,
                 >,
-            M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn MmioAttachment>>,
+            M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn DeviceAttachment>>,
             M: Attach<Arc<syscon::SysconDevice>, Error = E>,
         {
-            let (parsed, platform, dtb, plan, guest_writes, placements, mut pmi) =
-                preflight.into_parts();
+            let (parsed, platform, dtb, plan, recipe, placements) = preflight.into_parts();
             log::debug!(
                 "PMI parsed: arch={:?}, {} actions, dt:dtb source={:?}",
                 parsed.arch,
@@ -2770,56 +2548,54 @@ mod machine_select {
                 ),
             })
             .map_err(RunError::machine)?;
-            crate::boot_trace::mark("vm_created");
-            let memory = M::Memory::from_ranges(&plan.ram_ranges()).map_err(RunError::machine)?;
-            Attach::attach(&mut vm, memory).map_err(RunError::machine)?;
-            crate::boot_trace::mark("mem_attached");
-            apply_load_sections(&mut vm, &guest_writes, pmi.bytes())?;
-            // Sections are now in guest RAM; drop the PMI backing so it does not
-            // stay resident for the VM's lifetime. A guest reboot re-maps it.
-            pmi.release();
-            crate::boot_trace::mark("sections_loaded");
+            let failures = vm.device_failures();
+            let result = (|| {
+                crate::boot_trace::mark("vm_created");
+                let memory =
+                    M::Memory::from_ranges(&plan.ram_ranges()).map_err(RunError::machine)?;
+                Attach::attach(&mut vm, memory).map_err(RunError::machine)?;
+                crate::boot_trace::mark("mem_attached");
+                recipe
+                    .apply(&mut vm)
+                    .map_err(|error| RunError::Machine(error.to_string()))?;
+                crate::boot_trace::mark("sections_loaded");
 
-            attach_uart(&mut vm, &platform)?;
-            attach_syscon(&mut vm, &platform)?;
-            attach_devices(&mut vm, &platform, placements)?;
+                attach_uart(&mut vm, &platform)?;
+                attach_syscon(&mut vm, &platform)?;
+                attach_devices(&mut vm, &platform, placements)?;
 
-            let control = Arc::new(SupervisorControl {
-                supervisor_shutdown,
-            });
-            let cpu_profile = parsed.cpu_profile.as_str();
-            crate::boot_trace::mark("guest_loaded");
-            let mut outcome = run_vcpus::<M, E>(
-                &mut vm,
-                vcpus,
-                cpu_profile,
-                &parsed.vcpu as &dyn BootVcpuState,
-                control,
-            )?;
-            while matches!(outcome, VcpuStop::GuestReset) {
-                log::info!("guest requested reboot - replaying launch writes");
-                vm.reset_for_reboot().map_err(RunError::machine)?;
-                // Re-map the PMI just to replay the raw section loads, then drop
-                // it again — it is not held resident between boots.
-                pmi.remap().map_err(RunError::machine)?;
-                apply_load_sections(&mut vm, &guest_writes, pmi.bytes())?;
-                pmi.release();
                 let control = Arc::new(SupervisorControl {
                     supervisor_shutdown,
                 });
-                outcome = run_vcpus::<M, E>(
-                    &mut vm,
-                    vcpus,
-                    cpu_profile,
-                    &parsed.vcpu as &dyn BootVcpuState,
-                    control,
-                )?;
-            }
+                let cpu_profile = parsed.cpu_profile;
+                crate::boot_trace::mark("guest_loaded");
+                let mut outcome = run_vcpus::<M, E>(&mut vm, vcpus, cpu_profile, control)?;
+                while matches!(outcome, VcpuStop::GuestReset) {
+                    failures.check().map_err(RunError::machine)?;
+                    log::info!("guest requested reboot - replaying launch writes");
+                    vm.reset_for_reboot().map_err(RunError::machine)?;
+                    recipe
+                        .apply(&mut vm)
+                        .map_err(|error| RunError::Machine(error.to_string()))?;
+                    let control = Arc::new(SupervisorControl {
+                        supervisor_shutdown,
+                    });
+                    outcome = run_vcpus::<M, E>(&mut vm, vcpus, cpu_profile, control)?;
+                }
 
-            if matches!(outcome, VcpuStop::GuestPoweroff) {
-                dillo_virtio_console::flush_output();
+                if matches!(outcome, VcpuStop::GuestPoweroff) {
+                    dillo_virtio_console::flush_output();
+                }
+                Ok(0)
+            })();
+            drop(vm);
+            match failures.check() {
+                Ok(()) => result,
+                Err(failure) => Err(match result {
+                    Ok(_) => RunError::machine(failure),
+                    Err(error) => error.with_device_failure(failure),
+                }),
             }
-            Ok(0)
         }
 
         /// Top-level VM-child entry point for the selected host machine.
@@ -2842,6 +2618,121 @@ mod machine_select {
             use dillo_devtree::platform::Arch;
             use dillo_mmio::{MmioBus, MmioDevice, MmioWriteOutcome};
 
+            #[test]
+            fn late_device_failure_preserves_prior_diagnostics_without_duplication() {
+                let failure = dillo_machine::execution::DeviceFailure {
+                    participant: "blk request".into(),
+                    cause: dillo_machine::execution::JoinError::Host("late flush failure".into()),
+                };
+                let error = RunError::Machine("CPU owner failed; native interrupt failed".into())
+                    .with_device_failure(failure.clone())
+                    .with_device_failure(failure.clone());
+                let text = error.to_string();
+                let source = std::error::Error::source(&error).unwrap().to_string();
+                assert!(source.contains("CPU owner failed"));
+                assert!(source.contains("native interrupt failed"));
+                assert!(!text.contains("CPU owner failed"));
+                assert_eq!(text.matches("late flush failure").count(), 1);
+                assert_eq!(error.exit_code(), 12);
+                let error = RunError::MissingRequiredDevice("uart").with_device_failure(failure);
+                assert_eq!(error.exit_code(), 11, "retain the original error category");
+            }
+
+            struct RefusedCpu;
+            struct RefusedCpuInput;
+            struct RefusedMemory;
+            struct RefusedMachine {
+                prepared: usize,
+            }
+
+            #[derive(Clone)]
+            struct RefusedInterrupt;
+            impl dillo_machine::CpuInterrupt for RefusedInterrupt {
+                type Error = std::io::Error;
+                fn interrupt(&self) -> Result<(), Self::Error> {
+                    Ok(())
+                }
+            }
+            impl dillo_machine::CpuPreparation for RefusedCpuInput {
+                type Error = std::io::Error;
+                type Interrupt = RefusedInterrupt;
+                type Runner = RefusedCpu;
+                fn interrupt(&self) -> RefusedInterrupt {
+                    RefusedInterrupt
+                }
+                fn prepare(self) -> Result<RefusedCpu, Self::Error> {
+                    Ok(RefusedCpu)
+                }
+            }
+            impl dillo_machine::CpuRunner for RefusedCpu {
+                type Error = std::io::Error;
+                fn run(
+                    &mut self,
+                    _: &dyn dillo_machine::CpuTermination,
+                ) -> Result<VcpuStop, Self::Error> {
+                    panic!("failed launch executed a guest")
+                }
+            }
+            impl dillo_machine::Memory for RefusedMemory {
+                type Error = std::io::Error;
+                fn from_ranges(_: &[RamRange]) -> Result<Self, Self::Error> {
+                    Ok(Self)
+                }
+            }
+            impl Machine for RefusedMachine {
+                fn device_failures(&self) -> dillo_machine::execution::DeviceFailureObserver {
+                    dillo_machine::execution::DeviceFailureReporter::default().observer()
+                }
+                type Error = std::io::Error;
+                type CpuPreparation = RefusedCpuInput;
+                fn cpu_preparation(
+                    &mut self,
+                    _: u32,
+                    _: dillo_machine::CpuProfile,
+                ) -> Result<RefusedCpuInput, Self::Error> {
+                    self.prepared += 1;
+                    Ok(RefusedCpuInput)
+                }
+                type Memory = RefusedMemory;
+                fn guest_address_bits() -> Result<u32, Self::Error> {
+                    Ok(48)
+                }
+                fn from_launch_config(_: LaunchConfig) -> Result<Self, Self::Error> {
+                    Ok(Self { prepared: 0 })
+                }
+                fn write_guest(&mut self, _: u64, _: &[u8]) -> Result<(), Self::Error> {
+                    Ok(())
+                }
+                fn zero_guest(&mut self, _: u64, _: u64) -> Result<(), Self::Error> {
+                    Ok(())
+                }
+
+                fn prepare_vcpu_run(&mut self) -> Result<(), Self::Error> {
+                    Err(std::io::Error::other("injected native preparation refusal"))
+                }
+            }
+
+            #[test]
+            fn preparation_failure_never_runs_any_prepared_cpu() {
+                static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+                let mut machine = RefusedMachine { prepared: 0 };
+                let error = run_vcpus::<RefusedMachine, _>(
+                    &mut machine,
+                    2,
+                    dillo_machine::CpuProfile::X86_64(pmi::x86_64::Profile::V1),
+                    Arc::new(SupervisorControl {
+                        supervisor_shutdown: &SHUTDOWN,
+                    }),
+                )
+                .expect_err("preparation must fail");
+                assert_eq!(machine.prepared, 2);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("injected native preparation refusal")
+                );
+            }
+
             fn reg(base: u64, size: u64) -> OwnedProperty {
                 OwnedProperty::new("reg").with_u32s(&[
                     (base >> 32) as u32,
@@ -2849,6 +2740,199 @@ mod machine_select {
                     (size >> 32) as u32,
                     size as u32,
                 ])
+            }
+
+            #[derive(Default)]
+            struct AttachedDevices {
+                bus: MmioBus,
+                requirements: Vec<InterruptRequirement>,
+                failures: dillo_machine::execution::DeviceFailureReporter,
+            }
+
+            impl Machine for AttachedDevices {
+                type Error = std::io::Error;
+                type CpuPreparation = RefusedCpuInput;
+                type Memory = RefusedMemory;
+
+                fn device_failures(&self) -> dillo_machine::execution::DeviceFailureObserver {
+                    self.failures.observer()
+                }
+
+                fn cpu_preparation(
+                    &mut self,
+                    _: u32,
+                    _: dillo_machine::CpuProfile,
+                ) -> Result<RefusedCpuInput, Self::Error> {
+                    panic!("configuration reads must not prepare a CPU")
+                }
+
+                fn guest_address_bits() -> Result<u32, Self::Error> {
+                    Ok(48)
+                }
+
+                fn from_launch_config(_: LaunchConfig) -> Result<Self, Self::Error> {
+                    Ok(Self::default())
+                }
+
+                fn write_guest(&mut self, _: u64, _: &[u8]) -> Result<(), Self::Error> {
+                    panic!("configuration reads must not write guest RAM")
+                }
+
+                fn zero_guest(&mut self, _: u64, _: u64) -> Result<(), Self::Error> {
+                    panic!("configuration reads must not zero guest RAM")
+                }
+            }
+
+            #[derive(Debug)]
+            struct InactiveAttachment;
+
+            impl DeviceAttachment for InactiveAttachment {
+                fn interrupts(&self) -> &[dillo_machine::interrupt::InterruptResource] {
+                    &[]
+                }
+
+                fn shared_memory(&self) -> &[Arc<dyn dillo_machine::memory::SharedMemory>] {
+                    &[]
+                }
+
+                fn spawn(
+                    self: Arc<Self>,
+                    _: String,
+                    _: dillo_machine::execution::DeviceRun,
+                ) -> Result<
+                    dillo_machine::execution::DeviceHandle,
+                    dillo_machine::execution::SpawnError,
+                > {
+                    panic!("configuration reads must not activate a device")
+                }
+            }
+
+            impl<D: MmioDevice + 'static> Attach<Arc<D>> for AttachedDevices {
+                type Error = std::io::Error;
+                type Output = Arc<dyn DeviceAttachment>;
+
+                fn attach(&mut self, device: Arc<D>) -> Result<Self::Output, Self::Error> {
+                    self.requirements.extend_from_slice(device.interrupts());
+                    self.bus.register_device(device);
+                    Ok(Arc::new(InactiveAttachment))
+                }
+            }
+
+            #[test]
+            fn pci_root_realization_follows_declaration_not_population() {
+                use dillo_config::Bus;
+                use dillo_devtree::platform::{
+                    ControllerKind, InterruptControllerRef, MsiControllerRef, Pcie, ResourcePlan,
+                    VirtioMmio,
+                };
+
+                const ECAM: u64 = 0x3000_0000;
+                const MMIO: u64 = 0xa00_0000;
+                for (declared, placed_bus) in [
+                    (true, None),
+                    (true, Some(Bus::Mmio)),
+                    (true, Some(Bus::Pci)),
+                    (false, Some(Bus::Mmio)),
+                ] {
+                    let platform = PlatformMachine {
+                        arch: Arch::Aarch64,
+                        has_pcie: declared,
+                        pcie: if declared {
+                            Pcie {
+                                ecam_base: ECAM,
+                                ecam_size: 0x10_0000,
+                                bus_min: 0,
+                                bus_max: 0,
+                                mmio_base: 0x4000_0000,
+                                mmio_size: 0x100_0000,
+                                msi: Some(MsiParentage {
+                                    node: "/pcie@30000000".into(),
+                                    controller: MsiControllerRef {
+                                        node: "/msi-controller@a100000".into(),
+                                        phandle: 3,
+                                        kind: ControllerKind::GicV2mFrame,
+                                    },
+                                }),
+                            }
+                        } else {
+                            Pcie::ZEROED
+                        },
+                        plan: ResourcePlan::default(),
+                        uart: None,
+                        virtio_mmio: vec![VirtioMmio {
+                            base: MMIO,
+                            size: 0x200,
+                            irq: 16,
+                            interrupt: WiredInterrupt {
+                                node: "/virtio_mmio@a000000".into(),
+                                controller: InterruptControllerRef {
+                                    node: "/interrupt-controller@8000000".into(),
+                                    phandle: 1,
+                                    kind: ControllerKind::GicV3,
+                                    interrupt_cells: 3,
+                                },
+                                cells: vec![0, 16, 1],
+                                irq: 16,
+                            },
+                        }],
+                        poweroff: None,
+                        reboot: None,
+                    };
+                    let placements = placed_bus
+                        .into_iter()
+                        .map(|bus| DevicePlacement {
+                            bus,
+                            index: u32::from(bus == Bus::Pci),
+                            msix_vectors: 3,
+                            name: "console",
+                            device: Box::new(dillo_virtio_console::VirtioConsole::new()),
+                        })
+                        .collect();
+                    let mut attached = AttachedDevices::default();
+                    let result = attach_devices(&mut attached, &platform, placements);
+                    result.expect("realize declared devices");
+                    let mut value = [0; 4];
+                    assert_eq!(attached.bus.read(ECAM, &mut value), declared);
+                    if declared {
+                        assert_eq!(value, [0x86, 0x80, 0x37, 0x12]);
+                        assert!(attached.bus.read(ECAM + (1 << 15), &mut value));
+                        if placed_bus == Some(Bus::Pci) {
+                            assert_eq!(u16::from_le_bytes([value[0], value[1]]), 0x1af4);
+                        } else {
+                            assert_eq!(value, [0xff; 4]);
+                        }
+                        assert!(attached.bus.read(ECAM + (2 << 15), &mut value));
+                        assert_eq!(value, [0xff; 4]);
+                        assert!(!attached.bus.read(ECAM - 4, &mut value));
+                        assert!(
+                            !attached
+                                .bus
+                                .read(ECAM + platform.pcie.ecam_size, &mut value)
+                        );
+                    }
+                    let domains: Vec<_> = attached
+                        .requirements
+                        .iter()
+                        .filter(|requirement| {
+                            matches!(requirement, InterruptRequirement::MessageDomain { .. })
+                        })
+                        .copied()
+                        .collect();
+                    let expected_domains = if declared {
+                        vec![InterruptRequirement::MessageDomain {
+                            source: Some(MessageInterruptSource { controller: 3 }),
+                            vectors: if placed_bus == Some(Bus::Pci) { 3 } else { 0 },
+                        }]
+                    } else {
+                        vec![]
+                    };
+                    assert_eq!(domains, expected_domains);
+                    assert!(attached.bus.read(MMIO + 8, &mut value));
+                    assert_eq!(
+                        u32::from_le_bytes(value),
+                        if placed_bus == Some(Bus::Mmio) { 3 } else { 0 }
+                    );
+                }
             }
 
             #[test]

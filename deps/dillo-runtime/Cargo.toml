@@ -1,0 +1,16 @@
+[package]
+name = "dillo-runtime"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Shared machine execution supervision for Dillo."
+
+[dependencies]
+dillo-machine.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+pmi.workspace = true

@@ -3,7 +3,8 @@
 
 use std::sync::Mutex;
 
-use dillo_mmio::{MmioDevice, MmioError, MmioWindow, MmioWriteOutcome};
+use dillo_machine::memory::AddressRange;
+use dillo_mmio::{MmioDevice, MmioError, MmioWriteOutcome};
 
 /// Minimal x86 IOAPIC register model used by the WHP backend.
 ///
@@ -12,13 +13,13 @@ use dillo_mmio::{MmioDevice, MmioError, MmioWindow, MmioWriteOutcome};
 /// programmed redirection table when injecting wired interrupts.
 #[derive(Debug)]
 pub(crate) struct IoApic {
-    window: MmioWindow,
+    window: AddressRange,
     select: Mutex<u32>,
     redirection: Mutex<[u64; 24]>,
 }
 
 impl IoApic {
-    pub(crate) fn new(window: MmioWindow) -> Self {
+    pub(crate) fn new(window: AddressRange) -> Self {
         Self {
             window,
             select: Mutex::new(0),
@@ -110,11 +111,11 @@ impl IoApic {
 }
 
 impl MmioDevice for IoApic {
-    fn windows(&self) -> &[MmioWindow] {
+    fn windows(&self) -> &[AddressRange] {
         std::slice::from_ref(&self.window)
     }
 
-    fn read(&self, _window: MmioWindow, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
+    fn read(&self, _window: AddressRange, offset: u64, data: &mut [u8]) -> Result<(), MmioError> {
         self.read_register(offset, data)
             .then_some(())
             .ok_or(MmioError::Unsupported)
@@ -122,7 +123,7 @@ impl MmioDevice for IoApic {
 
     fn write(
         &self,
-        _window: MmioWindow,
+        _window: AddressRange,
         offset: u64,
         data: &[u8],
     ) -> Result<MmioWriteOutcome, MmioError> {
@@ -184,10 +185,11 @@ pub(crate) fn resolve_logical_destination(mask: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{IoApic, IoApicRoute, decode_route};
-    use dillo_mmio::{MmioDevice, MmioWindow};
+    use dillo_machine::memory::AddressRange;
+    use dillo_mmio::MmioDevice;
 
     fn ioapic() -> IoApic {
-        IoApic::new(MmioWindow {
+        IoApic::new(AddressRange {
             base: 0xFEC0_0000,
             size: 0x1000,
         })

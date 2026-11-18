@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+use super::ConsoleConfig;
 use dillo_config::ConsoleSize;
 use interprocess::local_socket::{
     GenericFilePath, Listener, ListenerNonblockingMode, ListenerOptions, Stream, prelude::*,
@@ -12,10 +13,7 @@ use interprocess::local_socket::{
 use std::{
     io::{self, Read},
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -23,7 +21,7 @@ use std::{
 pub(super) struct Receiver {
     listener: Listener,
     pending: Option<Pending>,
-    current: Arc<AtomicU32>,
+    current: Arc<Mutex<ConsoleConfig>>,
 }
 
 #[derive(Debug)]
@@ -35,7 +33,7 @@ struct Pending {
 }
 
 impl Receiver {
-    pub(super) fn bind(path: &Path, current: Arc<AtomicU32>) -> io::Result<Self> {
+    pub(super) fn bind(path: &Path, current: Arc<Mutex<ConsoleConfig>>) -> io::Result<Self> {
         let options = ListenerOptions::new()
             .name(path.to_fs_name::<GenericFilePath>()?)
             .nonblocking(ListenerNonblockingMode::Both);
@@ -101,11 +99,14 @@ impl Receiver {
         if pending.read == 4 {
             let bytes = pending.bytes;
             self.pending = None;
-            if let Ok(size) = ConsoleSize::try_from(bytes) {
-                let packed = u32::from_le_bytes(bytes);
-                if self.current.swap(packed, Ordering::AcqRel) != packed {
-                    return Ok(Some(size));
-                }
+            if let Ok(size) = ConsoleSize::try_from(bytes)
+                && self
+                    .current
+                    .lock()
+                    .expect("console config poisoned")
+                    .resize(size)
+            {
+                return Ok(Some(size));
             }
         } else if Instant::now() >= pending.deadline {
             self.pending = None;
@@ -117,7 +118,19 @@ impl Receiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dillo_virtio::VirtioDevice;
     use std::io::Write;
+
+    #[test]
+    fn size_generation_wraps_without_losing_the_update() {
+        let mut config = ConsoleConfig {
+            size: 0,
+            generation: u32::MAX,
+        };
+        assert!(config.resize((120, 41).try_into().unwrap()));
+        assert_eq!(config.generation, 0);
+        assert_eq!(config.size.to_le_bytes(), [120, 0, 41, 0]);
+    }
 
     #[test]
     fn fragmented_updates_and_stalled_clients_remain_bounded() -> io::Result<()> {
@@ -133,8 +146,12 @@ mod tests {
                 .ok_or_else(|| io::Error::other("temporary name"))?
                 .to_string_lossy()
         ));
-        let current = Arc::new(AtomicU32::new(0));
-        let mut receiver = Receiver::bind(&endpoint, Arc::clone(&current))?;
+        let mut console = crate::VirtioConsole::new().with_resize(&endpoint)?;
+        let mut receiver = console.resize.take().unwrap();
+        let mut initial = [0xff; 4];
+        console.read_config(0, &mut initial);
+        assert_eq!(initial, [0; 4]);
+        assert_eq!(console.config_generation(), 0);
         let mut first = Stream::connect(endpoint.as_path().to_fs_name::<GenericFilePath>()?)?;
         first.write_all(&[44, 1])?; // 300 columns; rows have not arrived yet.
         assert_eq!(receiver.poll()?, None);
@@ -149,6 +166,11 @@ mod tests {
         };
         assert_eq!((size.cols.get(), size.rows.get()), (300, 77));
         drop(first);
+
+        let before = console.config_generation();
+        let mut cols = [0; 2];
+        console.read_config(0, &mut cols);
+        assert_eq!(u16::from_le_bytes(cols), 300);
 
         // An abandoned partial message cannot hold the next caller forever.
         let mut stalled = Stream::connect(endpoint.as_path().to_fs_name::<GenericFilePath>()?)?;
@@ -168,11 +190,39 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         };
         assert_eq!((size.cols.get(), size.rows.get()), (120, 41));
-        assert_eq!(
-            current.load(Ordering::Acquire).to_le_bytes(),
-            [120, 0, 41, 0]
-        );
-        drop((stalled, next, receiver));
+        let mut rows = [0; 2];
+        console.read_config(2, &mut rows);
+        assert_eq!(u16::from_le_bytes(rows), 41);
+        // The guest must detect that these columns/rows are from two updates.
+        assert_ne!(before, console.config_generation());
+        let mut dimensions = [0; 4];
+        console.read_config(0, &mut dimensions);
+        assert_eq!(dimensions, [120, 0, 41, 0]);
+        drop((stalled, next));
+
+        let generation = console.config_generation();
+        for bytes in [[120, 0, 41, 0], [0, 0, 41, 0]] {
+            let mut client = Stream::connect(endpoint.as_path().to_fs_name::<GenericFilePath>()?)?;
+            client.write_all(&bytes[..2])?;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            // Observe the partial request so completion of a no-change/invalid
+            // request cannot be confused with a poll before it was accepted.
+            while receiver.pending.as_ref().is_none_or(|p| p.read != 2) {
+                assert_eq!(receiver.poll()?, None);
+                assert!(Instant::now() < deadline, "request acceptance deadline");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            client.write_all(&bytes[2..])?;
+            while receiver.pending.is_some() {
+                assert_eq!(receiver.poll()?, None);
+                assert!(Instant::now() < deadline, "request completion deadline");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(console.config_generation(), generation);
+            console.read_config(0, &mut dimensions);
+            assert_eq!(dimensions, [120, 0, 41, 0]);
+        }
+        drop(receiver);
         #[cfg(unix)]
         assert!(!endpoint.exists(), "resize endpoint survived teardown");
         Ok(())

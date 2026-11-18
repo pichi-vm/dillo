@@ -9,7 +9,7 @@ description = "In-process virtio-fs (FUSE) device for dillo (VirtioDevice transp
 
 [dependencies]
 dillo-virtio.workspace = true
-dillo-mmio.workspace = true
+dillo-machine.workspace = true
 vm-memory.workspace = true
 log.workspace = true
 thiserror.workspace = true
@@ -31,6 +31,7 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+dillo-virtio = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]
