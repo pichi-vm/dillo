@@ -39,7 +39,9 @@ pub trait NetBackend: Send + Sync + std::fmt::Debug {
     ///
     /// Returns `Ok(Some(n))` with the frame in `buf[..n]`, or `Ok(None)` on
     /// timeout (the caller re-checks shutdown and calls again). `buf` is at
-    /// least [`MAX_FRAME_LEN`] bytes.
+    /// least [`MAX_FRAME_LEN`] bytes. `Interrupted` may be retried; other
+    /// errors terminate the attached RX worker. Backends normalize transient
+    /// readiness races and empty polls to `Ok(None)`.
     fn recv(&self, buf: &mut [u8]) -> io::Result<Option<usize>>;
 
     /// Whether the device should advertise link-up in its config status. The

@@ -7,7 +7,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use dillo_mmio::{Interrupt, InterruptError, MessageInterrupt, MessageInterruptDomain};
+use dillo_machine::interrupt::{
+    Interrupt, InterruptError, MessageInterrupt, MessageInterruptDomain,
+};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::irq::IrqManager;

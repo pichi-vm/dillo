@@ -26,9 +26,10 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
-use rustix::fd::{AsFd, BorrowedFd};
-use rustix::fs::{Mode, OFlags};
+use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
+use rustix::fs::{FileType, Mode, OFlags};
 use snuffler::{
     BlockDevice, ClockInfo, ConsolePortProbe, CpuInfo, KernelLog, KernelLogEntry, MemoryInfo,
     NetBench, NetIf, NetOp, NetProbe, PciDevice, REPORT_BEGIN, REPORT_END, Report, SerialPort,
@@ -613,8 +614,9 @@ fn run_external_reach_probe(endpoints: &str) -> bool {
 /// (`dillo.console_port=NAME`): enumerate the ports the `virtio_console`
 /// driver discovered, find the requested name, and optionally read from
 /// (`dillo.console_port_read=N`) and write to (`dillo.console_port_write=TEXT`)
-/// its `/dev/vport*` node. `None` when the token is absent, so ordinary boots
-/// never touch it.
+/// its `/dev/vport*` node. Additional names to await can be listed with
+/// repeated `dillo.console_port_expect=NAME` tokens. Ordinary boots skip this
+/// probe.
 fn probe_console_port(cmdline: &str) -> Option<ConsolePortProbe> {
     let token = |key: &str| {
         cmdline
@@ -624,8 +626,13 @@ fn probe_console_port(cmdline: &str) -> Option<ConsolePortProbe> {
     };
     let requested_name = token("dillo.console_port=")?;
     let read_len = token("dillo.console_port_read=").and_then(|v| v.parse::<usize>().ok());
+    let expected_names: Vec<_> = cmdline
+        .split_whitespace()
+        .filter_map(|token| token.strip_prefix("dillo.console_port_expect="))
+        .collect();
     Some(run_console_port_probe(
         requested_name,
+        &expected_names,
         read_len,
         token("dillo.console_port_write="),
     ))
@@ -633,11 +640,15 @@ fn probe_console_port(cmdline: &str) -> Option<ConsolePortProbe> {
 
 fn run_console_port_probe(
     requested_name: String,
+    expected_names: &[&str],
     read_len: Option<usize>,
     write: Option<String>,
 ) -> ConsolePortProbe {
+    const TIMEOUT: Duration = Duration::from_secs(5);
+    const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
     let mut res = ConsolePortProbe {
-        requested_name: requested_name.clone(),
+        requested_name,
         names: Vec::new(),
         found: false,
         device: None,
@@ -646,77 +657,48 @@ fn run_console_port_probe(
         error: None,
     };
 
-    // Each MULTIPORT port the driver created shows up as
-    // /sys/class/virtio-ports/vportNpM/name holding the PORT_NAME the device
-    // sent. The matching character device is /dev/<that directory's name>.
-    let mut matched = None;
-    match fs::read_dir("/sys/class/virtio-ports") {
-        Ok(entries) => {
-            for e in entries.flatten() {
-                let Some(node) = e.file_name().to_str().map(str::to_owned) else {
-                    continue;
-                };
-                let Some(name) = read_opt(&e.path().join("name")) else {
-                    continue;
-                };
-                if name == requested_name {
-                    matched = Some(node);
-                }
-                res.names.push(name);
+    // MULTIPORT announcements arrive asynchronously after the driver probes.
+    // Keep the first successfully opened data fd through both transfers.
+    let deadline = Instant::now() + TIMEOUT;
+    let port = loop {
+        match OpenedConsolePort::try_open(&mut res, expected_names) {
+            Ok(port) => break port,
+            Err(error) if Instant::now() >= deadline => {
+                res.error = Some(format!("console ports not ready within 5s: {error}"));
+                return res;
             }
-            res.names.sort();
-        }
-        Err(e) => {
-            res.error = Some(format!("read /sys/class/virtio-ports: {e}"));
-            return res;
-        }
-    }
-
-    let Some(node) = matched else {
-        return res;
-    };
-    res.found = true;
-    let path = format!("/dev/{node}");
-    res.device = Some(path.clone());
-
-    // One read-write handle for both directions. Closing and reopening the
-    // port between the write and the read would be wrong: the driver reports
-    // the port closed on the last close, and the device must then discard
-    // anything it had queued for a port nobody has open.
-    //
-    // Non-blocking: a port whose host side never sends must not hang PID 1
-    // until the harness's boot timeout.
-    let fd = match rustix::fs::open(
-        path.as_str(),
-        OFlags::RDWR | OFlags::NONBLOCK,
-        Mode::empty(),
-    ) {
-        Ok(fd) => fd,
-        Err(e) => {
-            res.error = Some(format!("open {path}: {e}"));
-            return res;
+            Err(_) => std::thread::sleep(POLL_INTERVAL),
         }
     };
+    let OpenedConsolePort { path, fd } = port;
 
     if let Some(text) = write {
-        match rustix::io::write(&fd, text.as_bytes()) {
-            Ok(n) if n == text.len() => res.wrote = true,
-            Ok(n) => res.error = Some(format!("write {path}: short write ({n} bytes)")),
-            Err(e) => res.error = Some(format!("write {path}: {e}")),
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match rustix::io::write(&fd, text.as_bytes()) {
+                Ok(n) if n == text.len() => res.wrote = true,
+                Ok(n) => res.error = Some(format!("write {path}: short write ({n} bytes)")),
+                Err(rustix::io::Errno::AGAIN) if Instant::now() < deadline => {
+                    std::thread::sleep(POLL_INTERVAL);
+                    continue;
+                }
+                Err(e) => res.error = Some(format!("write {path}: {e}")),
+            }
+            break;
         }
     }
 
     if let Some(len) = read_len {
         let mut buf = vec![0u8; len];
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = Instant::now() + TIMEOUT;
         loop {
             match rustix::io::read(&fd, &mut buf) {
                 Ok(0) | Err(rustix::io::Errno::AGAIN) => {
-                    if std::time::Instant::now() >= deadline {
+                    if Instant::now() >= deadline {
                         res.error = Some(format!("read {path}: no data within 5s"));
                         break;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    std::thread::sleep(POLL_INTERVAL);
                 }
                 Ok(n) => {
                     res.read = Some(String::from_utf8_lossy(&buf[..n]).into_owned());
@@ -730,7 +712,69 @@ fn run_console_port_probe(
         }
     }
 
+    res.device = Some(path);
     res
+}
+
+struct OpenedConsolePort {
+    path: String,
+    fd: OwnedFd,
+}
+
+impl OpenedConsolePort {
+    fn try_open(res: &mut ConsolePortProbe, expected_names: &[&str]) -> Result<Self, String> {
+        // Each MULTIPORT port the driver created shows up as
+        // /sys/class/virtio-ports/vportNpM/name holding the PORT_NAME the device
+        // sent. The matching character device is /dev/<that directory's name>.
+        res.names.clear();
+        res.found = false;
+        res.device = None;
+        let mut path = None;
+        let entries = fs::read_dir("/sys/class/virtio-ports")
+            .map_err(|e| format!("read /sys/class/virtio-ports: {e}"))?;
+        for entry in entries.flatten() {
+            let Some(name) = read_opt(&entry.path().join("name")) else {
+                continue;
+            };
+            let node = entry.file_name();
+            let Some(node) = node.to_str() else {
+                continue;
+            };
+            if name == res.requested_name {
+                path = Some(format!("/dev/{node}"));
+            }
+            res.names.push(name);
+        }
+        res.names.sort();
+        let path = path.ok_or_else(|| format!("port {:?} not announced", res.requested_name))?;
+        res.found = true;
+        let missing = expected_names
+            .iter()
+            .find(|name| !res.names.iter().any(|actual| actual == **name));
+        let opened = match missing {
+            Some(name) => Err(format!("port {name:?} not announced")),
+            None => Self::open_device("/dev/hvc0", OFlags::WRONLY)
+                .and_then(|_| Self::open_device(&path, OFlags::RDWR)),
+        };
+
+        match opened {
+            Ok(fd) => Ok(Self { path, fd }),
+            Err(error) => {
+                res.device = Some(path);
+                Err(error)
+            }
+        }
+    }
+
+    fn open_device(path: &str, flags: OFlags) -> Result<OwnedFd, String> {
+        let fd = rustix::fs::open(path, flags | OFlags::NONBLOCK, Mode::empty())
+            .map_err(|e| format!("open {path}: {e}"))?;
+        let stat = rustix::fs::fstat(&fd).map_err(|e| format!("fstat {path}: {e}"))?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::CharacterDevice {
+            return Err(format!("{path} is not a character device"));
+        }
+        Ok(fd)
+    }
 }
 
 /// Probe virtio-vsock when the cmdline requests it (`dillo.vsock_port=N`):
