@@ -1,0 +1,47 @@
+name: Native PSCI conduit probe
+on:
+  push:
+    branches: [investigate/psci-conduit]
+  workflow_dispatch:
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: KVM
+            runs_on: '["self-hosted","Linux","ARM64","bare-metal","aarch64","kvm"]'
+            package: dillo-machine-kvm
+            test: imp::owner_tests::psci_conduit_native_probe
+          - backend: HVF
+            runs_on: '["self-hosted","macOS","ARM64","bare-metal","m1"]'
+            package: dillo-machine-hvf
+            test: imp::tests::psci_conduit_native_probe
+    runs-on: ${{ fromJSON(matrix.runs_on) }}
+    timeout-minutes: 10
+    env:
+      CARGO_BUILD_RUSTFLAGS: -D warnings
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Configure pinned toolchain and record platform
+        shell: bash
+        run: |
+          mkdir -p .cargo
+          cp .copr/cargo-config.toml .cargo/config.toml
+          rustup show
+          uname -a
+          if command -v sw_vers >/dev/null; then sw_vers; fi
+      - name: Exercise native PSCI conduits
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p ${{ matrix.package }} ${{ matrix.test }} -- --exact --nocapture 2>&1 | tee native-probe.log
+          grep -F '${{ matrix.backend }} PSCI HVC:' native-probe.log
+          grep -F '${{ matrix.backend }} PSCI SMC:' native-probe.log
+      - name: Preserve probe output
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: psci-conduit-${{ matrix.backend }}
+          path: native-probe.log
