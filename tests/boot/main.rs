@@ -489,12 +489,21 @@ fn boot_with_env(
     {
         let _ = child.kill();
         let _ = child.wait();
-        let mut s = std::fs::read_to_string(&out_path).unwrap_or_default();
-        s.push_str(&std::fs::read_to_string(&err_path).unwrap_or_default());
-        panic!("dillo boot timed out:\n{s}");
+        let [stdout, stderr] = [&out_path, &err_path].map(|path| match std::fs::read(path) {
+            Ok(bytes) => format!(
+                "({} bytes):\n{}",
+                bytes.len(),
+                String::from_utf8_lossy(&bytes),
+            ),
+            Err(error) => format!("unavailable: {error}"),
+        });
+        panic!("dillo boot timed out:\nstdout {stdout}\nstderr {stderr}");
     }
-    let mut s = std::fs::read_to_string(&out_path).unwrap_or_default();
-    s.push_str(&std::fs::read_to_string(&err_path).unwrap_or_default());
+    let mut s =
+        String::from_utf8_lossy(&std::fs::read(&out_path).expect("read guest stdout")).into_owned();
+    s.push_str(&String::from_utf8_lossy(
+        &std::fs::read(&err_path).expect("read guest stderr"),
+    ));
     s
 }
 
@@ -926,12 +935,17 @@ fn boots_with_raw_disk_over_mmio() {
         false,
     );
     let blk = format!("path={},bus=mmio", disk.display());
-    let output = boot_with(
+    let log_filter = std::env::var("RUST_LOG").map_or_else(
+        |_| "info,dillo::boot=trace".to_owned(),
+        |filter| format!("info,dillo::boot=trace,{filter}"),
+    );
+    let output = boot_with_env(
         &pmi,
         256,
         1,
         tmp.path(),
         &["--console", "endpoint=stdio,bus=mmio", "--blk", &blk],
+        &[("RUST_LOG", &log_filter)],
     );
     let r = parse_report(&output).unwrap_or_else(|| {
         panic!("boot produced no snuffler report (guest did not boot):\n{output}")
