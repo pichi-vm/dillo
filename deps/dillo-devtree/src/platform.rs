@@ -945,6 +945,16 @@ impl Pcie {
                 reason: "expected two cells",
             });
         }
+        let (bus_min, bus_max) = match (u8::try_from(bus_cells[0]), u8::try_from(bus_cells[1])) {
+            (Ok(min), Ok(max)) if min <= max => (min, max),
+            _ => {
+                return Err(SurveyError::BadProperty {
+                    node: "/pcie",
+                    prop: "bus-range",
+                    reason: "expected an ordered interval within 0..=255",
+                });
+            }
+        };
 
         pci.ack("device_type");
         pci.ack("#address-cells");
@@ -957,8 +967,8 @@ impl Pcie {
         Ok(Some(Pcie {
             ecam_base,
             ecam_size,
-            bus_min: bus_cells[0] as u8,
-            bus_max: bus_cells[1] as u8,
+            bus_min,
+            bus_max,
             mmio_base,
             mmio_size,
             msi,
@@ -1501,6 +1511,51 @@ mod tests {
 
     fn dtb(root: OwnedNode) -> Vec<u8> {
         OwnedTree::new(root).encode().expect("encode base")
+    }
+
+    #[test]
+    fn pci_bus_intervals_are_checked_before_narrowing() {
+        for (arch, base, name) in [
+            (Arch::Aarch64, base_root(), "pcie@c000000"),
+            (Arch::X86_64, x86_base_root(), "pcie@b0000000"),
+        ] {
+            for (buses, valid) in [
+                ([0, 0], true),
+                ([0, 255], true),
+                ([8, 15], true),
+                ([255, 255], true),
+                ([256, 256], false),
+                ([0, 256], false),
+                ([256, 0], false),
+                ([2, 1], false),
+                ([u32::MAX, u32::MAX], false),
+            ] {
+                let mut root = base.clone();
+                let pci = root.child_mut(name).unwrap();
+                pci.set_property(OwnedProperty::new("bus-range").with_u32s(&buses));
+                // Provide space for all 256 bus numbers, away from other MMIO.
+                pci.set_property(
+                    OwnedProperty::new("reg").with_u32s(&reg2(0x1_0000_0000, 0x1000_0000)),
+                );
+                let result = Machine::survey(&dtb(root), arch);
+                if valid {
+                    let pci = result.expect("valid bus interval").pcie;
+                    assert_eq!([u32::from(pci.bus_min), u32::from(pci.bus_max)], buses);
+                } else {
+                    assert!(
+                        matches!(
+                            result,
+                            Err(SurveyError::BadProperty {
+                                node: "/pcie",
+                                prop: "bus-range",
+                                ..
+                            })
+                        ),
+                        "{arch:?} {buses:?}: {result:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
