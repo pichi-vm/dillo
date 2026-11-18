@@ -166,7 +166,7 @@ jobs:
         shell: bash
         env:
           CARGO_BUILD_RUSTFLAGS: "-D warnings"
-        run: cargo test --workspace
+        run: cargo test --workspace -- --show-output
 
       - name: Test (Windows, workspace minus Unix-only crates)
         if: runner.os == 'Windows'
