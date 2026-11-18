@@ -658,7 +658,7 @@ impl GicConfig {
         let intc_path = format!("/{intc_name}");
         let mut intc = root.remove_child(&intc_name).expect("just located");
         require_compatible(&mut intc, "/interrupt-controller", "arm,gic-v3")?;
-        let reg = intc.require("reg", "/interrupt-controller")?;
+        let reg = intc.require_cells("reg", "/interrupt-controller", 8)?;
         let (dist_base, dist_size) = (&reg).reg_pair(0).ok_or(SurveyError::BadProperty {
             node: "/interrupt-controller",
             prop: "reg",
@@ -706,7 +706,7 @@ impl GicConfig {
         let v2m_path = format!("/{v2m_name}");
         let mut v2m = root.remove_child(&v2m_name).expect("just located");
         require_compatible(&mut v2m, "/msi-controller", "arm,gic-v2m-frame")?;
-        let vreg = v2m.require("reg", "/msi-controller")?;
+        let vreg = v2m.require_cells("reg", "/msi-controller", 4)?;
         let (msi_frame_base, msi_frame_size) =
             (&vreg).reg_pair(0).ok_or(SurveyError::BadProperty {
                 node: "/msi-controller",
@@ -816,7 +816,7 @@ impl Uart {
         };
         let mut serial = root.remove_child(&name).expect("just located");
         require_compatible(&mut serial, "/serial", "ns16550a")?;
-        let reg = serial.require("reg", "/serial")?;
+        let reg = serial.require_cells("reg", "/serial", 4)?;
         let (base, size) = (&reg).reg_pair(0).ok_or(SurveyError::BadProperty {
             node: "/serial",
             prop: "reg",
@@ -859,7 +859,7 @@ impl VirtioMmioSlots {
         while let Some(name) = child_name_prefixed(root, "virtio_mmio@") {
             let mut node = root.remove_child(&name).expect("just located");
             require_compatible(&mut node, "/virtio_mmio", "virtio,mmio")?;
-            let reg = node.require("reg", "/virtio_mmio")?;
+            let reg = node.require_cells("reg", "/virtio_mmio", 4)?;
             let (base, size) = (&reg).reg_pair(0).ok_or(SurveyError::BadProperty {
                 node: "/virtio_mmio",
                 prop: "reg",
@@ -902,7 +902,7 @@ impl Pcie {
 
         require_compatible(&mut pci, "/pcie", "pci-host-ecam-generic")?;
         pci.require_cell_counts("/pcie", 3, 2)?;
-        let reg = pci.require("reg", "/pcie")?;
+        let reg = pci.require_cells("reg", "/pcie", 4)?;
         let (ecam_base, ecam_size) = (&reg).reg_pair(0).ok_or(SurveyError::BadProperty {
             node: "/pcie",
             prop: "reg",
@@ -910,11 +910,11 @@ impl Pcie {
         })?;
         plan.declare_from(&reg, "/pcie", ecam_base, ecam_size, RegionKind::EcamWindow);
 
-        let ranges = pci.require("ranges", "/pcie")?;
+        let ranges = pci.require_cells("ranges", "/pcie", 7)?;
         let (mmio_base, mmio_size) = pci_window(&ranges).ok_or(SurveyError::BadProperty {
             node: "/pcie",
             prop: "ranges",
-            reason: "expected at least one 7-cell window",
+            reason: "expected one 7-cell window",
         })?;
         plan.declare_from(
             &ranges,
@@ -1056,7 +1056,7 @@ impl X86Intc {
             .ok_or(SurveyError::MissingNode(path))?;
         let mut node = root.remove_child(&name).expect("just located");
         node.ack("compatible"); // matched above
-        let reg = node.require("reg", path)?;
+        let reg = node.require_cells("reg", path, 4)?;
         let (base, size) = (&reg).reg_pair(0).ok_or(SurveyError::BadProperty {
             node: path,
             prop: "reg",
@@ -1111,7 +1111,7 @@ fn syscon_action(
     };
     let mut node = root.remove_child(&name).expect("just located");
     require_compatible(&mut node, path, compat)?;
-    let reg = node.require("reg", path)?;
+    let reg = node.require_cells("reg", path, 4)?;
     let (base, size) = (&reg).reg_pair(0).ok_or(SurveyError::BadProperty {
         node: path,
         prop: "reg",
@@ -1240,6 +1240,13 @@ trait SurveyNodeExt {
     ) -> Result<OwnedProperty, SurveyError>;
     /// Remove a required `u32` property, or error if absent/malformed.
     fn require_u32(&mut self, prop: &'static str, node: &'static str) -> Result<u32, SurveyError>;
+    /// Consume a resource property with the supported number of cells.
+    fn require_cells(
+        &mut self,
+        prop: &'static str,
+        node: &'static str,
+        count: usize,
+    ) -> Result<OwnedProperty, SurveyError>;
     /// Consume the cell declarations required by the resource decoder.
     fn require_cell_counts(
         &mut self,
@@ -1256,6 +1263,23 @@ trait SurveyNodeExt {
 }
 
 impl SurveyNodeExt for OwnedNode {
+    fn require_cells(
+        &mut self,
+        prop: &'static str,
+        node: &'static str,
+        count: usize,
+    ) -> Result<OwnedProperty, SurveyError> {
+        let property = self.require(prop, node)?;
+        if property.as_ref().len() != count * size_of::<u32>() {
+            return Err(SurveyError::Unsupported {
+                node,
+                prop,
+                value: format!("{} bytes; expected {count} cells", property.as_ref().len()),
+            });
+        }
+        Ok(property)
+    }
+
     fn require(
         &mut self,
         prop: &'static str,
@@ -1527,6 +1551,39 @@ mod tests {
 
     fn dtb(root: OwnedNode) -> Vec<u8> {
         OwnedTree::new(root).encode().expect("encode base")
+    }
+
+    #[test]
+    fn resource_properties_must_be_consumed_completely() {
+        for (arch, base) in [
+            (Arch::Aarch64, base_root()),
+            (Arch::X86_64, x86_base_root()),
+        ] {
+            for node in base.children() {
+                for prop in ["reg", "ranges"] {
+                    let Some(property) = node.property(prop) else {
+                        continue;
+                    };
+                    let bytes = property.as_ref();
+                    for len in [bytes.len() + 4, bytes.len() * 2, 0, bytes.len() - 1] {
+                        let mut root = base.clone();
+                        let mut value = bytes.to_vec();
+                        value.resize(len, 0);
+                        root.child_mut(node.name())
+                            .unwrap()
+                            .set_property(OwnedProperty::new(prop).with_bytes(value));
+                        assert!(
+                            matches!(
+                                Machine::survey(&dtb(root), arch),
+                                Err(SurveyError::Unsupported { prop: rejected, .. }) if rejected == prop
+                            ),
+                            "{}:{prop} with {len} bytes",
+                            node.name()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
