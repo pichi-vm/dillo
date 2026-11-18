@@ -15,10 +15,11 @@ pub mod cpuid_x86;
 
 /// Selected-machine launch configuration derived by dillo from PMI and DTB.
 #[derive(Debug)]
-pub struct LaunchConfig {
-    pub dtb: Vec<u8>,
+pub struct LaunchConfig<'a, Platform> {
+    /// The backend's surveyed platform, borrowed for native construction.
+    pub platform: &'a Platform,
     pub vcpus: u32,
-    /// Required width of the declared platform and every planned RAM extent.
+    /// Required width of every planned RAM extent.
     pub min_addr_space_bits: u32,
 }
 
@@ -114,6 +115,8 @@ pub trait Cpu: Send + Sync + 'static {
 /// A constructed VM capable of accepting DTB-derived resources and vCPUs.
 pub trait Machine: Sized + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
+    /// Platform input accepted by this Machine's launch constructor.
+    type Platform;
     type Cpu: Cpu<Error = Self::Error> + Send;
     type CpuState: CpuState<Error = Self::Error>;
     type Memory: Memory<Error = Self::Error>;
@@ -124,7 +127,7 @@ pub trait Machine: Sized + 'static {
     fn guest_address_bits() -> Result<u32, Self::Error>;
 
     /// Construct the backend VM from selected-machine launch facts.
-    fn from_launch_config(config: LaunchConfig) -> Result<Self, Self::Error>;
+    fn from_launch_config(config: LaunchConfig<'_, Self::Platform>) -> Result<Self, Self::Error>;
 
     /// Write launch data into guest RAM through backend-owned memory access.
     fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Self::Error>;
@@ -246,6 +249,7 @@ mod tests {
 
     impl Machine for TestMachine {
         type Error = TestError;
+        type Platform = ();
         type Cpu = TestCpu;
         type CpuState = TestCpuState;
         type Memory = TestMemory;
@@ -254,7 +258,9 @@ mod tests {
             Ok(48)
         }
 
-        fn from_launch_config(_config: LaunchConfig) -> Result<Self, Self::Error> {
+        fn from_launch_config(
+            _config: LaunchConfig<'_, Self::Platform>,
+        ) -> Result<Self, Self::Error> {
             Ok(Self)
         }
 
