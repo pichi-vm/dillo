@@ -38,12 +38,11 @@ mod imp {
     use std::thread;
     use std::time::Duration;
 
+    #[cfg(target_arch = "x86_64")]
+    use dillo_devtree::devtree::{OwnedTree, Tree};
     #[cfg(target_arch = "aarch64")]
-    use dillo_devtree::{CompatMismatch, FromDevTree, NodeExt, OwnedNodeExt, PropExt};
-    use dillo_devtree::{
-        devtree::{OwnedTree, Tree},
-        platform::Machine as PlatformMachine,
-    };
+    use dillo_devtree::platform::GicConfig;
+    use dillo_devtree::platform::Machine as PlatformMachine;
     use dillo_machine::attachment::{Attach, DeviceAttachment};
     use dillo_machine::execution::{DeviceHandle, RunToken, SpawnError};
     use dillo_machine::interrupt::{
@@ -436,26 +435,64 @@ mod imp {
     pub(crate) struct Aarch64Substrate {
         pub(crate) dist_base: u64,
         pub(crate) redist_base: u64,
+        pub(crate) vcpus: u32,
         pub(crate) spi_count: u32,
     }
 
+    #[cfg(target_arch = "aarch64")]
+    impl Aarch64Substrate {
+        const GICD_SIZE: u64 = 64 << 10;
+        const GICR_STRIDE: u64 = 128 << 10;
+        const REDIST_COUNT_SHIFT: u32 = 52;
+
+        fn from_survey(gic: &GicConfig, vcpus: u32) -> Result<Self, Error> {
+            if !(1..=0xfff).contains(&vcpus) {
+                return Err(Error::GicRedistributorCount(vcpus));
+            }
+            if gic.redist_base >= 1 << Self::REDIST_COUNT_SHIFT {
+                return Err(Error::GicRedistributorBase(gic.redist_base));
+            }
+            let redist_required = Self::GICR_STRIDE * u64::from(vcpus);
+            for (region, base, size, required) in [
+                ("GICD", gic.dist_base, gic.dist_size, Self::GICD_SIZE),
+                ("GICR", gic.redist_base, gic.redist_size, redist_required),
+            ] {
+                if !base.is_multiple_of(Self::GICD_SIZE) || base.checked_add(size).is_none() {
+                    return Err(Error::GicAperture { region, base, size });
+                }
+                if size < required {
+                    return Err(Error::GicExtent {
+                        region,
+                        declared: size,
+                        required,
+                    });
+                }
+            }
+            Ok(Self {
+                dist_base: gic.dist_base,
+                redist_base: gic.redist_base,
+                vcpus,
+                spi_count: gic.spi_count,
+            })
+        }
+
+        pub(crate) fn redist_region(&self) -> u64 {
+            // One region, with index and flags both zero. The kernel enforces
+            // the number of 128 KiB frames independently of CPU creation.
+            (u64::from(self.vcpus) << Self::REDIST_COUNT_SHIFT) | self.redist_base
+        }
+    }
+
     impl Vm {
+        #[cfg(target_arch = "x86_64")]
         fn from_dtb(dtb: &[u8]) -> Result<Self, Error> {
-            // The devicetree is the machine contract: the interrupt-controller
-            // substrate is constructed from what it declares, on both arches.
             let parsed: Tree<'_> = Tree::parse(dtb).map_err(Error::ParseDtb)?;
             let mut tree = OwnedTree::materialize(&parsed);
-            #[cfg(target_arch = "x86_64")]
-            let inner = {
-                let intc = crate::intc_x86::X86Intc::from_tree(&mut tree)?;
-                crate::hypervisor::Vm::new_with_intc(intc)?
-            };
-            #[cfg(target_arch = "aarch64")]
-            let inner = {
-                let substrate = Aarch64Substrate::from_devtree(&mut tree)?
-                    .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
-                crate::hypervisor::Vm::new_with_gic(&substrate)?
-            };
+            let intc = crate::intc_x86::X86Intc::from_tree(&mut tree)?;
+            Self::from_native(crate::hypervisor::Vm::new_with_intc(intc)?)
+        }
+
+        fn from_native(inner: crate::hypervisor::Vm) -> Result<Self, Error> {
             let irq_manager = Arc::new(Mutex::new(
                 IrqManager::new(inner.clone()).map_err(|e| Error::Irq(e.to_string()))?,
             ));
@@ -466,101 +503,6 @@ mod imp {
                 device_failures: dillo_machine::execution::DeviceFailureReporter::default(),
                 irq_manager,
             })
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    impl FromDevTree for Aarch64Substrate {
-        type Error = Error;
-
-        fn from_devtree(tree: &mut OwnedTree) -> Result<Option<Self>, Self::Error> {
-            let root = tree.root_mut();
-            let intc_name = root
-                .children()
-                .find(|node| {
-                    node.name().starts_with("interrupt-controller@")
-                        && node.compatible_contains("arm,gic-v3")
-                })
-                .map(|node| node.name().to_string())
-                .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
-            let mut intc = root
-                .remove_child(&intc_name)
-                .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
-            intc.take_compatible("arm,gic-v3").map_err(|e| match e {
-                CompatMismatch::Missing => Error::BadSubstrateProperty {
-                    node: "/interrupt-controller",
-                    prop: "compatible",
-                    reason: "missing",
-                },
-                CompatMismatch::Unsupported => Error::BadSubstrateProperty {
-                    node: "/interrupt-controller",
-                    prop: "compatible",
-                    reason: "unsupported compatible",
-                },
-            })?;
-            let reg = intc
-                .remove_property("reg")
-                .ok_or(Error::BadSubstrateProperty {
-                    node: "/interrupt-controller",
-                    prop: "reg",
-                    reason: "missing",
-                })?;
-            let (dist_base, _) = (&reg).reg_pair(0).ok_or(Error::BadSubstrateProperty {
-                node: "/interrupt-controller",
-                prop: "reg",
-                reason: "missing GICD pair",
-            })?;
-            let (redist_base, _) = (&reg).reg_pair(1).ok_or(Error::BadSubstrateProperty {
-                node: "/interrupt-controller",
-                prop: "reg",
-                reason: "missing GICR pair",
-            })?;
-            let _ = intc.remove_property("#interrupt-cells");
-            let _ = intc.remove_property("interrupt-controller");
-            let _ = intc.remove_property("phandle");
-
-            let v2m_name = root
-                .children()
-                .find(|node| {
-                    node.name().starts_with("msi-controller@")
-                        && node.compatible_contains("arm,gic-v2m-frame")
-                })
-                .map(|node| node.name().to_string())
-                .ok_or(Error::MissingSubstrate("/msi-controller@*"))?;
-            let mut v2m = root
-                .remove_child(&v2m_name)
-                .ok_or(Error::MissingSubstrate("/msi-controller@*"))?;
-            v2m.take_compatible("arm,gic-v2m-frame")
-                .map_err(|e| match e {
-                    CompatMismatch::Missing => Error::BadSubstrateProperty {
-                        node: "/msi-controller",
-                        prop: "compatible",
-                        reason: "missing",
-                    },
-                    CompatMismatch::Unsupported => Error::BadSubstrateProperty {
-                        node: "/msi-controller",
-                        prop: "compatible",
-                        reason: "unsupported compatible",
-                    },
-                })?;
-            let spi_count = v2m
-                .remove_property("arm,msi-num-spis")
-                .and_then(|prop| prop.as_u32())
-                .ok_or(Error::BadSubstrateProperty {
-                    node: "/msi-controller",
-                    prop: "arm,msi-num-spis",
-                    reason: "missing or not a u32",
-                })?;
-            let _ = v2m.remove_property("reg");
-            let _ = v2m.remove_property("arm,msi-base-spi");
-            let _ = v2m.remove_property("msi-controller");
-            let _ = v2m.remove_property("phandle");
-
-            Ok(Some(Self {
-                dist_base,
-                redist_base,
-                spi_count,
-            }))
         }
     }
 
@@ -608,7 +550,17 @@ mod imp {
                 .platform
                 .required_address_bits_for_ram(config.ram.iter().map(|r| (r.gpa, r.size)))
                 .map_err(|error| Error::AddressSpace(error.to_string()))?;
+            #[cfg(target_arch = "x86_64")]
             let mut vm = Self::from_dtb(config.platform.dtb())?;
+            #[cfg(target_arch = "aarch64")]
+            let mut vm = {
+                let gic = config
+                    .platform
+                    .gic()
+                    .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
+                let substrate = Aarch64Substrate::from_survey(gic, config.vcpus)?;
+                Self::from_native(crate::hypervisor::Vm::new_with_gic(&substrate)?)?
+            };
             let available = Self::guest_address_bits()?;
             if required > available {
                 return Err(Error::AddressSpace(format!(
@@ -1317,43 +1269,26 @@ mod imp {
                 0xffff_fff0,
                 vec![0xeb, 0xfe],
             );
+            #[cfg(target_arch = "x86_64")]
+            let mut vm = Vm::from_dtb(&tree.encode().unwrap()).expect("native KVM is required");
             #[cfg(target_arch = "aarch64")]
-            let (tree, profile, base, entry, code) = {
-                use dillo_devtree::devtree::{OwnedNode, OwnedProperty};
-                let root = OwnedNode::new("")
-                    .with_property(OwnedProperty::new("#address-cells").with_u32(2))
-                    .with_property(OwnedProperty::new("#size-cells").with_u32(2))
-                    .with_child(
-                        OwnedNode::new("interrupt-controller@8000000")
-                            .with_property(OwnedProperty::new("compatible").with_str("arm,gic-v3"))
-                            .with_property(OwnedProperty::new("reg").with_u32s(&[
-                                0,
-                                0x0800_0000,
-                                0,
-                                0x1_0000,
-                                0,
-                                0x080a_0000,
-                                0,
-                                0x4_0000,
-                            ])),
-                    )
-                    .with_child(
-                        OwnedNode::new("msi-controller@8020000")
-                            .with_property(
-                                OwnedProperty::new("compatible").with_str("arm,gic-v2m-frame"),
-                            )
-                            .with_property(OwnedProperty::new("arm,msi-num-spis").with_u32(64)),
-                    );
+            let (mut vm, profile, base, entry, code) = {
+                let substrate = Aarch64Substrate {
+                    dist_base: 0x0800_0000,
+                    redist_base: 0x080a_0000,
+                    vcpus: 2,
+                    spi_count: 64,
+                };
+                let native = crate::hypervisor::Vm::new_with_gic(&substrate)
+                    .expect("native KVM is required");
                 (
-                    OwnedTree::new(root),
+                    Vm::from_native(native).unwrap(),
                     dillo_machine::CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0),
                     0,
                     0,
                     0x1400_0000u32.to_le_bytes().to_vec(),
                 )
             };
-            // The owner fixture supplies only the native controller substrate.
-            let mut vm = Vm::from_dtb(&tree.encode().unwrap()).expect("native KVM is required");
             vm.attach_mapped_memory(Arc::new(
                 memory::MappedMemory::test_backing(&[(base, 0x1000)]).unwrap(),
             ))
@@ -1558,6 +1493,260 @@ mod imp {
     impl AsRawFd for Vcpu {
         fn as_raw_fd(&self) -> RawFd {
             self.inner.as_raw_fd()
+        }
+    }
+
+    #[cfg(all(test, target_arch = "aarch64"))]
+    mod vgic_realization_tests {
+        use super::*;
+        use dillo_devtree::{
+            devtree::{OwnedNode, OwnedProperty, OwnedTree},
+            platform::Arch,
+        };
+        use dillo_machine::{CpuPreparation as _, CpuProfile, Machine as _, RamRange};
+        use kvm_bindings::{KVM_VGIC_V3_ADDR_TYPE_DIST, KVM_VGIC_V3_ADDR_TYPE_REDIST_REGION};
+        use vm_memory::{Bytes, GuestAddress};
+
+        const DIST: u64 = 0x0900_0000;
+        const REDIST: u64 = 0x0b00_0000;
+        const MSI: u64 = 0x0c00_0000;
+        const GICD: u64 = Aarch64Substrate::GICD_SIZE;
+        const STRIDE: u64 = Aarch64Substrate::GICR_STRIDE;
+        const PROFILE: CpuProfile = CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0);
+
+        impl Vm {
+            fn from_gic_fixture(
+                (dist, dist_size): (u64, u64),
+                (redist, redist_size): (u64, u64),
+                vcpus: u32,
+            ) -> Result<Self, Error> {
+                let reg = |base: u64, size: u64| {
+                    [
+                        (base >> 32) as u32,
+                        base as u32,
+                        (size >> 32) as u32,
+                        size as u32,
+                    ]
+                };
+                let gic = [reg(dist, dist_size), reg(redist, redist_size)].concat();
+                let root = OwnedNode::new("")
+                    .with_property(OwnedProperty::new("#address-cells").with_u32(2))
+                    .with_property(OwnedProperty::new("#size-cells").with_u32(2))
+                    .with_child(
+                        OwnedNode::new(&format!("interrupt-controller@{dist:x}"))
+                            .with_property(OwnedProperty::new("compatible").with_str("arm,gic-v3"))
+                            .with_property(OwnedProperty::new("reg").with_u32s(&gic))
+                            .with_property(OwnedProperty::new("#interrupt-cells").with_u32(3))
+                            .with_property(OwnedProperty::new("interrupt-controller"))
+                            .with_property(OwnedProperty::new("phandle").with_u32(1)),
+                    )
+                    .with_child(
+                        OwnedNode::new(&format!("msi-controller@{MSI:x}"))
+                            .with_property(
+                                OwnedProperty::new("compatible").with_str("arm,gic-v2m-frame"),
+                            )
+                            .with_property(OwnedProperty::new("reg").with_u32s(&reg(MSI, 0x10000)))
+                            .with_property(OwnedProperty::new("arm,msi-base-spi").with_u32(64))
+                            .with_property(OwnedProperty::new("arm,msi-num-spis").with_u32(32))
+                            .with_property(OwnedProperty::new("msi-controller"))
+                            .with_property(OwnedProperty::new("phandle").with_u32(3)),
+                    )
+                    .with_child(
+                        OwnedNode::new("timer")
+                            .with_property(
+                                OwnedProperty::new("compatible").with_str("arm,armv8-timer"),
+                            )
+                            .with_property(OwnedProperty::new("interrupt-parent").with_u32(1))
+                            .with_property(OwnedProperty::new("interrupts").with_u32s(&[
+                                1, 13, 0xff08, 1, 14, 0xff08, 1, 11, 0xff08, 1, 10, 0xff08,
+                            ]))
+                            .with_property(OwnedProperty::new("always-on")),
+                    )
+                    .with_child(
+                        OwnedNode::new("psci")
+                            .with_property(
+                                OwnedProperty::new("compatible").with_str("arm,psci-1.0"),
+                            )
+                            .with_property(OwnedProperty::new("method").with_str("hvc")),
+                    );
+                let dtb = OwnedTree::new(root).encode().unwrap();
+                let platform = PlatformMachine::survey(dtb, Arch::Aarch64).expect("survey fixture");
+                Self::from_launch_config(LaunchConfig {
+                    platform: &platform,
+                    vcpus,
+                    ram: vec![RamRange {
+                        gpa: 0,
+                        size: 2 << 20,
+                    }],
+                })
+            }
+
+            fn load_gic_probe(&mut self) {
+                let program = [
+                    0xd282_0004u32, // movz x4, #0x1000 (observations area in RAM).
+                    0xd280_0025,    // movz x5, #1
+                    0xf900_0085,    // str x5, [x4] (guest progress).
+                    0xd2a1_2000,    // movz x0, #0x900, lsl #16 (GICD).
+                    0xb940_0401,    // ldr w1, [x0, #4] (GICD_TYPER).
+                    0xd2a1_6000,    // movz x0, #0xb00, lsl #16 (GICR).
+                    0xf940_0402,    // ldr x2, [x0, #8] (first GICR_TYPER).
+                    0x9140_8000,    // add x0, x0, #0x20, lsl #12
+                    0xf940_0403,    // ldr x3, [x0, #8] (second GICR_TYPER).
+                    0xa900_8881,    // stp x1, x2, [x4, #8]
+                    0xf900_0c83,    // str x3, [x4, #24]
+                    0xd2a1_a000,    // movz x0, #0xd00, lsl #16
+                    0xf900_0001,    // str x1, [x0] (unmapped MMIO, stop).
+                ];
+                let bytes: Vec<_> = program.into_iter().flat_map(u32::to_le_bytes).collect();
+                self.write_guest(0, &bytes).unwrap();
+            }
+        }
+
+        impl CpuRunner {
+            fn run_gic_probe(&mut self) -> Result<VmExit, Error> {
+                let _signal_mask =
+                    crate::hypervisor::block_kick_signal(&self.vcpu.inner, VCPU_KICK_SIGNAL)?;
+                let interrupt = self.vcpu.exit_requester.clone();
+                let _registration = interrupt.register_current_thread();
+                let stop = AtomicBool::new(false);
+                thread::scope(|scope| {
+                    let (done, running) = std::sync::mpsc::channel::<()>();
+                    let stop = &stop;
+                    scope.spawn(move || {
+                        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                            running.recv_timeout(Duration::from_secs(2))
+                        {
+                            stop.store(true, Ordering::Release);
+                            interrupt.request_exit().unwrap();
+                        }
+                    });
+                    let result = self.vcpu.inner.run(|_, _| 0, |_, _| false, stop);
+                    drop(done);
+                    result
+                })
+            }
+        }
+
+        #[test]
+        fn surveyed_gic_refuses_bad_apertures_and_count_encoding() {
+            for (dist_size, redist_size, region, declared, required) in [
+                (GICD - 1, STRIDE * 2, "GICD", GICD - 1, GICD),
+                (GICD, STRIDE, "GICR", STRIDE, STRIDE * 2),
+                (GICD, STRIDE * 2 - 1, "GICR", STRIDE * 2 - 1, STRIDE * 2),
+            ] {
+                let result = Vm::from_gic_fixture((DIST, dist_size), (REDIST, redist_size), 2);
+                assert!(
+                    matches!(result, Err(Error::GicExtent {
+                        region: actual, declared: actual_size, required: actual_required,
+                    }) if (actual, actual_size, actual_required) == (region, declared, required)),
+                    "{result:?}"
+                );
+            }
+
+            for (dist, redist, region) in [
+                ((DIST + 1, GICD), (REDIST, STRIDE), "GICD"),
+                ((DIST, GICD), (REDIST + 1, STRIDE), "GICR"),
+                ((u64::MAX - GICD + 1, GICD), (REDIST, STRIDE), "GICD"),
+            ] {
+                let result = Vm::from_gic_fixture(dist, redist, 1);
+                assert!(
+                    matches!(result, Err(Error::GicAperture { region: actual, .. })
+                    if actual == region),
+                    "{result:?}"
+                );
+            }
+
+            for count in [0, 4096] {
+                let result = Vm::from_gic_fixture((DIST, GICD), (REDIST, STRIDE), count);
+                assert!(
+                    matches!(result, Err(Error::GicRedistributorCount(actual))
+                    if actual == count),
+                    "{result:?}"
+                );
+            }
+            let result = Vm::from_gic_fixture((DIST, GICD), (1 << 52, STRIDE), 1);
+            assert!(
+                matches!(result, Err(Error::GicRedistributorBase(base))
+                if base == 1 << 52),
+                "{result:?}"
+            );
+        }
+
+        #[test]
+        fn relocated_counted_vgic_serves_both_redistributors() {
+            for extra in [0, 0x1000] {
+                let mut vm =
+                    Vm::from_gic_fixture((DIST, GICD + extra), (REDIST, STRIDE * 2 + extra), 2)
+                        .expect("native KVM admits relocated controller windows");
+                assert_eq!(vm.inner.vgic_address(KVM_VGIC_V3_ADDR_TYPE_DIST), DIST);
+                assert_eq!(
+                    vm.inner.vgic_address(KVM_VGIC_V3_ADDR_TYPE_REDIST_REGION),
+                    REDIST | (2 << 52)
+                );
+                vm.load_gic_probe();
+                let mut bsp = vm.cpu_preparation(0, PROFILE).unwrap().prepare().unwrap();
+                let _ap = vm.cpu_preparation(1, PROFILE).unwrap().prepare().unwrap();
+                vm.prepare_vcpu_run().unwrap();
+
+                let exit = bsp.run_gic_probe();
+                assert!(
+                    matches!(
+                        exit,
+                        Ok(VmExit::MmioWrite {
+                            addr: 0x0d00_0000,
+                            size: 8,
+                            ..
+                        })
+                    ),
+                    "{exit:?}"
+                );
+                let memory = vm.inner.guest_memory().unwrap();
+                let [progress, dist, first, second]: [u64; 4] = std::array::from_fn(|index| {
+                    memory
+                        .read_obj(GuestAddress(0x1000 + index as u64 * 8))
+                        .unwrap()
+                });
+                assert_eq!(progress, 1);
+                assert_eq!(dist & 0x1f, 3, "128 native interrupt lines");
+                assert_ne!(first, second, "the two redistributors must be distinct");
+                assert_eq!([first & 0x10, second & 0x10], [0, 0x10], "GICR_TYPER.Last");
+            }
+        }
+
+        #[test]
+        fn counted_redistributors_cannot_grow_to_fit_an_extra_cpu() {
+            let mut vm = Vm::from_gic_fixture((DIST, GICD), (REDIST, STRIDE), 1)
+                .expect("the single frame admits one CPU");
+            vm.load_gic_probe();
+            let mut bsp = vm.cpu_preparation(0, PROFILE).unwrap().prepare().unwrap();
+            // Some kernels accept the CPU ioctl with no redistributor. The
+            // native run must refuse in that case, before the guest can run.
+            let extra = vm.cpu_preparation(1, PROFILE).unwrap().prepare();
+            assert_eq!(
+                vm.inner.vgic_address(KVM_VGIC_V3_ADDR_TYPE_REDIST_REGION),
+                REDIST | (1 << 52)
+            );
+            let _extra = match extra {
+                Ok(extra) => extra,
+                Err(Error::CreateVcpu(1, error))
+                    if matches!(
+                        error.raw_os_error(),
+                        Some(libc::EINVAL | libc::ENOSPC | libc::ENXIO)
+                    ) =>
+                {
+                    return;
+                }
+                Err(error) => panic!("unexpected excess CPU failure: {error}"),
+            };
+            vm.prepare_vcpu_run().unwrap();
+            let result = bsp.run_gic_probe();
+            assert!(
+                matches!(result, Err(Error::RunVcpu(0, ref error))
+                if error.raw_os_error() == Some(libc::ENXIO)),
+                "{result:?}"
+            );
+            let memory = vm.inner.guest_memory().unwrap();
+            assert_eq!(memory.read_obj::<u64>(GuestAddress(0x1000)).unwrap(), 0);
         }
     }
 

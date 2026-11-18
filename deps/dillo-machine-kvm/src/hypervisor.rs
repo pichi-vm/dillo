@@ -20,7 +20,7 @@ use kvm_bindings::{
     KVM_REG_ARM_CORE, KVM_REG_ARM64, KVM_REG_ARM64_SYSREG, KVM_REG_ARM64_SYSREG_CRM_SHIFT,
     KVM_REG_ARM64_SYSREG_CRN_SHIFT, KVM_REG_ARM64_SYSREG_OP0_SHIFT, KVM_REG_ARM64_SYSREG_OP1_SHIFT,
     KVM_REG_ARM64_SYSREG_OP2_SHIFT, KVM_REG_SIZE_U64, KVM_VGIC_V3_ADDR_TYPE_DIST,
-    KVM_VGIC_V3_ADDR_TYPE_REDIST, kvm_create_device, kvm_device_attr,
+    KVM_VGIC_V3_ADDR_TYPE_REDIST_REGION, kvm_create_device, kvm_device_attr,
     kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V3, kvm_vcpu_init,
 };
 #[cfg(target_arch = "x86_64")]
@@ -101,6 +101,26 @@ pub enum Error {
 
     #[error("configure VGIC: {0}")]
     ConfigureVgic(std::io::Error),
+
+    #[error("KVM redistributor count {0} must be in 1..=4095")]
+    GicRedistributorCount(u32),
+
+    #[error("KVM cannot encode redistributor base {0:#x} in the counted region")]
+    GicRedistributorBase(u64),
+
+    #[error("KVM {region} aperture at {base:#x} with size {size:#x} is misaligned or overflows")]
+    GicAperture {
+        region: &'static str,
+        base: u64,
+        size: u64,
+    },
+
+    #[error("KVM {region} requires {required:#x} bytes within the declared {declared:#x} bytes")]
+    GicExtent {
+        region: &'static str,
+        declared: u64,
+        required: u64,
+    },
 
     #[error("parse DTB for KVM platform substrate: {0:?}")]
     ParseDtb(dillo_devtree::devtree::Error),
@@ -333,6 +353,28 @@ impl Vm {
             self.inner.vgic_initialized.store(true, Ordering::Release);
         }
         Ok(())
+    }
+
+    #[cfg(all(test, target_arch = "aarch64"))]
+    pub(crate) fn vgic_address(&self, attr: u32) -> u64 {
+        let mut data = 0u64; // Read redistributor region index 0.
+        let mut attribute = kvm_device_attr {
+            group: KVM_DEV_ARM_VGIC_GRP_ADDR,
+            attr: u64::from(attr),
+            addr: &raw mut data as u64,
+            flags: 0,
+        };
+        // SAFETY: VGIC address attributes read and write a live u64.
+        #[allow(unsafe_code)]
+        unsafe {
+            self.inner
+                .vgic
+                .as_ref()
+                .unwrap()
+                .get_device_attr(&mut attribute)
+                .unwrap();
+        }
+        data
     }
 
     /// Register immutable RAM layout once. Publish the backing owner before
@@ -863,7 +905,11 @@ fn create_vgic(vm: &VmFd, gic: &crate::imp::Aarch64Substrate) -> Result<DeviceFd
         .map_err(io)
         .map_err(Error::CreateVgic)?;
     set_vgic_addr(&vgic, KVM_VGIC_V3_ADDR_TYPE_DIST, gic.dist_base)?;
-    set_vgic_addr(&vgic, KVM_VGIC_V3_ADDR_TYPE_REDIST, gic.redist_base)?;
+    set_vgic_addr(
+        &vgic,
+        KVM_VGIC_V3_ADDR_TYPE_REDIST_REGION,
+        gic.redist_region(),
+    )?;
     let nr_irqs = 32 + gic.spi_count.max(96);
     let nr_irqs_attr = kvm_device_attr {
         group: KVM_DEV_ARM_VGIC_GRP_NR_IRQS,
@@ -1180,6 +1226,7 @@ mod arm_bsp_tests {
             let vm = Vm::new_with_gic(&crate::imp::Aarch64Substrate {
                 dist_base: 0x0800_0000,
                 redist_base: 0x080a_0000,
+                vcpus: count,
                 spi_count: 64,
             })
             .expect("native ARM KVM is required");
@@ -1283,6 +1330,7 @@ mod arm_bsp_tests {
         let vm = Vm::new_with_gic(&crate::imp::Aarch64Substrate {
             dist_base: 0x0800_0000,
             redist_base: 0x080a_0000,
+            vcpus: 2,
             spi_count: 64,
         })
         .expect("native ARM KVM is required");
@@ -1406,6 +1454,7 @@ mod arm_bsp_tests {
         let vm = Vm::new_with_gic(&crate::imp::Aarch64Substrate {
             dist_base: 0x0800_0000,
             redist_base: 0x080a_0000,
+            vcpus: 1,
             spi_count: 64,
         })
         .expect("native ARM KVM is required");
