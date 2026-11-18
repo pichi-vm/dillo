@@ -685,12 +685,13 @@ impl Vcpu {
                 }
                 Ok(VmExit::Hvc { args })
             }
-            // SMC from EL1.
+            // SMC traps leave PC at the instruction, unlike HVC exceptions.
             0x17 => {
                 let mut args = [0u64; 8];
                 for (i, a) in args.iter_mut().enumerate() {
                     *a = self.inner.get_reg(gpr(i as u8))?;
                 }
+                self.advance_pc()?;
                 Ok(VmExit::Smc { args })
             }
             // Data abort from a lower EL → MMIO. IPA in physical_address.

@@ -794,7 +794,7 @@ mod imp {
                     VmExit::MmioRead { .. } | VmExit::MmioWrite { .. } | VmExit::Interrupted => {}
                     VmExit::GuestPoweroff => return Ok(VcpuStop::GuestPoweroff),
                     VmExit::GuestReset => return Ok(VcpuStop::GuestReset),
-                    VmExit::Hvc { args } => match psci::dispatch(&args) {
+                    VmExit::Hvc { args } | VmExit::Smc { args } => match psci::dispatch(&args) {
                         psci::PsciAction::SystemOff => {
                             log::info!("guest issued PSCI SYSTEM_OFF (vCPU{idx})");
                             return Ok(VcpuStop::GuestPoweroff);
@@ -838,9 +838,6 @@ mod imp {
                             vcpu.set_gpr(0, value)?;
                         }
                     },
-                    VmExit::Smc { args } => {
-                        log::warn!("unexpected SMC exit from HVF vCPU: args={args:?}");
-                    }
                     VmExit::Unknown(reason) => return Err(Error::Hv(reason)),
                     other @ VmExit::Halted => {
                         let (esr, elr, far) = vcpu.el1_exception_state();
@@ -1171,6 +1168,94 @@ mod imp {
                 let vm =
                     launch(larger).expect("larger disjoint aperture can be admitted after refusal");
                 assert!(vm.inner.guest_memory().is_ok());
+            }
+        }
+
+        #[test]
+        fn psci_conduits_return_and_power_off() {
+            use dillo_machine::Machine as _;
+
+            if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
+                crate::hypervisor::tests::SignedNativeTest::spawn(
+                    "imp::tests::psci_conduits_return_and_power_off",
+                )
+                .verify();
+                return;
+            }
+            for (name, call) in [("HVC", 0xd400_0002), ("SMC", 0xd400_0003)] {
+                let gic = crate::hypervisor::GicParams {
+                    dist_base: 0x0800_0000,
+                    redist_base: 0x0810_0000,
+                    msi_base: 0x0a10_0000,
+                    msi_intid_base: 64,
+                    msi_intid_count: 32,
+                };
+                let mut vm = Vm::new(&gic, 36, 1).unwrap();
+                vm.attach_guest_memory(&[RamRange {
+                    gpa: 0,
+                    size: 0x4000,
+                }])
+                .unwrap();
+                let profile = dillo_machine::CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0);
+                // PSCI_VERSION; save its return; SYSTEM_OFF; record an unexpected return.
+                let code = [
+                    0x5280_0000u32,
+                    0x72b0_8000,
+                    call,
+                    0xd281_0001,
+                    0xb900_0020,
+                    0x5280_0100,
+                    0x72b0_8000,
+                    call,
+                    0xb900_0420,
+                    0x1400_0000,
+                ];
+                vm.write_guest(
+                    0,
+                    &code
+                        .into_iter()
+                        .flat_map(u32::to_le_bytes)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+                vm.write_guest(0x800, &[0xef, 0xbe, 0xad, 0xde, 0xef, 0xbe, 0xad, 0xde])
+                    .unwrap();
+                let memory = dillo_virtio::test_support::TestGuestMemory::from_owner(
+                    vm.inner.guest_memory().unwrap(),
+                );
+                let shutdown = Arc::new(AtomicBool::new(false));
+                let rescue_shutdown = Arc::clone(&shutdown);
+                let (done, completed) = std::sync::mpsc::channel();
+                let rescue = std::thread::spawn(move || {
+                    let expired = completed
+                        .recv_timeout(std::time::Duration::from_secs(3))
+                        .is_err();
+                    if expired {
+                        rescue_shutdown.store(true, Ordering::Release);
+                    }
+                    expired
+                });
+                let result = dillo_runtime::PreparingCpus::spawn(&mut vm, 1, profile)
+                    .and_then(|cpus| cpus.prepare(shutdown.as_ref()))
+                    .and_then(|cpus| cpus.run(shutdown.as_ref()));
+                let _ = done.send(());
+                let expired = rescue.join().unwrap();
+                let version = memory.read_obj::<u32>(GuestAddress(0x800)).unwrap();
+                let power_return = memory.read_obj::<u32>(GuestAddress(0x804)).unwrap();
+                eprintln!(
+                    "HVF PSCI {name}: version={version:#010x}, power_return={power_return:#010x}, deadline={expired}, result={result:?}"
+                );
+                assert!(!expired, "{name} PSCI required cancellation");
+                assert_eq!(
+                    u64::from(version),
+                    psci::ret::VERSION_1_1,
+                    "{name} PSCI_VERSION return"
+                );
+                assert_eq!(power_return, 0xdead_beef, "{name} SYSTEM_OFF returned");
+                assert!(
+                    matches!(result, Ok(dillo_machine::VcpuStop::GuestPoweroff)),
+                    "{result:?}"
+                );
             }
         }
 
