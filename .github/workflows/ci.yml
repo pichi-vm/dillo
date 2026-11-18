@@ -201,11 +201,12 @@ jobs:
         shell: bash
         env:
           CARGO_BUILD_RUSTFLAGS: "-D warnings"
+          DILLO_WHP_EMULATION_TRACE: "1"
         run: |
           # dillo-virtio-vsock bridges vsock to host Unix sockets (UnixStream),
           # so it is Unix-only; dillo depends on it via cfg(unix) and never
           # builds it on Windows. snuffler is the Linux guest probe.
-          cargo test --workspace --exclude snuffler --exclude dillo-virtio-vsock
+          cargo test --workspace --exclude snuffler --exclude dillo-virtio-vsock -- --show-output
 
       - name: Test (macOS, workspace minus Linux-only crates)
         if: runner.os == 'macOS'

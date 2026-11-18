@@ -1370,6 +1370,8 @@ mod raw {
             exit: None,
             failure: None,
         };
+        #[cfg(test)]
+        context.trace_exit(exit);
         let mut status = WHV_EMULATOR_STATUS::default();
         // SAFETY: IoPortAccess is valid for the active exit reason and all
         // pointers remain valid for the synchronous emulator call.
@@ -1406,6 +1408,8 @@ mod raw {
             exit: None,
             failure: None,
         };
+        #[cfg(test)]
+        context.trace_exit(exit);
         let mut status = WHV_EMULATOR_STATUS::default();
         // SAFETY: MemoryAccess is valid for the active exit reason and all
         // pointers remain valid for the synchronous emulator call.
@@ -1480,6 +1484,180 @@ mod raw {
     }
 
     impl EmulationContext<'_> {
+        #[cfg(test)]
+        fn tracing() -> bool {
+            std::env::var_os("DILLO_WHP_EMULATION_TRACE").is_some()
+        }
+
+        #[cfg(test)]
+        fn trace_exit(&self, exit: &WHV_RUN_VP_EXIT_CONTEXT) {
+            use windows_sys::Win32::System::Hypervisor::{
+                WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterCs,
+                WHvX64RegisterDs, WHvX64RegisterEfer, WHvX64RegisterRflags, WHvX64RegisterSs,
+            };
+            if !Self::tracing() {
+                return;
+            }
+            let vp = &exit.VpContext;
+            eprintln!(
+                "WHP emulation trace vp={} exit={:#x} rip={:#x} rflags={:#x} execution={:#x} instruction_length={} cs=({:#x},{:#x},{:#x},{:#x})",
+                self.idx,
+                exit.ExitReason,
+                vp.Rip,
+                vp.Rflags,
+                unsafe { vp.ExecutionState.AsUINT16 },
+                vp._bitfield & 15,
+                vp.Cs.Base,
+                vp.Cs.Limit,
+                vp.Cs.Selector,
+                unsafe { vp.Cs.Anonymous.Attributes }
+            );
+            if exit.ExitReason == EXIT_MEMORY_ACCESS {
+                let memory = unsafe { &exit.Anonymous.MemoryAccess };
+                eprintln!(
+                    "WHP emulation trace vp={} memory_exit gpa={:#x} gva={:#x} access_info={:#x} instruction_byte_count={} bytes={:02x?}",
+                    self.idx,
+                    memory.Gpa,
+                    memory.Gva,
+                    unsafe { memory.AccessInfo.AsUINT32 },
+                    memory.InstructionByteCount,
+                    &memory.InstructionBytes[..usize::from(memory.InstructionByteCount)
+                        .min(memory.InstructionBytes.len())]
+                );
+            }
+            let names = [
+                WHvX64RegisterRip,
+                WHvX64RegisterRflags,
+                WHvX64RegisterCr0,
+                WHvX64RegisterCr3,
+                WHvX64RegisterCr4,
+                WHvX64RegisterEfer,
+                WHvX64RegisterCs,
+                WHvX64RegisterDs,
+                WHvX64RegisterSs,
+            ];
+            let mut values = [WHV_REGISTER_VALUE::default(); 9];
+            let hr = unsafe {
+                WHvGetVirtualProcessorRegisters(
+                    self.partition,
+                    self.idx,
+                    names.as_ptr(),
+                    names.len() as u32,
+                    values.as_mut_ptr(),
+                )
+            };
+            eprintln!(
+                "WHP emulation trace vp={} diagnostic_readback hr={hr:#x}",
+                self.idx
+            );
+            if hr == S_OK {
+                self.trace_registers("diagnostic_readback", &names, &values);
+            }
+        }
+
+        #[cfg(test)]
+        fn trace_registers(
+            &self,
+            operation: &str,
+            names: &[WHV_REGISTER_NAME],
+            values: &[WHV_REGISTER_VALUE],
+        ) {
+            use windows_sys::Win32::System::Hypervisor::{
+                WHvRegisterPendingInterruption, WHvX64RegisterDr7, WHvX64RegisterXCr0,
+            };
+            use windows_sys::Win32::System::Hypervisor::{
+                WHvX64RegisterCr0, WHvX64RegisterCr2, WHvX64RegisterCr3, WHvX64RegisterCr4,
+                WHvX64RegisterCr8, WHvX64RegisterCs, WHvX64RegisterDs, WHvX64RegisterEfer,
+                WHvX64RegisterEs, WHvX64RegisterFs, WHvX64RegisterGs, WHvX64RegisterR8,
+                WHvX64RegisterR9, WHvX64RegisterR10, WHvX64RegisterR11, WHvX64RegisterR12,
+                WHvX64RegisterR13, WHvX64RegisterR14, WHvX64RegisterR15, WHvX64RegisterRbp,
+                WHvX64RegisterRdi, WHvX64RegisterRflags, WHvX64RegisterRsi, WHvX64RegisterRsp,
+                WHvX64RegisterSs,
+            };
+            for (&name, value) in names.iter().zip(values) {
+                // Interpret only known active union members, never output padding.
+                if name == WHvRegisterPendingInterruption {
+                    eprintln!(
+                        "WHP emulation trace vp={} {operation} register={name:#x} pending_interruption={:#x}",
+                        self.idx,
+                        unsafe { value.PendingInterruption.AsUINT64 }
+                    );
+                } else if [
+                    WHvX64RegisterCs,
+                    WHvX64RegisterDs,
+                    WHvX64RegisterEs,
+                    WHvX64RegisterFs,
+                    WHvX64RegisterGs,
+                    WHvX64RegisterSs,
+                ]
+                .contains(&name)
+                {
+                    let segment = unsafe { value.Segment };
+                    eprintln!(
+                        "WHP emulation trace vp={} {operation} register={name:#x} segment=({:#x},{:#x},{:#x},{:#x})",
+                        self.idx,
+                        segment.Base,
+                        segment.Limit,
+                        segment.Selector,
+                        unsafe { segment.Anonymous.Attributes }
+                    );
+                } else if [
+                    WHvX64RegisterDr7,
+                    WHvX64RegisterXCr0,
+                    WHvX64RegisterCr0,
+                    WHvX64RegisterCr2,
+                    WHvX64RegisterCr3,
+                    WHvX64RegisterCr4,
+                    WHvX64RegisterCr8,
+                    WHvX64RegisterEfer,
+                    WHvX64RegisterRip,
+                    WHvX64RegisterRflags,
+                    WHvX64RegisterRax,
+                    WHvX64RegisterRbx,
+                    WHvX64RegisterRcx,
+                    WHvX64RegisterRdx,
+                    WHvX64RegisterRsp,
+                    WHvX64RegisterRbp,
+                    WHvX64RegisterRsi,
+                    WHvX64RegisterRdi,
+                    WHvX64RegisterR8,
+                    WHvX64RegisterR9,
+                    WHvX64RegisterR10,
+                    WHvX64RegisterR11,
+                    WHvX64RegisterR12,
+                    WHvX64RegisterR13,
+                    WHvX64RegisterR14,
+                    WHvX64RegisterR15,
+                ]
+                .contains(&name)
+                {
+                    eprintln!(
+                        "WHP emulation trace vp={} {operation} register={name:#x} value={:#x}",
+                        self.idx,
+                        unsafe { value.Reg64 }
+                    );
+                } else {
+                    eprintln!(
+                        "WHP emulation trace vp={} {operation} register={name:#x} (value not decoded)",
+                        self.idx
+                    );
+                }
+            }
+        }
+
+        #[cfg(test)]
+        fn trace_callback(&self, name: &str, hr: i32) {
+            // Diagnostics must retain the callback's C-ABI unwind boundary.
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                if Self::tracing() {
+                    eprintln!(
+                        "WHP emulation trace vp={} {name} returned={hr:#x} failure={:?}",
+                        self.idx, self.failure
+                    );
+                }
+            }));
+        }
+
         fn terminal(&self) -> bool {
             matches!(
                 self.exit,
@@ -1522,6 +1700,18 @@ mod raw {
         }
 
         fn finish(mut self, hr: i32, status: WHV_EMULATOR_STATUS) -> Result<RunExit, super::Error> {
+            #[cfg(test)]
+            if Self::tracing() {
+                let bits = if hr == S_OK {
+                    Some(unsafe { status.AsUINT32 })
+                } else {
+                    None
+                };
+                eprintln!(
+                    "WHP emulation trace vp={} finish hr={hr:#x} status={bits:#x?} exit={:?} failure={:?}",
+                    self.idx, self.exit, self.failure
+                );
+            }
             if let Some(error) = self.failure.take() {
                 return Err(error);
             }
@@ -1579,9 +1769,23 @@ mod raw {
         memory_access: *mut WHV_EMULATOR_MEMORY_ACCESS_INFO,
     ) -> i32 {
         let context = unsafe { &mut *(context.cast_mut().cast::<EmulationContext<'_>>()) };
-        context.invoke(|context| {
+        let callback_hr = context.invoke(|context| {
             let memory = unsafe { &mut *memory_access };
             let size = memory.AccessSize;
+            #[cfg(test)]
+            if EmulationContext::tracing() {
+                eprintln!(
+                    "WHP emulation trace vp={} memory_request gpa={:#x} direction={} size={size}",
+                    context.idx, memory.GpaAddress, memory.Direction
+                );
+                if memory.Direction == 1 && usize::from(size) <= memory.Data.len() {
+                    eprintln!(
+                        "WHP emulation trace vp={} memory_write bytes={:02x?}",
+                        context.idx,
+                        &memory.Data[..usize::from(size)]
+                    );
+                }
+            }
             if size == 0 || usize::from(size) > memory.Data.len() {
                 return Err(super::Error::UnhandledExit(format!(
                     "WHP memory access at {:#x} has unsupported width {size}",
@@ -1592,6 +1796,13 @@ mod raw {
                 let data = &mut memory.Data[..size as usize];
                 if (context.mmio_read)(memory.GpaAddress, data)?.is_none() {
                     data.fill(0);
+                }
+                #[cfg(test)]
+                if EmulationContext::tracing() {
+                    eprintln!(
+                        "WHP emulation trace vp={} memory_read_reply gpa={:#x} bytes={data:02x?}",
+                        context.idx, memory.GpaAddress
+                    );
                 }
                 context.exit = Some(RunExit::MmioRead {
                     addr: memory.GpaAddress,
@@ -1611,7 +1822,10 @@ mod raw {
                 });
             }
             Ok(())
-        })
+        });
+        #[cfg(test)]
+        context.trace_callback("memory_callback", callback_hr);
+        callback_hr
     }
 
     unsafe extern "system" fn get_registers_callback(
@@ -1621,7 +1835,15 @@ mod raw {
         values: *mut WHV_REGISTER_VALUE,
     ) -> i32 {
         let context = unsafe { &mut *(context.cast_mut().cast::<EmulationContext<'_>>()) };
-        context.invoke(|context| {
+        let callback_hr = context.invoke(|context| {
+            #[cfg(test)]
+            if EmulationContext::tracing() && count > 0 {
+                let names = unsafe { std::slice::from_raw_parts(names, count as usize) };
+                eprintln!(
+                    "WHP emulation trace vp={} get_registers request names={names:#x?}",
+                    context.idx
+                );
+            }
             let hr = unsafe {
                 WHvGetVirtualProcessorRegisters(
                     context.partition,
@@ -1631,8 +1853,23 @@ mod raw {
                     values,
                 )
             };
+            #[cfg(test)]
+            if EmulationContext::tracing() {
+                eprintln!(
+                    "WHP emulation trace vp={} get_registers native_hr={hr:#x}",
+                    context.idx
+                );
+                if hr == S_OK && count > 0 {
+                    let names = unsafe { std::slice::from_raw_parts(names, count as usize) };
+                    let values = unsafe { std::slice::from_raw_parts(values, count as usize) };
+                    context.trace_registers("get_registers_reply", names, values);
+                }
+            }
             context.native_result(hr)
-        })
+        });
+        #[cfg(test)]
+        context.trace_callback("get_registers_callback", callback_hr);
+        callback_hr
     }
 
     unsafe extern "system" fn set_registers_callback(
@@ -1642,7 +1879,17 @@ mod raw {
         values: *const WHV_REGISTER_VALUE,
     ) -> i32 {
         let context = unsafe { &mut *(context.cast_mut().cast::<EmulationContext<'_>>()) };
-        context.invoke(|context| {
+        let callback_hr = context.invoke(|context| {
+            #[cfg(test)]
+            if EmulationContext::tracing() && count > 0 {
+                let names = unsafe { std::slice::from_raw_parts(names, count as usize) };
+                eprintln!(
+                    "WHP emulation trace vp={} set_registers request names={names:#x?}",
+                    context.idx
+                );
+                let values = unsafe { std::slice::from_raw_parts(values, count as usize) };
+                context.trace_registers("set_registers_input", names, values);
+            }
             let hr = unsafe {
                 WHvSetVirtualProcessorRegisters(
                     context.partition,
@@ -1652,8 +1899,18 @@ mod raw {
                     values,
                 )
             };
+            #[cfg(test)]
+            if EmulationContext::tracing() {
+                eprintln!(
+                    "WHP emulation trace vp={} set_registers native_hr={hr:#x}",
+                    context.idx
+                );
+            }
             context.native_result(hr)
-        })
+        });
+        #[cfg(test)]
+        context.trace_callback("set_registers_callback", callback_hr);
+        callback_hr
     }
 
     unsafe extern "system" fn translate_gva_callback(
@@ -1664,7 +1921,11 @@ mod raw {
         gpa: *mut u64,
     ) -> i32 {
         let context = unsafe { &mut *(context.cast_mut().cast::<EmulationContext<'_>>()) };
-        context.invoke(|context| {
+        let callback_hr = context.invoke(|context| {
+            #[cfg(test)]
+            if EmulationContext::tracing() {
+                eprintln!("WHP emulation trace vp={} translate_request gva={gva:#x} flags={translate_flags:#x}", context.idx);
+            }
             let mut result = WHV_TRANSLATE_GVA_RESULT::default();
             let mut translated_gpa = 0;
             let hr = unsafe {
@@ -1677,13 +1938,20 @@ mod raw {
                     &raw mut translated_gpa,
                 )
             };
+            #[cfg(test)]
+            if EmulationContext::tracing() {
+                eprintln!("WHP emulation trace vp={} translate_reply native_hr={hr:#x} result={} gpa={translated_gpa:#x}", context.idx, result.ResultCode);
+            }
             context.native_result(hr)?;
             unsafe {
                 *translation_result = result.ResultCode;
                 *gpa = translated_gpa;
             }
             Ok(())
-        })
+        });
+        #[cfg(test)]
+        context.trace_callback("translate_callback", callback_hr);
+        callback_hr
     }
 
     #[cfg(test)]
@@ -2294,6 +2562,155 @@ mod tests {
             )
             .expect("run hlt");
         assert!(matches!(exit, VmExit::Halted), "expected HLT, got {exit:?}");
+    }
+
+    #[test]
+    fn whp_fixed_entry_emulation_diagnostic_matrix() {
+        use dillo_machine::RamRange;
+        use dillo_machine::memory::AddressRange;
+        use dillo_mmio::{AccessError, MmioError};
+        use std::cell::Cell;
+
+        let _guard = whp_test_lock();
+        if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
+            super::memory_tests::NativeMemoryTest::spawn(
+                "hypervisor::tests::whp_fixed_entry_emulation_diagnostic_matrix",
+            )
+            .verify();
+            return;
+        }
+        let high = 0xffff_f100u32;
+        let low = 0x1_0100u32;
+        // Same physical operand in all cases. Each access is followed by HLT,
+        // although the callback deliberately fails before guest continuation.
+        let read: &[u8] = &[0xa1, 0, 0, 0, 0x0b, 0xf4];
+        let write: &[u8] = &[0xc7, 0x05, 0, 0, 0, 0x0b, 0x78, 0x56, 0x34, 0x12, 0xf4];
+        for (label, efer, ds_selector, entry, code) in [
+            ("fixed-read", 0x901, 0, high, read),
+            ("fixed-write", 0x901, 0, high, write),
+            ("read-LME-clear", 0x801, 0, high, read),
+            ("read-DS-selector-8", 0x901, 8, high, read),
+            ("read-low-code", 0x901, 0, low, read),
+        ] {
+            eprintln!(
+                "WHP entry experiment BEGIN {label}: efer={efer:#x} ds_selector={ds_selector:#x} code={entry:#x}"
+            );
+            // This diagnostic records all outcomes; the unchanged owner test
+            // remains the failing acceptance gate for the required PMI state.
+            let result = (|| -> Result<(), Error> {
+                let mut vm = Vm::new()?;
+                vm.set_memory(<crate::Memory as dillo_machine::Memory>::from_ranges(&[
+                    RamRange {
+                        gpa: 0x1_0000,
+                        size: 0x1000,
+                    },
+                    RamRange {
+                        gpa: 0xffff_f000,
+                        size: 0x1000,
+                    },
+                ])?)?;
+                // Identical mapping topology and code bytes in every case.
+                vm.write_guest(u64::from(low), code)?;
+                vm.write_guest(u64::from(high), code)?;
+                let mut trampoline = vec![0xe9];
+                trampoline.extend_from_slice(&entry.wrapping_sub(0xffff_fff5).to_le_bytes());
+                vm.write_guest(0xffff_fff0, &trampoline)?;
+                let mut cpu = vm.create_vcpu(0, "x86-64-v1")?;
+                cpu.initialize_bsp()?;
+                if efer != 0x901 {
+                    raw::set_virtual_processor_registers(
+                        cpu.partition.partition,
+                        cpu.idx,
+                        &[WHvX64RegisterEfer],
+                        &[WHV_REGISTER_VALUE { Reg64: efer }],
+                    )
+                    .map_err(|hr| Error::SetRegisters {
+                        idx: cpu.idx,
+                        hr: status(hr),
+                    })?;
+                }
+                if ds_selector != 0 {
+                    // Only the selector differs from initialize_bsp; cached
+                    // base, limit, type, privilege and attributes are retained.
+                    let ds = WHV_REGISTER_VALUE {
+                        Segment: WHV_X64_SEGMENT_REGISTER {
+                            Base: 0,
+                            Limit: u32::MAX,
+                            Selector: ds_selector,
+                            Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xc093 },
+                        },
+                    };
+                    raw::set_virtual_processor_registers(
+                        cpu.partition.partition,
+                        cpu.idx,
+                        &[WHvX64RegisterDs],
+                        &[ds],
+                    )
+                    .map_err(|hr| Error::SetRegisters {
+                        idx: cpu.idx,
+                        hr: status(hr),
+                    })?;
+                }
+                let reads = Cell::new(0);
+                let writes = Cell::new(0);
+                let exit = cpu.run(
+                    |_, _| 0,
+                    |address, data| {
+                        reads.set(reads.get() + 1);
+                        eprintln!(
+                            "WHP entry experiment {label}: read gpa={address:#x} size={}",
+                            data.len()
+                        );
+                        if address != 0x0b00_0000 {
+                            return Ok(None);
+                        }
+                        data.fill(0xa5);
+                        Err(AccessError {
+                            operation: "read",
+                            address,
+                            size: data.len(),
+                            window: AddressRange {
+                                base: 0x0b00_0000,
+                                size: 0x1000,
+                            },
+                            source: MmioError::Device(Box::new(std::io::Error::other(
+                                "diagnostic mapped read reached",
+                            ))),
+                        })
+                    },
+                    |address, data| {
+                        writes.set(writes.get() + 1);
+                        eprintln!(
+                            "WHP entry experiment {label}: write gpa={address:#x} data={data:02x?}"
+                        );
+                        if address != 0x0b00_0000 {
+                            return Ok(None);
+                        }
+                        Err(AccessError {
+                            operation: "write",
+                            address,
+                            size: data.len(),
+                            window: AddressRange {
+                                base: 0x0b00_0000,
+                                size: 0x1000,
+                            },
+                            source: MmioError::Device(Box::new(std::io::Error::other(
+                                "diagnostic mapped write reached",
+                            ))),
+                        })
+                    },
+                    &std::sync::atomic::AtomicBool::new(false),
+                );
+                eprintln!(
+                    "WHP entry experiment {label}: result={exit:?} read_callbacks={} write_callbacks={}",
+                    reads.get(),
+                    writes.get()
+                );
+                // No next run, even if emulation unexpectedly succeeds.
+                Ok(())
+            })();
+            eprintln!("WHP entry experiment END {label}: setup_and_cleanup={result:?}");
+        }
     }
 
     #[test]
