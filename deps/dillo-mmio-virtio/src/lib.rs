@@ -296,11 +296,7 @@ impl VirtioMmio {
             QUEUE_READY => g.queues.get(sel).map_or(0, |q| u32::from(q.ready)),
             INTERRUPT_STATUS => self.int_status.load(Ordering::SeqCst),
             STATUS => g.status,
-            // Config never changes mid-flight, so the generation is always 0.
-            // Kept as a named arm (not folded into the wildcard) to document the
-            // register map; its body coincides with the unhandled-register case.
-            #[allow(clippy::match_same_arms)]
-            CONFIG_GENERATION => 0,
+            CONFIG_GENERATION => g.device.config_generation(),
             // No shared memory regions: virtio 1.2 §4.2.2 requires all ones.
             SHM_LEN_LOW | SHM_LEN_HIGH | SHM_BASE_LOW | SHM_BASE_HIGH => u32::MAX,
             _ => 0,
@@ -625,8 +621,10 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct TestDevice {
         fail: bool,
+        generation: u32,
     }
 
     impl VirtioDevice for TestDevice {
@@ -663,7 +661,31 @@ mod tests {
             ))
         }
         fn read_config(&self, _: u64, _: &mut [u8]) {}
-        fn write_config(&mut self, _: u64, _: &[u8]) {}
+        fn config_generation(&self) -> u32 {
+            self.generation
+        }
+        fn write_config(&mut self, _: u64, data: &[u8]) {
+            self.generation = u32::from_le_bytes(data.try_into().unwrap());
+        }
+    }
+
+    #[test]
+    fn config_generation_reads_current_device_value_at_mmio_width() {
+        let transport = VirtioMmio::new(
+            AddressRange {
+                base: 0x1000,
+                size: 0x1000,
+            },
+            Box::new(TestDevice::default()),
+            Arc::new(AtomicU32::new(0)),
+            WiredIrq::unresolved(1),
+        );
+        for generation in [0u32, 0x1234_56ff, 0x1234_5700, u32::MAX, 0] {
+            transport.write(CONFIG, &generation.to_le_bytes());
+            let mut bytes = [0; 4];
+            transport.read(CONFIG_GENERATION, &mut bytes);
+            assert_eq!(u32::from_le_bytes(bytes), generation);
+        }
     }
 
     #[test]
@@ -678,7 +700,10 @@ mod tests {
                     base: 0x1000,
                     size: 0x1000,
                 },
-                Box::new(TestDevice { fail }),
+                Box::new(TestDevice {
+                    fail,
+                    ..Default::default()
+                }),
                 Arc::new(AtomicU32::new(0)),
                 WiredIrq::unresolved(1),
             );
@@ -711,7 +736,7 @@ mod tests {
                     base: 0x1000,
                     size: 0x1000,
                 },
-                Box::new(TestDevice { fail: false }),
+                Box::new(TestDevice::default()),
                 Arc::new(AtomicU32::new(0)),
                 WiredIrq::unresolved(1),
             );

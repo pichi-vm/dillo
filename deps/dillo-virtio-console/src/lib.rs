@@ -218,11 +218,32 @@ pub fn flush_output() {
     let _ = done_rx.recv();
 }
 
+/// Size and its generation are published together under one independent lock.
+/// Separate guest field reads can detect an intervening resize by comparing
+/// generations, without requiring the worker to lock the transport or device.
+#[derive(Debug, Default)]
+struct ConsoleConfig {
+    size: u32,
+    generation: u32,
+}
+
+impl ConsoleConfig {
+    fn resize(&mut self, size: dillo_config::ConsoleSize) -> bool {
+        let packed = u32::from_le_bytes(size.into());
+        if self.size == packed {
+            return false;
+        }
+        self.size = packed;
+        self.generation = self.generation.wrapping_add(1);
+        true
+    }
+}
+
 /// virtio-console: thread-mode device.
 pub struct VirtioConsole {
     activated: bool,
     resize: Option<resize::Receiver>,
-    size: Option<Arc<std::sync::atomic::AtomicU32>>,
+    size: Option<Arc<Mutex<ConsoleConfig>>>,
     /// Named MULTIPORT ports (port 0 is implicit and not in here).
     ports: Vec<NamedPort>,
     /// `queue_max_sizes` hands out a slice, so the sizes live here.
@@ -281,7 +302,7 @@ impl VirtioConsole {
     /// endpoint. Enables the standard MULTIPORT resize control messages even
     /// when the console has no named data ports. No guest agent is involved.
     pub fn with_resize(mut self, path: &std::path::Path) -> io::Result<Self> {
-        let current = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let current = Arc::new(Mutex::new(ConsoleConfig::default()));
         self.resize = Some(resize::Receiver::bind(path, Arc::clone(&current))?);
         self.size = Some(current);
         self.queue_sizes.resize(4 + 2 * self.ports.len(), QUEUE_MAX);
@@ -508,7 +529,9 @@ impl VirtioDevice for VirtioConsole {
         if let Some(size) = &self.size {
             config[..4].copy_from_slice(
                 &size
-                    .load(std::sync::atomic::Ordering::Acquire)
+                    .lock()
+                    .expect("console config poisoned")
+                    .size
                     .to_le_bytes(),
             );
         }
@@ -519,6 +542,12 @@ impl VirtioDevice for VirtioConsole {
             let off = offset as usize + i;
             *byte = config.get(off).copied().unwrap_or(0);
         }
+    }
+
+    fn config_generation(&self) -> u32 {
+        self.size.as_ref().map_or(0, |config| {
+            config.lock().expect("console config poisoned").generation
+        })
     }
 
     fn write_config(&mut self, _offset: u64, _data: &[u8]) {

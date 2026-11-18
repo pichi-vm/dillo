@@ -344,6 +344,15 @@ pub trait VirtioDevice: Send {
     /// Read device-specific configuration space.
     fn read_config(&self, offset: u64, data: &mut [u8]);
 
+    /// Generation of device-specific configuration, or zero for static data.
+    ///
+    /// Devices with changing configuration must publish data and generation
+    /// coherently with configuration reads. Transports expose their defined
+    /// register width; workers must not need the outer device/transport lock.
+    fn config_generation(&self) -> u32 {
+        0
+    }
+
     /// Write device-specific configuration space.
     fn write_config(&mut self, offset: u64, data: &[u8]);
 }

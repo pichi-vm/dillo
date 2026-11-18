@@ -873,6 +873,7 @@ mod tests {
         let blk = blk_from(1024 * 1024, 512, 512, None, false);
         let expected = VIRTIO_F_VERSION_1 | VIRTIO_BLK_F_FLUSH | VIRTIO_BLK_F_BLK_SIZE;
         assert_eq!(blk.features(), expected);
+        assert_eq!(blk.config_generation(), 0);
     }
 
     #[test]

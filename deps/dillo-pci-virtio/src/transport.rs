@@ -126,7 +126,6 @@ pub struct VirtioPciDevice {
     driver_feature_select: u32,
     driver_features: u64,
     device_status: u8,
-    config_generation: u8,
     queue_select: u16,
     msix_config_vector: u16,
 
@@ -166,7 +165,6 @@ impl std::fmt::Debug for VirtioPciDevice {
             .field("driver_feature_select", &self.driver_feature_select)
             .field("driver_features", &self.driver_features)
             .field("device_status", &self.device_status)
-            .field("config_generation", &self.config_generation)
             .field("queue_select", &self.queue_select)
             .field("msix_config_vector", &self.msix_config_vector)
             .field("queues", &self.queues)
@@ -303,7 +301,6 @@ impl VirtioPciDevice {
             driver_feature_select: 0,
             driver_features: 0,
             device_status: 0,
-            config_generation: 0,
             queue_select: 0,
             msix_config_vector: 0xFFFF,
             queues,
@@ -480,7 +477,12 @@ impl VirtioPciDevice {
             CC_MSIX_CONFIG => self.msix_config_vector as u32,
             CC_NUM_QUEUES => self.num_queues as u32,
             CC_DEVICE_STATUS => self.device_status as u32,
-            CC_CONFIG_GENERATION => self.config_generation as u32,
+            CC_CONFIG_GENERATION => u32::from(
+                self.device
+                    .lock()
+                    .expect("device mutex")
+                    .config_generation() as u8,
+            ),
             CC_QUEUE_SELECT => self.queue_select as u32,
             _ => self.queue_cfg_read(offset),
         };
@@ -858,6 +860,11 @@ mod tests {
                     self.config_data[off + i] = b;
                 }
             }
+        }
+
+        fn config_generation(&self) -> u32 {
+            // The test driver controls generation through the mock config.
+            u32::from_le_bytes(self.config_data[..4].try_into().unwrap())
         }
     }
 
@@ -1319,6 +1326,17 @@ mod tests {
     }
 
     // ==================== Device Config Tests ====================
+
+    #[test]
+    fn config_generation_reads_current_device_value_at_pci_width() {
+        let mut dev = make_test_device(2);
+        for generation in [0u32, 0x1234_56ff, 0x1234_5700, u32::MAX, 0] {
+            dev.bar_write(0, DEVICE_CFG_OFFSET, &generation.to_le_bytes());
+            let mut byte = [0];
+            dev.bar_read(0, super::CC_CONFIG_GENERATION, &mut byte);
+            assert_eq!(byte[0], generation as u8);
+        }
+    }
 
     #[test]
     fn device_config_read_delegates_to_device() {
