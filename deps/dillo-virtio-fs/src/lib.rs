@@ -22,10 +22,15 @@
 mod backend;
 mod fuse;
 
+#[cfg(test)]
+mod payload_tests;
+
 use dillo_virtio::queue::PublicationError;
 use std::sync::{Arc, Mutex};
 
 use dillo_machine::interrupt::Interrupt;
+use dillo_machine::memory::SharedMemoryError;
+use dillo_virtio::memory::VirtioMemoryError;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
 use dillo_virtio::{
     ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
@@ -288,6 +293,118 @@ fn queue_worker(
 /// One descriptor in a request chain: (guest address, byte length).
 type Desc = (GuestAddress, u32);
 
+/// An admitted payload or a rejection that cannot reach request dispatch.
+enum RequestPayload {
+    Complete(Vec<u8>),
+    Rejected(Option<Vec<u8>>),
+}
+
+impl RequestPayload {
+    fn read(memory: &dyn VirtioMemory, readable: &[Desc]) -> Result<Self, QueueError> {
+        let mut input = Vec::new();
+        for &(address, length) in readable {
+            let oversized = length as usize > MAX_REQUEST - input.len();
+            let take = if oversized {
+                // Only reply identity is useful once the request cannot be
+                // admitted. Do not access an irrelevant oversized body.
+                fuse::FUSE_IN_HEADER_LEN.saturating_sub(input.len())
+            } else {
+                length as usize
+            };
+            if address.0.checked_add(take as u64).is_none() {
+                return Ok(Self::Rejected(fuse::reject_request(&input, fuse::EIO)));
+            }
+            if take != 0 {
+                let start = input.len();
+                input.resize(start + take, 0);
+                match memory.read(address, &mut input[start..]) {
+                    Ok(n) if n > take => {
+                        return Err(QueueError::ReadCount {
+                            address: address.0,
+                            requested: take,
+                            returned: n,
+                        });
+                    }
+                    Ok(n) if n < take => {
+                        input.truncate(start + n);
+                        return Ok(Self::Rejected(fuse::reject_request(&input, fuse::EIO)));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        // A failed read may have changed the destination, but
+                        // none of those bytes form a successfully copied header.
+                        input.truncate(start);
+                        match error {
+                            VirtioMemoryError::Guest(_)
+                            | VirtioMemoryError::Shared(
+                                SharedMemoryError::OutOfLimits
+                                | SharedMemoryError::AccessDenied
+                                | SharedMemoryError::NotShared,
+                            ) => {
+                                return Ok(Self::Rejected(fuse::reject_request(&input, fuse::EIO)));
+                            }
+                            source @ VirtioMemoryError::Shared(_) => {
+                                return Err(QueueError::Payload {
+                                    address: address.0,
+                                    length: take,
+                                    source,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            if oversized {
+                return Ok(Self::Rejected(fuse::reject_request(&input, fuse::EINVAL)));
+            }
+        }
+        Ok(Self::Complete(input))
+    }
+
+    fn dispatch(self, state: &Mutex<FsState>, backend: &dyn FsBackend) -> Option<Vec<u8>> {
+        match self {
+            Self::Complete(input) => {
+                let mut state = state.lock().expect("virtio-fs state mutex");
+                fuse::dispatch(&mut state, backend, &input)
+            }
+            Self::Rejected(reply) => reply,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum QueueError {
+    #[error(transparent)]
+    Publication(#[from] PublicationError),
+    #[error("virtio-fs request read at {address:#x}+{length} failed: {source}")]
+    Payload {
+        address: u64,
+        length: usize,
+        #[source]
+        source: VirtioMemoryError,
+    },
+    #[error(
+        "virtio-fs request read at {address:#x} returned {returned} bytes for {requested}-byte buffer"
+    )]
+    ReadCount {
+        address: u64,
+        requested: usize,
+        returned: usize,
+    },
+}
+
+impl QueueError {
+    fn is_published(&self) -> bool {
+        matches!(self, Self::Publication(error) if error.is_published())
+    }
+}
+
+impl From<QueueError> for std::io::Error {
+    fn from(error: QueueError) -> Self {
+        Self::other(error)
+    }
+}
+
 fn drain_requests(
     queue_memory: &Arc<dyn QueueMemory>,
     buffer_memory: &Arc<dyn VirtioMemory>,
@@ -295,10 +412,10 @@ fn drain_requests(
     call_interrupt: Option<&Interrupt>,
     state: &Arc<Mutex<FsState>>,
     backend: &dyn FsBackend,
-) -> Result<(), PublicationError> {
+) -> Result<(), QueueError> {
     let mut q = queue.lock().expect("virtio-fs queue mutex");
     let mut signaled = false;
-    let result: Result<(), PublicationError> = (|| {
+    let result: Result<(), QueueError> = (|| {
         while let Some(head) = q.pop(queue_memory) {
             let head_index = head.index;
 
@@ -315,27 +432,8 @@ fn drain_requests(
                 current = desc.next_desc(queue_memory);
             }
 
-            // Gather the request bytes.
-            let mut input = Vec::new();
-            for &(addr, len) in &readable {
-                if input.len() >= MAX_REQUEST {
-                    break;
-                }
-                let take = (len as usize).min(MAX_REQUEST - input.len());
-                let mut buf = vec![0u8; take];
-                match buffer_memory.read(addr, &mut buf) {
-                    Ok(n) => input.extend_from_slice(&buf[..n]),
-                    Err(e) => {
-                        log::warn!("virtio-fs: request read at {:#x}+{len}: {e:?}", addr.0);
-                        break;
-                    }
-                }
-            }
-
-            let reply = {
-                let mut st = state.lock().expect("virtio-fs state mutex");
-                fuse::dispatch(&mut st, backend, &input)
-            };
+            let reply =
+                RequestPayload::read(buffer_memory.as_ref(), &readable)?.dispatch(state, backend);
 
             let written = match reply {
                 Some(reply) => scatter_write(buffer_memory, &writable, &reply),
@@ -347,7 +445,7 @@ fn drain_requests(
         Ok(())
     })();
     drop(q);
-    if (signaled || result.as_ref().is_err_and(PublicationError::is_published))
+    if (signaled || result.as_ref().is_err_and(QueueError::is_published))
         && let Some(intr) = call_interrupt
     {
         intr.signal();
@@ -602,7 +700,7 @@ mod tests {
         assert!(VirtioFs::new(&"x".repeat(TAG_LEN), Arc::new(MapFs::new()), true).is_ok());
     }
 
-    fn write_desc(
+    pub(super) fn write_desc(
         mem: &GuestMemoryMmap,
         table: GuestAddress,
         idx: u64,
