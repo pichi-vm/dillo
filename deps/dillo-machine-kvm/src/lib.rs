@@ -46,9 +46,9 @@ mod imp {
     use dillo_machine::interrupt::{
         InterruptError, InterruptLine, InterruptRequirement, InterruptResource,
     };
-    use dillo_machine::memory::SharedMemory;
+    use dillo_machine::memory::{AddressRange, SharedMemory};
     use dillo_machine::{Host, HostArchitecture, LaunchConfig, VcpuStop};
-    use dillo_mmio::{MmioBus, MmioDevice, MmioWriteOutcome};
+    use dillo_mmio::{MmioBus, MmioDevice, MmioError, MmioWriteOutcome};
     use vmm_sys_util::eventfd::EventFd;
 
     pub use crate::hypervisor::Error;
@@ -429,12 +429,13 @@ mod imp {
     }
 
     #[cfg(target_arch = "aarch64")]
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug)]
     pub(crate) struct Aarch64Substrate {
         pub(crate) dist_base: u64,
         pub(crate) redist_base: u64,
         pub(crate) vcpus: u32,
         pub(crate) nr_irqs: u32,
+        pub(crate) msi_frame: crate::hypervisor::GicV2mFrame,
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -506,7 +507,24 @@ mod imp {
                 redist_base: gic.redist_base,
                 vcpus,
                 nr_irqs: nr_irqs.next_multiple_of(32),
+                msi_frame: crate::hypervisor::GicV2mFrame::new(
+                    gic.msi_frame_base,
+                    gic.msi_frame_size,
+                    msi,
+                )?,
             })
+        }
+
+        #[cfg(test)]
+        pub(crate) fn test_native(vcpus: u32, nr_irqs: u32) -> Self {
+            Self {
+                dist_base: 0x0800_0000,
+                redist_base: 0x080a_0000,
+                vcpus,
+                nr_irqs,
+                msi_frame: crate::hypervisor::GicV2mFrame::new(0x0c00_0000, 0x1000, 64..96)
+                    .unwrap(),
+            }
         }
 
         pub(crate) fn redist_region(&self) -> u64 {
@@ -588,7 +606,7 @@ mod imp {
             #[cfg(target_arch = "aarch64")]
             let mut vm = {
                 let substrate = Aarch64Substrate::from_survey(config.platform, config.vcpus)?;
-                Self::from_native(crate::hypervisor::Vm::new_with_gic(&substrate)?)?
+                Self::from_native(crate::hypervisor::Vm::new_with_gic(substrate)?)?
             };
             let available = Self::guest_address_bits()?;
             if required > available {
@@ -746,24 +764,58 @@ mod imp {
                     item.shared_memory().len()
                 )));
             }
+            let windows = item.windows().to_vec();
+            #[cfg(target_arch = "aarch64")]
+            for &window in &windows {
+                self.inner.check_msi_window(window)?;
+            }
             let interrupts = self.resolve_interrupts(item.interrupts())?;
-            let device_failures = self
-                .device_failures
-                .scoped(format!("MMIO {:?}", item.windows()));
-            let notifications = crate::notification::Notifications::new(
-                self.inner.clone(),
-                item.windows().to_vec(),
-            );
+            let device_failures = self.device_failures.scoped(format!("MMIO {windows:?}"));
+            let notifications =
+                crate::notification::Notifications::new(self.inner.clone(), windows.clone());
             self.mmio_bus
                 .lock()
                 .expect("MMIO bus lock poisoned")
-                .register_device(item);
+                .register_device(Arc::new(AttachedMmioDevice {
+                    device: item,
+                    windows,
+                }));
             Ok(Arc::new(MachineMmioAttachment {
                 notifications,
                 interrupts,
                 shared_memory: self.shared_memory.clone(),
                 device_failures,
             }))
+        }
+    }
+
+    /// Routes only the windows admitted by Machine attachment.
+    struct AttachedMmioDevice<D> {
+        device: Arc<D>,
+        windows: Vec<AddressRange>,
+    }
+
+    impl<D: MmioDevice> MmioDevice for AttachedMmioDevice<D> {
+        fn windows(&self) -> &[AddressRange] {
+            &self.windows
+        }
+
+        fn read(
+            &self,
+            window: AddressRange,
+            offset: u64,
+            data: &mut [u8],
+        ) -> Result<(), MmioError> {
+            self.device.read(window, offset, data)
+        }
+
+        fn write(
+            &self,
+            window: AddressRange,
+            offset: u64,
+            data: &[u8],
+        ) -> Result<MmioWriteOutcome, MmioError> {
+            self.device.write(window, offset, data)
         }
     }
 
@@ -1302,14 +1354,9 @@ mod imp {
             let mut vm = Vm::from_dtb(&tree.encode().unwrap()).expect("native KVM is required");
             #[cfg(target_arch = "aarch64")]
             let (mut vm, profile, base, entry, code) = {
-                let substrate = Aarch64Substrate {
-                    dist_base: 0x0800_0000,
-                    redist_base: 0x080a_0000,
-                    vcpus: 2,
-                    nr_irqs: 128,
-                };
-                let native = crate::hypervisor::Vm::new_with_gic(&substrate)
-                    .expect("native KVM is required");
+                let substrate = Aarch64Substrate::test_native(2, 128);
+                let native =
+                    crate::hypervisor::Vm::new_with_gic(substrate).expect("native KVM is required");
                 (
                     Vm::from_native(native).unwrap(),
                     dillo_machine::CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0),
@@ -1555,6 +1602,7 @@ mod imp {
                     (dist, dist_size),
                     (redist, redist_size),
                     vcpus,
+                    (MSI, 0x10000),
                     DEFAULT_MSI,
                     None,
                 )
@@ -1564,6 +1612,7 @@ mod imp {
                 (dist, dist_size): (u64, u64),
                 (redist, redist_size): (u64, u64),
                 vcpus: u32,
+                (frame_base, frame_size): (u64, u64),
                 (msi_base, msi_count): (u32, u32),
                 wired: Option<(&str, [u32; 3])>,
             ) -> Result<Self, Error> {
@@ -1588,11 +1637,13 @@ mod imp {
                             .with_property(OwnedProperty::new("phandle").with_u32(1)),
                     )
                     .with_child(
-                        OwnedNode::new(&format!("msi-controller@{MSI:x}"))
+                        OwnedNode::new(&format!("msi-controller@{frame_base:x}"))
                             .with_property(
                                 OwnedProperty::new("compatible").with_str("arm,gic-v2m-frame"),
                             )
-                            .with_property(OwnedProperty::new("reg").with_u32s(&reg(MSI, 0x10000)))
+                            .with_property(
+                                OwnedProperty::new("reg").with_u32s(&reg(frame_base, frame_size)),
+                            )
                             .with_property(
                                 OwnedProperty::new("arm,msi-base-spi").with_u32(msi_base),
                             )
@@ -1666,8 +1717,16 @@ mod imp {
                     0xd2a1_a000,    // movz x0, #0xd00, lsl #16
                     0xf900_0001,    // str x1, [x0] (unmapped MMIO, stop).
                 ];
-                let bytes: Vec<_> = program.into_iter().flat_map(u32::to_le_bytes).collect();
+                self.load_probe(&program);
+            }
+
+            fn load_probe(&mut self, program: &[u32]) {
+                let bytes: Vec<_> = program.iter().copied().flat_map(u32::to_le_bytes).collect();
                 self.write_guest(0, &bytes).unwrap();
+            }
+
+            fn from_msi_fixture(frame: (u64, u64)) -> Result<Self, Error> {
+                Self::from_gic_irq_fixture((DIST, GICD), (REDIST, STRIDE), 1, frame, (66, 2), None)
             }
         }
 
@@ -1689,7 +1748,12 @@ mod imp {
                             interrupt.request_exit().unwrap();
                         }
                     });
-                    let result = self.vcpu.inner.run(|_, _| 0, |_, _| false, stop);
+                    let result = loop {
+                        let exit = self.vcpu.inner.run(|_, _| 0, |_, _| false, stop);
+                        if !matches!(exit, Ok(VmExit::MmioRead { .. })) {
+                            break exit;
+                        }
+                    };
                     drop(done);
                     result
                 })
@@ -1744,7 +1808,14 @@ mod imp {
         #[test]
         fn surveyed_gic_refuses_invalid_or_conflicting_spis() {
             let fixture = |msi, wired| {
-                Vm::from_gic_irq_fixture((DIST, GICD), (REDIST, STRIDE), 1, msi, wired)
+                Vm::from_gic_irq_fixture(
+                    (DIST, GICD),
+                    (REDIST, STRIDE),
+                    1,
+                    (MSI, 0x10000),
+                    msi,
+                    wired,
+                )
             };
             for (base, count) in [(64, 0), (31, 1), (1019, 2), (u32::MAX, 2)] {
                 let result = fixture((base, count), None);
@@ -1791,6 +1862,7 @@ mod imp {
                     (DIST, GICD + extra),
                     (REDIST, STRIDE * 2 + extra),
                     2,
+                    (MSI, 0x10000),
                     msi,
                     wired,
                 ) {
@@ -1847,6 +1919,242 @@ mod imp {
                 assert_eq!([first & 0x10, second & 0x10], [0, 0x10], "GICR_TYPER.Last");
                 eprintln!("MSI {msi:?}, wired {wired:?}: guest GICD_TYPER reports {realized} IRQs");
             }
+        }
+
+        #[test]
+        fn surveyed_gicv2m_refuses_bad_apertures() {
+            let short = Vm::from_msi_fixture((MSI, 0xfff));
+            assert!(
+                matches!(
+                    short,
+                    Err(Error::GicExtent {
+                        region: "GICv2m",
+                        declared: 0xfff,
+                        required: 0x1000,
+                    })
+                ),
+                "{short:?}"
+            );
+            for base in [MSI + 2, u64::MAX - 0xfff] {
+                let invalid = Vm::from_msi_fixture((base, 0x1000));
+                assert!(
+                    matches!(invalid, Err(Error::GicAperture {
+                        region: "GICv2m", base: refused, size: 0x1000,
+                    }) if refused == base),
+                    "{invalid:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn gicv2m_aperture_refuses_overlapping_device_attachments() {
+            use dillo_mmio::syscon::{SysconAction, SysconDevice, SysconRegister};
+
+            let mut vm = Vm::from_msi_fixture((MSI, 0x10000)).unwrap();
+            for (base, size) in [(MSI + 0x40, 4), (MSI - 4, 8), (MSI + 0x1040, 4)] {
+                let device = SysconDevice::new(
+                    SysconRegister {
+                        base,
+                        size,
+                        offset: 0,
+                        value: 66,
+                        mask: u32::MAX,
+                    },
+                    SysconAction::Poweroff,
+                )
+                .unwrap();
+                assert!(matches!(
+                    vm.attach(Arc::new(device)),
+                    Err(Error::GicMsiMmioOverlap {base: refused_base, size: refused_size})
+                        if (refused_base, refused_size) == (base, size)
+                ));
+            }
+        }
+
+        #[test]
+        fn gicv2m_attachment_uses_only_the_admitted_mmio_windows() {
+            struct ChangingWindows {
+                initial: [AddressRange; 1],
+                overlapping: [AddressRange; 1],
+                queried: AtomicBool,
+            }
+
+            impl MmioDevice for ChangingWindows {
+                fn windows(&self) -> &[AddressRange] {
+                    if self.queried.swap(true, Ordering::Relaxed) {
+                        &self.overlapping
+                    } else {
+                        &self.initial
+                    }
+                }
+
+                fn read(
+                    &self,
+                    window: AddressRange,
+                    offset: u64,
+                    data: &mut [u8],
+                ) -> Result<(), MmioError> {
+                    assert_eq!(window, self.initial[0]);
+                    assert_eq!(offset, 0);
+                    data.fill(0x5a);
+                    Ok(())
+                }
+
+                fn write(
+                    &self,
+                    window: AddressRange,
+                    offset: u64,
+                    data: &[u8],
+                ) -> Result<MmioWriteOutcome, MmioError> {
+                    assert_eq!(window, self.initial[0]);
+                    assert_eq!(offset, 0);
+                    assert_eq!(data, [1, 2, 3, 4]);
+                    Ok(MmioWriteOutcome::Continue)
+                }
+            }
+
+            let initial = AddressRange {
+                base: MSI + 0x10000,
+                size: 4,
+            };
+            let overlapping = AddressRange {
+                base: MSI + 0x40,
+                size: 4,
+            };
+            let device = Arc::new(ChangingWindows {
+                initial: [initial],
+                overlapping: [overlapping],
+                queried: AtomicBool::new(false),
+            });
+            let mut vm = Vm::from_msi_fixture((MSI, 0x10000)).unwrap();
+            let attached = vm.attach(Arc::clone(&device)).unwrap();
+            assert_eq!(device.windows(), &[overlapping]);
+            assert!(matches!(
+                attached.write_notification(overlapping, 0, 66),
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput
+            ));
+            let _notification = attached
+                .write_notification(initial, 0, 66)
+                .unwrap()
+                .expect("admitted windows can register a native ioeventfd");
+
+            let bus = vm.mmio_bus.lock().unwrap();
+            let mut bytes = [0; 4];
+            assert!(bus.read(initial.base, &mut bytes));
+            assert_eq!(bytes, [0x5a; 4]);
+            assert_eq!(
+                bus.write(initial.base, &[1, 2, 3, 4]),
+                Some(MmioWriteOutcome::Continue)
+            );
+            assert!(!bus.read(overlapping.base, &mut bytes));
+            assert_eq!(bus.write(overlapping.base, &66u32.to_le_bytes()), None);
+        }
+
+        #[test]
+        fn relocated_gicv2m_registers_latch_only_owned_spis() {
+            for size in [0x1000, 0x10000] {
+                let mut vm = Vm::from_msi_fixture((MSI, size)).unwrap();
+                let padding_write = if size == 0x10000 {
+                    0xb910_4002
+                } else {
+                    0xd503_201f
+                };
+                vm.load_probe(&[
+                    0xd2a1_8000,   // mov x0, #0xc000000 (relocated frame)
+                    0xd2a1_2001,   // mov x1, #0x9000000 (GICD)
+                    0xd282_0004,   // mov x4, #0x1000 (observations)
+                    0xb940_0802,   // ldr w2, [x0, #8] (MSI_TYPER)
+                    0xb900_0082,   // str w2, [x4]
+                    0xb94f_cc02,   // ldr w2, [x0, #0xfcc] (MSI_IIDR)
+                    0xb940_4003,   // ldr w3, [x0, #0x40] (write-only doorbell)
+                    0x2a03_0042,   // orr w2, w2, w3
+                    0x7940_1003,   // ldrh w3, [x0, #8] (unsupported TYPER width)
+                    0x2a03_0042,   // orr w2, w2, w3
+                    0xb950_0803,   // ldr w3, [x0, #0x1008] (no TYPER alias)
+                    0x2a03_0042,   // orr w2, w2, w3
+                    0xd2a1_4205,   // mov x5, #0xa100000 (producer's usual frame base)
+                    0xb940_08a3,   // ldr w3, [x5, #8]
+                    0x2a03_0042,   // orr w2, w2, w3
+                    0xb900_0482,   // str w2, [x4, #4] (all absent reads must be zero)
+                    0x5280_5502,   // mov w2, #0x2a8
+                    0xb90c_1022,   // str w2, [x1, #0xc10] (SPIs 65..68 edge; disabled)
+                    0x5280_0822,   // mov w2, #65
+                    0xb900_4002,   // str w2, [x0, #0x40] (below frame range)
+                    0x5280_0882,   // mov w2, #68
+                    0xb900_4002,   // str w2, [x0, #0x40] (above frame range)
+                    0x5280_0842,   // mov w2, #66
+                    0x3901_0002,   // strb w2, [x0, #0x40] (unsupported width)
+                    0x7900_8402,   // strh w2, [x0, #0x42] (upper half)
+                    0xb900_4402,   // str w2, [x0, #0x44] (reserved)
+                    padding_write, // str w2, [x0, #0x1040] in declared padding, or nop
+                    0xb942_0823,   // ldr w3, [x1, #0x208] (pending after invalid writes)
+                    0xb900_0883,   // str w3, [x4, #8]
+                    0x529f_8842,   // mov w2, #0xfc42 (low 10 bits: first SPI)
+                    0x7900_8002,   // strh w2, [x0, #0x40]
+                    0xb942_0823,   // ldr w3, [x1, #0x208]
+                    0xb900_0c83,   // str w3, [x4, #12]
+                    0x529f_8862,   // mov w2, #0xfc43 (low 10 bits: last SPI)
+                    0x72bf_ffe2,   // movk w2, #0xffff, lsl #16
+                    0xb900_4002,   // str w2, [x0, #0x40]
+                    0xb942_0823,   // ldr w3, [x1, #0x208]
+                    0xb900_1083,   // str w3, [x4, #16]
+                    0xd2a1_a000,   // mov x0, #0xd000000
+                    0xf900_0003,   // str x3, [x0] (unmapped MMIO completion)
+                ]);
+                let mut cpu = vm.cpu_preparation(0, PROFILE).unwrap().prepare().unwrap();
+                vm.prepare_vcpu_run().unwrap();
+                let exit = cpu.run_gic_probe();
+                assert!(
+                    matches!(
+                        exit,
+                        Ok(VmExit::MmioWrite {
+                            addr: 0x0d00_0000,
+                            ..
+                        })
+                    ),
+                    "{exit:?}"
+                );
+                let memory = TestGuestMemory::from_owner(vm.inner.guest_memory().unwrap());
+                let observed: [u32; 5] = std::array::from_fn(|index| {
+                    memory
+                        .read_obj(GuestAddress(0x1000 + index as u64 * 4))
+                        .unwrap()
+                });
+                eprintln!("relocated GICv2m aperture {size:#x}: {observed:#x?}");
+                assert_eq!(observed, [0x0042_0002, 0, 0, 0b0100, 0b1100]);
+            }
+        }
+
+        #[test]
+        fn gicv2m_native_injection_failure_prevents_guest_progress() {
+            // Private raw fixture: this VGIC deliberately lacks frame-owned INTID 64.
+            let native = crate::hypervisor::Vm::new_with_gic(Aarch64Substrate::test_native(1, 64))
+                .expect("native Arm KVM is required");
+            let mut vm = Vm::from_native(native).unwrap();
+            vm.attach_mapped_memory(Arc::new(
+                memory::MappedMemory::test_backing(&[(0, 0x2000)]).unwrap(),
+            ))
+            .unwrap();
+            vm.load_probe(&[
+                0xd2a1_8000, // mov x0, #0xc000000 (frame)
+                0x5280_0802, // mov w2, #64
+                0xb900_4002, // str w2, [x0, #0x40] (must fail)
+                0xd282_0004, // mov x4, #0x1000
+                0xb900_0082, // str w2, [x4] (must not execute)
+                0xd2a1_a000, // mov x0, #0xd000000
+                0xf900_0002, // str x2, [x0]
+            ]);
+            let mut cpu = vm.cpu_preparation(0, PROFILE).unwrap().prepare().unwrap();
+            vm.prepare_vcpu_run().unwrap();
+            let exit = cpu.run_gic_probe();
+            assert!(
+                matches!(exit, Err(Error::GicMsiWrite {
+                    gpa, size: 4, intid: 64, phase: "assert", ref source,
+                }) if gpa == MSI + 0x40 && source.raw_os_error() == Some(libc::EINVAL)),
+                "{exit:?}"
+            );
+            let memory = TestGuestMemory::from_owner(vm.inner.guest_memory().unwrap());
+            assert_eq!(memory.read_obj::<u32>(GuestAddress(0x1000)).unwrap(), 0);
         }
 
         #[test]

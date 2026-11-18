@@ -12,16 +12,18 @@ use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_arch = "aarch64")]
+use dillo_machine::memory::AddressRange;
 use kvm_bindings::kvm_userspace_memory_region;
 #[cfg(target_arch = "aarch64")]
 use kvm_bindings::{
-    KVM_ARM_VCPU_POWER_OFF, KVM_ARM_VCPU_PSCI_0_2, KVM_DEV_ARM_VGIC_CTRL_INIT,
-    KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_DEV_ARM_VGIC_GRP_CTRL, KVM_DEV_ARM_VGIC_GRP_NR_IRQS,
-    KVM_REG_ARM_CORE, KVM_REG_ARM64, KVM_REG_ARM64_SYSREG, KVM_REG_ARM64_SYSREG_CRM_SHIFT,
-    KVM_REG_ARM64_SYSREG_CRN_SHIFT, KVM_REG_ARM64_SYSREG_OP0_SHIFT, KVM_REG_ARM64_SYSREG_OP1_SHIFT,
-    KVM_REG_ARM64_SYSREG_OP2_SHIFT, KVM_REG_SIZE_U64, KVM_VGIC_V3_ADDR_TYPE_DIST,
-    KVM_VGIC_V3_ADDR_TYPE_REDIST_REGION, kvm_create_device, kvm_device_attr,
-    kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V3, kvm_vcpu_init,
+    KVM_ARM_IRQ_TYPE_SHIFT, KVM_ARM_IRQ_TYPE_SPI, KVM_ARM_VCPU_POWER_OFF, KVM_ARM_VCPU_PSCI_0_2,
+    KVM_DEV_ARM_VGIC_CTRL_INIT, KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_DEV_ARM_VGIC_GRP_CTRL,
+    KVM_DEV_ARM_VGIC_GRP_NR_IRQS, KVM_REG_ARM_CORE, KVM_REG_ARM64, KVM_REG_ARM64_SYSREG,
+    KVM_REG_ARM64_SYSREG_CRM_SHIFT, KVM_REG_ARM64_SYSREG_CRN_SHIFT, KVM_REG_ARM64_SYSREG_OP0_SHIFT,
+    KVM_REG_ARM64_SYSREG_OP1_SHIFT, KVM_REG_ARM64_SYSREG_OP2_SHIFT, KVM_REG_SIZE_U64,
+    KVM_VGIC_V3_ADDR_TYPE_DIST, KVM_VGIC_V3_ADDR_TYPE_REDIST_REGION, kvm_create_device,
+    kvm_device_attr, kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V3, kvm_vcpu_init,
 };
 #[cfg(target_arch = "x86_64")]
 use kvm_bindings::{kvm_regs, kvm_segment};
@@ -139,6 +141,19 @@ pub enum Error {
 
     #[error("KVM {node} wired SPI INTID {intid} overlaps the GICv2m MSI interval")]
     GicWiredMsiOverlap { node: String, intid: u32 },
+
+    #[error("KVM MMIO window {base:#x}+{size:#x} overlaps the GICv2m MSI aperture")]
+    GicMsiMmioOverlap { base: u64, size: u64 },
+
+    #[error("KVM GICv2m write at {gpa:#x} ({size} bytes), INTID {intid}, {phase}: {source}")]
+    GicMsiWrite {
+        gpa: u64,
+        size: usize,
+        intid: u32,
+        phase: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("parse DTB for KVM platform substrate: {0:?}")]
     ParseDtb(dillo_devtree::devtree::Error),
@@ -258,12 +273,102 @@ struct VmInner {
     #[cfg(target_arch = "x86_64")]
     intc: crate::intc_x86::X86Intc,
     #[cfg(target_arch = "aarch64")]
-    vgic: Option<DeviceFd>,
+    vgic: Option<Vgic>,
     #[cfg(target_arch = "aarch64")]
     vgic_initialized: AtomicBool,
     // Must drop after VmFd and DeviceFd: both retain the kernel VM and its
     // memslots. Every native service/CPU retains this same context owner.
     memory: Mutex<MemoryRegistration>,
+}
+
+#[cfg(target_arch = "aarch64")]
+#[derive(Debug)]
+struct Vgic {
+    fd: DeviceFd,
+    msi_frame: GicV2mFrame,
+}
+
+#[cfg(target_arch = "aarch64")]
+#[derive(Debug)]
+pub(crate) struct GicV2mFrame {
+    aperture: AddressRange,
+    spis: std::ops::Range<u32>,
+    pulse: Mutex<()>,
+}
+
+#[cfg(target_arch = "aarch64")]
+impl GicV2mFrame {
+    pub(crate) fn new(base: u64, size: u64, spis: std::ops::Range<u32>) -> Result<Self, Error> {
+        if !base.is_multiple_of(4) || base.checked_add(size).is_none() {
+            return Err(Error::GicAperture {
+                region: "GICv2m",
+                base,
+                size,
+            });
+        }
+        if size < 0x1000 {
+            return Err(Error::GicExtent {
+                region: "GICv2m",
+                declared: size,
+                required: 0x1000,
+            });
+        }
+        Ok(Self {
+            aperture: AddressRange { base, size },
+            spis,
+            pulse: Mutex::new(()),
+        })
+    }
+
+    fn overlaps(&self, window: AddressRange) -> bool {
+        window.size != 0
+            && window.base < self.aperture.base + self.aperture.size
+            && window
+                .base
+                .checked_add(window.size)
+                .is_none_or(|end| self.aperture.base < end)
+    }
+
+    fn read(&self, gpa: u64, data: &mut [u8]) -> bool {
+        if !self.aperture.contains(gpa, data.len() as u64) {
+            return false;
+        }
+        match (gpa - self.aperture.base, data.len()) {
+            (0x008, 4) => {
+                let typer = (self.spis.start << 16) | (self.spis.end - self.spis.start);
+                data.copy_from_slice(&typer.to_le_bytes());
+            }
+            // MSI_IIDR advertises architecture v0 with zero identification fields.
+            // Reserved locations, unsupported widths and aperture padding are RAZ.
+            _ => data.fill(0),
+        }
+        true
+    }
+
+    fn write(&self, vm: &VmFd, gpa: u64, data: &[u8]) -> Result<bool, Error> {
+        if !self.aperture.contains(gpa, data.len() as u64) {
+            return Ok(false);
+        }
+        if let (0x040, [lo, hi] | [lo, hi, _, _]) = (gpa - self.aperture.base, data) {
+            let intid = u32::from(u16::from_le_bytes([*lo, *hi])) & 0x3ff;
+            if self.spis.contains(&intid) {
+                let irq = (KVM_ARM_IRQ_TYPE_SPI << KVM_ARM_IRQ_TYPE_SHIFT) | intid;
+                // Keep the line pulse intact across CPU owners.
+                let _pulse = self.pulse.lock().expect("GICv2m pulse lock poisoned");
+                for (active, phase) in [(true, "assert"), (false, "deassert")] {
+                    vm.set_irq_line(irq, active)
+                        .map_err(|error| Error::GicMsiWrite {
+                            gpa,
+                            size: data.len(),
+                            intid,
+                            phase,
+                            source: io(error),
+                        })?;
+                }
+            }
+        }
+        Ok(true)
+    }
 }
 
 #[derive(Debug)]
@@ -342,19 +447,22 @@ impl Vm {
     }
 
     #[cfg(target_arch = "aarch64")]
-    pub(crate) fn new_with_gic(gic: &crate::imp::Aarch64Substrate) -> Result<Self, Error> {
+    pub(crate) fn new_with_gic(gic: crate::imp::Aarch64Substrate) -> Result<Self, Error> {
         let kvm = Kvm::new().map_err(io).map_err(Error::OpenKvm)?;
         let api = kvm.get_api_version();
         if api != 12 {
             return Err(Error::ApiVersion(api));
         }
         let vm = kvm.create_vm().map_err(io).map_err(Error::CreateVm)?;
-        let vgic = create_vgic(&vm, gic)?;
+        let fd = create_vgic(&vm, &gic)?;
         Ok(Self {
             inner: Arc::new(VmInner {
                 kvm,
                 vm,
-                vgic: Some(vgic),
+                vgic: Some(Vgic {
+                    fd,
+                    msi_frame: gic.msi_frame,
+                }),
                 vgic_initialized: AtomicBool::new(false),
                 memory: Mutex::new(MemoryRegistration::Empty),
             }),
@@ -367,8 +475,24 @@ impl Vm {
             return Ok(());
         }
         if let Some(vgic) = self.inner.vgic.as_ref() {
-            init_vgic(vgic)?;
+            init_vgic(&vgic.fd)?;
             self.inner.vgic_initialized.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn msi_frame(&self) -> Option<&GicV2mFrame> {
+        self.inner.vgic.as_ref().map(|vgic| &vgic.msi_frame)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) fn check_msi_window(&self, window: AddressRange) -> Result<(), Error> {
+        if self.msi_frame().is_some_and(|frame| frame.overlaps(window)) {
+            return Err(Error::GicMsiMmioOverlap {
+                base: window.base,
+                size: window.size,
+            });
         }
         Ok(())
     }
@@ -389,6 +513,7 @@ impl Vm {
                 .vgic
                 .as_ref()
                 .unwrap()
+                .fd
                 .get_device_attr(&mut attribute)
                 .unwrap();
         }
@@ -562,7 +687,7 @@ impl Vm {
 
         Ok(Vcpu {
             fd,
-            _vm: self.clone(),
+            vm: self.clone(),
             idx,
             #[cfg(target_arch = "x86_64")]
             xsave_size: (self.inner.vm.check_extension_int(Cap::Xsave2) as usize)
@@ -576,7 +701,11 @@ impl Vm {
 pub(crate) struct Vcpu {
     // The CPU descriptor must close before its VM/RAM context can be dropped.
     fd: VcpuFd,
-    _vm: Vm,
+    #[cfg_attr(
+        target_arch = "x86_64",
+        expect(dead_code, reason = "retains the VM and RAM")
+    )]
+    vm: Vm,
     idx: u32,
     #[cfg(target_arch = "x86_64")]
     xsave_size: usize,
@@ -770,11 +899,9 @@ impl Vcpu {
         Ok(())
     }
 
-    /// Run the vCPU until the next exit. PIO and MMIO reads are
-    /// handled inline via the supplied callbacks — the response is
-    /// written into `kvm_run.io.data` / `kvm_run.mmio.data` before
-    /// this call returns so the guest sees the value at its next
-    /// instruction.
+    /// Run until the next owner-visible exit. PIO and MMIO reads fill
+    /// KVM's response buffer inline. On Arm the VM's MSI frame is handled
+    /// here before ordinary MMIO dispatch.
     ///
     /// `mmio_read(addr, &mut data)` returns `true` if the read was
     /// handled (`data` filled). `false` leaves the KVM-supplied
@@ -800,7 +927,16 @@ impl Vcpu {
                 return Ok(VmExit::Interrupted);
             }
             match self.fd.run() {
-                Ok(e) => break e,
+                Ok(exit) => {
+                    #[cfg(target_arch = "aarch64")]
+                    if let VcpuExit::MmioWrite(gpa, data) = &exit
+                        && let Some(frame) = self.vm.msi_frame()
+                        && frame.write(self.vm.fd(), *gpa, data)?
+                    {
+                        continue;
+                    }
+                    break exit;
+                }
                 Err(e) if e.errno() == nix::libc::EAGAIN => continue,
                 Err(e) if e.errno() == nix::libc::EINTR => return Ok(VmExit::Interrupted),
                 Err(e) => return Err(Error::RunVcpu(self.idx, io(e))),
@@ -831,6 +967,14 @@ impl Vcpu {
         // Handle MMIO read in-place.
         if let kvm_ioctls::VcpuExit::MmioRead(addr, data) = exit {
             let size = data.len() as u8;
+            #[cfg(target_arch = "aarch64")]
+            if self
+                .vm
+                .msi_frame()
+                .is_some_and(|frame| frame.read(addr, data))
+            {
+                return Ok(VmExit::MmioRead { addr, size });
+            }
             if !mmio_read(addr, data) {
                 // Leave KVM's pre-zeroed buffer — matches real hardware
                 // "no device" all-zeros on unmapped MMIO.
@@ -1253,13 +1397,8 @@ mod arm_bsp_tests {
             let ranges = arm_v82::RANGES.map(|range| (range.gpa, range.size));
             let backing = Arc::new(crate::memory::MappedMemory::test_backing(&ranges).unwrap());
             let memory = backing.guest_memory();
-            let vm = Vm::new_with_gic(&crate::imp::Aarch64Substrate {
-                dist_base: 0x0800_0000,
-                redist_base: 0x080a_0000,
-                vcpus: count,
-                nr_irqs: 128,
-            })
-            .expect("native ARM KVM is required");
+            let vm = Vm::new_with_gic(crate::imp::Aarch64Substrate::test_native(count, 128))
+                .expect("native ARM KVM is required");
             vm.attach_memory(backing).unwrap();
             let probe = arm_v82::NativeOperations::new(memory, count);
             let (all_ready, gic, results) = std::thread::scope(|scope| {
@@ -1358,13 +1497,8 @@ mod arm_bsp_tests {
         use vm_memory::GuestAddress;
         let backing = Arc::new(crate::memory::MappedMemory::test_backing(&[(0, 0x4000)]).unwrap());
         let memory = TestGuestMemory::from_owner(backing.guest_memory());
-        let vm = Vm::new_with_gic(&crate::imp::Aarch64Substrate {
-            dist_base: 0x0800_0000,
-            redist_base: 0x080a_0000,
-            vcpus: 2,
-            nr_irqs: 128,
-        })
-        .expect("native ARM KVM is required");
+        let vm = Vm::new_with_gic(crate::imp::Aarch64Substrate::test_native(2, 128))
+            .expect("native ARM KVM is required");
         vm.attach_memory(backing).unwrap();
         for (base, instructions) in [(0, arm_v81::PROGRAM), (0xa00, arm_v81::SYNC_HANDLER)] {
             for (index, instruction) in instructions.iter().enumerate() {
@@ -1483,13 +1617,8 @@ mod arm_bsp_tests {
         use vm_memory::GuestAddress;
         let backing = Arc::new(crate::memory::MappedMemory::test_backing(&[(0, 0x2000)]).unwrap());
         let memory = TestGuestMemory::from_owner(backing.guest_memory());
-        let vm = Vm::new_with_gic(&crate::imp::Aarch64Substrate {
-            dist_base: 0x0800_0000,
-            redist_base: 0x080a_0000,
-            vcpus: 1,
-            nr_irqs: 128,
-        })
-        .expect("native ARM KVM is required");
+        let vm = Vm::new_with_gic(crate::imp::Aarch64Substrate::test_native(1, 128))
+            .expect("native ARM KVM is required");
         vm.attach_memory(backing).unwrap();
         // Independent architectural opcodes: MRS X0, <register>; STR X0,[X1,#n].
         let inputs = [
@@ -1615,7 +1744,7 @@ mod arm_bsp_tests {
         fd.vcpu_init(&init).expect("initialize BSP");
         let mut bsp = Vcpu {
             fd,
-            _vm: vm.clone(),
+            vm: vm.clone(),
             idx: 0,
         };
         init.features[0] |= 1 << KVM_ARM_VCPU_POWER_OFF;
