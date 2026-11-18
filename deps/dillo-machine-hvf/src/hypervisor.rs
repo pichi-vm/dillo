@@ -783,6 +783,14 @@ fn gpr(n: u8) -> Reg {
 mod arm_v81;
 
 #[cfg(test)]
+#[path = "../../dillo-machine/tests/fixtures/arm_timer_probe.rs"]
+mod arm_timer_probe;
+
+#[cfg(test)]
+#[path = "timer_probe.rs"]
+mod timer_probe;
+
+#[cfg(test)]
 #[path = "../../dillo-machine/tests/fixtures/arm_v82.rs"]
 mod arm_v82;
 

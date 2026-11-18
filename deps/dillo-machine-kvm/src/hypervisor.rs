@@ -1536,6 +1536,14 @@ mod bsp_tests {
 mod arm_v81;
 
 #[cfg(all(test, target_arch = "aarch64"))]
+#[path = "../../dillo-machine/tests/fixtures/arm_timer_probe.rs"]
+mod arm_timer_probe;
+
+#[cfg(all(test, target_arch = "aarch64"))]
+#[path = "timer_probe.rs"]
+mod timer_probe;
+
+#[cfg(all(test, target_arch = "aarch64"))]
 #[path = "../../dillo-machine/tests/fixtures/arm_v82.rs"]
 mod arm_v82;
 
