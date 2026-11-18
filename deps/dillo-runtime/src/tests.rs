@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use dillo_machine::{LaunchConfig, Memory, RamRange};
+use dillo_machine::LaunchConfig;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::AtomicUsize;
@@ -325,13 +325,6 @@ impl Drop for Runner {
             .record(Event::Destroyed(self.index, thread::current().id()));
     }
 }
-struct TestMemory;
-impl Memory for TestMemory {
-    type Error = std::io::Error;
-    fn from_ranges(_: &[RamRange]) -> Result<Self, Self::Error> {
-        Ok(Self)
-    }
-}
 enum DeviceFailurePhase {
     None,
     MachinePreparation,
@@ -368,7 +361,6 @@ impl Machine for TestMachine {
     type Error = std::io::Error;
     type Platform = ();
     type CpuPreparation = Input;
-    type Memory = TestMemory;
     fn cpu_preparation(&mut self, index: u32, _: CpuProfile) -> Result<Input, Self::Error> {
         assert_ne!(
             self.construction_panic,

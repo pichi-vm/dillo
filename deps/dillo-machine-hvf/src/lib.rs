@@ -168,6 +168,19 @@ mod imp {
             })
         }
 
+        fn attach_guest_memory(&mut self, ranges: &[RamRange]) -> Result<(), Error> {
+            self.inner
+                .attach(Arc::new(crate::memory::MappedMemory::new(ranges)?))?;
+            let guest_mem = self.inner.guest_memory()?;
+            self.shared_memory = vec![Arc::new(
+                dillo_machine::memory::MappedSharedMemory::for_guest_memory(
+                    guest_mem,
+                    dillo_machine::memory::SharedAccess::ReadWrite,
+                ),
+            )];
+            Ok(())
+        }
+
         fn mmio_bus(&self) -> Arc<Mutex<MmioBus>> {
             Arc::clone(&self.mmio_bus)
         }
@@ -481,7 +494,6 @@ mod imp {
         type Error = Error;
         type Platform = PlatformMachine;
         type CpuPreparation = CpuPreparation;
-        type Memory = Memory;
 
         fn cpu_preparation(
             &mut self,
@@ -523,14 +535,17 @@ mod imp {
         fn from_launch_config(
             config: LaunchConfig<'_, Self::Platform>,
         ) -> Result<Self, Self::Error> {
+            let required = config
+                .platform
+                .required_address_bits_for_ram(config.ram.iter().map(|r| (r.gpa, r.size)))
+                .map_err(|error| Error::Hv(error.to_string()))?;
             let parsed: Tree<'_> = Tree::parse(config.platform.dtb()).map_err(Error::ParseDtb)?;
             let mut tree = OwnedTree::materialize(&parsed);
             let gic = crate::hypervisor::GicParams::from_devtree(&mut tree)?
                 .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
-            let required = config
-                .min_addr_space_bits
-                .max(config.platform.min_addr_space_bits());
-            Self::new(&gic, required, config.vcpus)
+            let mut vm = Self::new(&gic, required, config.vcpus)?;
+            vm.attach_guest_memory(&config.ram)?;
+            Ok(vm)
         }
 
         fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Self::Error> {
@@ -555,39 +570,6 @@ mod imp {
             // The shared owner runtime has joined every old CPU before this
             // existing warm-reset hook. Do not inherit an old CPU_ON request.
             self.cpu_power = Arc::new(CpuPower::new(self.cpu_power.slots.len() as u32));
-            Ok(())
-        }
-    }
-
-    /// Allocated RAM is consumed by attachment to exactly one native machine.
-    #[derive(Debug)]
-    pub struct Memory {
-        backing: Arc<crate::memory::MappedMemory>,
-    }
-
-    impl dillo_machine::Memory for Memory {
-        type Error = Error;
-
-        fn from_ranges(ranges: &[RamRange]) -> Result<Self, Self::Error> {
-            Ok(Self {
-                backing: Arc::new(crate::memory::MappedMemory::new(ranges)?),
-            })
-        }
-    }
-
-    impl Attach<Memory> for Vm {
-        type Error = Error;
-        type Output = ();
-
-        fn attach(&mut self, item: Memory) -> Result<Self::Output, Self::Error> {
-            self.inner.attach(item.backing)?;
-            let guest_mem = self.inner.guest_memory()?;
-            self.shared_memory = vec![Arc::new(
-                dillo_machine::memory::MappedSharedMemory::for_guest_memory(
-                    guest_mem,
-                    dillo_machine::memory::SharedAccess::ReadWrite,
-                ),
-            )];
             Ok(())
         }
     }
@@ -1221,13 +1203,10 @@ mod imp {
                     msi_intid_count: 32,
                 };
                 let mut vm = Vm::new(&gic, 36, 2).expect("native HVF/GIC is required");
-                vm.attach(
-                    <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
-                        gpa: 0,
-                        size: 0x4000,
-                    }])
-                    .unwrap(),
-                )
+                vm.attach_guest_memory(&[RamRange {
+                    gpa: 0,
+                    size: 0x4000,
+                }])
                 .unwrap();
                 let profile = dillo_machine::CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0);
                 let base = 0;
@@ -1371,13 +1350,10 @@ mod imp {
                 msi_intid_count: 32,
             };
             let mut vm = Vm::new(&gic, 36, 1).unwrap();
-            vm.attach(
-                <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
-                    gpa: 0,
-                    size: 0x4000,
-                }])
-                .unwrap(),
-            )
+            vm.attach_guest_memory(&[RamRange {
+                gpa: 0,
+                size: 0x4000,
+            }])
             .unwrap();
             let probe = vm.inner.mapping_probe(0);
             let alias = probe.alias();
@@ -1408,13 +1384,10 @@ mod imp {
             let mut replacement =
                 Vm::new(&gic, 36, 1).expect("successful retirement reopens process slot");
             replacement
-                .attach(
-                    <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
-                        gpa: 0,
-                        size: 0x4000,
-                    }])
-                    .unwrap(),
-                )
+                .attach_guest_memory(&[RamRange {
+                    gpa: 0,
+                    size: 0x4000,
+                }])
                 .unwrap();
             let replacement_probe = replacement.inner.mapping_probe(0);
             replacement.write_guest(8, &[0x33, 0x44]).unwrap();
@@ -1482,13 +1455,10 @@ mod imp {
                 msi_intid_count: 32,
             };
             let mut vm = Vm::new(&gic, 36, 1).unwrap();
-            vm.attach(
-                <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
-                    gpa: 0,
-                    size: 0x4000,
-                }])
-                .unwrap(),
-            )
+            vm.attach_guest_memory(&[RamRange {
+                gpa: 0,
+                size: 0x4000,
+            }])
             .unwrap();
             let probe = vm.inner.mapping_probe(0);
             let spi = vm.create_line_interrupt(8);
@@ -1502,13 +1472,10 @@ mod imp {
             assert!(!probe.is_mapped());
 
             let mut vm = Vm::new(&gic, 36, 1).unwrap();
-            vm.attach(
-                <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
-                    gpa: 0,
-                    size: 0x4000,
-                }])
-                .unwrap(),
-            )
+            vm.attach_guest_memory(&[RamRange {
+                gpa: 0,
+                size: 0x4000,
+            }])
             .unwrap();
             let probe = vm.inner.mapping_probe(0);
             let domain = GicMessageInterruptDomain::new(1, vm.inner.cpu_instance());
@@ -1560,13 +1527,10 @@ mod imp {
                 vm.cpu_preparation(0, profile).is_err(),
                 "RAM absence must not reserve a CPU slot"
             );
-            vm.attach(
-                <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
-                    gpa: 0,
-                    size: 0x4000,
-                }])
-                .unwrap(),
-            )
+            vm.attach_guest_memory(&[RamRange {
+                gpa: 0,
+                size: 0x4000,
+            }])
             .unwrap();
             let probe = vm.inner.mapping_probe(0);
             let preparation = vm.cpu_preparation(0, profile).unwrap();
@@ -1601,13 +1565,10 @@ mod imp {
             assert!(!probe.is_mapped());
 
             let mut vm = Vm::new(&gic, 36, 1).unwrap();
-            vm.attach(
-                <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
-                    gpa: 0,
-                    size: 0x4000,
-                }])
-                .unwrap(),
-            )
+            vm.attach_guest_memory(&[RamRange {
+                gpa: 0,
+                size: 0x4000,
+            }])
             .unwrap();
             let probe = vm.inner.mapping_probe(0);
             let preparation = vm.cpu_preparation(0, profile).unwrap();
@@ -1713,12 +1674,11 @@ mod imp {
                 msi_intid_count: 32,
             };
             let mut vm = Vm::new(&gic, 36, 2).expect("native HVF/GIC is required");
-            let memory = <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
+            vm.attach_guest_memory(&[RamRange {
                 gpa: 0,
                 size: 0x4000,
             }])
             .unwrap();
-            vm.attach(memory).unwrap();
             let profile = dillo_machine::CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0);
             let ap = vm.cpu_preparation(1, profile).unwrap();
             let bsp = vm.cpu_preparation(0, profile).unwrap();

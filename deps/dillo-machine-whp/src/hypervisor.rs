@@ -14,8 +14,9 @@ use thiserror::Error;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 use windows_sys::Win32::System::Hypervisor::{WHV_REGISTER_NAME, WHV_REGISTER_VALUE};
 
+use crate::VmExit;
 use crate::cpuid_x86;
-use crate::{Memory, VmExit};
+use crate::memory::Memory;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -238,10 +239,7 @@ impl Vm {
 
     #[cfg(test)]
     pub(crate) fn add_memory(&mut self, base: u64, size: u64) -> Result<(), Error> {
-        let memory = <Memory as dillo_machine::Memory>::from_ranges(&[dillo_machine::RamRange {
-            gpa: base,
-            size,
-        }])?;
+        let memory = Memory::from_ranges(&[dillo_machine::RamRange { gpa: base, size }])?;
         self.set_memory(memory)
     }
 
@@ -2245,12 +2243,11 @@ pub(crate) mod memory_tests {
         .unwrap();
         vm.write_guest(0x10100, &[0x5a, 0, 0xee]).unwrap();
         let probe = vm.allocation_probe(0);
-        let candidate =
-            <Memory as dillo_machine::Memory>::from_ranges(&[dillo_machine::RamRange {
-                gpa: 0x10000,
-                size: 0x1000,
-            }])
-            .unwrap();
+        let candidate = Memory::from_ranges(&[dillo_machine::RamRange {
+            gpa: 0x10000,
+            size: 0x1000,
+        }])
+        .unwrap();
         assert!(matches!(
             vm.set_memory(candidate),
             Err(Error::MemoryAlreadyRegistered)
@@ -2284,7 +2281,7 @@ pub(crate) mod memory_tests {
             return;
         }
         let mut vm = Vm::new().expect("native WHP is required");
-        let memory = <Memory as dillo_machine::Memory>::from_ranges(&[
+        let memory = Memory::from_ranges(&[
             dillo_machine::RamRange {
                 gpa: 0x10000,
                 size: 0x1000,

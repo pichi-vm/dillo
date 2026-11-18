@@ -4,7 +4,7 @@
 use super::delegation_tests::{BaseChannel, base, image};
 use super::*;
 use dillo_launch::pmi_parse::{self, Error as ParseError};
-use dillo_machine::{CpuProfile, LaunchConfig, Machine, Memory, RamRange, VcpuStop};
+use dillo_machine::{CpuProfile, LaunchConfig, Machine, VcpuStop};
 use serde_json::json;
 
 /// A current-schema PE with independent source sections and authored actions.
@@ -137,7 +137,6 @@ impl RecordingMachine {
 
 struct UnusedCpu;
 struct UnusedCpuInput;
-struct UnusedMemory;
 
 impl dillo_machine::CpuRunner for UnusedCpu {
     type Error = std::io::Error;
@@ -164,12 +163,6 @@ impl dillo_machine::CpuPreparation for UnusedCpuInput {
         Ok(UnusedCpu)
     }
 }
-impl Memory for UnusedMemory {
-    type Error = std::io::Error;
-    fn from_ranges(_: &[RamRange]) -> Result<Self, Self::Error> {
-        Ok(Self)
-    }
-}
 impl Machine for RecordingMachine {
     fn device_failures(&self) -> dillo_machine::execution::DeviceFailureObserver {
         dillo_machine::execution::DeviceFailureReporter::default().observer()
@@ -180,7 +173,6 @@ impl Machine for RecordingMachine {
     fn cpu_preparation(&mut self, _: u32, _: CpuProfile) -> Result<UnusedCpuInput, Self::Error> {
         Ok(UnusedCpuInput)
     }
-    type Memory = UnusedMemory;
     fn guest_address_bits() -> Result<u32, Self::Error> {
         Ok(48)
     }

@@ -32,8 +32,8 @@ pub struct LaunchConfig<'a, Platform> {
     /// The backend's surveyed platform, borrowed for native construction.
     pub platform: &'a Platform,
     pub vcpus: u32,
-    /// Required width of every planned RAM extent.
-    pub min_addr_space_bits: u32,
+    /// The exact ordered RAM extents requested for this machine.
+    pub ram: Vec<RamRange>,
 }
 
 /// One DTB/launch-derived guest RAM range.
@@ -139,15 +139,6 @@ pub trait LaunchInput: std::fmt::Debug + Sized + 'static {
     fn view(&self) -> std::io::Result<Self::View<'_>>;
 }
 
-/// Backend-owned memory input constructed from DTB-derived RAM ranges.
-pub trait Memory: 'static {
-    type Error: std::error::Error + Send + Sync + 'static;
-
-    fn from_ranges(ranges: &[RamRange]) -> Result<Self, Self::Error>
-    where
-        Self: Sized;
-}
-
 /// Read-only observation of runtime's monotonic termination request.
 pub trait CpuTermination: Send + Sync {
     fn is_requested(&self) -> bool;
@@ -187,7 +178,6 @@ pub trait Machine: Sized + 'static {
     /// Platform input accepted by this Machine's launch constructor.
     type Platform;
     type CpuPreparation: CpuPreparation<Error = Self::Error>;
-    type Memory: Memory<Error = Self::Error>;
 
     /// Observe the sticky device-failure record belonging to this machine.
     fn device_failures(&self) -> execution::DeviceFailureObserver;
@@ -204,7 +194,7 @@ pub trait Machine: Sized + 'static {
     /// Does not allocate RAM or execute a guest.
     fn guest_address_bits() -> Result<u32, Self::Error>;
 
-    /// Construct the backend VM from selected-machine launch facts.
+    /// Construct the backend VM with its admitted guest RAM registered.
     fn from_launch_config(config: LaunchConfig<'_, Self::Platform>) -> Result<Self, Self::Error>;
 
     /// Write launch data into guest RAM through backend-owned memory access.
@@ -243,7 +233,6 @@ mod tests {
     use std::fmt;
 
     use super::*;
-    use crate::attachment::Attach;
 
     #[test]
     fn arm_physical_width_uses_parange_only() {
@@ -290,16 +279,6 @@ mod tests {
         }
     }
 
-    struct TestMemory;
-
-    impl Memory for TestMemory {
-        type Error = TestError;
-
-        fn from_ranges(_ranges: &[RamRange]) -> Result<Self, Self::Error> {
-            Ok(Self)
-        }
-    }
-
     struct TestCpu {
         stop: VcpuStop,
     }
@@ -313,15 +292,6 @@ mod tests {
 
     struct TestMachine;
 
-    impl Attach<TestMemory> for TestMachine {
-        type Error = TestError;
-        type Output = ();
-
-        fn attach(&mut self, _item: TestMemory) -> Result<Self::Output, Self::Error> {
-            Ok(())
-        }
-    }
-
     impl Machine for TestMachine {
         fn device_failures(&self) -> execution::DeviceFailureObserver {
             execution::DeviceFailureReporter::default().observer()
@@ -332,7 +302,6 @@ mod tests {
         fn cpu_preparation(&mut self, _: u32, _: CpuProfile) -> Result<TestCpuState, Self::Error> {
             Ok(TestCpuState)
         }
-        type Memory = TestMemory;
 
         fn guest_address_bits() -> Result<u32, Self::Error> {
             Ok(48)
@@ -355,13 +324,15 @@ mod tests {
 
     #[test]
     fn machine_uses_common_launch_ram_and_vcpu_api() {
-        let mut machine = TestMachine;
-        let memory = TestMemory::from_ranges(&[RamRange {
-            gpa: 0x1000,
-            size: 0x2000,
-        }])
-        .expect("memory constructed");
-        Attach::attach(&mut machine, memory).expect("RAM attached");
+        let mut machine = TestMachine::from_launch_config(LaunchConfig {
+            platform: &(),
+            vcpus: 1,
+            ram: vec![RamRange {
+                gpa: 0x1000,
+                size: 0x2000,
+            }],
+        })
+        .expect("machine constructed");
         machine
             .write_guest(0x1000, b"boot")
             .expect("guest write accepted");

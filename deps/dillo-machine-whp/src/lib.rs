@@ -8,8 +8,6 @@ mod hypervisor;
 mod launch_input;
 mod memory;
 
-pub use memory::Memory;
-
 pub use launch_input::CapturedLaunchInput;
 mod ioapic;
 
@@ -42,7 +40,7 @@ mod imp {
         MessageInterrupt, MessageInterruptDomain,
     };
     use dillo_machine::memory::{AddressRange, SharedMemory};
-    use dillo_machine::{Host, HostArchitecture, LaunchConfig, VcpuStop};
+    use dillo_machine::{Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
     use dillo_mmio::{MmioBus, MmioDevice, MmioWriteOutcome};
     #[cfg(test)]
     use vm_memory::GuestAddress;
@@ -51,7 +49,8 @@ mod imp {
     pub use crate::hypervisor::Error;
     use crate::hypervisor::InterruptController;
     use crate::ioapic::IoApic;
-    use crate::{CapturedLaunchInput, Memory, VmExit};
+    use crate::memory::Memory;
+    use crate::{CapturedLaunchInput, VmExit};
 
     fn install_signal_watchers(_supervisor_shutdown: &'static AtomicBool) {}
 
@@ -121,12 +120,8 @@ mod imp {
             })
         }
 
-        fn set_memory(&mut self, memory: Memory) -> Result<(), Error> {
-            self.inner.set_memory(memory)
-        }
-
-        fn attach_guest_memory(&mut self, memory: Memory) -> Result<(), Error> {
-            self.set_memory(memory)?;
+        fn attach_guest_memory(&mut self, ranges: &[RamRange]) -> Result<(), Error> {
+            self.inner.set_memory(Memory::from_ranges(ranges)?)?;
             let guest_mem = self.guest_memory()?;
             self.shared_memory = vec![Arc::new(
                 dillo_machine::memory::MappedSharedMemory::for_guest_memory(
@@ -205,7 +200,6 @@ mod imp {
         type Error = Error;
         type Platform = PlatformMachine;
         type CpuPreparation = CpuPreparation;
-        type Memory = Memory;
 
         fn cpu_preparation(
             &mut self,
@@ -235,20 +229,22 @@ mod imp {
         fn from_launch_config(
             config: LaunchConfig<'_, Self::Platform>,
         ) -> Result<Self, Self::Error> {
+            let required = config
+                .platform
+                .required_address_bits_for_ram(config.ram.iter().map(|r| (r.gpa, r.size)))
+                .map_err(|error| Error::AddressSpace(error.to_string()))?;
             let parsed: Tree<'_> = Tree::parse(config.platform.dtb()).map_err(Error::ParseDtb)?;
             let mut tree = OwnedTree::materialize(&parsed);
             let substrate = WhpX86Substrate::from_devtree(&mut tree)?
                 .ok_or(Error::MissingSubstrate("/ioapic"))?;
-            let vm = Self::new_x86_64(config.vcpus, Some(substrate.ioapic))?;
+            let mut vm = Self::new_x86_64(config.vcpus, Some(substrate.ioapic))?;
             let available = Self::guest_address_bits()?;
-            let required = config
-                .min_addr_space_bits
-                .max(config.platform.min_addr_space_bits());
             if required > available {
                 return Err(Error::AddressSpace(format!(
                     "launch requires {required} bits; backend provides {available}"
                 )));
             }
+            vm.attach_guest_memory(&config.ram)?;
             Ok(vm)
         }
 
@@ -346,15 +342,6 @@ mod imp {
             Ok(Some(Self {
                 ioapic: IoApic::new(AddressRange { base, size }),
             }))
-        }
-    }
-
-    impl Attach<Memory> for Vm {
-        type Error = Error;
-        type Output = ();
-
-        fn attach(&mut self, item: Memory) -> Result<Self::Output, Self::Error> {
-            self.attach_guest_memory(item)
         }
     }
 
@@ -870,9 +857,7 @@ mod imp {
     mod owner_tests {
         use super::*;
         use dillo_machine::RamRange;
-        use dillo_machine::{
-            CpuInterrupt as _, CpuPreparation as _, CpuRunner as _, Machine as _, Memory as _,
-        };
+        use dillo_machine::{CpuInterrupt as _, CpuPreparation as _, CpuRunner as _, Machine as _};
         use std::thread;
 
         #[test]
@@ -912,13 +897,10 @@ mod imp {
             for outcome in 0..6 {
                 let mut vm = Vm::new_x86_64(2, None).expect("native WHP is required");
                 let base = 0xffff_f000;
-                vm.attach(
-                    Memory::from_ranges(&[RamRange {
-                        gpa: base,
-                        size: 0x1000,
-                    }])
-                    .unwrap(),
-                )
+                vm.attach_guest_memory(&[RamRange {
+                    gpa: base,
+                    size: 0x1000,
+                }])
                 .unwrap();
                 let profile = dillo_machine::CpuProfile::X86_64(pmi::x86_64::Profile::V1);
 
@@ -1057,13 +1039,10 @@ mod imp {
                 return;
             }
             let mut vm = Vm::new_x86_64(1, None).expect("native WHP is required");
-            vm.attach(
-                Memory::from_ranges(&[RamRange {
-                    gpa: 0x10000,
-                    size: 0x1000,
-                }])
-                .unwrap(),
-            )
+            vm.attach_guest_memory(&[RamRange {
+                gpa: 0x10000,
+                size: 0x1000,
+            }])
             .unwrap();
             vm.write_guest(0x10100, &[0x11, 0x22]).unwrap();
             let original = vm.inner.allocation_probe(0);
@@ -1078,13 +1057,10 @@ mod imp {
             original.assert_retained();
             let mut replacement = Vm::new_x86_64(1, None).unwrap();
             replacement
-                .attach(
-                    Memory::from_ranges(&[RamRange {
-                        gpa: 0x10000,
-                        size: 0x1000,
-                    }])
-                    .unwrap(),
-                )
+                .attach_guest_memory(&[RamRange {
+                    gpa: 0x10000,
+                    size: 0x1000,
+                }])
                 .unwrap();
             replacement.write_guest(0x10100, &[0x33, 0x44]).unwrap();
             let fresh = replacement.inner.allocation_probe(0);
@@ -1122,13 +1098,10 @@ mod imp {
                 vm.cpu_preparation(0, profile),
                 Err(Error::MemoryNotReady)
             ));
-            vm.attach(
-                Memory::from_ranges(&[RamRange {
-                    gpa: 0x10000,
-                    size: 0x1000,
-                }])
-                .unwrap(),
-            )
+            vm.attach_guest_memory(&[RamRange {
+                gpa: 0x10000,
+                size: 0x1000,
+            }])
             .unwrap();
             // Native progress marker, followed by an infinite guest loop.
             vm.write_guest(0x10000, &[0xe6, 0x42, 0xeb, 0xfe]).unwrap();
@@ -1250,13 +1223,10 @@ mod imp {
             };
             let mut vm =
                 Vm::new_x86_64(1, Some(IoApic::new(window))).expect("native WHP is required");
-            vm.attach(
-                Memory::from_ranges(&[RamRange {
-                    gpa: 0x10000,
-                    size: 0x1000,
-                }])
-                .unwrap(),
-            )
+            vm.attach_guest_memory(&[RamRange {
+                gpa: 0x10000,
+                size: 0x1000,
+            }])
             .unwrap();
             let original = vm.inner.allocation_probe(0);
             let ioapic = Arc::clone(vm.ioapic.as_ref().unwrap());
@@ -1273,13 +1243,10 @@ mod imp {
             original.assert_reclaimed();
 
             let mut vm = Vm::new_x86_64(1, None).unwrap();
-            vm.attach(
-                Memory::from_ranges(&[RamRange {
-                    gpa: 0x10000,
-                    size: 0x1000,
-                }])
-                .unwrap(),
-            )
+            vm.attach_guest_memory(&[RamRange {
+                gpa: 0x10000,
+                size: 0x1000,
+            }])
             .unwrap();
             let original = vm.inner.allocation_probe(0);
             let domain = FixedMessageInterruptDomain::new(vm.fixed_interrupt_requester(), 1);
@@ -1316,13 +1283,10 @@ mod imp {
             // and VM teardown, matching the hypervisor's other native tests.
             let _guard = crate::hypervisor::whp_test_lock();
             let mut vm = Vm::new_x86_64(2, None).expect("native WHP is required");
-            vm.attach(
-                Memory::from_ranges(&[RamRange {
-                    gpa: 0xffff_f000,
-                    size: 0x1000,
-                }])
-                .unwrap(),
-            )
+            vm.attach_guest_memory(&[RamRange {
+                gpa: 0xffff_f000,
+                size: 0x1000,
+            }])
             .unwrap();
             vm.write_guest(0xffff_fff0, &[0xeb, 0xfe]).unwrap();
             let profile = dillo_machine::CpuProfile::X86_64(pmi::x86_64::Profile::V1);

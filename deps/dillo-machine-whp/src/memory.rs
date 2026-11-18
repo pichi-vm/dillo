@@ -14,7 +14,7 @@ use crate::hypervisor::Error;
 
 /// Machine's fixed RAM layout, native views and private section capabilities.
 #[derive(Debug)]
-pub struct Memory {
+pub(crate) struct Memory {
     guest: GuestMemoryMmap,
     // A mapped view keeps storage alive by itself. Machine additionally retains
     // the original capability; byte-access exports never receive this handle.
@@ -96,12 +96,8 @@ impl Memory {
             MmapRegion::from_mapping_handle(section, 0, size)
         }
     }
-}
 
-impl dillo_machine::Memory for Memory {
-    type Error = Error;
-
-    fn from_ranges(ranges: &[RamRange]) -> Result<Self, Self::Error> {
+    pub(crate) fn from_ranges(ranges: &[RamRange]) -> Result<Self, Error> {
         Self::allocate(
             ranges,
             #[cfg(test)]
@@ -114,7 +110,6 @@ impl dillo_machine::Memory for Memory {
 mod tests {
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
 
-    use dillo_machine::Memory as _;
     use vm_memory::{Bytes, GuestMemory, GuestMemoryRegion, VolatileMemory};
     use windows_sys::Win32::Foundation::{
         DuplicateHandle, GetHandleInformation, HANDLE_FLAG_INHERIT,

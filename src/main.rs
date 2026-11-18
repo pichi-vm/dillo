@@ -2094,7 +2094,7 @@ mod machine_select {
             InterruptRequirement, InterruptSource, MessageInterruptSource,
         };
         use dillo_machine::memory::AddressRange;
-        use dillo_machine::{LaunchConfig, Machine, Memory as MachineMemory, VcpuStop};
+        use dillo_machine::{LaunchConfig, Machine, VcpuStop};
         use dillo_mmio::syscon;
         use dillo_pci::PciRoot;
         use dillo_pci_virtio::VirtioPciAdapter;
@@ -2440,7 +2440,6 @@ mod machine_select {
         where
             E: std::error::Error + Send + Sync + 'static,
             M: Machine<Error = E, Platform = PlatformMachine> + dillo_machine::Host,
-            M: Attach<M::Memory, Error = E, Output = ()>,
             M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn DeviceAttachment>>,
             M: Attach<Arc<dillo_mmio_virtio::EmptySlot>, Error = E>,
             M: Attach<
@@ -2478,19 +2477,11 @@ mod machine_select {
             let mut vm = M::from_launch_config(LaunchConfig {
                 platform: &platform,
                 vcpus,
-                min_addr_space_bits: ranges
-                    .iter()
-                    .map(|r| u64::BITS - (r.gpa + r.size - 1).leading_zeros())
-                    .max()
-                    .unwrap_or(0),
+                ram: plan.into_ranges(),
             })
             .map_err(RunError::machine)?;
             let failures = vm.device_failures();
             let result = (|| {
-                crate::boot_trace::mark("vm_created");
-                let memory =
-                    M::Memory::from_ranges(&plan.into_ranges()).map_err(RunError::machine)?;
-                Attach::attach(&mut vm, memory).map_err(RunError::machine)?;
                 crate::boot_trace::mark("mem_attached");
                 recipe
                     .apply(&mut vm)
@@ -2558,6 +2549,57 @@ mod machine_select {
             use dillo_mmio::{MmioBus, MmioDevice, MmioWriteOutcome};
 
             #[test]
+            fn machine_constructor_refuses_unadmitted_ram() {
+                use dillo_machine::{Host, HostArchitecture};
+
+                let host_arch = <selected_machine::Vm as Host>::ARCH;
+                let arch = match host_arch {
+                    HostArchitecture::X86_64 => Arch::X86_64,
+                    HostArchitecture::Aarch64 => Arch::Aarch64,
+                };
+                let dtb = crate::launch::test_platform_base(host_arch, false, false);
+                let platform = PlatformMachine::survey(dtb, arch).expect("survey fixture platform");
+                let (gpa, size) = platform
+                    .placement_regions()
+                    .next()
+                    .expect("declared region");
+                let error = selected_machine::Vm::from_launch_config(LaunchConfig {
+                    platform: &platform,
+                    vcpus: 1,
+                    ram: vec![RamRange { gpa, size }],
+                })
+                .expect_err("RAM overlapping the platform must fail before native setup");
+                assert!(
+                    error.to_string().contains("overlaps a declared region"),
+                    "{error}"
+                );
+
+                #[cfg(target_os = "linux")]
+                {
+                    let available =
+                        selected_machine::Vm::guest_address_bits().expect("native KVM capacity");
+                    let error = selected_machine::Vm::from_launch_config(LaunchConfig {
+                        platform: &platform,
+                        vcpus: 1,
+                        ram: vec![RamRange {
+                            gpa: 1 << available,
+                            size: 2 << 20,
+                        }],
+                    })
+                    .expect_err("RAM exceeding KVM capacity must fail before allocation");
+                    let required = available + 1;
+                    assert!(
+                        matches!(
+                            &error,
+                            selected_machine::Error::AddressSpace(message)
+                                if message == &format!("launch requires {required} bits; backend provides {available}")
+                        ),
+                        "{error}"
+                    );
+                }
+            }
+
+            #[test]
             fn late_device_failure_preserves_prior_diagnostics_without_duplication() {
                 let failure = dillo_machine::execution::DeviceFailure {
                     participant: "blk request".into(),
@@ -2579,7 +2621,6 @@ mod machine_select {
 
             struct RefusedCpu;
             struct RefusedCpuInput;
-            struct RefusedMemory;
             struct RefusedMachine {
                 prepared: usize,
             }
@@ -2612,12 +2653,6 @@ mod machine_select {
                     panic!("failed launch executed a guest")
                 }
             }
-            impl dillo_machine::Memory for RefusedMemory {
-                type Error = std::io::Error;
-                fn from_ranges(_: &[RamRange]) -> Result<Self, Self::Error> {
-                    Ok(Self)
-                }
-            }
             impl Machine for RefusedMachine {
                 fn device_failures(&self) -> dillo_machine::execution::DeviceFailureObserver {
                     dillo_machine::execution::DeviceFailureReporter::default().observer()
@@ -2633,7 +2668,6 @@ mod machine_select {
                     self.prepared += 1;
                     Ok(RefusedCpuInput)
                 }
-                type Memory = RefusedMemory;
                 fn guest_address_bits() -> Result<u32, Self::Error> {
                     Ok(48)
                 }
@@ -2695,7 +2729,6 @@ mod machine_select {
                 type Error = std::io::Error;
                 type Platform = ();
                 type CpuPreparation = RefusedCpuInput;
-                type Memory = RefusedMemory;
 
                 fn device_failures(&self) -> dillo_machine::execution::DeviceFailureObserver {
                     self.failures.observer()
