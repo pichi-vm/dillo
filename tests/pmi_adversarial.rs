@@ -359,6 +359,8 @@ fn current_schema_accepts_both_architectures() {
     for (machine, profile, arch) in [
         (0x8664, "x86-64-v1", HostArch::X86_64),
         (0xaa64, "armv8.0-a", HostArch::Aarch64),
+        (0x8664, "x86-64-v3", HostArch::X86_64),
+        (0xaa64, "armv8.2-a", HostArch::Aarch64),
     ] {
         let parsed = parse(
             &Fixture::new(machine, profile, None).bytes(),
@@ -368,6 +370,31 @@ fn current_schema_accepts_both_architectures() {
             },
         )
         .expect("valid current schema");
+        assert_eq!(parsed.cpu_profile.as_str(), profile);
+        assert_eq!(parsed.actions.len(), 2);
+    }
+}
+
+#[test]
+fn omitted_profile_resolves_to_the_architecture_default() {
+    for (machine, profile, arch) in [
+        (0x8664, "x86-64-v1", HostArch::X86_64),
+        (0xaa64, "armv8.0-a", HostArch::Aarch64),
+    ] {
+        let mut fixture = Fixture::new(machine, profile, None);
+        let mut manifest: serde_json::Value =
+            ciborium::de::from_reader(fixture.manifest.as_slice()).unwrap();
+        manifest.as_object_mut().unwrap().remove("cpu:profile");
+        fixture.manifest.clear();
+        ciborium::ser::into_writer(&manifest, &mut fixture.manifest).unwrap();
+        let parsed = parse(
+            &fixture.bytes(),
+            &ParseOptions {
+                host_arch: arch,
+                memory_mib: 4096,
+            },
+        )
+        .expect("omitted profile uses the architecture default");
         assert_eq!(parsed.cpu_profile.as_str(), profile);
         assert_eq!(parsed.actions.len(), 2);
     }

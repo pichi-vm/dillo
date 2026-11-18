@@ -64,7 +64,7 @@ uninlined_format_args = "allow"
 
 [workspace.dependencies]
 # Cross-product shared crates (git deps)
-pmi = { git = "https://github.com/pichi-vm/pmi", branch = "main" }
+pmi = { git = "https://github.com/pichi-vm/pmi", rev = "b345e89b42dbb13572879102ece515726db701ed" }
 devtree = { git = "https://github.com/pichi-vm/devtree" }
 # Dev-only caching URL downloader (shared by arma/dillo tests).
 burrow = { git = "https://github.com/pichi-vm/burrow" }

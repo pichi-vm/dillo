@@ -142,7 +142,7 @@ dependencies = [
  "flate2",
  "goblin",
  "lzma-rust2",
- "pmi",
+ "pmi 0.1.0 (git+https://github.com/pichi-vm/pmi?branch=main)",
  "regex",
  "ruzstd",
  "serde",
@@ -501,7 +501,7 @@ dependencies = [
  "log",
  "nix 0.30.1",
  "object",
- "pmi",
+ "pmi 0.1.0 (git+https://github.com/pichi-vm/pmi?rev=b345e89b42dbb13572879102ece515726db701ed)",
  "rstest",
  "rustix",
  "serde",
@@ -542,7 +542,7 @@ dependencies = [
 name = "dillo-machine"
 version = "0.1.0"
 dependencies = [
- "pmi",
+ "pmi 0.1.0 (git+https://github.com/pichi-vm/pmi?rev=b345e89b42dbb13572879102ece515726db701ed)",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
 ]
@@ -560,7 +560,7 @@ dependencies = [
  "dillo-virtio",
  "libc",
  "log",
- "pmi",
+ "pmi 0.1.0 (git+https://github.com/pichi-vm/pmi?rev=b345e89b42dbb13572879102ece515726db701ed)",
  "tempfile",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
@@ -583,7 +583,7 @@ dependencies = [
  "log",
  "mmarinus",
  "nix 0.30.1",
- "pmi",
+ "pmi 0.1.0 (git+https://github.com/pichi-vm/pmi?rev=b345e89b42dbb13572879102ece515726db701ed)",
  "rustix",
  "tempfile",
  "thiserror 2.0.18",
@@ -601,7 +601,7 @@ dependencies = [
  "dillo-runtime",
  "dillo-virtio",
  "log",
- "pmi",
+ "pmi 0.1.0 (git+https://github.com/pichi-vm/pmi?rev=b345e89b42dbb13572879102ece515726db701ed)",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
  "wait-timeout",
@@ -663,7 +663,7 @@ name = "dillo-runtime"
 version = "0.1.0"
 dependencies = [
  "dillo-machine",
- "pmi",
+ "pmi 0.1.0 (git+https://github.com/pichi-vm/pmi?rev=b345e89b42dbb13572879102ece515726db701ed)",
 ]
 
 [[package]]
@@ -1563,6 +1563,15 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 name = "pmi"
 version = "0.1.0"
 source = "git+https://github.com/pichi-vm/pmi?branch=main#d6c2543129c3dad900d39a14ac9c4909bd39c0ac"
+dependencies = [
+ "flagset",
+ "serde",
+]
+
+[[package]]
+name = "pmi"
+version = "0.1.0"
+source = "git+https://github.com/pichi-vm/pmi?rev=b345e89b42dbb13572879102ece515726db701ed#b345e89b42dbb13572879102ece515726db701ed"
 dependencies = [
  "flagset",
  "serde",

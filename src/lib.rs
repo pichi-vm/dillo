@@ -353,8 +353,8 @@ pub mod pmi_parse {
     pub struct ParsedPmi {
         pub arch: HostArch,
         /// `cpu:profile` target attribute (per `pmi/spec/cpu.md`). The
-        /// architecture-typed baseline. Native CPU preparation must validate
-        /// guest-visible capabilities before execution.
+        /// architecture-typed baseline, defaulted when omitted. Native CPU
+        /// preparation must validate guest-visible capabilities before execution.
         pub cpu_profile: CpuProfile,
         pub actions: Vec<Action>,
         /// The bundled base DTB named by the `dt:dtb` target attribute, as a
