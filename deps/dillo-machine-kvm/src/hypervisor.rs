@@ -425,14 +425,23 @@ impl Vm {
         Ok(())
     }
 
-    pub(crate) fn guest_memory(&self) -> Result<vm_memory::GuestMemoryMmap, Error> {
+    pub(crate) fn guest_memory(&self) -> Result<Arc<dillo_machine::memory::MappedRam>, Error> {
+        Ok(self.backing()?.guest_memory())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mapping_probe(&self) -> crate::memory::MappingProbe {
+        crate::memory::MappingProbe::new(&self.backing().unwrap())
+    }
+
+    fn backing(&self) -> Result<Arc<crate::memory::MappedMemory>, Error> {
         let memory = self
             .inner
             .memory
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match &*memory {
-            MemoryRegistration::Ready(backing) => Ok(backing.guest_memory()),
+            MemoryRegistration::Ready(backing) => Ok(Arc::clone(backing)),
             _ => Err(Error::MemoryRegistration("RAM setup is incomplete")),
         }
     }
@@ -1078,12 +1087,13 @@ mod bsp_tests {
 
     #[test]
     fn fixed_bsp_state_is_written_and_ap_remains_uninitialized() {
-        use vm_memory::{Bytes, GuestAddress};
+        use dillo_virtio::test_support::TestGuestMemory;
+        use vm_memory::GuestAddress;
         let backing = Arc::new(
             crate::memory::MappedMemory::test_backing(&[(0x1000, 0x1000), (0xffff_f000, 0x1000)])
                 .unwrap(),
         );
-        let memory = backing.guest_memory();
+        let memory = TestGuestMemory::from_owner(backing.guest_memory());
         let intc = crate::intc_x86::X86Intc::new(0xfee0_0000, 0x1000, 0xfec0_0000, 0x1000).unwrap();
         let vm = Vm::new_with_intc(intc).unwrap();
         vm.attach_memory(backing).unwrap();
@@ -1324,9 +1334,10 @@ mod arm_bsp_tests {
     #[test]
     fn arm_v81_native_lor_and_owner_floor() {
         use dillo_machine::aarch64::Register;
-        use vm_memory::{Bytes, GuestAddress};
+        use dillo_virtio::test_support::TestGuestMemory;
+        use vm_memory::GuestAddress;
         let backing = Arc::new(crate::memory::MappedMemory::test_backing(&[(0, 0x4000)]).unwrap());
-        let memory = backing.guest_memory();
+        let memory = TestGuestMemory::from_owner(backing.guest_memory());
         let vm = Vm::new_with_gic(&crate::imp::Aarch64Substrate {
             dist_base: 0x0800_0000,
             redist_base: 0x080a_0000,
@@ -1448,9 +1459,10 @@ mod arm_bsp_tests {
     #[test]
     fn arm_admitted_owner_matches_guest_mrs_reads() {
         use dillo_machine::aarch64::Register;
-        use vm_memory::{Bytes, GuestAddress};
+        use dillo_virtio::test_support::TestGuestMemory;
+        use vm_memory::GuestAddress;
         let backing = Arc::new(crate::memory::MappedMemory::test_backing(&[(0, 0x2000)]).unwrap());
-        let memory = backing.guest_memory();
+        let memory = TestGuestMemory::from_owner(backing.guest_memory());
         let vm = Vm::new_with_gic(&crate::imp::Aarch64Substrate {
             dist_base: 0x0800_0000,
             redist_base: 0x080a_0000,
@@ -1690,9 +1702,12 @@ mod memory_registration_tests {
             Err(Error::MemoryRegistration(_))
         ));
         assert_eq!(replacement_probe.mappings(), 0);
-        let memory = vm.guest_memory().unwrap();
+        let memory =
+            dillo_virtio::test_support::TestGuestMemory::from_owner(vm.guest_memory().unwrap());
         let mut data = [0; 16];
-        vm_memory::Bytes::read_slice(&memory, &mut data, vm_memory::GuestAddress(0)).unwrap();
+        memory
+            .read_slice(&mut data, vm_memory::GuestAddress(0))
+            .unwrap();
         assert_eq!(&data, b"original backing");
         drop(vm);
         assert!(probe.mappings() > 0);

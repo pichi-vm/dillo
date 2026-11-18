@@ -4,8 +4,10 @@
 //! Fixed private section capabilities and their independently owning RAM views.
 
 use std::os::windows::io::{AsHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
+use std::sync::Arc;
 
 use dillo_machine::RamRange;
+use dillo_machine::memory::MappedRam;
 use vm_memory::{GuestAddress, GuestMemoryMmap, GuestRegionMmap, MmapRegion};
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::System::Memory::{CreateFileMappingW, PAGE_READWRITE, SEC_COMMIT};
@@ -15,7 +17,7 @@ use crate::hypervisor::Error;
 /// Machine's fixed RAM layout, native views and private section capabilities.
 #[derive(Debug)]
 pub(crate) struct Memory {
-    guest: GuestMemoryMmap,
+    guest: Arc<MappedRam>,
     // A mapped view keeps storage alive by itself. Machine additionally retains
     // the original capability; byte-access exports never receive this handle.
     #[cfg_attr(
@@ -26,7 +28,7 @@ pub(crate) struct Memory {
 }
 
 impl Memory {
-    pub(crate) fn guest(&self) -> &GuestMemoryMmap {
+    pub(crate) fn guest(&self) -> &Arc<MappedRam> {
         &self.guest
     }
 
@@ -74,6 +76,8 @@ impl Memory {
             #[cfg(not(test))]
             let view = Self::map(section.as_handle(), size);
             let view = view.map_err(Error::AllocateMemory)?;
+            #[cfg(test)]
+            assert!(view.file_offset().is_none(), "sections are not files");
             regions.push(
                 GuestRegionMmap::new(view, GuestAddress(range.gpa))
                     .ok_or_else(|| Error::CreateGuestMemory("guest RAM extent overflow".into()))?,
@@ -82,6 +86,10 @@ impl Memory {
         }
         let guest = GuestMemoryMmap::from_regions(regions)
             .map_err(|error| Error::CreateGuestMemory(error.to_string()))?;
+        // SAFETY: each region owns one mapping of its own anonymous section.
+        // Production keeps section handles private and never makes another view.
+        #[allow(unsafe_code)]
+        let guest = unsafe { MappedRam::adopt(guest) };
         Ok(Self { guest, sections })
     }
 
@@ -89,8 +97,8 @@ impl Memory {
         // SAFETY: only our private PAGE_READWRITE|SEC_COMMIT, cacheable ordinary
         // data sections reach this method. Every successful view remains fully
         // committed/writable; no code resizes, reprotects or independently
-        // unmaps it. Host access, including overlapping exported views, uses
-        // vm-memory's volatile/atomic interfaces rather than Rust references.
+        // unmaps it. Production host byte access uses the RAM owner's guarded
+        // volatile/atomic operations.
         #[allow(unsafe_code)]
         unsafe {
             MmapRegion::from_mapping_handle(section, 0, size)
@@ -110,7 +118,7 @@ impl Memory {
 mod tests {
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
 
-    use vm_memory::{Bytes, GuestMemory, GuestMemoryRegion, VolatileMemory};
+    use vm_memory::{Bytes, VolatileMemory};
     use windows_sys::Win32::Foundation::{
         DuplicateHandle, GetHandleInformation, HANDLE_FLAG_INHERIT,
     };
@@ -119,6 +127,7 @@ mod tests {
 
     use super::*;
     use crate::hypervisor::memory_tests::{AllocationProbe, NativeMemoryTest};
+    use dillo_virtio::test_support::TestGuestMemory;
 
     #[test]
     fn native_sections_share_exact_guest_extents_and_outlive_handles() {
@@ -143,16 +152,14 @@ mod tests {
         .unwrap();
         let layout: Vec<_> = memory
             .guest
-            .iter()
-            .map(|region| (region.start_addr().0, region.len()))
+            .native_regions()
+            .map(|(gpa, size, _)| (gpa, size))
             .collect();
         assert_eq!(layout, [(0x1000, 0x1000), (0x9000, 0x2000)]);
-        for region in memory.guest.iter() {
-            assert!(region.file_offset().is_none(), "sections are not files");
-            let mut bytes = vec![0xff; region.len() as usize];
-            memory
-                .guest
-                .read_slice(&mut bytes, region.start_addr())
+        for (gpa, size, _) in memory.guest.native_regions() {
+            let mut bytes = vec![0xff; size as usize];
+            TestGuestMemory::from_owner(Arc::clone(&memory.guest))
+                .read_slice(&mut bytes, GuestAddress(gpa))
                 .unwrap();
             assert!(
                 bytes.iter().all(|byte| *byte == 0),
@@ -191,8 +198,12 @@ mod tests {
             GuestAddress(0x9000),
         )
         .unwrap();
-        assert_ne!(alias.as_ptr(), memory.guest.iter().nth(1).unwrap().as_ptr());
+        assert_ne!(
+            alias.as_ptr(),
+            memory.guest.native_regions().nth(1).unwrap().2
+        );
         let alias_probe = AllocationProbe::from_region(&alias);
+        // This independent test alias is accessed serially with the owner.
         let alias = GuestMemoryMmap::from_regions(vec![alias]).unwrap();
         let original = AllocationProbe::new(&memory.guest, 1);
         memory
@@ -203,13 +214,12 @@ mod tests {
         alias.read_slice(&mut bytes, GuestAddress(0x9100)).unwrap();
         assert_eq!(bytes, [0xa5, 0x5a]);
         alias.write_slice(&[0x63], GuestAddress(0x9101)).unwrap();
-        memory
-            .guest
+        TestGuestMemory::from_owner(Arc::clone(&memory.guest))
             .read_slice(&mut bytes, GuestAddress(0x9100))
             .unwrap();
         assert_eq!(bytes, [0xa5, 0x63]);
         drop(data);
-        let export = memory.guest.clone();
+        let export = TestGuestMemory::from_owner(Arc::clone(&memory.guest));
         drop(memory); // closes all original section handles
         original.assert_retained();
         alias_probe.assert_retained();

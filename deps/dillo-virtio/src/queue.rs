@@ -433,20 +433,21 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestGuestMemory;
     use dillo_machine::memory::{
         AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
     };
-    use vm_memory::{Address, Bytes, GuestMemoryMmap};
+    use vm_memory::Address;
 
     const QUEUE_SIZE: u16 = 16;
 
     /// Build guest memory and return (mem, desc_table_gpa, avail_ring_gpa, used_ring_gpa).
     fn setup_queue_memory(
         _queue_size: u16,
-    ) -> (GuestMemoryMmap, GuestAddress, GuestAddress, GuestAddress) {
+    ) -> (TestGuestMemory, GuestAddress, GuestAddress, GuestAddress) {
         // Layout: desc_table at 0x100 (16-byte aligned), avail at 0x1000, used at 0x2000
         let mem_size: u64 = 0x10000;
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), mem_size as usize)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), mem_size as usize)]).unwrap();
         let desc = GuestAddress(0x100);
         let avail = GuestAddress(0x1000);
         let used = GuestAddress(0x2000);
@@ -464,9 +465,9 @@ mod tests {
         q
     }
 
-    fn shared_queue_memory(mem: &GuestMemoryMmap, base: u64, size: u64) -> SharedQueueMemory {
+    fn shared_queue_memory(mem: &TestGuestMemory, base: u64, size: u64) -> SharedQueueMemory {
         SharedQueueMemory::new(vec![Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange { base, size },
                 access: SharedAccess::ReadWrite,
@@ -484,7 +485,7 @@ mod tests {
                 let (mem, _, _, _) = setup_queue_memory(16);
                 let shared: Arc<dyn QueueMemory> =
                     Arc::new(SharedQueueMemory::new(vec![Arc::new(
-                        MappedSharedMemory::for_guest_memory(mem.clone(), SharedAccess::ReadWrite),
+                        MappedSharedMemory::for_guest_memory(mem.owner(), SharedAccess::ReadWrite),
                     )]));
                 let fault = FaultQueueMemory::new(shared, fail);
                 let mut queue = make_valid_queue(16);
@@ -602,7 +603,7 @@ mod tests {
             let memory = SharedQueueMemory::new(vec![
                 Arc::new(Refused(unsupported)),
                 Arc::new(MappedSharedMemory::for_guest_memory(
-                    mem.clone(),
+                    mem.owner(),
                     SharedAccess::ReadWrite,
                 )),
             ]);
@@ -647,7 +648,7 @@ mod tests {
         }
         let (mem, _, _, _) = setup_queue_memory(16);
         let healthy: Arc<dyn SharedMemory> = Arc::new(MappedSharedMemory::for_guest_memory(
-            mem.clone(),
+            mem.owner(),
             SharedAccess::ReadWrite,
         ));
         let memory = SharedQueueMemory::new(vec![Arc::new(FailedBacking), healthy]);
@@ -656,7 +657,7 @@ mod tests {
         );
         assert_eq!(mem.read_obj::<u32>(GuestAddress(0x2004)).unwrap(), 0);
         let denied = SharedQueueMemory::new(vec![Arc::new(MappedSharedMemory::for_guest_memory(
-            mem.clone(),
+            mem.owner(),
             SharedAccess::ReadOnly,
         ))]);
         assert!(matches!(
@@ -671,16 +672,12 @@ mod tests {
 
     #[test]
     fn shared_queue_scalars_use_atomic_service_and_refuse_misalignment() {
-        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
+        let memory = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
         memory
             .write_slice(&[0x5a; 32], GuestAddress(0x100))
             .unwrap();
         memory
-            .store(
-                0x8877_6655_4433_2211u64.to_le(),
-                GuestAddress(0x110),
-                Ordering::Relaxed,
-            )
+            .write_slice(&0x8877_6655_4433_2211u64.to_le_bytes(), GuestAddress(0x110))
             .unwrap();
         let queue_memory = shared_queue_memory(&memory, 0, 0x1000);
         assert!(queue_memory.write_u16(GuestAddress(0x102), 0x00ff).is_ok());
@@ -840,7 +837,7 @@ mod tests {
     fn test_pop_returns_descriptor_through_shared_memory() {
         let (mem, desc, avail, used) = setup_queue_memory(QUEUE_SIZE);
         let shared = SharedQueueMemory::new(vec![Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0,
@@ -873,7 +870,7 @@ mod tests {
     fn test_pop_rejects_metadata_outside_shared_memory() {
         let (mem, desc, avail, used) = setup_queue_memory(QUEUE_SIZE);
         let shared = SharedQueueMemory::new(vec![Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0x1000,
@@ -925,7 +922,7 @@ mod tests {
     fn test_add_used_writes_through_shared_memory() {
         let (mem, desc, avail, used) = setup_queue_memory(QUEUE_SIZE);
         let shared = SharedQueueMemory::new(vec![Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0x2000,

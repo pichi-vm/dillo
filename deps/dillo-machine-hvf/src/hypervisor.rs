@@ -316,7 +316,7 @@ impl Vm {
         crate::memory::MappingProbe::new(&self.native.backing().unwrap(), index)
     }
 
-    pub(crate) fn guest_memory(&self) -> Result<vm_memory::GuestMemoryMmap, Error> {
+    pub(crate) fn guest_memory(&self) -> Result<Arc<dillo_machine::memory::MappedRam>, Error> {
         Ok(self.native.backing()?.guest_memory())
     }
 
@@ -789,6 +789,7 @@ mod arm_v82;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use dillo_virtio::test_support::TestGuestMemory;
     use vm_memory::{Bytes, GuestAddress, VolatileMemory};
 
     #[test]
@@ -1059,8 +1060,7 @@ pub(crate) mod tests {
             .collect();
         let observed: [[u64; arm_v81::RESULT_WORDS]; 2] = std::array::from_fn(|index| {
             let mut bytes = [0; arm_v81::RESULT_WORDS * 8];
-            vm.guest_memory()
-                .unwrap()
+            TestGuestMemory::from_owner(vm.guest_memory().unwrap())
                 .read_slice(
                     &mut bytes,
                     GuestAddress(arm_v81::RESULTS + index as u64 * arm_v81::RESULT_STRIDE),
@@ -1219,7 +1219,9 @@ pub(crate) mod tests {
             assert_eq!(cpu.get_exit_info().reason, ExitReason::EXCEPTION);
             let syndrome = cpu.get_exit_info().exception.syndrome;
             assert_eq!(syndrome >> 26, 0x16);
-            let value: u64 = ram.guest_memory().read_obj(GuestAddress(0x1000)).unwrap();
+            let value: u64 = TestGuestMemory::from_owner(ram.guest_memory())
+                .read_obj(GuestAddress(0x1000))
+                .unwrap();
             assert_eq!(
                 value, 0xa5,
                 "earlier real HVF map remains backed after partial failure"
@@ -1422,8 +1424,7 @@ pub(crate) mod tests {
             .join()
             .unwrap();
         let mut bytes = [0; 80];
-        vm.guest_memory()
-            .unwrap()
+        TestGuestMemory::from_owner(vm.guest_memory().unwrap())
             .read_slice(&mut bytes, GuestAddress(0x1000))
             .unwrap();
         let mut file_bytes = [0; 80];

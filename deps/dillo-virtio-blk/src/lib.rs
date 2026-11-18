@@ -717,8 +717,9 @@ mod tests {
         AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
     };
     use dillo_virtio::queue::VIRTQ_DESC_F_NEXT;
+    use dillo_virtio::test_support::TestGuestMemory;
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
-    use vm_memory::{Address, Bytes, GuestMemoryMmap};
+    use vm_memory::Address;
 
     /// In-RAM backing that serves bytes from a fixed buffer, for dispatch tests.
     struct RamBacking {
@@ -826,9 +827,9 @@ mod tests {
             }
         }
         for fail in 0..4 {
-            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
             let shared = Arc::new(MappedSharedMemory::for_guest_memory(
-                mem.clone(),
+                mem.owner(),
                 SharedAccess::ReadWrite,
             ));
             let fault = Arc::new(dillo_virtio::test_support::FaultQueueMemory::new(
@@ -927,7 +928,7 @@ mod tests {
     /// byte is S_OK. Memory layout mirrors the console crate's queue tests.
     #[test]
     fn read_request_fills_buffer_and_sets_status_ok() {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
 
         // Descriptor table at 0x100; 3 descriptors (header, data, status).
         let desc = GuestAddress(0x100);
@@ -962,7 +963,7 @@ mod tests {
         mem.write_obj::<u16>(1, avail.unchecked_add(2)).unwrap();
 
         let shared = Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0,
@@ -1018,7 +1019,7 @@ mod tests {
     }
 
     fn write_desc(
-        mem: &GuestMemoryMmap,
+        mem: &TestGuestMemory,
         table: GuestAddress,
         idx: u64,
         addr: u64,
@@ -1041,12 +1042,12 @@ mod qcow2_tests {
         AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
     };
     use dillo_virtio::SharedVirtioMemory;
-    use vm_memory::{Bytes, GuestMemoryMmap};
+    use dillo_virtio::test_support::TestGuestMemory;
 
-    fn memory() -> (GuestMemoryMmap, Arc<dyn VirtioMemory>) {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 65536)]).unwrap();
+    fn memory() -> (TestGuestMemory, Arc<dyn VirtioMemory>) {
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 65536)]).unwrap();
         let shared = Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0,
@@ -1058,7 +1059,7 @@ mod qcow2_tests {
         (mem, Arc::new(SharedVirtioMemory::new(vec![shared])))
     }
     fn submit(
-        mem: &GuestMemoryMmap,
+        mem: &TestGuestMemory,
         access: &Arc<dyn VirtioMemory>,
         backing: &dyn BlockBacking,
         kind: u32,

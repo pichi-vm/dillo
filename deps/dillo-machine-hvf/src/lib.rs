@@ -1350,7 +1350,7 @@ mod imp {
         #[test]
         fn hvf_host_exports_outlive_retirement_without_retargeting() {
             use dillo_machine::Machine as _;
-            use vm_memory::{GuestMemory as _, VolatileMemory as _};
+            use vm_memory::VolatileMemory as _;
             if std::env::var_os("DILLO_SIGNED_HVF_BSP_TEST").is_none() {
                 crate::hypervisor::tests::SignedNativeTest::spawn(
                     "imp::tests::hvf_host_exports_outlive_retirement_without_retargeting",
@@ -1378,10 +1378,10 @@ mod imp {
                 vm.inner
                     .guest_memory()
                     .unwrap()
-                    .iter()
+                    .native_regions()
                     .next()
                     .unwrap()
-                    .as_ptr(),
+                    .2,
                 "scalar observation uses an independent host mapping"
             );
             let export = vm.shared_memory[0]
@@ -1411,12 +1411,11 @@ mod imp {
             export.read(8, &mut bytes).unwrap();
             assert_eq!(bytes, [0x11, 0x22]);
             export.write(8, &[0x55, 0x66]).unwrap();
-            replacement
-                .inner
-                .guest_memory()
-                .unwrap()
-                .read_slice(&mut bytes, GuestAddress(8))
-                .unwrap();
+            dillo_virtio::test_support::TestGuestMemory::from_owner(
+                replacement.inner.guest_memory().unwrap(),
+            )
+            .read_slice(&mut bytes, GuestAddress(8))
+            .unwrap();
             assert_eq!(
                 bytes,
                 [0x33, 0x44],

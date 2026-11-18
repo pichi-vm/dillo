@@ -487,8 +487,9 @@ mod tests {
         AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
     };
     use dillo_virtio::queue::VIRTQ_DESC_F_NEXT;
+    use dillo_virtio::test_support::TestGuestMemory;
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
-    use vm_memory::{Address, Bytes, GuestMemoryMmap};
+    use vm_memory::Address;
 
     #[test]
     fn failed_publication_does_not_repeat_filesystem_mutation() {
@@ -512,9 +513,9 @@ mod tests {
             }
         }
         for fail in 0..4 {
-            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
             let shared = Arc::new(MappedSharedMemory::for_guest_memory(
-                mem.clone(),
+                mem.owner(),
                 SharedAccess::ReadWrite,
             ));
             let fault = Arc::new(dillo_virtio::test_support::FaultQueueMemory::new(
@@ -701,7 +702,7 @@ mod tests {
     }
 
     pub(super) fn write_desc(
-        mem: &GuestMemoryMmap,
+        mem: &TestGuestMemory,
         table: GuestAddress,
         idx: u64,
         addr: u64,
@@ -721,7 +722,7 @@ mod tests {
     /// descriptor with a sane header (exercises scatter/gather + add_used).
     #[test]
     fn init_request_through_queue_writes_reply() {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
 
         let desc = GuestAddress(0x100);
         let avail = GuestAddress(0x1000);
@@ -762,7 +763,7 @@ mod tests {
         mem.write_obj::<u16>(1, avail.unchecked_add(2)).unwrap();
 
         let shared = Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0,

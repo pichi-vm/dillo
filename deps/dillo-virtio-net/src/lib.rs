@@ -515,8 +515,9 @@ mod tests {
         AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
     };
     use dillo_virtio::queue::VIRTQ_DESC_F_WRITE;
+    use dillo_virtio::test_support::TestGuestMemory;
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
-    use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryMmap};
+    use vm_memory::{Address, GuestAddress};
 
     use super::*;
 
@@ -550,7 +551,7 @@ mod tests {
     fn tx_publication_error_preserves_earlier_completions_without_resending() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         for fail in 0..8 {
-            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
             let mut queue = ready_queue(0x100, 0x1000, 0x2000);
             queue.uses_notif_suppression = true;
             mem.write_obj::<u64>(0x5000, queue.desc_table).unwrap();
@@ -599,7 +600,7 @@ mod tests {
 
     #[test]
     fn rx_publication_error_is_not_empty_or_retryable() {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let mut queue = ready_queue(0x100, 0x1000, 0x2000);
         queue.uses_notif_suppression = true;
         mem.write_obj::<u64>(0x5000, queue.desc_table).unwrap();
@@ -653,9 +654,9 @@ mod tests {
 
     /// A queue + buffer memory harness backed by one shared-memory capability
     /// over `mem`.
-    fn shared(mem: &GuestMemoryMmap, base: u64, size: u64) -> Arc<MappedSharedMemory> {
+    fn shared(mem: &TestGuestMemory, base: u64, size: u64) -> Arc<MappedSharedMemory> {
         Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange { base, size },
                 access: SharedAccess::ReadWrite,
@@ -692,7 +693,7 @@ mod tests {
         }
         let backend: Arc<dyn NetBackend> =
             Arc::new(Backend(std::sync::atomic::AtomicUsize::new(0)));
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let qmem: Arc<dyn QueueMemory> =
             Arc::new(SharedQueueMemory::new(vec![shared(&mem, 0, 0x4000)]));
         let bmem: Arc<dyn VirtioMemory> =
@@ -713,14 +714,14 @@ mod tests {
     /// with the 12-byte header stripped.
     #[test]
     fn tx_strips_header_and_forwards_frame() {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let mut q = ready_queue(0x100, 0x1000, 0x2000);
 
         // One readable descriptor at 0x5000 carrying hdr(12) + "hello-frame".
         let payload = b"hello-frame";
         let mut frame = vec![0u8; NET_HDR_LEN];
         frame.extend_from_slice(payload);
-        mem.write(&frame, GuestAddress(0x5000)).unwrap();
+        mem.write_slice(&frame, GuestAddress(0x5000)).unwrap();
 
         mem.write_obj::<u64>(0x5000, q.desc_table).unwrap();
         mem.write_obj::<u32>(frame.len() as u32, q.desc_table.unchecked_add(8))
@@ -772,7 +773,7 @@ mod tests {
     /// virtio_net_hdr prepended and num_buffers = 1.
     #[test]
     fn rx_prepends_header_into_guest_buffer() {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let mut q = ready_queue(0x100, 0x1000, 0x2000);
 
         // One writable descriptor at 0x5000, 2048 bytes.
@@ -798,7 +799,7 @@ mod tests {
 
         // Header is zeroed except num_buffers = 1, then the frame follows.
         let mut hdr = [0u8; NET_HDR_LEN];
-        Bytes::read(&mem, &mut hdr, GuestAddress(0x5000)).unwrap();
+        mem.read_slice(&mut hdr, GuestAddress(0x5000)).unwrap();
         assert_eq!(
             u16::from_le_bytes([
                 hdr[NET_HDR_NUM_BUFFERS_OFF],
@@ -807,7 +808,8 @@ mod tests {
             1
         );
         let mut got = vec![0u8; payload.len()];
-        Bytes::read(&mem, &mut got, GuestAddress(0x5000 + NET_HDR_LEN as u64)).unwrap();
+        mem.read_slice(&mut got, GuestAddress(0x5000 + NET_HDR_LEN as u64))
+            .unwrap();
         assert_eq!(&got, payload);
 
         // used_idx advanced and the used length covers header + frame.
@@ -821,7 +823,7 @@ mod tests {
     /// retains the frame.
     #[test]
     fn rx_without_buffer_is_held() {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let mut q = ready_queue(0x100, 0x1000, 0x2000);
         // avail_idx == next_avail (0) → empty ring.
         mem.write_obj::<u16>(0, q.avail_ring.unchecked_add(2))

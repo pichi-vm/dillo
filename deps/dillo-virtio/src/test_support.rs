@@ -1,15 +1,74 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Test-only fault injection over real queue memory, before one scalar store.
+//! Test fixtures for guarded guest-memory access and queue fault injection.
 
 use crate::QueueMemory;
-use dillo_machine::memory::SharedMemoryError;
+use dillo_machine::memory::{
+    MappedRam, MappedSharedMemory, SharedAccess, SharedMemory, SharedMemoryError, SharedRange,
+};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
-use vm_memory::GuestAddress;
+use vm_memory::{Address, ByteValued, GuestAddress, GuestMemoryError, GuestMemoryMmap};
+
+/// Guest RAM for fixtures that access the same bytes as device capabilities.
+#[derive(Clone, Debug)]
+pub struct TestGuestMemory {
+    owner: Arc<MappedRam>,
+    shared: MappedSharedMemory,
+}
+
+impl TestGuestMemory {
+    pub fn from_ranges(
+        ranges: &[(GuestAddress, usize)],
+    ) -> Result<Self, vm_memory::mmap::FromRangesError> {
+        let guest = GuestMemoryMmap::from_ranges(ranges)?;
+        // SAFETY: fresh anonymous mappings never leave this owner.
+        #[allow(unsafe_code)]
+        let owner = unsafe { MappedRam::adopt(guest) };
+        Ok(Self::from_owner(owner))
+    }
+
+    pub fn from_owner(owner: Arc<MappedRam>) -> Self {
+        let shared =
+            MappedSharedMemory::for_guest_memory(Arc::clone(&owner), SharedAccess::ReadOnly);
+        Self { owner, shared }
+    }
+
+    pub fn owner(&self) -> Arc<MappedRam> {
+        Arc::clone(&self.owner)
+    }
+
+    pub fn read_slice(&self, data: &mut [u8], addr: GuestAddress) -> Result<(), SharedMemoryError> {
+        self.shared
+            .region(SharedRange {
+                gpa: addr.raw_value(),
+                size: data.len() as u64,
+                access: SharedAccess::ReadOnly,
+            })?
+            .read(0, data)
+    }
+
+    pub fn read_obj<T: ByteValued>(&self, addr: GuestAddress) -> Result<T, SharedMemoryError> {
+        let mut object = T::zeroed();
+        self.read_slice(object.as_mut_slice(), addr)?;
+        Ok(object)
+    }
+
+    pub fn write_slice(&self, data: &[u8], addr: GuestAddress) -> Result<(), GuestMemoryError> {
+        self.owner.write_slice(data, addr)
+    }
+
+    pub fn write_obj<T: ByteValued>(
+        &self,
+        object: T,
+        addr: GuestAddress,
+    ) -> Result<(), GuestMemoryError> {
+        self.write_slice(object.as_slice(), addr)
+    }
+}
 
 pub struct FaultQueueMemory {
     memory: Arc<dyn QueueMemory>,

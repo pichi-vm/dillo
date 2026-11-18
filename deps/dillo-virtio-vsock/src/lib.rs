@@ -494,9 +494,10 @@ mod tests {
     #[test]
     fn publication_failure_keeps_vsock_connection_effects_once_and_rx_consumed() {
         use dillo_machine::memory::{MappedSharedMemory, SharedAccess};
+        use dillo_virtio::test_support::TestGuestMemory;
         use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryMmap};
+        use vm_memory::{Address, GuestAddress};
         struct Backend(Arc<AtomicUsize>);
         impl VsockBackend for Backend {
             fn on_connection_request(&mut self, _: u32, _: u32) -> bool {
@@ -513,9 +514,9 @@ mod tests {
             }
         }
         for fail in 0..4 {
-            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
             let shared = Arc::new(MappedSharedMemory::for_guest_memory(
-                mem.clone(),
+                mem.owner(),
                 SharedAccess::ReadWrite,
             ));
             let qmem: Arc<dyn QueueMemory> =
@@ -561,7 +562,7 @@ mod tests {
             mem.write_obj::<u16>(VIRTQ_DESC_F_WRITE, queue.desc_table.unchecked_add(12))
                 .unwrap();
             let healthy: Arc<dyn QueueMemory> = Arc::new(SharedQueueMemory::new(vec![Arc::new(
-                MappedSharedMemory::for_guest_memory(mem.clone(), SharedAccess::ReadWrite),
+                MappedSharedMemory::for_guest_memory(mem.owner(), SharedAccess::ReadWrite),
             )]));
             let rx: Arc<dyn QueueMemory> = Arc::new(
                 dillo_virtio::test_support::FaultQueueMemory::new(healthy, fail),

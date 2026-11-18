@@ -13,8 +13,11 @@
 use dillo_machine::{
     RamRange,
     aarch64::{AdmittedCpu, Register},
+    memory::MappedRam,
 };
-use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
+use dillo_virtio::test_support::TestGuestMemory;
+use std::sync::Arc;
+use vm_memory::GuestAddress;
 
 pub(super) const RANGES: [RamRange; 2] = [
     RamRange {
@@ -34,13 +37,16 @@ const WORDS: usize = 35;
 /// Owners borrow entry arguments from this fixture; verification consumes it
 /// only after the native threads have joined.
 pub(super) struct NativeOperations {
-    memory: GuestMemoryMmap,
+    memory: TestGuestMemory,
     owners: u32,
 }
 impl NativeOperations {
-    pub(super) fn new(memory: GuestMemoryMmap, owners: u32) -> Self {
+    pub(super) fn new(memory: Arc<MappedRam>, owners: u32) -> Self {
         assert!((1..=2).contains(&owners));
-        let fixture = Self { memory, owners };
+        let fixture = Self {
+            memory: TestGuestMemory::from_owner(memory),
+            owners,
+        };
         fixture.load();
         fixture
     }

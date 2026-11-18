@@ -10,8 +10,9 @@
 
 use std::sync::{Arc, Mutex};
 
+use dillo_machine::memory::MappedRam;
 use thiserror::Error;
-use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
+use vm_memory::GuestAddress;
 use windows_sys::Win32::System::Hypervisor::{WHV_REGISTER_NAME, WHV_REGISTER_VALUE};
 
 use crate::VmExit;
@@ -167,13 +168,13 @@ enum RamRegistration {
 }
 
 impl RamRegistration {
-    fn ready(&self) -> Result<&GuestMemoryMmap, Error> {
+    fn ready(&self) -> Result<&Arc<MappedRam>, Error> {
         match self {
             Self::Ready(memory) => Ok(memory.guest()),
             Self::Empty => Err(Error::MemoryNotReady),
             Self::Attempted { memory, attempts } => Err(Error::MemoryRegistrationFailed {
                 attempts: *attempts,
-                regions: memory.guest().num_regions(),
+                regions: memory.guest().native_regions().count(),
             }),
         }
     }
@@ -253,7 +254,7 @@ impl Vm {
             .map_err(|source| Error::WriteGuest { gpa, source })
     }
 
-    pub(crate) fn guest_memory(&self) -> Result<GuestMemoryMmap, Error> {
+    pub(crate) fn guest_memory(&self) -> Result<Arc<MappedRam>, Error> {
         self.inner.guest_memory()
     }
 
@@ -268,12 +269,8 @@ impl Vm {
             return Vec::new();
         };
         memory
-            .iter()
-            .filter_map(|region| {
-                let base = region.start_addr();
-                let host = memory.get_host_address(base).ok()?;
-                Some((base.raw_value(), host as u64, region.len()))
-            })
+            .native_regions()
+            .map(|(gpa, size, host)| (gpa, host as u64, size))
             .collect()
     }
 
@@ -390,7 +387,7 @@ impl VmInner {
             .map(|_| ())
     }
 
-    fn guest_memory(&self) -> Result<GuestMemoryMmap, Error> {
+    fn guest_memory(&self) -> Result<Arc<MappedRam>, Error> {
         self.memory
             .lock()
             .expect("WHP RAM registration poisoned")
@@ -412,13 +409,7 @@ impl VmInner {
         let RamRegistration::Attempted { memory, attempts } = &mut *registration else {
             unreachable!("WHP RAM registration was just installed");
         };
-        for (index, region) in memory.guest().iter().enumerate() {
-            let base = region.start_addr().raw_value();
-            let size = region.len();
-            let host = memory
-                .guest()
-                .get_host_address(region.start_addr())
-                .map_err(|source| Error::GuestMemoryHostAddress { gpa: base, source })?;
+        for (index, (base, size, host)) in memory.guest().native_regions().enumerate() {
             *attempts = index + 1;
             #[cfg(test)]
             if *self.fail_map_at.lock().unwrap() == Some(index) {
@@ -1596,7 +1587,7 @@ mod raw {
     ) -> Result<(), HResult> {
         let flags = WHvMapGpaRangeFlagRead | WHvMapGpaRangeFlagWrite | WHvMapGpaRangeFlagExecute;
         // SAFETY: the partition owner has already retained this actual
-        // GuestMemoryMmap through successful whole-partition destruction.
+        // RAM owner through successful whole-partition destruction.
         let hr = unsafe { WHvMapGpaRange(partition, host.cast_const(), gpa, size, flags) };
         if failed(hr) {
             return Err(HResult(hr));
@@ -2156,19 +2147,32 @@ pub(crate) mod memory_tests {
     pub(crate) struct AllocationProbe {
         address: usize,
         size: usize,
-        original: std::sync::Weak<vm_memory::mmap::MmapRegion<()>>,
+        original: std::sync::Weak<dyn Send + Sync>,
     }
 
     impl AllocationProbe {
-        pub(crate) fn new(memory: &GuestMemoryMmap, index: usize) -> Self {
-            Self::from_region(memory.iter().nth(index).unwrap())
+        pub(crate) fn new(memory: &Arc<MappedRam>, index: usize) -> Self {
+            let (_, size, address) = memory.native_regions().nth(index).unwrap();
+            let original = Arc::downgrade(memory);
+            Self::observing(address, size as usize, original)
         }
 
         pub(crate) fn from_region(region: &vm_memory::GuestRegionMmap) -> Self {
+            use vm_memory::GuestMemoryRegion;
+            let mapping = region.get_mmap();
+            let original = Arc::downgrade(&mapping);
+            Self::observing(mapping.as_ptr(), region.len() as usize, original)
+        }
+
+        fn observing(
+            address: *mut u8,
+            size: usize,
+            original: std::sync::Weak<dyn Send + Sync>,
+        ) -> Self {
             let probe = Self {
-                address: region.get_mmap().as_ptr() as usize,
-                size: region.len() as usize,
-                original: Arc::downgrade(&region.get_mmap()),
+                address: address as usize,
+                size,
+                original,
             };
             probe.assert_retained();
             probe
@@ -2201,11 +2205,10 @@ pub(crate) mod memory_tests {
         }
 
         pub(crate) fn assert_retained(&self) {
-            let original = self
+            let _original = self
                 .original
                 .upgrade()
                 .expect("original mapping owner was released");
-            assert_eq!(original.as_ptr() as usize, self.address);
             let information = self.query();
             assert_eq!(information.State, MEM_COMMIT);
             assert_eq!(information.Type, MEM_MAPPED);
@@ -2259,8 +2262,7 @@ pub(crate) mod memory_tests {
             .unwrap();
         assert!(matches!(exit, VmExit::Halted), "{exit:?}");
         let mut bytes = [0; 3];
-        vm.guest_memory()
-            .unwrap()
+        dillo_virtio::test_support::TestGuestMemory::from_owner(vm.guest_memory().unwrap())
             .read_slice(&mut bytes, GuestAddress(0x10100))
             .unwrap();
         assert_eq!(bytes, [0x5a, 0x5a, 0xee]);

@@ -1232,7 +1232,8 @@ mod tests {
     use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
 
     use crate::control::ControlMessage;
-    use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryMmap};
+    use dillo_virtio::test_support::TestGuestMemory;
+    use vm_memory::{Address, GuestAddress};
 
     /// A `Write` that records bytes and counts `flush` calls.
     #[derive(Default)]
@@ -1400,7 +1401,7 @@ mod tests {
 
     #[test]
     fn rx_drains_pending_input_into_guest_buffer() {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let mut queue = Queue::new(16);
         queue.size = 16;
         queue.ready = true;
@@ -1421,7 +1422,7 @@ mod tests {
             .unwrap();
 
         let queue_shared = Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0x100,
@@ -1431,7 +1432,7 @@ mod tests {
             },
         ));
         let buffer_shared = Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0x5000,
@@ -1450,7 +1451,7 @@ mod tests {
         assert!(pending.is_empty());
 
         let mut out = [0u8; 3];
-        Bytes::read(&mem, &mut out, GuestAddress(0x5000)).unwrap();
+        mem.read_slice(&mut out, GuestAddress(0x5000)).unwrap();
         assert_eq!(&out, b"abc");
         let used_idx: u16 = mem.read_obj(GuestAddress(0x2002)).unwrap();
         assert_eq!(used_idx, 1);
@@ -1458,9 +1459,9 @@ mod tests {
 
     #[test]
     fn rx_drains_queue_metadata_through_shared_memory() {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let shared = Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0x100,
@@ -1470,7 +1471,7 @@ mod tests {
             },
         ));
         let buffer_shared = Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0x5000,
@@ -1506,16 +1507,16 @@ mod tests {
         assert!(drain_rx(&queue_memory, &buffer_memory, &queue, &mut pending, None).unwrap());
 
         let mut out = [0u8; 3];
-        Bytes::read(&mem, &mut out, GuestAddress(0x5000)).unwrap();
+        mem.read_slice(&mut out, GuestAddress(0x5000)).unwrap();
         assert_eq!(&out, b"abc");
         assert_eq!(queue_memory.read_u16(GuestAddress(0x2002)), Some(1));
     }
 
     #[test]
     fn rx_rejects_payload_outside_shared_memory() {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let queue_shared = Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0x100,
@@ -1525,7 +1526,7 @@ mod tests {
             },
         ));
         let buffer_shared = Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0x6000,
@@ -1570,7 +1571,7 @@ mod tests {
     /// each `len` bytes at `0x5000 + i * len`. `writable` picks the direction:
     /// device-writable (RX / control receiveq) or device-readable (TX).
     struct TestQueue {
-        mem: GuestMemoryMmap,
+        mem: TestGuestMemory,
         queue_memory: Arc<dyn QueueMemory>,
         buffer_memory: Arc<dyn VirtioMemory>,
         queue: Arc<Mutex<Queue>>,
@@ -1581,7 +1582,7 @@ mod tests {
     impl TestQueue {
         fn new(count: u16, len: u32, writable: bool) -> Self {
             const BUFFER_BASE: u64 = 0x5000;
-            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
             let mut queue = Queue::new(16);
             queue.size = 16;
             queue.ready = true;
@@ -1605,7 +1606,7 @@ mod tests {
 
             let shared = |base, size| {
                 Arc::new(MappedSharedMemory::new(
-                    mem.clone(),
+                    mem.owner(),
                     SharedMemoryRequirement {
                         range: AddressRange { base, size },
                         access: SharedAccess::ReadWrite,
@@ -1635,12 +1636,12 @@ mod tests {
         /// Read back what the device wrote into chain `i`'s buffer.
         fn get(&self, i: u64, len: usize) -> Vec<u8> {
             let mut out = vec![0u8; len];
-            Bytes::read(
-                &self.mem,
-                &mut out,
-                GuestAddress(self.buffer_base + i * u64::from(self.len)),
-            )
-            .unwrap();
+            self.mem
+                .read_slice(
+                    &mut out,
+                    GuestAddress(self.buffer_base + i * u64::from(self.len)),
+                )
+                .unwrap();
             out
         }
 

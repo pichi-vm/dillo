@@ -228,7 +228,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn guest_writes_match_address_width_and_queue_value() {
-        use vm_memory::{Bytes, GuestAddress};
+        use vm_memory::GuestAddress;
         let backing = Arc::new(crate::memory::MappedMemory::test_backing(&[(0, 0x1000)]).unwrap());
         let ram = backing.guest_memory();
         let code = [

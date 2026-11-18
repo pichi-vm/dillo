@@ -39,12 +39,11 @@ mod imp {
         Interrupt, InterruptError, InterruptLine, InterruptRequirement, InterruptResource,
         MessageInterrupt, MessageInterruptDomain,
     };
-    use dillo_machine::memory::{AddressRange, SharedMemory};
+    use dillo_machine::memory::{AddressRange, MappedRam, SharedMemory};
     use dillo_machine::{Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
     use dillo_mmio::{MmioBus, MmioDevice, MmioWriteOutcome};
     #[cfg(test)]
     use vm_memory::GuestAddress;
-    use vm_memory::GuestMemoryMmap;
 
     pub use crate::hypervisor::Error;
     use crate::hypervisor::InterruptController;
@@ -138,7 +137,7 @@ mod imp {
             }
         }
 
-        fn guest_memory(&self) -> Result<GuestMemoryMmap, Error> {
+        fn guest_memory(&self) -> Result<Arc<MappedRam>, Error> {
             self.inner.guest_memory()
         }
 
@@ -1032,7 +1031,6 @@ mod imp {
         #[test]
         fn native_ram_exports_preserve_old_allocation_across_fresh_partitions() {
             use crate::hypervisor::memory_tests::NativeMemoryTest;
-            use vm_memory::Bytes;
             let _guard = crate::hypervisor::whp_test_lock();
             if std::env::var_os("DILLO_WHP_MEMORY_CHILD").is_none() {
                 NativeMemoryTest::spawn("imp::owner_tests::native_ram_exports_preserve_old_allocation_across_fresh_partitions").verify();
@@ -1068,11 +1066,11 @@ mod imp {
             export.read(0x100, &mut bytes).unwrap();
             assert_eq!(bytes, [0x11, 0x22]);
             export.write(0x100, &[0x55, 0x66]).unwrap();
-            replacement
-                .guest_memory()
-                .unwrap()
-                .read_slice(&mut bytes, GuestAddress(0x10100))
-                .unwrap();
+            dillo_virtio::test_support::TestGuestMemory::from_owner(
+                replacement.guest_memory().unwrap(),
+            )
+            .read_slice(&mut bytes, GuestAddress(0x10100))
+            .unwrap();
             assert_eq!(bytes, [0x33, 0x44]);
             drop(export);
             original.assert_reclaimed();

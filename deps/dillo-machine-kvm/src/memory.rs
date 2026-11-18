@@ -8,11 +8,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, anyhow, bail};
+use dillo_machine::memory::MappedRam;
 use nix::fcntl::{FallocateFlags, fallocate};
 use nix::sys::memfd::{MFdFlags, memfd_create};
 use nix::unistd::ftruncate;
 use vm_memory::mmap::MmapRegionBuilder;
-use vm_memory::{Bytes, FileOffset, GuestAddress, GuestMemoryMmap, GuestRegionMmap};
+use vm_memory::{FileOffset, GuestAddress, GuestMemoryMmap, GuestRegionMmap};
 
 /// Whether to eagerly commit all guest RAM at creation. Default off:
 /// pages commit lazily on first touch, which is faster to boot and lets
@@ -54,7 +55,9 @@ impl MappedRegion {
 #[derive(Debug)]
 pub(crate) struct MappedMemory {
     regions: Vec<MappedRegion>,
-    guest_memory: GuestMemoryMmap,
+    guest_memory: Arc<MappedRam>,
+    #[cfg(test)]
+    file: Arc<File>,
 }
 
 impl MappedMemory {
@@ -120,9 +123,15 @@ impl MappedMemory {
         }
         let guest_memory = GuestMemoryMmap::from_regions(views)
             .map_err(|error| anyhow!("GuestMemoryMmap: {error:?}"))?;
+        // SAFETY: the private backing has disjoint file offsets and one host
+        // mapping per range. Production neither exports the file nor remaps it.
+        #[allow(unsafe_code)]
+        let guest_memory = unsafe { MappedRam::adopt(guest_memory) };
         Ok(Self {
             regions,
             guest_memory,
+            #[cfg(test)]
+            file,
         })
     }
 
@@ -130,8 +139,8 @@ impl MappedMemory {
         &self.regions
     }
 
-    pub(crate) fn guest_memory(&self) -> GuestMemoryMmap {
-        self.guest_memory.clone()
+    pub(crate) fn guest_memory(&self) -> Arc<MappedRam> {
+        Arc::clone(&self.guest_memory)
     }
 
     /// Copy through the owning guest-memory view, preserving the existing
@@ -182,21 +191,7 @@ impl MappingProbe {
     }
 
     pub(crate) fn new(memory: &MappedMemory) -> Self {
-        Self::from_view(&memory.guest_memory)
-    }
-
-    pub(crate) fn from_view(memory: &GuestMemoryMmap) -> Self {
-        use vm_memory::GuestMemory;
-        let file = memory
-            .iter()
-            .next()
-            .unwrap()
-            .file_offset()
-            .unwrap()
-            .file()
-            .try_clone()
-            .unwrap();
-        Self::from_file(Arc::new(file))
+        Self::from_file(Arc::clone(&memory.file))
     }
 
     pub(crate) fn mappings(&self) -> usize {
@@ -216,26 +211,33 @@ impl MappingProbe {
 mod tests {
     use super::*;
     use dillo_machine::memory::{MappedSharedMemory, SharedAccess, SharedMemory, SharedRange};
+    use dillo_virtio::test_support::TestGuestMemory;
     use std::os::unix::fs::FileExt;
-    use vm_memory::{GuestMemory, GuestMemoryRegion, MmapRegion};
+    use vm_memory::{Bytes, MmapRegion};
 
     #[test]
     fn owning_views_preserve_file_offsets_and_reclaim_after_last_region() {
         let memory = MappedMemory::test_backing(&[(0, 0x1000), (0x4000, 0x1000)]).unwrap();
         let probe = MappingProbe::new(&memory);
-        let view = memory.guest_memory();
+        let mappings = probe.mappings();
+        assert!(mappings > 0);
+        let view =
+            MappedSharedMemory::for_guest_memory(memory.guest_memory(), SharedAccess::ReadOnly);
         memory.write(0x4000, b"shared without copying").unwrap();
         let mut bytes = [0u8; 22];
         probe.file.read_exact_at(&mut bytes, 0x1000).unwrap();
         assert_eq!(&bytes, b"shared without copying");
-        let (_, region) = view.remove_region(GuestAddress(0x4000), 0x1000).unwrap();
-        assert_eq!(region.file_offset().unwrap().start(), 0x1000);
+        let region = view
+            .region(SharedRange {
+                gpa: 0x4000,
+                size: 0x1000,
+                access: SharedAccess::ReadOnly,
+            })
+            .unwrap();
         drop(memory);
         drop(view);
-        assert!(probe.mappings() > 0);
-        region
-            .read_slice(&mut bytes, vm_memory::MemoryRegionAddress(0))
-            .unwrap();
+        assert_eq!(probe.mappings(), mappings);
+        region.read(0, &mut bytes).unwrap();
         assert_eq!(&bytes, b"shared without copying");
         drop(region);
         assert_eq!(probe.mappings(), 0);
@@ -273,8 +275,7 @@ mod tests {
         assert!(memory.write(u64::MAX, &[1]).is_err());
         memory.write(0xfff, &[3]).unwrap();
         assert_eq!(
-            memory
-                .guest_memory()
+            TestGuestMemory::from_owner(memory.guest_memory())
                 .read_obj::<u8>(GuestAddress(0xfff))
                 .unwrap(),
             3
@@ -285,44 +286,81 @@ mod tests {
     fn atomic_metadata_uses_independent_views_of_original_memfd() {
         let backing = MappedMemory::new([(0x20_0000, 0x20_0000)])
             .expect("native hugepage-backed Machine RAM is required");
-        let original = backing.guest_memory();
-        let first = original.iter().next().unwrap();
-        let alias =
-            MmapRegion::<()>::from_file(first.file_offset().unwrap().clone(), first.len() as usize)
-                .unwrap();
+        let alias = MmapRegion::<()>::from_file(
+            FileOffset::from_arc(Arc::clone(&backing.file), 0),
+            0x20_0000,
+        )
+        .unwrap();
         assert_ne!(
-            alias.as_ptr(),
-            first.as_ptr(),
+            alias.as_ptr() as u64,
+            backing.regions()[0].host_addr(),
             "independent host mapping required"
         );
+        // The test alone accesses this alias, serially with capability access.
         let alias = GuestMemoryMmap::from_regions(vec![
-            GuestRegionMmap::new(alias, first.start_addr()).unwrap(),
+            GuestRegionMmap::new(alias, GuestAddress(0x20_0000)).unwrap(),
         ])
         .unwrap();
-        original
-            .store(
-                0x8877_6655_4433_2211u64.to_le(),
-                GuestAddress(0x20_0010),
-                Ordering::Relaxed,
-            )
+        backing
+            .write(0x20_0010, &0x8877_6655_4433_2211u64.to_le_bytes())
             .unwrap();
-        let capability = MappedSharedMemory::for_guest_memory(original, SharedAccess::ReadWrite);
-        let independent = MappedSharedMemory::for_guest_memory(alias, SharedAccess::ReadWrite);
+        let capability =
+            MappedSharedMemory::for_guest_memory(backing.guest_memory(), SharedAccess::ReadWrite);
         let range = SharedRange {
             gpa: 0x20_0000,
             size: 0x20,
             access: SharedAccess::ReadWrite,
         };
         let first = capability.region(range).unwrap();
-        let second = independent.region(range).unwrap();
         first.store_u16_le(0, 0x00ff).unwrap();
         first.store_u32_le(4, 0x89ab_cdef).unwrap();
-        assert_eq!(second.load_u16_le(0).unwrap(), 0x00ff);
-        assert_eq!(second.load_u32_le(4).unwrap(), 0x89ab_cdef);
-        assert_eq!(second.load_u64_le(0x10).unwrap(), 0x8877_6655_4433_2211);
-        second.store_u16_le(0, 0x0100).unwrap();
-        second.store_u32_le(4, 0x0123_4567).unwrap();
+        assert_eq!(
+            u16::from_le(
+                alias
+                    .load(GuestAddress(0x20_0000), Ordering::Relaxed)
+                    .unwrap()
+            ),
+            0x00ff
+        );
+        assert_eq!(
+            u32::from_le(
+                alias
+                    .load(GuestAddress(0x20_0004), Ordering::Relaxed)
+                    .unwrap()
+            ),
+            0x89ab_cdef
+        );
+        assert_eq!(
+            u64::from_le(
+                alias
+                    .load(GuestAddress(0x20_0010), Ordering::Relaxed)
+                    .unwrap()
+            ),
+            0x8877_6655_4433_2211
+        );
+        alias
+            .store(
+                0x0100u16.to_le(),
+                GuestAddress(0x20_0000),
+                Ordering::Relaxed,
+            )
+            .unwrap();
+        alias
+            .store(
+                0x0123_4567u32.to_le(),
+                GuestAddress(0x20_0004),
+                Ordering::Relaxed,
+            )
+            .unwrap();
+        alias
+            .store(
+                0x1122_3344_5566_7788u64.to_le(),
+                GuestAddress(0x20_0010),
+                Ordering::Relaxed,
+            )
+            .unwrap();
         assert_eq!(first.load_u16_le(0).unwrap(), 0x0100);
         assert_eq!(first.load_u32_le(4).unwrap(), 0x0123_4567);
+        assert_eq!(first.load_u64_le(0x10).unwrap(), 0x1122_3344_5566_7788);
     }
 }

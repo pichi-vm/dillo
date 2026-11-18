@@ -7,8 +7,9 @@ use std::os::fd::FromRawFd;
 use std::sync::Arc;
 
 use dillo_machine::RamRange;
+use dillo_machine::memory::MappedRam;
 use vm_memory::mmap::MmapRegionBuilder;
-use vm_memory::{Bytes, FileOffset, GuestAddress, GuestMemoryMmap, GuestRegionMmap};
+use vm_memory::{FileOffset, GuestAddress, GuestMemoryMmap, GuestRegionMmap};
 
 use crate::hypervisor::Error;
 
@@ -19,11 +20,13 @@ pub(crate) struct MappedRegion {
     pub(crate) size: u64,
 }
 
-/// Every exported view clones the actual mmap owners, including their file offsets.
+/// The native allocation and exported byte views share one RAM owner.
 #[derive(Debug)]
 pub(crate) struct MappedMemory {
     regions: Vec<MappedRegion>,
-    guest: GuestMemoryMmap,
+    guest: Arc<MappedRam>,
+    #[cfg(test)]
+    file: Arc<std::fs::File>,
 }
 
 impl MappedMemory {
@@ -149,15 +152,24 @@ impl MappedMemory {
         }
         let guest = GuestMemoryMmap::from_regions(views)
             .map_err(|e| Error::Hv(format!("RAM regions: {e}")))?;
-        Ok(Self { regions, guest })
+        // SAFETY: each byte has one host mapping of a disjoint offset in this
+        // private unlinked object. Production never exposes or remaps the file.
+        #[allow(unsafe_code)]
+        let guest = unsafe { MappedRam::adopt(guest) };
+        Ok(Self {
+            regions,
+            guest,
+            #[cfg(test)]
+            file,
+        })
     }
 
     pub(crate) fn regions(&self) -> &[MappedRegion] {
         &self.regions
     }
 
-    pub(crate) fn guest_memory(&self) -> GuestMemoryMmap {
-        self.guest.clone()
+    pub(crate) fn guest_memory(&self) -> Arc<MappedRam> {
+        Arc::clone(&self.guest)
     }
 
     pub(crate) fn write(&self, gpa: u64, data: &[u8]) -> Result<(), Error> {
@@ -188,22 +200,35 @@ pub(crate) struct MappingProbe {
 #[cfg(test)]
 impl MappingProbe {
     pub(crate) fn new(memory: &MappedMemory, index: usize) -> Self {
-        use vm_memory::GuestMemory as _;
-        Self::from_region(memory.guest.iter().nth(index).unwrap())
+        let region = &memory.regions[index];
+        let offset = memory.regions[..index].iter().map(|r| r.size).sum();
+        Self::observing(
+            region.address,
+            region.size,
+            FileOffset::from_arc(Arc::clone(&memory.file), offset),
+        )
     }
 
     fn from_region(region: &GuestRegionMmap) -> Self {
         use vm_memory::GuestMemoryRegion as _;
-        let witness = MmapRegionBuilder::new(region.size())
-            .with_file_offset(region.file_offset().unwrap().clone())
+        Self::observing(
+            region.as_ptr() as u64,
+            region.size() as u64,
+            region.file_offset().unwrap().clone(),
+        )
+    }
+
+    fn observing(address: u64, size: u64, offset: FileOffset) -> Self {
+        let witness = MmapRegionBuilder::new(size as usize)
+            .with_file_offset(offset)
             .with_mmap_prot(libc::PROT_READ | libc::PROT_WRITE)
             .with_mmap_flags(libc::MAP_SHARED)
             .build()
             .unwrap();
         Self {
             witness,
-            address: region.as_ptr() as u64,
-            size: region.size() as u64,
+            address,
+            size,
         }
     }
 
@@ -278,9 +303,11 @@ impl MappingProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dillo_machine::memory::{MappedSharedMemory, SharedAccess, SharedMemory, SharedRange};
+    use dillo_virtio::test_support::TestGuestMemory;
     use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::PermissionsExt as _;
-    use vm_memory::{GuestMemory as _, VolatileMemory as _};
+    use vm_memory::{Bytes as _, VolatileMemory as _};
 
     #[test]
     fn writable_shared_object_descriptor_cannot_resize_ram() {
@@ -289,8 +316,8 @@ mod tests {
             size: 0x4000,
         }])
         .unwrap();
-        let region = memory.guest.iter().next().unwrap();
-        let backing = region.file_offset().unwrap().file();
+        let backing = &memory.file;
+        let observer = TestGuestMemory::from_owner(memory.guest_memory());
         assert_eq!(backing.metadata().unwrap().permissions().mode() & 0o077, 0);
         // SAFETY: fcntl observes flags of a descriptor retained by backing.
         #[allow(unsafe_code)]
@@ -309,10 +336,7 @@ mod tests {
             assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
             assert_eq!(backing.metadata().unwrap().len(), 0x4000);
             let mut bytes = [0; 2];
-            memory
-                .guest
-                .read_slice(&mut bytes, GuestAddress(8))
-                .unwrap();
+            observer.read_slice(&mut bytes, GuestAddress(8)).unwrap();
             assert_eq!(bytes, [0xa5, 0x5a]);
         }
         let error = MmapRegionBuilder::<()>::new(0x4000)
@@ -341,26 +365,39 @@ mod tests {
         .unwrap();
         let first = MappingProbe::new(&memory, 0);
         let second = MappingProbe::new(&memory, 1);
-        let export = memory.guest_memory();
-        let region_export = export.iter().nth(1).unwrap().get_mmap();
+        let export =
+            MappedSharedMemory::for_guest_memory(memory.guest_memory(), SharedAccess::ReadOnly);
+        let region_export = export
+            .region(SharedRange {
+                gpa: 0x10000,
+                size: 0x4000,
+                access: SharedAccess::ReadOnly,
+            })
+            .unwrap();
+        // Only this test accesses the independent alias, serially with the owner.
         let alias = second.alias();
-        assert_eq!(region_export.file_offset().unwrap().start(), 0x4000);
+        assert_eq!(alias.file_offset().unwrap().start(), 0x4000);
         memory.write(0x10003, &[0xa5, 0x5a]).unwrap();
         let mut bytes = [0; 2];
         alias.as_volatile_slice().read_slice(&mut bytes, 3).unwrap();
         assert_eq!(bytes, [0xa5, 0x5a]);
         alias.as_volatile_slice().write_slice(&[0x7b], 4).unwrap();
-        export
-            .read_slice(&mut bytes, GuestAddress(0x10003))
-            .unwrap();
+        region_export.read(3, &mut bytes).unwrap();
         assert_eq!(bytes, [0xa5, 0x7b]);
         assert!(first.is_mapped());
         assert!(second.is_mapped());
         drop(memory);
         drop(export);
-        assert!(!first.is_mapped(), "first mapping has no remaining view");
-        assert!(second.is_mapped(), "individual region export owns its mmap");
+        assert!(
+            first.is_mapped(),
+            "region export shares the allocation owner"
+        );
+        assert!(
+            second.is_mapped(),
+            "region export retains the original mmap"
+        );
         drop(region_export);
+        assert!(!first.is_mapped());
         assert!(
             !second.is_mapped(),
             "final view really munmaps original address"

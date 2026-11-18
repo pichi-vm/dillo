@@ -362,10 +362,11 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use crate::test_support::TestGuestMemory;
     use dillo_machine::memory::{
         AddressRange, MappedSharedMemory, SharedAccess, SharedMemoryRequirement,
     };
-    use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
+    use vm_memory::GuestAddress;
 
     use super::*;
 
@@ -514,9 +515,9 @@ mod tests {
 
     #[test]
     fn activation_queue_memory_uses_shared_memory_when_present() {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let shared = Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0x2000,
@@ -550,9 +551,9 @@ mod tests {
 
     #[test]
     fn activation_buffer_memory_uses_shared_memory_when_present() {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let shared = Arc::new(MappedSharedMemory::new(
-            mem.clone(),
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0x2000,
@@ -573,7 +574,7 @@ mod tests {
             .write(GuestAddress(0x2000), &[9])
             .expect("write inside shared capability limits");
         let mut data = [0];
-        Bytes::read(&mem, &mut data, GuestAddress(0x2000)).unwrap();
+        mem.read_slice(&mut data, GuestAddress(0x2000)).unwrap();
         assert_eq!(data, [9]);
         let mut outside = [0];
         assert!(

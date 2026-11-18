@@ -108,15 +108,15 @@ impl VirtioMemory for SharedVirtioMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestGuestMemory;
     use dillo_machine::memory::{AddressRange, MappedSharedMemory, SharedMemoryRequirement};
-    use vm_memory::{Bytes, GuestMemoryMmap};
 
     #[test]
     fn shared_virtio_memory_reads_inside_capability_limits() {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
-        Bytes::write(&mem, &[1, 2, 3], GuestAddress(0x5000)).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        mem.write_slice(&[1, 2, 3], GuestAddress(0x5000)).unwrap();
         let shared = SharedVirtioMemory::new(vec![Arc::new(MappedSharedMemory::new(
-            mem,
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0x5000,
@@ -133,9 +133,9 @@ mod tests {
 
     #[test]
     fn shared_virtio_memory_rejects_access_outside_capability_limits() {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let shared = SharedVirtioMemory::new(vec![Arc::new(MappedSharedMemory::new(
-            mem,
+            mem.owner(),
             SharedMemoryRequirement {
                 range: AddressRange {
                     base: 0x5000,

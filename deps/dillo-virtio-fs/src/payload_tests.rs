@@ -3,9 +3,9 @@
 
 use super::*;
 use dillo_machine::memory::{MappedSharedMemory, SharedAccess};
+use dillo_virtio::test_support::TestGuestMemory;
 use dillo_virtio::{SharedQueueMemory, SharedVirtioMemory};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use vm_memory::{Bytes, GuestMemoryMmap};
 
 const TAIL: u64 = 0x001f_0000;
 const REPLY: u64 = 0x4000;
@@ -109,7 +109,7 @@ impl VirtioMemory for PayloadMemory {
 }
 
 struct Fixture {
-    mem: GuestMemoryMmap,
+    mem: TestGuestMemory,
     queue: Arc<Mutex<Queue>>,
     metadata: Arc<dyn QueueMemory>,
     payload: Arc<dyn VirtioMemory>,
@@ -122,9 +122,9 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x0020_0000)]).unwrap();
+        let mem = TestGuestMemory::from_ranges(&[(GuestAddress(0), 0x0020_0000)]).unwrap();
         let shared = Arc::new(MappedSharedMemory::for_guest_memory(
-            mem.clone(),
+            mem.owner(),
             SharedAccess::ReadWrite,
         ));
         let metadata = Arc::new(SharedQueueMemory::new(vec![shared.clone()]));

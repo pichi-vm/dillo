@@ -1055,7 +1055,7 @@ mod imp {
             for outcome in 0..6 {
                 let (mut vm, profile, base) = machine_fixture();
                 let observer = vm.device_failures();
-                let probe = memory::MappingProbe::from_view(&vm.inner.guest_memory().unwrap());
+                let probe = vm.inner.mapping_probe();
                 let retained = vm.shared_memory[0]
                     .region(SharedRange {
                         gpa: base,
@@ -1181,7 +1181,7 @@ mod imp {
         #[test]
         fn exported_region_outlives_machine_and_then_reclaims_mapping() {
             let (vm, _, base) = machine_fixture();
-            let probe = memory::MappingProbe::from_view(&vm.inner.guest_memory().unwrap());
+            let probe = vm.inner.mapping_probe();
             let region = vm.shared_memory[0]
                 .region(dillo_machine::memory::SharedRange {
                     gpa: base,
@@ -1202,7 +1202,7 @@ mod imp {
         #[test]
         fn standalone_preparation_and_native_runner_retain_machine_ram() {
             let (mut vm, profile, _) = machine_fixture();
-            let probe = memory::MappingProbe::from_view(&vm.inner.guest_memory().unwrap());
+            let probe = vm.inner.mapping_probe();
             let input = vm.cpu_preparation(0, profile).unwrap();
             drop(vm);
             assert!(
@@ -1231,7 +1231,7 @@ mod imp {
         fn irq_and_notification_services_each_retain_registered_ram() {
             for notification_last in [true, false] {
                 let (vm, _, _) = machine_fixture();
-                let probe = memory::MappingProbe::from_view(&vm.inner.guest_memory().unwrap());
+                let probe = vm.inner.mapping_probe();
                 let irq = Arc::clone(&vm.irq_manager);
                 let window = dillo_machine::memory::AddressRange {
                     base: 0x0b00_0000,
@@ -1504,8 +1504,9 @@ mod imp {
             platform::Arch,
         };
         use dillo_machine::{CpuPreparation as _, CpuProfile, Machine as _, RamRange};
+        use dillo_virtio::test_support::TestGuestMemory;
         use kvm_bindings::{KVM_VGIC_V3_ADDR_TYPE_DIST, KVM_VGIC_V3_ADDR_TYPE_REDIST_REGION};
-        use vm_memory::{Bytes, GuestAddress};
+        use vm_memory::GuestAddress;
 
         const DIST: u64 = 0x0900_0000;
         const REDIST: u64 = 0x0b00_0000;
@@ -1700,7 +1701,7 @@ mod imp {
                     ),
                     "{exit:?}"
                 );
-                let memory = vm.inner.guest_memory().unwrap();
+                let memory = TestGuestMemory::from_owner(vm.inner.guest_memory().unwrap());
                 let [progress, dist, first, second]: [u64; 4] = std::array::from_fn(|index| {
                     memory
                         .read_obj(GuestAddress(0x1000 + index as u64 * 8))
@@ -1745,7 +1746,7 @@ mod imp {
                 if error.raw_os_error() == Some(libc::ENXIO)),
                 "{result:?}"
             );
-            let memory = vm.inner.guest_memory().unwrap();
+            let memory = TestGuestMemory::from_owner(vm.inner.guest_memory().unwrap());
             assert_eq!(memory.read_obj::<u64>(GuestAddress(0x1000)).unwrap(), 0);
         }
     }

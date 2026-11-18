@@ -4,7 +4,7 @@
 //! Shared guest-memory access and mapped-memory adapters.
 
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use vm_memory::{
     Address, AtomicAccess, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion,
@@ -195,9 +195,64 @@ impl SharedRegion {
     }
 }
 
+/// Owns mapped RAM and orders all participating same-process byte and scalar access.
+#[derive(Debug)]
+pub struct MappedRam {
+    guest: GuestMemoryMmap,
+    access: Mutex<()>,
+}
+
+impl MappedRam {
+    /// Adopt an allocation before publishing its host access capabilities.
+    ///
+    /// # Safety
+    ///
+    /// For the backing lifetime, all potentially conflicting same-process
+    /// accesses must use this owner or have an independently established
+    /// happens-before relationship. This includes aliases and later mappings
+    /// through any retained handles. Keep the backing and mappings valid and
+    /// writable until this owner is dropped. This does not order external
+    /// guest or process accesses.
+    #[allow(unsafe_code)]
+    pub unsafe fn adopt(guest: GuestMemoryMmap) -> Arc<Self> {
+        Arc::new(Self {
+            guest,
+            access: Mutex::new(()),
+        })
+    }
+
+    /// Return GPA, length and host address for native VM registration.
+    /// The native registration must retain the backing for its lifetime.
+    pub fn native_regions(&self) -> impl Iterator<Item = (u64, u64, *mut u8)> + '_ {
+        self.guest.iter().map(|region| {
+            (
+                region.start_addr().raw_value(),
+                region.len(),
+                region.as_ptr(),
+            )
+        })
+    }
+
+    /// Copy launch data through the same access guard used by shared regions.
+    pub fn write_slice(
+        &self,
+        data: &[u8],
+        address: GuestAddress,
+    ) -> Result<(), vm_memory::GuestMemoryError> {
+        let _guard = self.lock();
+        self.guest.write_slice(data, address)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, ()> {
+        self.access
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 #[derive(Debug)]
 struct MappedSharedRegion {
-    memory: GuestMemoryMmap,
+    memory: Arc<MappedRam>,
     gpa: u64,
     size: u64,
     access: SharedAccess,
@@ -209,7 +264,9 @@ impl SharedRegionAccess for MappedSharedRegion {
             return Err(SharedMemoryError::AccessDenied);
         }
         let addr = self.checked_access(offset, data.len())?;
+        let _guard = self.memory.lock();
         self.memory
+            .guest
             .read(data, GuestAddress(addr))
             .map_err(|e| SharedMemoryError::Backing(e.to_string()))
             .map(|_| ())
@@ -220,7 +277,9 @@ impl SharedRegionAccess for MappedSharedRegion {
             return Err(SharedMemoryError::AccessDenied);
         }
         let addr = self.checked_access(offset, data.len())?;
+        let _guard = self.memory.lock();
         self.memory
+            .guest
             .write(data, GuestAddress(addr))
             .map_err(|e| SharedMemoryError::Backing(e.to_string()))
             .map(|_| ())
@@ -253,7 +312,9 @@ impl MappedSharedRegion {
             return Err(SharedMemoryError::AccessDenied);
         }
         let addr = self.checked_access(offset, std::mem::size_of::<T>())?;
+        let _guard = self.memory.lock();
         self.memory
+            .guest
             .load(GuestAddress(addr), Ordering::Relaxed)
             .map_err(|error| SharedMemoryError::Backing(error.to_string()))
     }
@@ -266,7 +327,9 @@ impl MappedSharedRegion {
         // vm-memory validates the entire scalar in one mapped region and its
         // native alignment before performing the atomic store. It never splits
         // a scalar into byte accesses or mutates a short first-region slice.
+        let _guard = self.memory.lock();
         self.memory
+            .guest
             .store(value, GuestAddress(addr), Ordering::Relaxed)
             .map_err(|error| SharedMemoryError::Backing(error.to_string()))
     }
@@ -337,14 +400,14 @@ impl SharedMemoryState {
 /// `shared` when guest shared/private conversion exits are handled internally.
 #[derive(Debug, Clone)]
 pub struct MappedSharedMemory {
-    memory: GuestMemoryMmap,
+    memory: Arc<MappedRam>,
     limits: Vec<AddressRange>,
     access: SharedAccess,
     shared: SharedMemoryState,
 }
 
 impl MappedSharedMemory {
-    pub fn new(memory: GuestMemoryMmap, requirement: SharedMemoryRequirement) -> Self {
+    pub fn new(memory: Arc<MappedRam>, requirement: SharedMemoryRequirement) -> Self {
         Self {
             memory,
             limits: vec![requirement.range],
@@ -353,8 +416,8 @@ impl MappedSharedMemory {
         }
     }
 
-    pub fn for_guest_memory(memory: GuestMemoryMmap, access: SharedAccess) -> Self {
-        let limits = Self::guest_memory_ranges(&memory);
+    pub fn for_guest_memory(memory: Arc<MappedRam>, access: SharedAccess) -> Self {
+        let limits = Self::guest_memory_ranges(&memory.guest);
         Self {
             memory,
             access,
@@ -364,7 +427,7 @@ impl MappedSharedMemory {
     }
 
     pub fn with_shared_ranges(
-        memory: GuestMemoryMmap,
+        memory: Arc<MappedRam>,
         requirement: SharedMemoryRequirement,
         shared: Vec<AddressRange>,
     ) -> Self {
@@ -377,7 +440,7 @@ impl MappedSharedMemory {
     }
 
     pub fn with_shared_state(
-        memory: GuestMemoryMmap,
+        memory: Arc<MappedRam>,
         requirement: SharedMemoryRequirement,
         shared: SharedMemoryState,
     ) -> Self {
@@ -429,7 +492,7 @@ impl SharedMemory for MappedSharedMemory {
             return Err(SharedMemoryError::NotShared);
         }
         let size = usize::try_from(range.size).map_err(|_| SharedMemoryError::OutOfLimits)?;
-        if !self.memory.check_range(GuestAddress(range.gpa), size) {
+        if !self.memory.guest.check_range(GuestAddress(range.gpa), size) {
             return Err(SharedMemoryError::OutOfLimits);
         }
         Ok(SharedRegion::new(Arc::new(MappedSharedRegion {
@@ -445,21 +508,52 @@ impl SharedMemory for MappedSharedMemory {
 mod tests {
     use super::*;
 
+    impl MappedRam {
+        fn test_from_ranges(ranges: &[(GuestAddress, usize)]) -> Arc<Self> {
+            let guest = GuestMemoryMmap::from_ranges(ranges).unwrap();
+            // SAFETY: fresh anonymous mappings never leave this owner.
+            #[allow(unsafe_code)]
+            unsafe {
+                Self::adopt(guest)
+            }
+        }
+
+        fn read_slice(&self, data: &mut [u8], address: GuestAddress) {
+            let _guard = self.lock();
+            self.guest.read_slice(data, address).unwrap();
+        }
+    }
+
     #[test]
     fn scalar_accesses_use_little_endian_storage_and_retain_the_mapping() {
-        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0x1000), 0x1000)]).unwrap();
+        let memory = MappedRam::test_from_ranges(&[(GuestAddress(0x1000), 0x1000)]);
         memory
             .write_slice(&[0x5a; 32], GuestAddress(0x1100))
             .unwrap();
         memory
-            .store(
-                0x8877_6655_4433_2211u64.to_le(),
+            .write_slice(
+                &0x8877_6655_4433_2211u64.to_le_bytes(),
                 GuestAddress(0x1110),
-                Ordering::Relaxed,
             )
             .unwrap();
-        let original = Arc::downgrade(&memory.iter().next().unwrap().get_mmap());
+        let original = Arc::downgrade(&memory);
         let shared = MappedSharedMemory::for_guest_memory(memory.clone(), SharedAccess::ReadWrite);
+        let requirement = SharedMemoryRequirement {
+            range: AddressRange {
+                base: 0x1100,
+                size: 0x20,
+            },
+            access: SharedAccess::ReadOnly,
+        };
+        let bounded = MappedSharedMemory::new(memory.clone(), requirement);
+        assert!(Arc::ptr_eq(&shared.memory, &bounded.memory));
+        let reader = bounded
+            .region(SharedRange {
+                gpa: 0x1100,
+                size: 0x20,
+                access: SharedAccess::ReadOnly,
+            })
+            .unwrap();
         // Alignment belongs to the final native address, not the claimed base.
         let region = shared
             .region(SharedRange {
@@ -474,7 +568,7 @@ mod tests {
         assert_eq!(region.load_u32_le(3).unwrap(), 0x89ab_cdef);
         assert_eq!(region.load_u64_le(15).unwrap(), 0x8877_6655_4433_2211);
         let mut bytes = [0; 32];
-        memory.read_slice(&mut bytes, GuestAddress(0x1100)).unwrap();
+        reader.read(0, &mut bytes).unwrap();
         assert_eq!(
             &bytes[..8],
             &[0x5a, 0x5a, 0xab, 0x12, 0xef, 0xcd, 0xab, 0x89]
@@ -487,6 +581,8 @@ mod tests {
         assert_eq!(&bytes[24..], &[0x5a; 8]);
         drop(memory);
         drop(shared);
+        drop(bounded);
+        drop(reader);
         assert!(original.upgrade().is_some());
         region.store_u16_le(1, 0x00ff).unwrap();
         assert_eq!(region.load_u16_le(1).unwrap(), 0x00ff);
@@ -496,7 +592,7 @@ mod tests {
 
     #[test]
     fn scalar_permissions_and_refused_stores_preserve_original_bytes() {
-        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0x1000), 0x1000)]).unwrap();
+        let memory = MappedRam::test_from_ranges(&[(GuestAddress(0x1000), 0x1000)]);
         memory
             .write_slice(&[0x5a; 32], GuestAddress(0x1100))
             .unwrap();
@@ -569,7 +665,7 @@ mod tests {
             Err(SharedMemoryError::Backing(_))
         ));
         let mut bytes = [0; 32];
-        memory.read_slice(&mut bytes, GuestAddress(0x1100)).unwrap();
+        memory.read_slice(&mut bytes, GuestAddress(0x1100));
         assert_eq!(bytes, [0x5a; 32]);
         write_only.store_u16_le(14, 0x1234).unwrap();
         write_only.store_u32_le(0, 0x89ab_cdef).unwrap();
@@ -581,11 +677,10 @@ mod tests {
     fn scalar_accesses_refuse_to_span_mapped_regions_without_partial_store() {
         // Deliberately split a scalar across independently owned mappings, even
         // though the claimed guest range is contiguous and the address aligned.
-        let memory = GuestMemoryMmap::from_ranges(&[
+        let memory = MappedRam::test_from_ranges(&[
             (GuestAddress(0x1000), 3),
             (GuestAddress(0x1003), 0x1000),
-        ])
-        .unwrap();
+        ]);
         memory
             .write_slice(&[0x5a; 16], GuestAddress(0x1000))
             .unwrap();
@@ -627,17 +722,16 @@ mod tests {
             Err(SharedMemoryError::Backing(_))
         ));
         let mut bytes = [0; 16];
-        memory.read_slice(&mut bytes, GuestAddress(0x1000)).unwrap();
+        memory.read_slice(&mut bytes, GuestAddress(0x1000));
         assert_eq!(bytes, [0x5a; 16]);
     }
 
     #[test]
     fn mapped_shared_memory_refuses_unbacked_claims_before_access() {
-        let memory = GuestMemoryMmap::from_ranges(&[
+        let memory = MappedRam::test_from_ranges(&[
             (GuestAddress(0x1000), 0x1000),
             (GuestAddress(0x3000), 0x1000),
-        ])
-        .unwrap();
+        ]);
         for base in [0x1000, 0x3000] {
             memory
                 .write_slice(&[0x5a; 0x1000], GuestAddress(base))
@@ -665,7 +759,7 @@ mod tests {
         }
         for base in [0x1000, 0x3000] {
             let mut bytes = [0; 0x1000];
-            memory.read_slice(&mut bytes, GuestAddress(base)).unwrap();
+            memory.read_slice(&mut bytes, GuestAddress(base));
             assert_eq!(bytes, [0x5a; 0x1000]);
         }
         // Empty claims have no backing bytes to cover, even inside the hole
@@ -684,11 +778,10 @@ mod tests {
     #[test]
     fn mapped_shared_memory_claims_contiguous_backing_at_zero_and_nonzero_gpas() {
         for base in [0, 0x1000] {
-            let memory = GuestMemoryMmap::from_ranges(&[
+            let memory = MappedRam::test_from_ranges(&[
                 (GuestAddress(base), 8),
                 (GuestAddress(base + 8), 8),
-            ])
-            .unwrap();
+            ]);
             let shared = MappedSharedMemory::new(
                 memory,
                 SharedMemoryRequirement {
@@ -712,7 +805,7 @@ mod tests {
 
     #[test]
     fn mapped_shared_memory_keeps_refusal_precedence_for_unbacked_ranges() {
-        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
+        let memory = MappedRam::test_from_ranges(&[(GuestAddress(0), 0x1000)]);
         let shared = MappedSharedMemory::with_shared_ranges(
             memory,
             SharedMemoryRequirement {
@@ -754,8 +847,10 @@ mod tests {
 
     #[test]
     fn mapped_shared_memory_reads_and_writes_claimed_region() {
-        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x4000)]).unwrap();
-        memory.write(&[1, 2, 3, 4], GuestAddress(0x1200)).unwrap();
+        let memory = MappedRam::test_from_ranges(&[(GuestAddress(0), 0x4000)]);
+        memory
+            .write_slice(&[1, 2, 3, 4], GuestAddress(0x1200))
+            .unwrap();
         let shared = MappedSharedMemory::new(
             memory,
             SharedMemoryRequirement {
@@ -785,7 +880,7 @@ mod tests {
 
     #[test]
     fn mapped_shared_memory_rejects_outside_capability_limits() {
-        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x4000)]).unwrap();
+        let memory = MappedRam::test_from_ranges(&[(GuestAddress(0), 0x4000)]);
         let shared = MappedSharedMemory::new(
             memory,
             SharedMemoryRequirement {
@@ -810,13 +905,12 @@ mod tests {
     #[test]
     fn mapped_guest_memory_claims_contiguous_regions_without_widening_access() {
         for base in [0, 0x1000] {
-            let memory = GuestMemoryMmap::from_ranges(&[
+            let memory = MappedRam::test_from_ranges(&[
                 (GuestAddress(base), 3),
                 (GuestAddress(base + 3), 5),
                 (GuestAddress(base + 8), 8),
                 (GuestAddress(base + 32), 8),
-            ])
-            .unwrap();
+            ]);
             let shared =
                 MappedSharedMemory::for_guest_memory(memory.clone(), SharedAccess::ReadWrite);
             let region = shared
@@ -834,7 +928,7 @@ mod tests {
                 Err(SharedMemoryError::Backing(_))
             ));
             let mut bytes = [0; 16];
-            memory.read_slice(&mut bytes, GuestAddress(base)).unwrap();
+            memory.read_slice(&mut bytes, GuestAddress(base));
             assert_eq!(bytes, [0x5a; 16]);
             region.read(0, &mut bytes).unwrap();
             assert_eq!(bytes, [0x5a; 16]);
@@ -856,9 +950,7 @@ mod tests {
                 .unwrap();
             separate.write(0, &[0xa5; 8]).unwrap();
             let mut bytes = [0; 8];
-            memory
-                .read_slice(&mut bytes, GuestAddress(base + 32))
-                .unwrap();
+            memory.read_slice(&mut bytes, GuestAddress(base + 32));
             assert_eq!(bytes, [0xa5; 8]);
 
             let readonly = MappedSharedMemory::for_guest_memory(memory, SharedAccess::ReadOnly);
@@ -887,12 +979,11 @@ mod tests {
 
     #[test]
     fn mapped_shared_memory_can_limit_claims_to_guest_ram() {
-        let memory = GuestMemoryMmap::from_ranges(&[
+        let memory = MappedRam::test_from_ranges(&[
             (GuestAddress(0x1000), 0x1000),
             (GuestAddress(0x4000), 0x1000),
-        ])
-        .unwrap();
-        memory.write(&[1, 2], GuestAddress(0x4100)).unwrap();
+        ]);
+        memory.write_slice(&[1, 2], GuestAddress(0x4100)).unwrap();
         let shared = MappedSharedMemory::for_guest_memory(memory, SharedAccess::ReadWrite);
 
         let region = shared
@@ -918,7 +1009,7 @@ mod tests {
 
     #[test]
     fn mapped_shared_memory_rejects_private_range() {
-        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x4000)]).unwrap();
+        let memory = MappedRam::test_from_ranges(&[(GuestAddress(0), 0x4000)]);
         let shared = MappedSharedMemory::with_shared_ranges(
             memory,
             SharedMemoryRequirement {
@@ -946,7 +1037,7 @@ mod tests {
 
     #[test]
     fn mapped_shared_memory_observes_runtime_private_shared_updates() {
-        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x4000)]).unwrap();
+        let memory = MappedRam::test_from_ranges(&[(GuestAddress(0), 0x4000)]);
         let state = SharedMemoryState::new(vec![AddressRange {
             base: 0x1000,
             size: 0x1000,
@@ -999,7 +1090,7 @@ mod tests {
 
     #[test]
     fn mapped_shared_memory_enforces_access_mode() {
-        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x4000)]).unwrap();
+        let memory = MappedRam::test_from_ranges(&[(GuestAddress(0), 0x4000)]);
         let shared = MappedSharedMemory::new(
             memory,
             SharedMemoryRequirement {
@@ -1033,7 +1124,7 @@ mod tests {
 
     #[test]
     fn mapped_shared_memory_region_bounds_are_enforced() {
-        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x4000)]).unwrap();
+        let memory = MappedRam::test_from_ranges(&[(GuestAddress(0), 0x4000)]);
         let shared = MappedSharedMemory::new(
             memory,
             SharedMemoryRequirement {
