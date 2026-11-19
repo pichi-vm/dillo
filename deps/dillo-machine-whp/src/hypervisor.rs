@@ -67,6 +67,13 @@ pub enum Error {
     #[error("WHP setup partition failed: {0}")]
     SetupPartition(String),
 
+    #[error("{operation}. WHP partition deletion failed ({hr}) and resources were retained")]
+    PartitionCleanup {
+        #[source]
+        operation: Box<Error>,
+        hr: String,
+    },
+
     #[error("WHP create vCPU {idx} failed: {hr}")]
     CreateVcpu { idx: u32, hr: String },
 
@@ -172,15 +179,12 @@ impl Vm {
     fn new_with_options(options: PartitionOptions) -> Result<Self, Error> {
         ensure_hypervisor_present()?;
 
-        let partition = raw::create_partition().map_err(|hr| Error::CreatePartition(status(hr)))?;
-
-        let inner = VmInner { partition };
         if options.processor_count == 0 {
-            drop(inner);
             return Err(Error::EmptyProcessorCount);
         }
 
-        let setup_result = inner
+        let inner = VmInner::new()?;
+        let setup = inner
             .set_processor_count(options.processor_count)
             .and_then(|()| {
                 if options.hyperv_enlightenments {
@@ -192,16 +196,7 @@ impl Vm {
                 }
                 inner.setup()
             });
-        if let Err(err) = setup_result {
-            drop(inner);
-            return Err(err);
-        }
-
-        Ok(Self {
-            regions: Vec::new(),
-            memory: None,
-            inner: Arc::new(inner),
-        })
+        inner.finish_setup(setup)
     }
 
     #[cfg(test)]
@@ -366,6 +361,40 @@ impl Drop for Region {
 }
 
 impl VmInner {
+    fn new() -> Result<Self, Error> {
+        Ok(Self {
+            partition: raw::create_partition().map_err(|hr| Error::CreatePartition(status(hr)))?,
+        })
+    }
+
+    fn finish_setup(mut self, setup: Result<(), Error>) -> Result<Vm, Error> {
+        setup.map_err(|operation| self.cleanup_error(operation))?;
+        Ok(Vm {
+            regions: Vec::new(),
+            memory: None,
+            inner: Arc::new(self),
+        })
+    }
+
+    fn cleanup_error(&mut self, operation: Error) -> Error {
+        match self.retire() {
+            Ok(()) => operation,
+            Err(hr) => Error::PartitionCleanup {
+                operation: Box::new(operation),
+                hr: status(hr),
+            },
+        }
+    }
+
+    fn retire(&mut self) -> Result<(), HResult> {
+        // Retire at most once, including when setup or mapping fails.
+        let partition = std::mem::take(&mut self.partition);
+        if partition == 0 {
+            return Ok(());
+        }
+        raw::delete_partition(partition)
+    }
+
     fn set_processor_count(&self, count: u32) -> Result<(), Error> {
         raw::set_processor_count(self.partition, count)
             .map_err(|hr| Error::SetProcessorCount(status(hr)))
@@ -467,7 +496,9 @@ fn hyperv_leaf1_cpuid(
 
 impl Drop for VmInner {
     fn drop(&mut self) {
-        raw::delete_partition(self.partition);
+        if let Err(hr) = self.retire() {
+            log::error!("WHP partition deletion failed ({hr}), resources retained");
+        }
     }
 }
 
@@ -768,6 +799,12 @@ mod raw {
     const E_FAIL: i32 = 0x8000_4005u32.cast_signed();
     const ERROR_NOT_SUPPORTED: HResult = HResult(0x8007_0032u32.cast_signed());
 
+    #[cfg(test)]
+    std::thread_local! {
+        pub(super) static FAIL_NEXT_DELETE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        pub(super) static DELETED_PARTITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     pub(super) fn hypervisor_present() -> Result<u32, HResult> {
         get_capability_u32(WHvCapabilityCodeHypervisorPresent)
     }
@@ -782,11 +819,19 @@ mod raw {
         Ok(partition)
     }
 
-    pub(super) fn delete_partition(partition: PartitionHandle) {
-        if partition != 0 {
-            // SAFETY: best-effort cleanup of an owned WHP partition handle.
-            let _ = unsafe { WHvDeletePartition(partition) };
+    pub(super) fn delete_partition(partition: PartitionHandle) -> Result<(), HResult> {
+        #[cfg(test)]
+        if FAIL_NEXT_DELETE.with(|fail| fail.replace(false)) {
+            return Err(HResult(E_FAIL));
         }
+        // SAFETY: only the final owner of this live partition calls this.
+        let hr = unsafe { WHvDeletePartition(partition) };
+        if hr != S_OK {
+            return Err(HResult(hr));
+        }
+        #[cfg(test)]
+        DELETED_PARTITIONS.with(|count| count.set(count.get() + 1));
+        Ok(())
     }
 
     pub(super) fn set_processor_count(
@@ -1525,10 +1570,10 @@ mod raw {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, Vm, raw};
+    use super::{Error, Vm, VmInner, raw};
     use crate::VmExit;
     use std::collections::BTreeMap;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
     use windows_sys::Win32::System::Hypervisor::{
         WHvX64RegisterRax, WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterRsp,
     };
@@ -1742,6 +1787,38 @@ mod tests {
     }
 
     #[test]
+    fn whp_setup_failure_reports_partition_cleanup_failure() {
+        if !native_test_child("whp_setup_failure_reports_partition_cleanup_failure") {
+            return;
+        }
+        let before = raw::DELETED_PARTITIONS.with(std::cell::Cell::get);
+        for fail_delete in [false, true] {
+            let inner = VmInner::new().unwrap();
+            // The required ProcessorCount property has not been set.
+            let setup = inner.setup();
+            assert!(
+                matches!(setup, Err(Error::SetupPartition(_))),
+                "expected native setup failure, got {setup:?}"
+            );
+            raw::FAIL_NEXT_DELETE.with(|fail| fail.set(fail_delete));
+            let error = inner.finish_setup(setup).unwrap_err();
+            if fail_delete {
+                let Error::PartitionCleanup { operation, hr } = error else {
+                    panic!("expected setup and cleanup errors, got {error:?}");
+                };
+                assert!(matches!(*operation, Error::SetupPartition(_)));
+                assert_eq!(hr, "0x80004005");
+            } else {
+                assert!(matches!(error, Error::SetupPartition(_)));
+            }
+            assert_eq!(
+                raw::DELETED_PARTITIONS.with(std::cell::Cell::get),
+                before + 1
+            );
+        }
+    }
+
+    #[test]
     fn whp_sets_pmi_x86_64_scalar_registers() {
         let _guard = whp_test_lock();
         let vm = Vm::new().expect("create WHP partition");
@@ -1899,6 +1976,45 @@ mod tests {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("WHP test lock poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn native_test_child(name: &str) -> bool {
+        use std::time::{Duration, Instant};
+
+        const CHILD_TEST: &str = "DILLO_WHP_NATIVE_TEST";
+        if std::env::var_os(CHILD_TEST).as_deref() == Some(name.as_ref()) {
+            return true;
+        }
+
+        // Isolate deliberately retained partitions and virtual address
+        // reclamation checks from other tests in the same process.
+        let _guard = whp_test_lock();
+        let test = format!("hypervisor::tests::{name}");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([&test, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD_TEST, name)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(
+                        status.success(),
+                        "{name} failed in its child process: {status}"
+                    );
+                    return false;
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                result => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{name} did not complete within its child process: {result:?}");
+                }
+            }
+        }
     }
 }
