@@ -41,7 +41,7 @@ mod imp {
         devtree::{OwnedTree, Tree},
         platform::Machine as PlatformMachine,
     };
-    use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
+    use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, VcpuStop};
     use dillo_mmio::{
         Attach, InterruptError, InterruptLine, MmioAttachment, MmioBus, MmioDevice,
         MmioDeviceHandle, MmioInterrupt, MmioInterruptRequirement, MmioRunToken, MmioSpawnError,
@@ -555,7 +555,6 @@ mod imp {
         type Platform = PlatformMachine;
         type Cpu = Cpu;
         type CpuState = CpuState;
-        type Memory = Memory;
 
         fn guest_address_bits() -> Result<u32, Self::Error> {
             crate::hypervisor::guest_address_bits()
@@ -564,16 +563,22 @@ mod imp {
         fn from_launch_config(
             config: LaunchConfig<'_, Self::Platform>,
         ) -> Result<Self, Self::Error> {
-            let vm = Self::from_dtb(config.platform.dtb())?;
-            let available = Self::guest_address_bits()?;
             let required = config
-                .min_addr_space_bits
-                .max(config.platform.min_addr_space_bits());
+                .platform
+                .required_address_bits_for_ram(config.ram.iter().map(|r| (r.gpa, r.size)))
+                .map_err(|error| Error::AddressSpace(error.to_string()))?;
+            let available = Self::guest_address_bits()?;
+
             if required > available {
                 return Err(Error::AddressSpace(format!(
                     "launch requires {required} bits; backend provides {available}"
                 )));
             }
+            let mut vm = Self::from_dtb(config.platform.dtb())?;
+            vm.inner.check_memory_slots(config.ram.len())?;
+            let mapped = memory::MappedMemory::new(config.ram.into_iter().map(|r| (r.gpa, r.size)))
+                .map_err(Error::AllocateMemory)?;
+            vm.attach_mapped_memory(Arc::new(mapped))?;
             Ok(vm)
         }
 
@@ -597,33 +602,6 @@ mod imp {
                     .map_err(|e| Error::Irq(e.to_string()))?;
             }
             Ok(())
-        }
-    }
-
-    #[derive(Debug)]
-    pub struct Memory {
-        mapped: Arc<memory::MappedMemory>,
-    }
-
-    impl dillo_machine::Memory for Memory {
-        type Error = Error;
-
-        fn from_ranges(ranges: &[RamRange]) -> Result<Self, Self::Error> {
-            let mapped =
-                memory::MappedMemory::new(ranges.iter().map(|range| (range.gpa, range.size)))
-                    .map_err(Error::AllocateMemory)?;
-            Ok(Self {
-                mapped: Arc::new(mapped),
-            })
-        }
-    }
-
-    impl Attach<Memory> for Vm {
-        type Error = Error;
-        type Output = ();
-
-        fn attach(&mut self, item: Memory) -> Result<Self::Output, Self::Error> {
-            self.attach_mapped_memory(item.mapped)
         }
     }
 
@@ -1173,8 +1151,8 @@ mod imp {
     }
 
     // Declaration-to-realization tests for the x86 interrupt-controller
-    // contract. These drive the real `Machine::from_launch_config` path against
-    // `/dev/kvm` and then read back from KVM what was actually constructed, so
+    // contract. These drive the native substrate constructor against `/dev/kvm`
+    // and then read back from KVM what was actually constructed, so
     // a backend that accepted the declaration without realizing it fails here.
     #[cfg(all(test, target_arch = "x86_64"))]
     #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1183,7 +1161,6 @@ mod imp {
             devtree::{OwnedNode, OwnedProperty},
             platform::Arch,
         };
-        use dillo_machine::Machine as _;
 
         use super::*;
         use crate::intc_x86::{IOAPIC_FIXED_BASE, tests::tree};
@@ -1206,11 +1183,7 @@ mod imp {
             );
             let dtb = tree.encode().expect("encode declaration");
             let platform = PlatformMachine::survey(dtb, Arch::X86_64).expect("survey declaration");
-            Vm::from_launch_config(LaunchConfig {
-                platform: &platform,
-                vcpus: 1,
-                min_addr_space_bits: 32,
-            })
+            Vm::from_dtb(platform.dtb())
         }
 
         /// The base a freshly created vCPU's LAPIC actually decodes at.
