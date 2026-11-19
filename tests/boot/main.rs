@@ -37,7 +37,7 @@ mod virtiofs;
 
 #[cfg(target_arch = "aarch64")]
 #[test]
-fn arma64_timer_boots() {
+fn arm_kaslr_fallback_boots() {
     assert!(hypervisor_available(), "native Arm hypervisor required");
     let dir = PathBuf::from("target/arma64-evidence");
     std::fs::create_dir_all(&dir).unwrap();
@@ -72,7 +72,7 @@ fn arma64_timer_boots() {
         .expect("guest timer observations");
     assert_eq!(
         timer.dt_interrupts,
-        [1, 13, 4, 1, 14, 4, 1, 11, 4, 1, 10, 4]
+        [1, 13, 0xff08, 1, 14, 0xff08, 1, 11, 0xff08, 1, 10, 0xff08]
     );
     assert!(
         report
@@ -96,7 +96,7 @@ fn arma64_timer_boots() {
             "timer IRQ did not recur"
         );
     }
-    eprintln!("Arma #64 guest timer qualification: {timer:?}");
+    eprintln!("Arm KASLR fallback native boot: {timer:?}");
 }
 
 // dillo boots a same-arch guest, so the host arch picks the kernel.
