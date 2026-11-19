@@ -74,6 +74,9 @@ pub enum Error {
         hr: String,
     },
 
+    #[error("WHP address-width probe partition deletion failed ({0}) and resources were retained")]
+    DeleteProbePartition(String),
+
     #[error("WHP create vCPU {idx} failed: {hr}")]
     CreateVcpu { idx: u32, hr: String },
 
@@ -324,17 +327,31 @@ fn validate_cpu_profile(cpu_profile: &str) -> Result<(), Error> {
 
 pub(crate) fn guest_address_bits() -> Result<u32, Error> {
     // The probe uses the launch partition policy, but never maps RAM or runs.
-    // Vcpu and Vm drops retire the probe even when a query fails.
-    let vm = Vm::new_x86_64_with_local_apic_count(1)?;
-    let vcpu = vm.create_vcpu_without_ram_check(0, "x86-64-v1")?;
-    let physical = raw::guest_physical_bits(vcpu.partition.partition, vcpu.idx)
-        .map_err(|hr| Error::AddressSpace(status(hr)))?;
-    if !(32..=52).contains(&physical) {
-        return Err(Error::AddressSpace(format!(
-            "invalid guest width {physical}"
-        )));
+    let mut vm = Vm::new_x86_64_with_local_apic_count(1)?;
+    let width = vm
+        .create_vcpu_without_ram_check(0, "x86-64-v1")
+        .and_then(|vcpu| {
+            let physical = raw::guest_physical_bits(vcpu.partition.partition, vcpu.idx)
+                .map_err(|hr| Error::AddressSpace(status(hr)))?;
+            if !(32..=52).contains(&physical) {
+                return Err(Error::AddressSpace(format!(
+                    "invalid guest width {physical}"
+                )));
+            }
+            Ok(physical)
+        });
+    // The temporary vCPU drops at the end of the query, leaving the sole owner.
+    let inner = Arc::get_mut(&mut vm.inner)
+        .ok_or_else(|| Error::AddressSpace("probe partition is still shared".into()))?;
+    match width {
+        Ok(physical) => {
+            inner
+                .retire()
+                .map_err(|hr| Error::DeleteProbePartition(status(hr)))?;
+            Ok(physical)
+        }
+        Err(operation) => Err(inner.cleanup_error(operation)),
     }
-    Ok(physical)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -793,6 +810,10 @@ mod raw {
         partition: PartitionHandle,
         idx: u32,
     ) -> Result<u32, HResult> {
+        #[cfg(test)]
+        if FAIL_NEXT_GUEST_PHYSICAL_BITS.with(|fail| fail.replace(false)) {
+            return Err(HResult(E_FAIL));
+        }
         let mut output = WHV_CPUID_OUTPUT::default();
         // SAFETY: the partition/vCPU are live and output is a correctly sized
         // writable CPUID result. This queries the value exposed to the guest.
@@ -846,6 +867,7 @@ mod raw {
     std::thread_local! {
         pub(super) static FAIL_MAP_GPA: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
         pub(super) static FAIL_NEXT_DELETE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        pub(super) static FAIL_NEXT_GUEST_PHYSICAL_BITS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         pub(super) static DELETED_PARTITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
@@ -1613,7 +1635,7 @@ mod raw {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, Vm, VmInner, raw};
+    use super::{Error, Vm, VmInner, guest_address_bits, raw};
     use crate::VmExit;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
@@ -1924,6 +1946,44 @@ mod tests {
                 before + 1
             );
         }
+    }
+
+    #[test]
+    fn whp_address_width_probe_reports_partition_cleanup_failure() {
+        if !native_test_child("whp_address_width_probe_reports_partition_cleanup_failure") {
+            return;
+        }
+        let deleted = || raw::DELETED_PARTITIONS.with(std::cell::Cell::get);
+        let before = deleted();
+        guest_address_bits().unwrap();
+        assert_eq!(deleted(), before + 1);
+
+        let failed = "0x80004005";
+        raw::FAIL_NEXT_GUEST_PHYSICAL_BITS.with(|fail| fail.set(true));
+        let error = guest_address_bits().unwrap_err();
+        assert!(
+            matches!(&error, Error::AddressSpace(hr) if hr == failed),
+            "{error:?}"
+        );
+        assert_eq!(deleted(), before + 2);
+
+        raw::FAIL_NEXT_DELETE.with(|fail| fail.set(true));
+        let error = guest_address_bits().unwrap_err();
+        assert!(
+            matches!(&error, Error::DeleteProbePartition(hr) if hr == failed),
+            "{error:?}"
+        );
+        assert_eq!(deleted(), before + 2);
+
+        raw::FAIL_NEXT_GUEST_PHYSICAL_BITS.with(|fail| fail.set(true));
+        raw::FAIL_NEXT_DELETE.with(|fail| fail.set(true));
+        let error = guest_address_bits().unwrap_err();
+        let Error::PartitionCleanup { operation, hr } = error else {
+            panic!("expected query and cleanup errors, got {error:?}");
+        };
+        assert!(matches!(*operation, Error::AddressSpace(hr) if hr == failed));
+        assert_eq!(hr, failed);
+        assert_eq!(deleted(), before + 2);
     }
 
     #[test]
