@@ -7,7 +7,6 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::sync::Arc;
 
 use kvm_bindings::{KVM_IRQ_ROUTING_IRQCHIP, kvm_irq_routing_entry, kvm_irq_routing_irqchip};
 #[cfg(target_arch = "x86_64")]
@@ -15,10 +14,11 @@ use kvm_bindings::{
     KVM_IRQ_ROUTING_MSI, KVM_IRQCHIP_IOAPIC, KVM_IRQCHIP_PIC_MASTER, KVM_IRQCHIP_PIC_SLAVE,
     kvm_irq_routing_msi,
 };
-use kvm_ioctls::VmFd;
 use vmm_sys_util::eventfd::EventFd;
 
 use thiserror::Error;
+
+use crate::hypervisor::Vm;
 
 /// Errors from IRQ routing and irqfd management.
 #[derive(Error, Debug)]
@@ -47,7 +47,7 @@ const NUM_IOAPIC_PINS: u32 = 24;
 /// Maintains the full GSI routing table (IOAPIC defaults + MSI entries) and
 /// atomically replaces it via `KVM_SET_GSI_ROUTING` on each change.
 pub(crate) struct IrqManager {
-    vm_fd: Arc<VmFd>,
+    vm: Vm,
     next_gsi: u32,
     /// Min-heap of released GSIs available for reuse (Reverse makes BinaryHeap a min-heap).
     free_gsis: BinaryHeap<Reverse<u32>>,
@@ -77,7 +77,7 @@ impl IrqManager {
     ///
     /// GSIs 0-23 are mapped to IOAPIC pins 0-23. This preserves legacy device
     /// routing (e.g., serial UART on IRQ 4) when MSI entries are added later.
-    pub(crate) fn new(vm_fd: Arc<VmFd>) -> Result<Self, IrqError> {
+    pub(crate) fn new(vm: Vm) -> Result<Self, IrqError> {
         // x86: KVM's in-kernel IOAPIC + PIC need their default GSI routes
         // (GSIs 0-23 → IOAPIC pins, plus the PIC mirror), 8 + 8 + 24 = 40 entries.
         // aarch64's GICv3 has no such defaults — every interrupt is an SPI routed
@@ -101,7 +101,7 @@ impl IrqManager {
         let routes: Vec<kvm_irq_routing_entry> = Vec::new();
 
         let mut mgr = Self {
-            vm_fd,
+            vm,
             next_gsi: FIRST_MSI_GSI,
             free_gsis: BinaryHeap::new(),
             routes,
@@ -154,7 +154,8 @@ impl IrqManager {
         // Create eventfd with EFD_CLOEXEC so it does not leak across exec()
         // boundaries (prerequisite for exec-based reboot, ISOL-06).
         let eventfd = EventFd::new(libc::EFD_CLOEXEC).map_err(IrqError::EventFdCreate)?;
-        self.vm_fd
+        self.vm
+            .fd()
             .register_irqfd(&eventfd, gsi)
             .map_err(IrqError::KvmIrqfd)?;
 
@@ -196,7 +197,8 @@ impl IrqManager {
             };
             self.routes.push(make_spi_irqchip_entry(gsi, pin));
             self.commit_routes()?;
-            self.vm_fd
+            self.vm
+                .fd()
                 .register_irqfd(&eventfd, gsi)
                 .map_err(IrqError::KvmIrqfd)?;
             self.irqfds.push((gsi, eventfd));
@@ -215,7 +217,8 @@ impl IrqManager {
     #[cfg(target_arch = "x86_64")]
     pub(crate) fn register_irqfd_at_gsi(&mut self, gsi: u32) -> Result<EventFd, IrqError> {
         let eventfd = EventFd::new(libc::EFD_CLOEXEC).map_err(IrqError::EventFdCreate)?;
-        self.vm_fd
+        self.vm
+            .fd()
             .register_irqfd(&eventfd, gsi)
             .map_err(IrqError::KvmIrqfd)?;
         let device_fd = eventfd.try_clone().map_err(IrqError::EventFdClone)?;
@@ -257,7 +260,8 @@ impl IrqManager {
     #[cfg(all(test, target_arch = "x86_64"))]
     fn teardown_irqfds(&mut self) -> Result<(), IrqError> {
         for (gsi, fd) in self.irqfds.drain(..) {
-            self.vm_fd
+            self.vm
+                .fd()
                 .unregister_irqfd(&fd, gsi)
                 .map_err(IrqError::KvmIrqfd)?;
         }
@@ -286,7 +290,8 @@ impl IrqManager {
         if let Some(idx) = pos {
             let (_, fd) = self.irqfds.remove(idx);
             // (1) Unregister irqfd with KVM.
-            self.vm_fd
+            self.vm
+                .fd()
                 .unregister_irqfd(&fd, gsi)
                 .map_err(IrqError::KvmIrqfd)?;
         } else {
@@ -346,7 +351,8 @@ impl IrqManager {
         for (i, entry) in self.routes.iter().enumerate() {
             entries[i] = *entry;
         }
-        self.vm_fd
+        self.vm
+            .fd()
             .set_gsi_routing(&routing)
             .map_err(IrqError::KvmRouting)
     }
@@ -428,8 +434,8 @@ mod tests {
 
     /// Helper: create a minimal KVM VM suitable for irqfd tests.
     ///
-    /// Returns (vm_fd arc, kvm instance) with irqchip + PIT2 configured.
-    fn create_test_vm() -> Arc<VmFd> {
+    /// Returns an owning VM with irqchip and PIT2 configured.
+    fn create_test_vm() -> Vm {
         let kvm = kvm_ioctls::Kvm::new().expect("open /dev/kvm");
         let vm = kvm.create_vm().expect("create VM");
         vm.set_tss_address(0xFFFB_C000).expect("set TSS");
@@ -438,7 +444,7 @@ mod tests {
         vm.create_irq_chip().expect("create irqchip");
         vm.create_pit2(kvm_pit_config::default())
             .expect("create PIT2");
-        Arc::new(vm)
+        Vm::test_from_native(kvm, vm)
     }
 
     #[test]

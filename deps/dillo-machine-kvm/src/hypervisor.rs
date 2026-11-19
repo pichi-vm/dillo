@@ -8,9 +8,9 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use std::os::fd::AsRawFd;
-use std::sync::Arc;
 #[cfg(target_arch = "aarch64")]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use kvm_bindings::kvm_userspace_memory_region;
 #[cfg(target_arch = "aarch64")]
@@ -29,6 +29,7 @@ use kvm_bindings::{kvm_regs, kvm_segment};
 use kvm_ioctls::DeviceFd;
 use kvm_ioctls::{Cap, Kvm, VcpuExit, VcpuFd, VmFd};
 use thiserror::Error;
+use vm_memory::{Address, GuestMemoryRegion};
 
 use crate::VmExit;
 #[cfg(target_arch = "x86_64")]
@@ -114,8 +115,15 @@ pub enum Error {
     #[error("allocate guest memory (2 MiB huge pages): {0:#}")]
     AllocateMemory(#[source] anyhow::Error),
 
-    #[error("set user memory region: {0}")]
-    SetMemRegion(std::io::Error),
+    #[error("set user memory slot {slot}: {source}")]
+    SetMemRegion {
+        slot: u32,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("KVM RAM registration: {0}")]
+    MemoryRegistration(&'static str),
 
     #[error("create vCPU {0}: {1}")]
     CreateVcpu(u32, std::io::Error),
@@ -203,7 +211,7 @@ struct VmInner {
     // aarch64 keeps the handle alive to own the VM lifetime but never reads it.
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     kvm: Kvm,
-    vm: std::sync::Arc<VmFd>,
+    vm: VmFd,
     /// The declared controller model this VM realizes. The LAPIC base is
     /// per-vCPU, so it must outlive construction to reach every vCPU.
     #[cfg(target_arch = "x86_64")]
@@ -212,15 +220,41 @@ struct VmInner {
     vgic: Option<DeviceFd>,
     #[cfg(target_arch = "aarch64")]
     vgic_initialized: AtomicBool,
+    // The VM and vGIC descriptors close before the registered memory drops.
+    memory: Mutex<MemoryRegistration>,
+}
+
+#[derive(Debug)]
+enum MemoryRegistration {
+    Empty,
+    Failed {
+        _backing: Arc<crate::memory::MappedMemory>,
+    },
+    Ready(Arc<crate::memory::MappedMemory>),
 }
 
 impl Vm {
-    /// Borrow the underlying `Arc<VmFd>` for callers that need to wire
-    /// KVM-specific facilities (ioeventfd, irqfd) directly. Cheap
-    /// `Arc::clone` — both `Vm` and the returned handle share the fd.
-    /// Only meaningful on Linux because `VmFd` is KVM-specific.
-    pub(crate) fn vm_fd_arc(&self) -> std::sync::Arc<VmFd> {
-        std::sync::Arc::clone(&self.inner.vm)
+    /// Borrow the descriptor for one operation. Retain a `Vm` for future use.
+    pub(crate) fn fd(&self) -> &VmFd {
+        &self.inner.vm
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_from_native(kvm: Kvm, vm: VmFd) -> Self {
+        Self {
+            inner: Arc::new(VmInner {
+                kvm,
+                vm,
+                #[cfg(target_arch = "x86_64")]
+                intc: crate::intc_x86::X86Intc::new(0xfee0_0000, 0x1000, 0xfec0_0000, 0x1000)
+                    .unwrap(),
+                #[cfg(target_arch = "aarch64")]
+                vgic: None,
+                #[cfg(target_arch = "aarch64")]
+                vgic_initialized: AtomicBool::new(false),
+                memory: Mutex::new(MemoryRegistration::Empty),
+            }),
+        }
     }
 
     /// Open `/dev/kvm`, create a VM, and set up the in-kernel LAPIC + I/O APIC
@@ -257,8 +291,9 @@ impl Vm {
         Ok(Self {
             inner: Arc::new(VmInner {
                 kvm,
-                vm: std::sync::Arc::new(vm),
+                vm,
                 intc,
+                memory: Mutex::new(MemoryRegistration::Empty),
             }),
         })
     }
@@ -275,9 +310,10 @@ impl Vm {
         Ok(Self {
             inner: Arc::new(VmInner {
                 kvm,
-                vm: std::sync::Arc::new(vm),
+                vm,
                 vgic: Some(vgic),
                 vgic_initialized: AtomicBool::new(false),
+                memory: Mutex::new(MemoryRegistration::Empty),
             }),
         })
     }
@@ -294,38 +330,67 @@ impl Vm {
         Ok(())
     }
 
-    /// Register a userspace memory region.
-    ///
-    /// SAFETY caveat encoded by KVM's API: `host_addr` must remain valid
-    /// for the lifetime of the slot. Caller holds the memfd
-    /// mapping for the VM's entire lifetime.
-    pub(crate) fn add_memslot(
+    pub(crate) fn attach_memory(
         &self,
-        slot: u32,
-        gpa: u64,
-        host_addr: u64,
-        size: u64,
+        backing: Arc<crate::memory::MappedMemory>,
     ) -> Result<(), Error> {
-        let region = kvm_userspace_memory_region {
-            slot,
-            flags: 0,
-            guest_phys_addr: gpa,
-            memory_size: size,
-            userspace_addr: host_addr,
-        };
-        // SAFETY: dillo keeps the underlying mmap of `host_addr`
-        // alive for the VM's entire lifetime (the memfd + its mapping
-        // are owned by the VM child process). KVM does not access this
-        // memory after the slot is removed.
-        #[allow(unsafe_code)]
-        unsafe {
-            self.inner
-                .vm
-                .set_user_memory_region(region)
-                .map_err(io)
-                .map_err(Error::SetMemRegion)?;
+        let mut memory = self
+            .inner
+            .memory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*memory, MemoryRegistration::Empty) {
+            return Err(Error::MemoryRegistration(
+                "RAM is already registered or setup failed",
+            ));
         }
+        // Retain backing before mapping any slot. Only complete registration
+        // transitions out of the failed state.
+        *memory = MemoryRegistration::Failed {
+            _backing: Arc::clone(&backing),
+        };
+        for (index, region) in backing.regions().enumerate() {
+            let slot = u32::try_from(index)
+                .map_err(|_| Error::MemoryRegistration("too many RAM slots"))?;
+            let native = kvm_userspace_memory_region {
+                slot,
+                flags: 0,
+                guest_phys_addr: region.start_addr().raw_value(),
+                memory_size: region.len(),
+                userspace_addr: region.as_ptr() as u64,
+            };
+            log::info!(
+                "registering KVM memslot {slot}: [{:#x}..{:#x}) host={:#x}",
+                region.start_addr().raw_value(),
+                region.start_addr().raw_value() + region.len(),
+                region.as_ptr() as u64
+            );
+            // SAFETY: The VM retains the backing before registration. The
+            // current raw mappings also stay mapped for the process lifetime.
+            #[allow(unsafe_code)]
+            unsafe { self.inner.vm.set_user_memory_region(native) }.map_err(|error| {
+                Error::SetMemRegion {
+                    slot,
+                    source: io(error),
+                }
+            })?;
+        }
+        *memory = MemoryRegistration::Ready(backing);
         Ok(())
+    }
+
+    pub(crate) fn memory(&self) -> Result<Arc<crate::memory::MappedMemory>, Error> {
+        match &*self
+            .inner
+            .memory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            MemoryRegistration::Ready(backing) => Ok(Arc::clone(backing)),
+            _ => Err(Error::UnhandledExit(
+                "guest RAM is not attached".to_string(),
+            )),
+        }
     }
 
     /// Create vCPU `idx` and apply the CPUID derived from `cpu_profile`.
@@ -338,6 +403,14 @@ impl Vm {
     /// `KVM_SET_CPUID2(KVM_GET_SUPPORTED_CPUID)` and refuse with
     /// [`Error::HostMissingCpuFeature`] if the floor is unmet.
     pub(crate) fn create_vcpu(&self, idx: u32, cpu_profile: &str) -> Result<Vcpu, Error> {
+        let memory = self
+            .inner
+            .memory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*memory, MemoryRegistration::Failed { .. }) {
+            return Err(Error::MemoryRegistration("RAM setup failed"));
+        }
         let fd = self
             .inner
             .vm
@@ -396,15 +469,21 @@ impl Vm {
                 .map_err(|e| Error::CreateVcpu(idx, io(e)))?;
         }
 
-        Ok(Vcpu { fd, idx })
+        Ok(Vcpu {
+            fd,
+            idx,
+            _vm: self.clone(),
+        })
     }
 }
 
 /// Per-vCPU handle. Move into the vCPU thread; call `run()` in a loop.
 #[derive(Debug)]
 pub(crate) struct Vcpu {
+    // The CPU descriptor closes before its native VM can drop.
     fd: VcpuFd,
     idx: u32,
+    _vm: Vm,
 }
 
 impl Vcpu {

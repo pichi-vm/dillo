@@ -47,7 +47,6 @@ mod imp {
         MmioDeviceHandle, MmioInterrupt, MmioInterruptRequirement, MmioRunToken, MmioSpawnError,
         MmioWriteOutcome, SharedMemory,
     };
-    use vm_memory::{Address, GuestMemoryRegion};
     use vmm_sys_util::eventfd::EventFd;
 
     use crate::VmExit;
@@ -200,13 +199,11 @@ mod imp {
         }));
     }
 
-    #[derive(Clone)]
     pub struct Vm {
         inner: crate::hypervisor::Vm,
         mmio_bus: Arc<Mutex<MmioBus>>,
         exit_requester: VcpuExitRequester,
         shared_memory: Vec<Arc<dyn SharedMemory>>,
-        mapped_memory: Option<Arc<memory::MappedMemory>>,
         irq_manager: Arc<Mutex<IrqManager>>,
     }
 
@@ -217,7 +214,6 @@ mod imp {
                 .field("mmio_bus", &self.mmio_bus)
                 .field("exit_requester", &self.exit_requester)
                 .field("shared_memory", &self.shared_memory.len())
-                .field("mapped_memory", &self.mapped_memory.is_some())
                 .field("irq_manager", &"<backend-owned>")
                 .finish()
         }
@@ -324,26 +320,12 @@ mod imp {
     }
 
     impl Vm {
-        fn add_memslot(&self, slot: u32, gpa: u64, host_addr: u64, size: u64) -> Result<(), Error> {
-            self.inner.add_memslot(slot, gpa, host_addr, size)
-        }
-
         fn attach_mapped_memory(&mut self, mapped: Arc<memory::MappedMemory>) -> Result<(), Error> {
-            for (slot_idx, region) in mapped.regions().enumerate() {
-                let gpa = region.start_addr().raw_value();
-                let size = region.len();
-                let host_addr = region.as_ptr() as u64;
-                log::info!(
-                    "registering KVM memslot {slot_idx}: [{gpa:#x}..{:#x}) host={host_addr:#x}",
-                    gpa + size
-                );
-                self.add_memslot(slot_idx as u32, gpa, host_addr, size)?;
-            }
+            self.inner.attach_memory(mapped)?;
             self.shared_memory = vec![Arc::new(dillo_mmio::MappedSharedMemory::for_guest_memory(
-                mapped.guest_memory(),
+                self.inner.memory()?.guest_memory(),
                 dillo_mmio::SharedAccess::ReadWrite,
             ))];
-            self.mapped_memory = Some(mapped);
             Ok(())
         }
 
@@ -418,9 +400,9 @@ mod imp {
                 .register_spi_irqfd(source)
                 .map_err(|e| Error::Irq(e.to_string()))?;
             drop(mgr);
-            Ok(dillo_mmio::Interrupt::new(Arc::new(
-                EventFdInterruptLine::new(eventfd),
-            )))
+            Ok(dillo_mmio::Interrupt::new(Arc::new(EventFdInterruptLine {
+                eventfd,
+            })))
         }
 
         fn create_message_interrupt_domain(
@@ -461,14 +443,13 @@ mod imp {
                 crate::hypervisor::Vm::new_with_gic(&substrate)?
             };
             let irq_manager = Arc::new(Mutex::new(
-                IrqManager::new(inner.vm_fd_arc()).map_err(|e| Error::Irq(e.to_string()))?,
+                IrqManager::new(inner.clone()).map_err(|e| Error::Irq(e.to_string()))?,
             ));
             Ok(Self {
                 inner,
                 mmio_bus: Arc::new(Mutex::new(MmioBus::new())),
                 exit_requester,
                 shared_memory: Vec::new(),
-                mapped_memory: None,
                 irq_manager,
             })
         }
@@ -597,11 +578,8 @@ mod imp {
         }
 
         fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Self::Error> {
-            let memory = self
-                .mapped_memory
-                .as_ref()
-                .ok_or_else(|| Error::UnhandledExit("guest RAM is not attached".to_string()))?;
-            memory
+            self.inner
+                .memory()?
                 .write(gpa, data)
                 .map_err(|e| Error::UnhandledExit(e.to_string()))
         }
@@ -753,12 +731,6 @@ mod imp {
         eventfd: EventFd,
     }
 
-    impl EventFdInterruptLine {
-        fn new(eventfd: EventFd) -> Self {
-            Self { eventfd }
-        }
-    }
-
     impl InterruptLine for EventFdInterruptLine {
         fn signal(&self) {
             if let Err(e) = self.eventfd.write(1) {
@@ -792,7 +764,7 @@ mod imp {
             }
             let interrupts = self.resolve_interrupts(item.interrupts())?;
             let notifications = crate::notification::Notifications::new(
-                self.inner.vm_fd_arc(),
+                self.inner.clone(),
                 item.windows().to_vec(),
             );
             self.mmio_bus
