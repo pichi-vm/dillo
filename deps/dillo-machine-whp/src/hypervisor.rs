@@ -8,7 +8,7 @@
 //! Linux and macOS backends. Register state, memory mapping, and exit
 //! translation are added in later phases.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use thiserror::Error;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
@@ -121,8 +121,11 @@ pub enum Error {
     #[error("WHP map GPA range [{gpa:#x}..{end:#x}) failed: {hr}")]
     MapGpa { gpa: u64, end: u64, hr: String },
 
-    #[error("WHP guest address {0:#x} is not in any mapped region")]
-    UnmappedGuestAddr(u64),
+    #[error("WHP guest memory has already been registered or attempted")]
+    MemoryAlreadyRegistered,
+
+    #[error("WHP guest memory is not ready")]
+    MemoryNotReady,
 
     #[error("WHP guest memory host address for GPA {gpa:#x}: {source:?}")]
     GuestMemoryHostAddress {
@@ -152,14 +155,28 @@ fn status(hr: HResult) -> String {
 
 #[derive(Debug)]
 pub(crate) struct Vm {
-    regions: Vec<Region>,
-    memory: Option<GuestMemoryMmap>,
     inner: Arc<VmInner>,
 }
 
 #[derive(Debug)]
 struct VmInner {
     partition: raw::PartitionHandle,
+    memory: Mutex<RamRegistration>,
+}
+
+#[derive(Debug, Default)]
+struct RamRegistration {
+    backing: Option<GuestMemoryMmap>,
+    ready: bool,
+}
+
+impl RamRegistration {
+    fn ready(&self) -> Result<&GuestMemoryMmap, Error> {
+        self.backing
+            .as_ref()
+            .filter(|_| self.ready)
+            .ok_or(Error::MemoryNotReady)
+    }
 }
 
 impl Vm {
@@ -210,48 +227,49 @@ impl Vm {
     }
 
     pub(crate) fn set_memory(&mut self, memory: GuestMemoryMmap) -> Result<(), Error> {
-        self.regions.clear();
-        for region in memory.iter() {
-            let base = region.start_addr().raw_value();
-            let size = region.len();
-            let host_addr = memory
-                .get_host_address(region.start_addr())
-                .map_err(|source| Error::GuestMemoryHostAddress { gpa: base, source })?;
-            if let Err(hr) = raw::map_gpa_range(self.inner.partition, host_addr.cast(), base, size)
-            {
-                let end = base.saturating_add(size);
-                self.regions.clear();
-                return Err(Error::MapGpa {
-                    gpa: base,
-                    end,
-                    hr: status(hr),
-                });
-            }
-            self.regions.push(Region {
-                base,
-                size,
-                partition: self.inner.partition,
-            });
+        let mut registration = self.inner.memory();
+        if self.inner.partition == 0 || registration.backing.is_some() {
+            return Err(Error::MemoryAlreadyRegistered);
         }
-        self.memory = Some(memory);
-        Ok(())
+        if memory.num_regions() == 0 {
+            return Err(Error::EmptyMemoryRegion);
+        }
+
+        // A failed map is terminal for this partition. Keep all candidate
+        // regions alive before WHP can retain any of their addresses.
+        let result = self.inner.map_memory(registration.backing.insert(memory));
+        if result.is_ok() {
+            registration.ready = true;
+        }
+        drop(registration);
+
+        result.map_err(|operation| {
+            // Escaped authorities may still own the partition. If they do,
+            // retirement is deferred until the final owner drops.
+            if let Some(inner) = Arc::get_mut(&mut self.inner) {
+                inner.cleanup_error(operation)
+            } else {
+                operation
+            }
+        })
     }
 
     pub(crate) fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Error> {
-        let memory = self.memory.as_ref().ok_or(Error::UnmappedGuestAddr(gpa))?;
-        memory
+        self.inner
+            .memory()
+            .ready()?
             .write(data, GuestAddress(gpa))
             .map_err(|source| Error::WriteGuest { gpa, source })?;
         Ok(())
     }
 
     pub(crate) fn guest_memory(&self) -> Result<GuestMemoryMmap, Error> {
-        self.memory.clone().ok_or(Error::UnmappedGuestAddr(0))
+        self.inner.memory().ready().cloned()
     }
 
     #[cfg(test)]
     pub(crate) fn region_mappings(&self) -> Vec<(u64, u64, u64)> {
-        let Some(memory) = &self.memory else {
+        let Ok(memory) = self.guest_memory() else {
             return Vec::new();
         };
         memory
@@ -265,6 +283,11 @@ impl Vm {
     }
 
     pub(crate) fn create_vcpu(&self, idx: u32, cpu_profile: &str) -> Result<Vcpu, Error> {
+        self.inner.memory().ready()?;
+        self.create_vcpu_without_ram_check(idx, cpu_profile)
+    }
+
+    fn create_vcpu_without_ram_check(&self, idx: u32, cpu_profile: &str) -> Result<Vcpu, Error> {
         validate_cpu_profile(cpu_profile)?;
         raw::create_virtual_processor(self.inner.partition, idx).map_err(|hr| {
             Error::CreateVcpu {
@@ -301,9 +324,9 @@ fn validate_cpu_profile(cpu_profile: &str) -> Result<(), Error> {
 
 pub(crate) fn guest_address_bits() -> Result<u32, Error> {
     // The probe uses the launch partition policy, but never maps RAM or runs.
-    // Vcpu and Vm drops release the probe even when a query fails.
+    // Vcpu and Vm drops retire the probe even when a query fails.
     let vm = Vm::new_x86_64_with_local_apic_count(1)?;
-    let vcpu = vm.create_vcpu(0, "x86-64-v1")?;
+    let vcpu = vm.create_vcpu_without_ram_check(0, "x86-64-v1")?;
     let physical = raw::guest_physical_bits(vcpu.partition.partition, vcpu.idx)
         .map_err(|hr| Error::AddressSpace(status(hr)))?;
     if !(32..=52).contains(&physical) {
@@ -342,21 +365,9 @@ impl InterruptController {
         destination: u32,
         vector: u8,
     ) -> Result<(), Error> {
+        self.inner.memory().ready()?;
         raw::request_fixed_interrupt(self.inner.partition, destination, vector)
             .map_err(|hr| Error::RequestInterrupt(status(hr)))
-    }
-}
-
-#[derive(Debug)]
-struct Region {
-    base: u64,
-    size: u64,
-    partition: raw::PartitionHandle,
-}
-
-impl Drop for Region {
-    fn drop(&mut self) {
-        raw::unmap_gpa_range(self.partition, self.base, self.size);
     }
 }
 
@@ -364,16 +375,37 @@ impl VmInner {
     fn new() -> Result<Self, Error> {
         Ok(Self {
             partition: raw::create_partition().map_err(|hr| Error::CreatePartition(status(hr)))?,
+            memory: Mutex::default(),
         })
     }
 
     fn finish_setup(mut self, setup: Result<(), Error>) -> Result<Vm, Error> {
         setup.map_err(|operation| self.cleanup_error(operation))?;
         Ok(Vm {
-            regions: Vec::new(),
-            memory: None,
             inner: Arc::new(self),
         })
+    }
+
+    fn memory(&self) -> MutexGuard<'_, RamRegistration> {
+        self.memory.lock().expect("WHP RAM registration poisoned")
+    }
+
+    fn map_memory(&self, memory: &GuestMemoryMmap) -> Result<(), Error> {
+        for region in memory.iter() {
+            let base = region.start_addr().raw_value();
+            let size = region.len();
+            let host_addr = memory
+                .get_host_address(region.start_addr())
+                .map_err(|source| Error::GuestMemoryHostAddress { gpa: base, source })?;
+            raw::map_gpa_range(self.partition, host_addr.cast(), base, size).map_err(|hr| {
+                Error::MapGpa {
+                    gpa: base,
+                    end: base.saturating_add(size),
+                    hr: status(hr),
+                }
+            })?;
+        }
+        Ok(())
     }
 
     fn cleanup_error(&mut self, operation: Error) -> Error {
@@ -392,7 +424,18 @@ impl VmInner {
         if partition == 0 {
             return Ok(());
         }
-        raw::delete_partition(partition)
+        let deletion = raw::delete_partition(partition);
+        let memory = self
+            .memory
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        let registration = std::mem::take(memory);
+        if deletion.is_err() {
+            // WHP may still address this backing. Keep the handle and all
+            // attempted mappings for the remaining lifetime of the process.
+            std::mem::forget((partition, registration));
+        }
+        deletion
     }
 
     fn set_processor_count(&self, count: u32) -> Result<(), Error> {
@@ -736,7 +779,7 @@ mod raw {
         WHvRunVirtualProcessor, WHvRunVpExitReasonCanceled, WHvRunVpExitReasonMemoryAccess,
         WHvRunVpExitReasonUnrecoverableException, WHvRunVpExitReasonX64Cpuid,
         WHvRunVpExitReasonX64Halt, WHvRunVpExitReasonX64IoPortAccess, WHvSetPartitionProperty,
-        WHvSetVirtualProcessorRegisters, WHvSetupPartition, WHvTranslateGva, WHvUnmapGpaRange,
+        WHvSetVirtualProcessorRegisters, WHvSetupPartition, WHvTranslateGva,
         WHvX64InterruptDestinationModePhysical, WHvX64InterruptTriggerModeEdge,
         WHvX64InterruptTypeFixed, WHvX64LocalApicEmulationModeXApic, WHvX64RegisterRax,
         WHvX64RegisterRbx, WHvX64RegisterRcx, WHvX64RegisterRdx, WHvX64RegisterRip,
@@ -801,6 +844,7 @@ mod raw {
 
     #[cfg(test)]
     std::thread_local! {
+        pub(super) static FAIL_MAP_GPA: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
         pub(super) static FAIL_NEXT_DELETE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         pub(super) static DELETED_PARTITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
@@ -1519,20 +1563,19 @@ mod raw {
         gpa: u64,
         size: u64,
     ) -> Result<(), HResult> {
+        #[cfg(test)]
+        if FAIL_MAP_GPA.with(|fail| fail.get() == Some(gpa)) {
+            FAIL_MAP_GPA.with(|fail| fail.set(None));
+            return Err(HResult(E_FAIL));
+        }
         let flags = WHvMapGpaRangeFlagRead | WHvMapGpaRangeFlagWrite | WHvMapGpaRangeFlagExecute;
-        // SAFETY: `host` points into the live GuestMemoryMmap kept by `Vm`
+        // SAFETY: `host` points into the live GuestMemoryMmap kept by `VmInner`
         // for at least as long as the GPA mapping.
         let hr = unsafe { WHvMapGpaRange(partition, host.cast_const(), gpa, size, flags) };
         if failed(hr) {
             return Err(HResult(hr));
         }
         Ok(())
-    }
-
-    pub(super) fn unmap_gpa_range(partition: PartitionHandle, gpa: u64, size: u64) {
-        // SAFETY: best-effort cleanup of a GPA range that was previously
-        // mapped on this partition.
-        let _ = unsafe { WHvUnmapGpaRange(partition, gpa, size) };
     }
 
     fn get_capability_u32(code: WHV_CAPABILITY_CODE) -> Result<u32, HResult> {
@@ -1573,9 +1616,13 @@ mod tests {
     use super::{Error, Vm, VmInner, raw};
     use crate::VmExit;
     use std::collections::BTreeMap;
-    use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+    use vm_memory::{Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
     use windows_sys::Win32::System::Hypervisor::{
         WHvX64RegisterRax, WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterRsp,
+    };
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_FREE, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, VirtualQuery,
     };
 
     #[test]
@@ -1736,15 +1783,22 @@ mod tests {
     fn whp_partition_and_vcpu_lifecycle() {
         let _guard = whp_test_lock();
         let vm = Vm::new().expect("create WHP partition");
-        vm.create_vcpu(0, "x86-64-v2").expect("create WHP vCPU");
+        assert!(matches!(
+            vm.create_vcpu(0, "x86-64-v2"),
+            Err(Error::MemoryNotReady)
+        ));
+        vm.create_vcpu_without_ram_check(0, "x86-64-v2")
+            .expect("create WHP vCPU");
     }
 
     #[test]
     fn whp_creates_multiple_vcpus_when_partition_count_allows_it() {
         let _guard = whp_test_lock();
         let vm = Vm::new_x86_64_with_local_apic_count(2).expect("create WHP partition");
-        vm.create_vcpu(0, "x86-64-v2").expect("create WHP vCPU 0");
-        vm.create_vcpu(1, "x86-64-v2").expect("create WHP vCPU 1");
+        vm.create_vcpu_without_ram_check(0, "x86-64-v2")
+            .expect("create WHP vCPU 0");
+        vm.create_vcpu_without_ram_check(1, "x86-64-v2")
+            .expect("create WHP vCPU 1");
     }
 
     #[test]
@@ -1752,7 +1806,7 @@ mod tests {
         let _guard = whp_test_lock();
         let vm = Vm::new().expect("create WHP partition");
         let err = vm
-            .create_vcpu(0, "x86-64-v5")
+            .create_vcpu_without_ram_check(0, "x86-64-v5")
             .expect_err("unknown profile must fail");
         assert!(matches!(err, Error::UnknownCpuProfile { .. }));
     }
@@ -1761,7 +1815,7 @@ mod tests {
     fn whp_rejects_unavailable_cpu_profile_features() {
         let _guard = whp_test_lock();
         let vm = Vm::new().expect("create WHP partition");
-        match vm.create_vcpu(0, "x86-64-v4") {
+        match vm.create_vcpu_without_ram_check(0, "x86-64-v4") {
             Ok(_) => {
                 // This host exposes x86-64-v4; successful validation is the
                 // correct result on newer AVX-512-capable instances.
@@ -1784,6 +1838,60 @@ mod tests {
             .expect("write guest memory");
         let mappings = vm.region_mappings();
         assert_eq!(mappings, vec![(0x1000_0000, mappings[0].1, 0x0020_0000)]);
+    }
+
+    #[test]
+    fn whp_partial_map_keeps_all_backing_until_the_last_native_owner() {
+        if !native_test_child("whp_partial_map_keeps_all_backing_until_the_last_native_owner") {
+            return;
+        }
+        let mut vm = Vm::new().unwrap();
+        let service = vm.interrupt_controller();
+        let memory = GuestMemoryMmap::from_ranges(&[
+            (GuestAddress(0x10000), 0x1000),
+            (GuestAddress(0x20000), 0x1000),
+        ])
+        .unwrap();
+        memory.write_slice(&[0xf4], GuestAddress(0x10000)).unwrap();
+        let first = AllocationProbe::new(&memory, 0);
+        let second = AllocationProbe::new(&memory, 1);
+        raw::FAIL_MAP_GPA.with(|fail| fail.set(Some(0x20000)));
+        let error = vm.set_memory(memory).unwrap_err();
+        assert!(
+            matches!(error, Error::MapGpa { gpa: 0x20000, .. }),
+            "expected failure at the second GPA, got {error:?}"
+        );
+        assert!(matches!(vm.guest_memory(), Err(Error::MemoryNotReady)));
+        assert!(matches!(
+            vm.create_vcpu(0, "x86-64-v1"),
+            Err(Error::MemoryNotReady)
+        ));
+        assert!(matches!(
+            service.request_fixed_interrupt(0, 0x45),
+            Err(Error::MemoryNotReady)
+        ));
+        assert!(matches!(
+            vm.add_memory(0x30000, 0x1000),
+            Err(Error::MemoryAlreadyRegistered)
+        ));
+
+        // Bypass readiness only in this fixture to prove the first real map
+        // survives failure of the second map and the visible VM's destruction.
+        let mut cpu = vm.create_vcpu_without_ram_check(0, "x86-64-v1").unwrap();
+        let cancel = cpu.cancel_handle();
+        drop(vm);
+        cpu.set_x86_64_state(&real_mode_state(0x10000, 0)).unwrap();
+        let exit = cpu.run(|_, _| 0, |_, _| false).unwrap();
+        assert!(matches!(exit, VmExit::Halted), "{exit:?}");
+        drop(cpu);
+        first.assert_retained();
+        second.assert_retained();
+        drop(service);
+        first.assert_retained();
+        second.assert_retained();
+        drop(cancel);
+        first.assert_reclaimed();
+        second.assert_reclaimed();
     }
 
     #[test]
@@ -1819,10 +1927,117 @@ mod tests {
     }
 
     #[test]
+    fn whp_failed_partition_delete_retains_live_backing() {
+        if native_test_child("whp_failed_partition_delete_retains_live_backing") {
+            check_failed_partition_delete(false);
+        }
+    }
+
+    #[test]
+    fn whp_failed_map_and_delete_retains_attempted_backing() {
+        if native_test_child("whp_failed_map_and_delete_retains_attempted_backing") {
+            check_failed_partition_delete(true);
+        }
+    }
+
+    fn check_failed_partition_delete(fail_map: bool) {
+        let mut vm = Vm::new().unwrap();
+        let partition = vm.inner.partition;
+        let memory = GuestMemoryMmap::from_ranges(&[
+            (GuestAddress(0x10000), 0x1000),
+            (GuestAddress(0x20000), 0x1000),
+        ])
+        .unwrap();
+        let probes = [
+            AllocationProbe::new(&memory, 0),
+            AllocationProbe::new(&memory, 1),
+        ];
+        raw::FAIL_NEXT_DELETE.with(|fail| fail.set(true));
+        if fail_map {
+            raw::FAIL_MAP_GPA.with(|fail| fail.set(Some(0x20000)));
+            let error = vm.set_memory(memory).unwrap_err();
+            let Error::PartitionCleanup { operation, hr } = error else {
+                panic!("expected map and cleanup errors, got {error:?}");
+            };
+            assert!(
+                matches!(*operation, Error::MapGpa { gpa: 0x20000, .. }),
+                "expected failure at the second GPA, got {operation:?}"
+            );
+            assert_eq!(hr, "0x80004005");
+            assert!(matches!(
+                vm.add_memory(0x30000, 0x1000),
+                Err(Error::MemoryAlreadyRegistered)
+            ));
+        } else {
+            vm.set_memory(memory).unwrap();
+        }
+        drop(vm);
+        for probe in probes {
+            probe.assert_retained();
+        }
+        // Both the actual partition and its backing remain live after Drop.
+        raw::create_virtual_processor(partition, 0).unwrap();
+        raw::delete_virtual_processor(partition, 0);
+    }
+
+    struct AllocationProbe {
+        address: usize,
+        original: Weak<vm_memory::mmap::MmapRegion<()>>,
+    }
+
+    impl AllocationProbe {
+        fn new(memory: &GuestMemoryMmap, index: usize) -> Self {
+            let region = memory.iter().nth(index).unwrap();
+            let mmap = region.get_mmap();
+            Self {
+                address: mmap.as_ptr() as usize,
+                original: Arc::downgrade(&mmap),
+            }
+        }
+
+        fn query(&self) -> MEMORY_BASIC_INFORMATION {
+            let mut information = MEMORY_BASIC_INFORMATION::default();
+            // SAFETY: VirtualQuery fills a VM information record and never
+            // dereferences the allocation address being queried.
+            #[allow(unsafe_code)]
+            let length = unsafe {
+                VirtualQuery(
+                    self.address as *const _,
+                    &raw mut information,
+                    std::mem::size_of_val(&information),
+                )
+            };
+            assert_eq!(
+                length,
+                std::mem::size_of_val(&information),
+                "VirtualQuery failed: {}",
+                std::io::Error::last_os_error()
+            );
+            information
+        }
+
+        fn assert_retained(&self) {
+            let original = self.original.upgrade().expect("backing was released");
+            assert_eq!(original.as_ptr() as usize, self.address);
+            let information = self.query();
+            assert_eq!(information.AllocationBase as usize, self.address);
+            assert_eq!(information.State, MEM_COMMIT);
+            assert_eq!(information.Type, MEM_PRIVATE);
+        }
+
+        fn assert_reclaimed(&self) {
+            assert!(self.original.upgrade().is_none());
+            assert_eq!(self.query().State, MEM_FREE);
+        }
+    }
+
+    #[test]
     fn whp_sets_pmi_x86_64_scalar_registers() {
         let _guard = whp_test_lock();
         let vm = Vm::new().expect("create WHP partition");
-        let mut vcpu = vm.create_vcpu(0, "x86-64-v2").expect("create WHP vCPU");
+        let mut vcpu = vm
+            .create_vcpu_without_ram_check(0, "x86-64-v2")
+            .expect("create WHP vCPU");
         let state = pmi::vm::vcpu::x86_64::CpuState {
             rip: 0x1000,
             rsp: 0x8000,
@@ -1871,12 +2086,16 @@ mod tests {
     }
 
     #[test]
-    fn whp_runs_to_hlt_exit() {
+    fn whp_runs_to_hlt_after_refusing_ram_replacement() {
         let _guard = whp_test_lock();
         let mut vm = Vm::new().expect("create WHP partition");
         let code_base = 0x1_0000;
         vm.add_memory(code_base, 0x1000).expect("map guest memory");
         vm.write_guest(code_base, &[0xF4]).expect("write hlt");
+        assert!(matches!(
+            vm.add_memory(code_base, 0x1000),
+            Err(Error::MemoryAlreadyRegistered)
+        ));
 
         let mut vcpu = vm.create_vcpu(0, "x86-64-v2").expect("create WHP vCPU");
         vcpu.set_x86_64_state(&real_mode_state(code_base, 0))
