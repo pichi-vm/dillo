@@ -236,7 +236,7 @@ dillo-virtio-vsock.workspace = true
 ciborium.workspace = true
 # Boot/e2e tests build a PMI with arma and assert on the Report that snuffler
 # emits from inside the guest.
-arma = { git = "https://github.com/pichi-vm/arma", rev = "d4e24baf6f5da11d00221b3005c12ff647ceffbc", artifact = "bin" } # image builder, host target
+arma = { git = "https://github.com/pichi-vm/arma", rev = "caac51b192ae943e4af39fa78919931313868589", artifact = "bin" } # image builder, host target
 serde_json = "1"                                   # decode the Report on the host
 rstest = "0.23"                                    # parameterized boot matrix
 burrow = { workspace = true }               # cached kernel download
