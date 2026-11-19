@@ -426,6 +426,16 @@ pub struct ClockInfo {
     pub available_sources: Vec<String>,
     /// `/sys/devices/system/clockevents/clockevent*/current_device`, sorted by CPU/index.
     pub event_devices: Vec<String>,
+    /// Opt-in end-to-end timer observation for the Arma #64 qualification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timer_probe: Option<TimerProbe>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimerProbe {
+    pub dt_interrupts: Vec<u32>,
+    pub irq_counts: Vec<Vec<u64>>,
+    pub elapsed_ns: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -973,6 +973,41 @@ fn read_clock() -> ClockInfo {
         current_source,
         available_sources,
         event_devices,
+        timer_probe: read_trim("/proc/cmdline")
+            .split_whitespace()
+            .any(|arg| arg == "dillo.arma64_timer_probe")
+            .then(timer_probe),
+    }
+}
+
+fn timer_probe() -> snuffler::TimerProbe {
+    let raw = fs::read("/proc/device-tree/timer/interrupts").expect("timer DT cells");
+    let (cells, remainder) = raw.as_chunks::<4>();
+    assert!(remainder.is_empty());
+    let dt_interrupts = cells.iter().map(|cell| u32::from_be_bytes(*cell)).collect();
+    let counts = || {
+        let irqs = fs::read_to_string("/proc/interrupts").expect("guest interrupts");
+        let line = irqs
+            .lines()
+            .find(|line| line.contains("arch_timer"))
+            .expect("arch timer IRQ");
+        line.split_once(':')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .map_while(|word| word.parse::<u64>().ok())
+            .collect::<Vec<_>>()
+    };
+    let start = monotonic_ns();
+    let mut irq_counts = vec![counts()];
+    for _ in 0..2 {
+        std::thread::sleep(Duration::from_millis(100));
+        irq_counts.push(counts());
+    }
+    snuffler::TimerProbe {
+        dt_interrupts,
+        irq_counts,
+        elapsed_ns: monotonic_ns() - start,
     }
 }
 

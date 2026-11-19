@@ -435,6 +435,13 @@ impl Vcpu {
                 "created CPU PARange differs from its inspected configuration".into(),
             ));
         }
+        if std::env::var_os("DILLO_ARM64_QUALIFY").is_some() {
+            let isar0 = snapshot.value(Register::Isar0)?;
+            eprintln!(
+                "HVF boot owner ISAR0={isar0:#018x} RNDR={}",
+                (isar0 >> 60) & 0xf
+            );
+        }
         // Native/config values may serve optional baseline IDs even if one
         // API cannot read them. If neither can, preserve the earlier-profile
         // RAZ emulation. These values never replace failed admission evidence;

@@ -35,6 +35,70 @@ mod console_lifetime;
 mod console_resize;
 mod virtiofs;
 
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn arma64_timer_boots() {
+    assert!(hypervisor_available(), "native Arm hypervisor required");
+    let dir = PathBuf::from("target/arma64-evidence");
+    std::fs::create_dir_all(&dir).unwrap();
+    let pmi = build_pmi(
+        &dir,
+        "console=hvc0 dillo.panic_report dillo.arma64_timer_probe",
+        true,
+    );
+    let output = boot_with_env(
+        &pmi,
+        256,
+        2,
+        &dir,
+        &[],
+        &[
+            ("RUST_LOG", "info,dillo::boot=trace"),
+            ("DILLO_ARM64_QUALIFY", "1"),
+        ],
+    );
+    std::fs::write(dir.join("combined.log"), &output).unwrap();
+    let report = parse_report(&output).unwrap_or_else(|| panic!("no guest report:\n{output}"));
+    std::fs::write(
+        dir.join("report.json"),
+        serde_json::to_vec_pretty(&report).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(report.cpu.online_count, 2);
+    let timer = report
+        .clock
+        .timer_probe
+        .as_ref()
+        .expect("guest timer observations");
+    assert_eq!(
+        timer.dt_interrupts,
+        [1, 13, 4, 1, 14, 4, 1, 11, 4, 1, 10, 4]
+    );
+    assert!(
+        report
+            .clock
+            .event_devices
+            .iter()
+            .any(|name| name.contains("arch_sys_timer"))
+    );
+    assert!(
+        timer.elapsed_ns >= 200_000_000,
+        "guest sleep completed too early"
+    );
+    assert_eq!(timer.irq_counts.len(), 3);
+    for counts in &timer.irq_counts {
+        assert_eq!(counts.len(), 2);
+    }
+    for pair in timer.irq_counts.windows(2) {
+        assert!(pair[0].iter().zip(&pair[1]).all(|(a, b)| b >= a));
+        assert!(
+            pair[1].iter().sum::<u64>() > pair[0].iter().sum::<u64>(),
+            "timer IRQ did not recur"
+        );
+    }
+    eprintln!("Arma #64 guest timer qualification: {timer:?}");
+}
+
 // dillo boots a same-arch guest, so the host arch picks the kernel.
 #[cfg(target_arch = "x86_64")]
 mod host {

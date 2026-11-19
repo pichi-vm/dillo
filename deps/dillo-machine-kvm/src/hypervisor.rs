@@ -824,6 +824,13 @@ impl Vcpu {
                 })?;
             Ok(u64::from_le_bytes(bytes))
         })?;
+        if std::env::var_os("DILLO_ARM64_QUALIFY").is_some() {
+            let isar0 = snapshot.value(Register::Isar0)?;
+            eprintln!(
+                "KVM boot owner ISAR0={isar0:#018x} RNDR={}",
+                (isar0 >> 60) & 0xf
+            );
+        }
         Ok(snapshot.admit(profile)?)
     }
     /// Apply PMI's fixed vm BSP state. APs retain native guest-startup state.
