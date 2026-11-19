@@ -113,7 +113,7 @@ kvm-ioctls = "0.24"
 kvm-bindings = "0.14"
 
 # Hypervisor backends
-applevisor = "1"
+applevisor = { git = "https://github.com/pichi-vm/applevisor", rev = "2e38fb0e372e2bb8fbb90cbf89f5931b710c32a4" }
 applevisor-sys = "1"
 windows-sys = { version = "0.61", features = ["Win32_System_Hypervisor"] }
 
