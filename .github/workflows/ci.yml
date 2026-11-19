@@ -186,6 +186,37 @@ jobs:
           CARGO_BUILD_RUSTFLAGS: "-D warnings"
         run: cargo test --workspace --exclude snuffler
 
+      - name: Signed HVF native ownership tests
+        if: runner.os == 'macOS'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+        run: |
+          set -euo pipefail
+          binary="$(cargo test --locked -p dillo-machine-hvf --lib --no-run --message-format=json \
+            | python3 -c '
+          import json, sys
+          for line in sys.stdin:
+              event = json.loads(line)
+              if (event.get("reason") == "compiler-artifact"
+                      and event["target"]["name"] == "dillo_machine_hvf"
+                      and event["profile"]["test"]):
+                  print(event["executable"])
+          ')"
+          test -x "$binary"
+          entitlements="$(mktemp)"
+          trap 'rm -f "$entitlements"' EXIT
+          cat > "$entitlements" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict><key>com.apple.security.hypervisor</key><true/></dict>
+          </plist>
+          EOF
+          codesign --force --sign - --entitlements "$entitlements" "$binary"
+          "$binary" --ignored --test-threads=1 hypervisor::tests::hvf_
+
       - name: Reserve hugepages for guest RAM (Linux/KVM)
         if: runner.os == 'Linux'
         shell: bash
