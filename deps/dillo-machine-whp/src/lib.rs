@@ -196,7 +196,6 @@ mod imp {
         type Platform = PlatformMachine;
         type Cpu = Cpu;
         type CpuState = CpuState;
-        type Memory = Memory;
 
         fn guest_address_bits() -> Result<u32, Self::Error> {
             crate::hypervisor::guest_address_bits()
@@ -205,20 +204,24 @@ mod imp {
         fn from_launch_config(
             config: LaunchConfig<'_, Self::Platform>,
         ) -> Result<Self, Self::Error> {
+            let required = config
+                .platform
+                .required_address_bits_for_ram(config.ram.iter().map(|r| (r.gpa, r.size)))
+                .map_err(|error| Error::AddressSpace(error.to_string()))?;
             let parsed: Tree<'_> = Tree::parse(config.platform.dtb()).map_err(Error::ParseDtb)?;
             let mut tree = OwnedTree::materialize(&parsed);
             let substrate = WhpX86Substrate::from_devtree(&mut tree)?
                 .ok_or(Error::MissingSubstrate("/ioapic"))?;
-            let vm = Self::new_x86_64(config.vcpus, Some(substrate.ioapic))?;
             let available = Self::guest_address_bits()?;
-            let required = config
-                .min_addr_space_bits
-                .max(config.platform.min_addr_space_bits());
+
             if required > available {
                 return Err(Error::AddressSpace(format!(
                     "launch requires {required} bits; backend provides {available}"
                 )));
             }
+            let memory = guest_memory_from_ranges(config.ram)?;
+            let mut vm = Self::new_x86_64(config.vcpus, Some(substrate.ioapic))?;
+            vm.attach_guest_memory(memory)?;
             Ok(vm)
         }
 
@@ -303,30 +306,6 @@ mod imp {
             Ok(Some(Self {
                 ioapic: IoApic::new(MmioWindow { base, size }),
             }))
-        }
-    }
-
-    #[derive(Debug)]
-    pub struct Memory {
-        guest_memory: GuestMemoryMmap,
-    }
-
-    impl dillo_machine::Memory for Memory {
-        type Error = Error;
-
-        fn from_ranges(ranges: &[RamRange]) -> Result<Self, Self::Error> {
-            Ok(Self {
-                guest_memory: guest_memory_from_ranges(ranges.iter().copied())?,
-            })
-        }
-    }
-
-    impl Attach<Memory> for Vm {
-        type Error = Error;
-        type Output = ();
-
-        fn attach(&mut self, item: Memory) -> Result<Self::Output, Self::Error> {
-            self.attach_guest_memory(item.guest_memory)
         }
     }
 

@@ -19,8 +19,8 @@ pub struct LaunchConfig<'a, Platform> {
     /// The backend's surveyed platform, borrowed for native construction.
     pub platform: &'a Platform,
     pub vcpus: u32,
-    /// Required width of every planned RAM extent.
-    pub min_addr_space_bits: u32,
+    /// The exact ordered RAM extents requested for this machine.
+    pub ram: Vec<RamRange>,
 }
 
 /// One DTB/launch-derived guest RAM range.
@@ -79,15 +79,6 @@ pub trait Host {
     fn install_signal_watchers(supervisor_shutdown: &'static AtomicBool);
 }
 
-/// Backend-owned memory input constructed from DTB-derived RAM ranges.
-pub trait Memory: 'static {
-    type Error: std::error::Error + Send + Sync + 'static;
-
-    fn from_ranges(ranges: &[RamRange]) -> Result<Self, Self::Error>
-    where
-        Self: Sized;
-}
-
 /// Backend-owned CPU input constructed from PMI/DTB-derived launch facts.
 pub trait CpuState: Send + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
@@ -119,14 +110,13 @@ pub trait Machine: Sized + 'static {
     type Platform;
     type Cpu: Cpu<Error = Self::Error> + Send;
     type CpuState: CpuState<Error = Self::Error>;
-    type Memory: Memory<Error = Self::Error>;
 
     /// Maximum usable guest address width under this backend's CPU/VM policy.
     /// Intersects guest-visible physical width with backend GPA/IPA capacity.
     /// Does not allocate RAM or execute a guest.
     fn guest_address_bits() -> Result<u32, Self::Error>;
 
-    /// Construct the backend VM from selected-machine launch facts.
+    /// Construct the backend VM with its admitted guest RAM registered.
     fn from_launch_config(config: LaunchConfig<'_, Self::Platform>) -> Result<Self, Self::Error>;
 
     /// Write launch data into guest RAM through backend-owned memory access.
@@ -199,16 +189,6 @@ mod tests {
         }
     }
 
-    struct TestMemory;
-
-    impl Memory for TestMemory {
-        type Error = TestError;
-
-        fn from_ranges(_ranges: &[RamRange]) -> Result<Self, Self::Error> {
-            Ok(Self)
-        }
-    }
-
     struct TestCpu {
         stop: VcpuStop,
     }
@@ -227,15 +207,6 @@ mod tests {
 
     struct TestMachine;
 
-    impl Attach<TestMemory> for TestMachine {
-        type Error = TestError;
-        type Output = ();
-
-        fn attach(&mut self, _item: TestMemory) -> Result<Self::Output, Self::Error> {
-            Ok(())
-        }
-    }
-
     impl Attach<TestCpuState> for TestMachine {
         type Error = TestError;
         type Output = Arc<TestCpu>;
@@ -252,7 +223,6 @@ mod tests {
         type Platform = ();
         type Cpu = TestCpu;
         type CpuState = TestCpuState;
-        type Memory = TestMemory;
 
         fn guest_address_bits() -> Result<u32, Self::Error> {
             Ok(48)
@@ -271,13 +241,15 @@ mod tests {
 
     #[test]
     fn machine_uses_common_launch_ram_and_vcpu_api() {
-        let mut machine = TestMachine;
-        let memory = TestMemory::from_ranges(&[RamRange {
-            gpa: 0x1000,
-            size: 0x2000,
-        }])
-        .expect("memory constructed");
-        Attach::attach(&mut machine, memory).expect("RAM attached");
+        let mut machine = TestMachine::from_launch_config(LaunchConfig {
+            platform: &(),
+            vcpus: 1,
+            ram: vec![RamRange {
+                gpa: 0x1000,
+                size: 0x2000,
+            }],
+        })
+        .expect("machine constructed");
         machine
             .write_guest(0x1000, b"boot")
             .expect("guest write accepted");

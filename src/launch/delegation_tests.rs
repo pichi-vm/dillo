@@ -494,3 +494,42 @@ fn overlay_reservation_bounds_are_enforced() {
     assert!(matches!(err, LaunchError::DtboSynth(_)), "{err}");
     assert_eq!(err.exit_code(), 11);
 }
+
+#[test]
+fn machine_constructor_refuses_unadmitted_ram() {
+    use crate::machine_select::machine::Vm;
+    use dillo_machine::{Host, LaunchConfig, Machine, RamRange};
+
+    let arch = match <Vm as Host>::ARCH {
+        HostArchitecture::X86_64 => Arch::X86_64,
+        HostArchitecture::Aarch64 => Arch::Aarch64,
+    };
+    let platform = PlatformMachine::survey(base(<Vm as Host>::ARCH, false, false), arch)
+        .expect("survey fixture platform");
+    let (gpa, size) = platform
+        .placement_regions()
+        .next()
+        .expect("declared region");
+    let error = Vm::from_launch_config(LaunchConfig {
+        platform: &platform,
+        vcpus: 1,
+        ram: vec![RamRange { gpa, size }],
+    })
+    .expect_err("overlap must fail before native setup");
+    assert!(
+        error.to_string().contains("overlaps a declared region"),
+        "{error}"
+    );
+
+    let available = Vm::guest_address_bits().expect("native guest address capacity");
+    let error = Vm::from_launch_config(LaunchConfig {
+        platform: &platform,
+        vcpus: 1,
+        ram: vec![RamRange {
+            gpa: 1 << available,
+            size: 2 << 20,
+        }],
+    })
+    .expect_err("over-width RAM must fail before allocation");
+    assert!(error.to_string().contains("address"), "{error}");
+}
