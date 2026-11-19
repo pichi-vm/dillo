@@ -105,7 +105,7 @@ pub enum PsciMethod {
     Smc,
 }
 
-/// Failures surveying the base DTB into a [`Machine`].
+/// Failures surveying the base DTB or validating launch extents against it.
 #[derive(Debug, Error)]
 pub enum SurveyError {
     #[error("base DTB parse failed: {0:?}")]
@@ -168,6 +168,25 @@ pub enum SurveyError {
         region: String,
         region_start: u64,
         region_end: u64,
+    },
+
+    #[error("RAM layout must contain at least one extent")]
+    EmptyRamLayout,
+
+    #[error("RAM extent at {gpa:#x} with size {size:#x} is empty or overflows")]
+    InvalidRamExtent { gpa: u64, size: u64 },
+
+    #[error("RAM extent at {gpa:#x} starts before the previous extent ends at {previous_end:#x}")]
+    UnorderedRamExtent { gpa: u64, previous_end: u64 },
+
+    #[error(
+        "RAM extent [{gpa:#x}..{end:#x}) overlaps a declared region at {region_base:#x} with size {region_size:#x}"
+    )]
+    RamOverlapsRegion {
+        gpa: u64,
+        end: u64,
+        region_base: u64,
+        region_size: u64,
     },
 
     #[error("property `{prop}` on `{node}` references unknown phandle {phandle}")]
@@ -669,6 +688,42 @@ impl Machine {
                 .max(u128::from(self.pcie.mmio_base) + 2 * u128::from(self.pcie.mmio_size));
         }
         u128::BITS - (space_top.max(2) - 1).leading_zeros()
+    }
+
+    /// Check the requested RAM layout and derive the width it needs together
+    /// with the surveyed platform. Native construction must supply this width.
+    pub fn required_address_bits_for_ram(
+        &self,
+        ranges: impl IntoIterator<Item = (u64, u64)>,
+    ) -> Result<u32, SurveyError> {
+        let mut required = self.min_addr_space_bits();
+        let mut previous_end = 0;
+        for (gpa, size) in ranges {
+            let end = gpa
+                .checked_add(size)
+                .filter(|_| size != 0)
+                .ok_or(SurveyError::InvalidRamExtent { gpa, size })?;
+            if gpa < previous_end {
+                return Err(SurveyError::UnorderedRamExtent { gpa, previous_end });
+            }
+            if let Some((region_base, region_size)) = self
+                .placement_regions()
+                .find(|&(base, len)| overlaps(gpa, size, base, len))
+            {
+                return Err(SurveyError::RamOverlapsRegion {
+                    gpa,
+                    end,
+                    region_base,
+                    region_size,
+                });
+            }
+            required = required.max(u64::BITS - (end - 1).leading_zeros());
+            previous_end = end;
+        }
+        if previous_end == 0 {
+            return Err(SurveyError::EmptyRamLayout);
+        }
+        Ok(required)
     }
 }
 
@@ -1986,6 +2041,53 @@ mod tests {
             .set_u32s(&reg2(ECAM_BASE, 0x1000));
         let err = Machine::survey(dtb(root), Arch::Aarch64).unwrap_err();
         assert!(matches!(err, SurveyError::Overlap { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn ram_admission_checks_layout_and_required_width() {
+        let platform = Machine::survey(dtb(base_root()), Arch::Aarch64).unwrap();
+        let limit = 1 << 40;
+        assert_eq!(
+            platform
+                .required_address_bits_for_ram([(0, 0x1000), (0x1000, 0x1000)])
+                .unwrap(),
+            platform.min_addr_space_bits()
+        );
+        assert_eq!(
+            platform
+                .required_address_bits_for_ram([(0, 0x1000), (limit - 0x1000, 0x1000)])
+                .unwrap(),
+            40
+        );
+        assert_eq!(
+            platform
+                .required_address_bits_for_ram([(limit, 0x1000)])
+                .unwrap(),
+            41
+        );
+        assert!(matches!(
+            platform.required_address_bits_for_ram([]),
+            Err(SurveyError::EmptyRamLayout)
+        ));
+        for range in [(0x1000, 0), (u64::MAX, 1)] {
+            assert!(matches!(
+                platform.required_address_bits_for_ram([range]),
+                Err(SurveyError::InvalidRamExtent { .. })
+            ));
+        }
+        for ranges in [
+            [(0, 0x2000), (0x1000, 0x1000)],
+            [(0x2000, 0x1000), (0, 0x1000)],
+        ] {
+            assert!(matches!(
+                platform.required_address_bits_for_ram(ranges),
+                Err(SurveyError::UnorderedRamExtent { .. })
+            ));
+        }
+        assert!(matches!(
+            platform.required_address_bits_for_ram([(SERIAL_BASE, 0x1000)]),
+            Err(SurveyError::RamOverlapsRegion { .. })
+        ));
     }
 
     #[test]
