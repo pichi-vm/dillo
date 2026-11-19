@@ -16,7 +16,7 @@ use nix::sys::memfd::{MFdFlags, memfd_create};
 use nix::sys::mman::{MapFlags, ProtFlags, mmap};
 use nix::unistd::ftruncate;
 use vm_memory::mmap::MmapRegionBuilder;
-use vm_memory::{FileOffset, GuestAddress, GuestMemoryMmap, GuestRegionMmap};
+use vm_memory::{Bytes, FileOffset, GuestAddress, GuestMemory, GuestMemoryMmap, GuestRegionMmap};
 
 /// Owned memfd.
 #[derive(Debug)]
@@ -106,7 +106,7 @@ fn mmap_range(memfd: &Memfd, fd_offset: u64, size: u64) -> Result<u64> {
 /// guest-memory access.
 fn build_guest_memory(
     memfd: &Memfd,
-    regions: &[(u64, u64, u64)], // (gpa, host_addr, size) — same shape GpaMap takes
+    regions: &[(u64, u64, u64)], // (gpa, host_addr, size)
 ) -> Result<GuestMemoryMmap> {
     let mut built: Vec<GuestRegionMmap> = Vec::with_capacity(regions.len());
     let mut file_offset: u64 = 0;
@@ -152,35 +152,10 @@ fn build_guest_memory(
     GuestMemoryMmap::from_regions(built).map_err(|e| anyhow!("GuestMemoryMmap: {e:?}"))
 }
 
-/// Maps GPA → (host_addr, size). Used to translate guest-physical
-/// writes (load-section copies, DTBO fill) into host-virtual writes.
-#[derive(Debug)]
-pub(crate) struct MappedRegion {
-    gpa: u64,
-    host_addr: u64,
-    size: u64,
-}
-
-impl MappedRegion {
-    pub(crate) fn gpa(&self) -> u64 {
-        self.gpa
-    }
-
-    pub(crate) fn host_addr(&self) -> u64 {
-        self.host_addr
-    }
-
-    pub(crate) fn size(&self) -> u64 {
-        self.size
-    }
-}
-
 /// KVM-owned standard-VM guest memory backing.
 #[derive(Debug)]
 pub(crate) struct MappedMemory {
     _memfd: Memfd,
-    regions: Vec<MappedRegion>,
-    gpa_map: GpaMap,
     guest_memory: GuestMemoryMmap,
 }
 
@@ -189,84 +164,33 @@ impl MappedMemory {
         let requested = regions.into_iter().collect::<Vec<_>>();
         let total_bytes = requested.iter().map(|(_, size)| *size).sum();
         let memfd = create_and_size(total_bytes)?;
-        let mut gpa_map = GpaMap::new();
         let mut mapped = Vec::with_capacity(requested.len());
         let mut host_base = 0;
         for (gpa, size) in requested {
             let host_addr = mmap_range(&memfd, host_base, size)?;
-            gpa_map.add(gpa, host_addr, size);
-            mapped.push(MappedRegion {
-                gpa,
-                host_addr,
-                size,
-            });
+            mapped.push((gpa, host_addr, size));
             host_base += size;
         }
-        let tuples = mapped
-            .iter()
-            .map(|region| (region.gpa, region.host_addr, region.size))
-            .collect::<Vec<_>>();
-        let guest_memory = build_guest_memory(&memfd, &tuples)?;
+        let guest_memory = build_guest_memory(&memfd, &mapped)?;
         Ok(Self {
             _memfd: memfd,
-            regions: mapped,
-            gpa_map,
             guest_memory,
         })
     }
 
-    pub(crate) fn regions(&self) -> &[MappedRegion] {
-        &self.regions
-    }
-
-    pub(crate) fn gpa_map(&self) -> &GpaMap {
-        &self.gpa_map
+    pub(crate) fn regions(&self) -> impl Iterator<Item = &GuestRegionMmap> {
+        self.guest_memory.iter()
     }
 
     pub(crate) fn guest_memory(&self) -> GuestMemoryMmap {
         self.guest_memory.clone()
     }
-}
 
-#[derive(Debug, Default, Clone)]
-pub(crate) struct GpaMap {
-    regions: Vec<(u64, u64, u64)>, // (gpa, host_addr, size)
-}
-
-impl GpaMap {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-    pub(crate) fn add(&mut self, gpa: u64, host_addr: u64, size: u64) {
-        self.regions.push((gpa, host_addr, size));
-    }
-
-    /// Copy `src` into guest memory starting at `gpa`. Errors if the
-    /// destination range spans regions or falls outside any region.
-    pub(crate) fn write(&self, gpa: u64, src: &[u8]) -> Result<()> {
-        for &(rg, ra, rs) in &self.regions {
-            if gpa >= rg && gpa < rg + rs {
-                let off = gpa - rg;
-                if off + src.len() as u64 > rs {
-                    return Err(anyhow!(
-                        "write spans region boundary: gpa={:#x} len={} region={:#x}+{}",
-                        gpa,
-                        src.len(),
-                        rg,
-                        rs
-                    ));
-                }
-                // SAFETY: ra+off..+src.len() lies inside the mmap'd
-                // region we registered with KVM; the mapping is alive
-                // for the VM's lifetime.
-                #[allow(unsafe_code)]
-                unsafe {
-                    let dst = (ra + off) as *mut u8;
-                    std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
-                }
-                return Ok(());
-            }
-        }
-        Err(anyhow!("no region contains GPA {:#x}", gpa))
+    /// Write through the guest-memory view while preserving the single-region bound.
+    pub(crate) fn write(&self, gpa: u64, source: &[u8]) -> Result<()> {
+        self.guest_memory
+            .get_slice(GuestAddress(gpa), source.len())?
+            .write_slice(source, 0)?;
+        Ok(())
     }
 }
