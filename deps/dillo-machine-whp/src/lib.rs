@@ -414,10 +414,19 @@ mod imp {
     fn guest_memory_from_ranges(
         ranges: impl IntoIterator<Item = RamRange>,
     ) -> Result<GuestMemoryMmap, Error> {
-        let ranges: Vec<(GuestAddress, usize)> = ranges
+        // Hyper-V TLFS defines 4 KiB GPA pages for x64.
+        const PAGE_SIZE: u64 = 0x1000;
+        let ranges: Vec<_> = ranges
             .into_iter()
-            .map(|range| (GuestAddress(range.gpa), range.size as usize))
-            .collect();
+            .map(|RamRange { gpa, size }| {
+                if !gpa.is_multiple_of(PAGE_SIZE) || !size.is_multiple_of(PAGE_SIZE) {
+                    return Err(Error::AddressSpace(format!(
+                        "RAM base {gpa:#x} and size {size:#x} must be multiples of {PAGE_SIZE} bytes"
+                    )));
+                }
+                Ok((GuestAddress(gpa), size as usize))
+            })
+            .collect::<Result<_, _>>()?;
         GuestMemoryMmap::from_ranges(&ranges).map_err(|e| Error::CreateGuestMemory(format!("{e}")))
     }
 
@@ -816,9 +825,25 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::{FixedMessage, FixedMessageTable, FixedMsi, decode_fixed_msi};
+        use super::{
+            Error, FixedMessage, FixedMessageTable, FixedMsi, RamRange, decode_fixed_msi,
+            guest_memory_from_ranges,
+        };
         use dillo_mmio::MessageInterrupt;
         use std::sync::Mutex;
+
+        #[test]
+        fn guest_ram_requires_whole_pages_at_aligned_addresses() {
+            for (gpa, size) in [(1, 0x1000), (0, 0x1001)] {
+                let error = guest_memory_from_ranges([RamRange { gpa, size }]).unwrap_err();
+                assert!(matches!(error, Error::AddressSpace(_)), "{error}");
+            }
+            guest_memory_from_ranges([RamRange {
+                gpa: 0x1000,
+                size: 0x1000,
+            }])
+            .unwrap();
+        }
 
         #[test]
         fn message_vectors_keep_enable_and_mask_independent() {
