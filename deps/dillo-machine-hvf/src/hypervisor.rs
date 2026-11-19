@@ -273,13 +273,6 @@ impl Vm {
     }
 
     /// Register initial RAM while construction still owns the only native handle.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the RAM-owning constructor uses this after the launch API migration"
-        )
-    )]
     pub(crate) fn with_memory(mut self, ranges: &[RamRange]) -> Result<Self, Error> {
         let native = Arc::get_mut(&mut self.0)
             .ok_or_else(|| Error::Hv("initial RAM requires exclusive HVF VM ownership".into()))?;
@@ -298,7 +291,8 @@ impl Vm {
         Ok(self)
     }
 
-    pub(crate) fn attach_memory(&self, ranges: &[RamRange]) -> Result<(), Error> {
+    #[cfg(test)]
+    fn attach_memory(&self, ranges: &[RamRange]) -> Result<(), Error> {
         self.0.register_memory(
             ranges,
             #[cfg(test)]

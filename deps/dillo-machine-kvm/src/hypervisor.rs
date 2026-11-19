@@ -207,9 +207,6 @@ pub(crate) struct Vm {
 
 #[derive(Debug)]
 struct VmInner {
-    // Only consumed on x86_64 (KVM_GET_SUPPORTED_CPUID in `create_vcpu`);
-    // aarch64 keeps the handle alive to own the VM lifetime but never reads it.
-    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     kvm: Kvm,
     vm: VmFd,
     /// The declared controller model this VM realizes. The LAPIC base is
@@ -237,6 +234,16 @@ impl Vm {
     /// Borrow the descriptor for one operation. Retain a `Vm` for future use.
     pub(crate) fn fd(&self) -> &VmFd {
         &self.inner.vm
+    }
+
+    pub(crate) fn check_memory_slots(&self, required: usize) -> Result<(), Error> {
+        let available = self.inner.kvm.get_nr_memslots();
+        if required > available {
+            return Err(Error::AddressSpace(format!(
+                "launch requires {required} RAM slots; backend provides {available}"
+            )));
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -986,6 +993,20 @@ mod memory_registration_tests {
     use super::*;
     use crate::irq::IrqManager;
     use crate::memory::{MappedMemory, MappingProbe};
+
+    #[test]
+    fn refuses_more_ram_ranges_than_native_memory_slots() {
+        let kvm = Kvm::new().expect("native KVM is required");
+        let limit = kvm.get_nr_memslots();
+        let native = kvm.create_vm().unwrap();
+        let vm = Vm::test_from_native(kvm, native);
+
+        vm.check_memory_slots(limit).unwrap();
+        assert!(matches!(
+            vm.check_memory_slots(limit + 1),
+            Err(Error::AddressSpace(_))
+        ));
+    }
 
     #[test]
     fn partial_memslot_failure_retains_ram_until_native_owner_closes() {

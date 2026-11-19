@@ -35,6 +35,9 @@ pub(crate) struct MappedMemory {
 
 impl MappedMemory {
     pub(crate) fn new(regions: impl IntoIterator<Item = (u64, u64)>) -> Result<Self> {
+        // Linux's KVM_MEM_MAX_NR_PAGES limits each slot in host base pages.
+        const MAX_SLOT_PAGES: u64 = (1 << 31) - 1;
+
         let requested = regions.into_iter().collect::<Vec<_>>();
         // Hugepage mmap rounds lengths up; munmap requires hugepage multiples.
         // Reject partial pages before allocating so cleanup uses the full extent.
@@ -44,8 +47,24 @@ impl MappedMemory {
                 .all(|(_, size)| *size > 0 && size.is_multiple_of(2 << 20)),
             "guest RAM regions must be nonzero multiples of 2 MiB"
         );
-        let total_bytes = requested.iter().try_fold(0u64, |total, (_, size)| {
-            total.checked_add(*size).context("guest RAM size overflow")
+        // KVM requires GPA bases to align to the host's base page size.
+        // SAFETY: sysconf reads a process-wide constant and takes no pointers.
+        #[allow(unsafe_code)]
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let page_size = u64::try_from(page_size).context("invalid host page size")?;
+        ensure!(page_size != 0, "host page size must be nonzero");
+        ensure!(
+            requested
+                .iter()
+                .all(|(gpa, _)| gpa.is_multiple_of(page_size)),
+            "guest RAM bases must align to the host page size ({page_size})"
+        );
+        let total_bytes = requested.iter().try_fold(0u64, |total, &(gpa, size)| {
+            ensure!(
+                size / page_size <= MAX_SLOT_PAGES,
+                "guest RAM region at {gpa:#x} with size {size:#x} exceeds the KVM slot limit of {MAX_SLOT_PAGES} host pages"
+            );
+            total.checked_add(size).context("guest RAM size overflow")
         })?;
         // Preserve the existing hugepage and optional eager-commit policy.
         let fd = memfd_create(
@@ -187,6 +206,35 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "guest RAM regions must be nonzero multiples of 2 MiB"
+        );
+    }
+
+    #[test]
+    fn hugepage_backing_rejects_misaligned_guest_base_before_allocation() {
+        let error = MappedMemory::new([(1, 2 << 20)]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("guest RAM bases must align to the host page size")
+        );
+    }
+
+    #[test]
+    fn hugepage_backing_rejects_oversized_kvm_slot_before_allocation() {
+        // SAFETY: sysconf reads a process-wide constant and takes no pointers.
+        #[allow(unsafe_code)]
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let oversized = u64::try_from(page_size).unwrap() << 31;
+        // The second extent makes the aggregate size overflow, so this fixture
+        // cannot reach allocation even if the per-slot check regresses.
+        let largest_hugepage_multiple = u64::MAX - ((2 << 20) - 1);
+        let error = MappedMemory::new([(0, oversized), (oversized, largest_hugepage_multiple)])
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "guest RAM region at 0x0 with size {oversized:#x} exceeds the KVM slot limit of 2147483647 host pages"
+            )
         );
     }
 

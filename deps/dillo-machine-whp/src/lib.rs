@@ -196,7 +196,6 @@ mod imp {
         type Platform = PlatformMachine;
         type Cpu = Cpu;
         type CpuState = CpuState;
-        type Memory = Memory;
 
         fn guest_address_bits() -> Result<u32, Self::Error> {
             crate::hypervisor::guest_address_bits()
@@ -205,20 +204,24 @@ mod imp {
         fn from_launch_config(
             config: LaunchConfig<'_, Self::Platform>,
         ) -> Result<Self, Self::Error> {
+            let required = config
+                .platform
+                .required_address_bits_for_ram(config.ram.iter().map(|r| (r.gpa, r.size)))
+                .map_err(|error| Error::AddressSpace(error.to_string()))?;
             let parsed: Tree<'_> = Tree::parse(config.platform.dtb()).map_err(Error::ParseDtb)?;
             let mut tree = OwnedTree::materialize(&parsed);
             let substrate = WhpX86Substrate::from_devtree(&mut tree)?
                 .ok_or(Error::MissingSubstrate("/ioapic"))?;
-            let vm = Self::new_x86_64(config.vcpus, Some(substrate.ioapic))?;
             let available = Self::guest_address_bits()?;
-            let required = config
-                .min_addr_space_bits
-                .max(config.platform.min_addr_space_bits());
+
             if required > available {
                 return Err(Error::AddressSpace(format!(
                     "launch requires {required} bits; backend provides {available}"
                 )));
             }
+            let memory = guest_memory_from_ranges(config.ram)?;
+            let mut vm = Self::new_x86_64(config.vcpus, Some(substrate.ioapic))?;
+            vm.attach_guest_memory(memory)?;
             Ok(vm)
         }
 
@@ -307,30 +310,6 @@ mod imp {
     }
 
     #[derive(Debug)]
-    pub struct Memory {
-        guest_memory: GuestMemoryMmap,
-    }
-
-    impl dillo_machine::Memory for Memory {
-        type Error = Error;
-
-        fn from_ranges(ranges: &[RamRange]) -> Result<Self, Self::Error> {
-            Ok(Self {
-                guest_memory: guest_memory_from_ranges(ranges.iter().copied())?,
-            })
-        }
-    }
-
-    impl Attach<Memory> for Vm {
-        type Error = Error;
-        type Output = ();
-
-        fn attach(&mut self, item: Memory) -> Result<Self::Output, Self::Error> {
-            self.attach_guest_memory(item.guest_memory)
-        }
-    }
-
-    #[derive(Debug)]
     pub struct CpuState {
         index: u32,
         cpu_profile: String,
@@ -414,10 +393,19 @@ mod imp {
     fn guest_memory_from_ranges(
         ranges: impl IntoIterator<Item = RamRange>,
     ) -> Result<GuestMemoryMmap, Error> {
-        let ranges: Vec<(GuestAddress, usize)> = ranges
+        // Hyper-V TLFS defines 4 KiB GPA pages for x64.
+        const PAGE_SIZE: u64 = 0x1000;
+        let ranges: Vec<_> = ranges
             .into_iter()
-            .map(|range| (GuestAddress(range.gpa), range.size as usize))
-            .collect();
+            .map(|RamRange { gpa, size }| {
+                if !gpa.is_multiple_of(PAGE_SIZE) || !size.is_multiple_of(PAGE_SIZE) {
+                    return Err(Error::AddressSpace(format!(
+                        "RAM base {gpa:#x} and size {size:#x} must be multiples of {PAGE_SIZE} bytes"
+                    )));
+                }
+                Ok((GuestAddress(gpa), size as usize))
+            })
+            .collect::<Result<_, _>>()?;
         GuestMemoryMmap::from_ranges(&ranges).map_err(|e| Error::CreateGuestMemory(format!("{e}")))
     }
 
@@ -816,9 +804,25 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::{FixedMessage, FixedMessageTable, FixedMsi, decode_fixed_msi};
+        use super::{
+            Error, FixedMessage, FixedMessageTable, FixedMsi, RamRange, decode_fixed_msi,
+            guest_memory_from_ranges,
+        };
         use dillo_mmio::MessageInterrupt;
         use std::sync::Mutex;
+
+        #[test]
+        fn guest_ram_requires_whole_pages_at_aligned_addresses() {
+            for (gpa, size) in [(1, 0x1000), (0, 0x1001)] {
+                let error = guest_memory_from_ranges([RamRange { gpa, size }]).unwrap_err();
+                assert!(matches!(error, Error::AddressSpace(_)), "{error}");
+            }
+            guest_memory_from_ranges([RamRange {
+                gpa: 0x1000,
+                size: 0x1000,
+            }])
+            .unwrap();
+        }
 
         #[test]
         fn message_vectors_keep_enable_and_mask_independent() {
