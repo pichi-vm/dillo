@@ -16,7 +16,7 @@ jobs:
     runs-on: ${{ fromJSON(matrix.runners) }}
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Inspect host and execute architectural RNG instructions
         shell: bash
         run: |
@@ -30,10 +30,9 @@ jobs:
               sysctl machdep.cpu.brand_string
               sysctl hw.optional.arm.FEAT_RNG || true
               sdk=$(xcrun --show-sdk-path)
-              rg -n -i 'rndr|rng|random|feature_reg|trap' "$sdk/System/Library/Frameworks/Hypervisor.framework/Headers" || true
+              grep -RniE 'rndr|rng|random|feature_reg|trap' "$sdk/System/Library/Frameworks/Hypervisor.framework/Headers" || true
               cc -Wall -Wextra -Werror scripts/native-rndr.c -framework Hypervisor -o rng-evidence/probe
             else
-              lscpu
               cat /proc/cpuinfo
               cc -Wall -Wextra -Werror scripts/native-rndr.c -o rng-evidence/probe
             fi
