@@ -144,13 +144,19 @@ mod imp {
             gic: &crate::hypervisor::GicParams,
             min_addr_space_bits: u32,
             vcpus: u32,
+            ram: &[RamRange],
         ) -> Result<Self, Error> {
-            let inner = NativeVm::new(gic, min_addr_space_bits)?;
+            let inner = NativeVm::new(gic, min_addr_space_bits)?.with_memory(ram)?;
+            let shared_memory: Vec<Arc<dyn SharedMemory>> =
+                vec![Arc::new(dillo_mmio::MappedSharedMemory::for_guest_memory(
+                    inner.guest_memory()?,
+                    dillo_mmio::SharedAccess::ReadWrite,
+                ))];
             Ok(Self {
                 cpu_runtime: Arc::new(CpuRuntime::new(vcpus, inner.clone())),
                 inner,
                 mmio_bus: Arc::new(Mutex::new(MmioBus::new())),
-                shared_memory: Vec::new(),
+                shared_memory,
             })
         }
 
@@ -465,7 +471,6 @@ mod imp {
         type Platform = PlatformMachine;
         type Cpu = Cpu;
         type CpuState = CpuState;
-        type Memory = Memory;
 
         fn guest_address_bits() -> Result<u32, Self::Error> {
             crate::hypervisor::guest_address_bits()
@@ -474,14 +479,16 @@ mod imp {
         fn from_launch_config(
             config: LaunchConfig<'_, Self::Platform>,
         ) -> Result<Self, Self::Error> {
+            let required = config
+                .platform
+                .required_address_bits_for_ram(config.ram.iter().map(|r| (r.gpa, r.size)))
+                .map_err(|error| Error::Hv(error.to_string()))?;
             let parsed: Tree<'_> = Tree::parse(config.platform.dtb()).map_err(Error::ParseDtb)?;
             let mut tree = OwnedTree::materialize(&parsed);
             let gic = crate::hypervisor::GicParams::from_devtree(&mut tree)?
                 .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
-            let required = config
-                .min_addr_space_bits
-                .max(config.platform.min_addr_space_bits());
-            Self::new(&gic, required, config.vcpus)
+
+            Self::new(&gic, required, config.vcpus, &config.ram)
         }
 
         fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Self::Error> {
@@ -490,36 +497,6 @@ mod imp {
 
         fn reset_for_reboot(&mut self) -> Result<(), Self::Error> {
             self.inner.reset_gic()
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    pub struct Memory {
-        ranges: Vec<RamRange>,
-    }
-
-    impl dillo_machine::Memory for Memory {
-        type Error = Error;
-
-        fn from_ranges(ranges: &[RamRange]) -> Result<Self, Self::Error> {
-            Ok(Self {
-                ranges: ranges.to_vec(),
-            })
-        }
-    }
-
-    impl Attach<Memory> for Vm {
-        type Error = Error;
-        type Output = ();
-
-        fn attach(&mut self, item: Memory) -> Result<Self::Output, Self::Error> {
-            self.inner.attach_memory(&item.ranges)?;
-            let guest_mem = self.inner.guest_memory()?;
-            self.shared_memory = vec![Arc::new(dillo_mmio::MappedSharedMemory::for_guest_memory(
-                guest_mem,
-                dillo_mmio::SharedAccess::ReadWrite,
-            ))];
-            Ok(())
         }
     }
 

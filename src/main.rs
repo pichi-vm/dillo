@@ -2178,7 +2178,7 @@ mod machine_select {
         use dillo_devtree::platform::{MsiParentage, WiredInterrupt};
         use dillo_machine::{
             BootVcpuState, Cpu as MachineCpu, CpuState as MachineCpuState, LaunchConfig, Machine,
-            Memory as MachineMemory, VcpuStop,
+            VcpuStop,
         };
         use dillo_mmio::syscon;
         use dillo_mmio::{
@@ -2664,7 +2664,6 @@ mod machine_select {
         where
             E: std::error::Error + Send + Sync + 'static,
             M: Machine<Error = E, Platform = PlatformMachine>,
-            M: Attach<M::Memory, Error = E, Output = ()>,
             M: Attach<M::CpuState, Error = E, Output = Arc<M::Cpu>>,
             M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn MmioAttachment>>,
             M: Attach<Arc<dillo_mmio_virtio::EmptySlot>, Error = E>,
@@ -2704,17 +2703,10 @@ mod machine_select {
             let mut vm = M::from_launch_config(LaunchConfig {
                 platform: &platform,
                 vcpus,
-                min_addr_space_bits: ranges
-                    .iter()
-                    .map(|r| u64::BITS - (r.gpa + r.size - 1).leading_zeros())
-                    .max()
-                    .unwrap_or(0),
+                ram: plan.into_ranges(),
             })
             .map_err(RunError::machine)?;
-            crate::boot_trace::mark("vm_created");
-            let memory = M::Memory::from_ranges(&plan.into_ranges()).map_err(RunError::machine)?;
-            Attach::attach(&mut vm, memory).map_err(RunError::machine)?;
-            crate::boot_trace::mark("mem_attached");
+            crate::boot_trace::mark("machine_ready");
             apply_load_sections(&mut vm, &guest_writes, pmi.bytes())?;
             // Sections are now in guest RAM; drop the PMI backing so it does not
             // stay resident for the VM's lifetime. A guest reboot re-maps it.
