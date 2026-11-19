@@ -71,81 +71,83 @@ jobs:
             exit 1
           fi
       - name: Execute each exact probe with a process-group deadline
-        shell: bash
+        uses: actions/github-script@v8
         env:
           PROBE_BACKEND: ${{ matrix.backend }}
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import json
-          import os
-          import signal
-          import subprocess
+        with:
+          script: |
+            const fs = require('node:fs');
+            const { spawn } = require('node:child_process');
+            const backend = process.env.PROBE_BACKEND;
+            const evidence = 'target/arm-timer-evidence';
+            const build = fs.readFileSync(`${evidence}/build.jsonl`, 'utf8')
+              .trim().split('\n').map(JSON.parse);
+            const binaries = build.filter(event =>
+              event.reason === 'compiler-artifact' &&
+              event.target.name === `dillo_machine_${backend}` &&
+              event.profile.test && event.executable
+            ).map(event => event.executable);
+            if (binaries.length !== 1) throw new Error(`Expected one native test binary: ${binaries}`);
+            const [binary] = binaries;
+            const cases = backend === 'kvm' ? ['native_kvm_relocated_el1_timer_ppis'] :
+              ['native_hvf_el1_physical_timer', 'native_hvf_el1_virtual_timer'];
+            const deadline = backend === 'kvm' ? 20 : 70;
 
-          backend = os.environ["PROBE_BACKEND"]
-          evidence = Path("target/arm-timer-evidence")
-          build = [json.loads(line) for line in (evidence / "build.jsonl").read_text().splitlines()]
-          binaries = [
-              event["executable"]
-              for event in build
-              if event["reason"] == "compiler-artifact"
-              and event["target"]["name"] == "dillo_machine_" + backend
-              and event["profile"]["test"]
-              and event["executable"]
-          ]
-          assert len(binaries) == 1, f"expected one linked native test binary, got {binaries}"
-          binary, = binaries
-          if backend == "kvm":
-              cases = ["native_kvm_relocated_el1_timer_ppis"]
-              deadline = 20
-          else:
-              cases = ["native_hvf_el1_physical_timer", "native_hvf_el1_virtual_timer"]
-              deadline = 70
+            async function run(args, name, seconds) {
+              core.info(`deadline=${seconds}s command=${JSON.stringify([binary, ...args])}`);
+              const path = `${evidence}/${name}`;
+              const fd = fs.openSync(path, 'w');
+              const child = spawn(binary, args, { stdio: ['ignore', fd, fd], detached: true });
+              fs.closeSync(fd);
+              const status = await new Promise((resolve, reject) => {
+                let expired = false;
+                let reap;
+                const timer = setTimeout(() => {
+                  expired = true;
+                  fs.appendFileSync(path, '\nTIMEOUT: killing native process group\n');
+                  try { process.kill(-child.pid, 'SIGKILL'); }
+                  catch (error) { if (error.code !== 'ESRCH') core.error(error.message); }
+                  reap = setTimeout(() => {
+                    child.unref();
+                    reject(new Error('Native process did not exit after group kill'));
+                  }, 5000);
+                }, seconds * 1000);
+                child.once('error', error => {
+                  clearTimeout(timer);
+                  fs.appendFileSync(path, `\nLAUNCH ERROR: ${error.message}\n`);
+                  resolve(127);
+                });
+                child.once('close', (code, signal) => {
+                  clearTimeout(timer);
+                  clearTimeout(reap);
+                  core.info(`native exit code=${code} signal=${signal}`);
+                  resolve(expired ? 124 : (code ?? 128));
+                });
+              });
+              const output = fs.readFileSync(path, 'utf8');
+              core.info(output);
+              fs.appendFileSync(`${evidence}/exit-status.log`, `${name}: ${status}\n`);
+              return { status, output };
+            }
 
-          def run(arguments, path, seconds):
-              command = [binary, *arguments]
-              print(f"deadline={seconds}s command={command!r}", flush=True)
-              with path.open("wb") as log:
-                  child = subprocess.Popen(
-                      command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
-                  )
-                  try:
-                      status = child.wait(timeout=seconds)
-                  except subprocess.TimeoutExpired:
-                      try:
-                          os.killpg(child.pid, signal.SIGKILL)
-                      except ProcessLookupError:
-                          pass
-                      killed = child.wait(timeout=5)
-                      print(f"TIMEOUT; process group kill, wait status={killed}", flush=True)
-                      status = 124
-              result = path.read_text(errors="replace")
-              print(result, end="", flush=True)
-              with (evidence / "exit-status.log").open("a") as statuses:
-                  statuses.write(f"{path.name}: {status}\n")
-              return status, result
-
-          failures = []
-          for case in cases:
-              full_name = "hypervisor::timer_probe::" + case
-              status, listing = run(
-                  [full_name, "--exact", "--list"], evidence / f"{case}-list.log", 5
-              )
-              if status or listing.splitlines().count(f"{full_name}: test") != 1:
-                  failures.append(f"{case}: test absent or listing failed")
-                  continue
-              status, result = run(
-                  [full_name, "--exact", "--nocapture", "--test-threads=1"],
-                  evidence / f"{case}.log",
-                  deadline,
-              )
-              # HVF's existing signed child and its parent each print a summary.
-              counts = 1 if backend == "kvm" else 2
-              if status or result.count("test result: ok. 1 passed; 0 failed; 0 ignored;") != counts:
-                  failures.append(f"{case}: native execution failed or test count was unexpected")
-          if failures:
-              raise SystemExit("\n".join(failures))
-          PY
+            const failures = [];
+            for (const name of cases) {
+              const fullName = `hypervisor::timer_probe::${name}`;
+              const listing = await run([fullName, '--exact', '--list'], `${name}-list.log`, 5);
+              if (listing.status || listing.output.split(/\r?\n/)
+                    .filter(line => line === `${fullName}: test`).length !== 1) {
+                failures.push(`${name}: test absent or listing failed`);
+                continue;
+              }
+              const result = await run(
+                [fullName, '--exact', '--nocapture', '--test-threads=1'], `${name}.log`, deadline);
+              // HVF's signed child and its parent each print a summary.
+              const expected = backend === 'kvm' ? 1 : 2;
+              const summaries = result.output.match(/test result: ok\. 1 passed; 0 failed; 0 ignored;/g) || [];
+              if (result.status || summaries.length !== expected)
+                failures.push(`${name}: native execution failed or test count was unexpected`);
+            }
+            if (failures.length) core.setFailed(failures.join('\n'));
       - uses: actions/upload-artifact@v7.0.2
         if: always()
         with:

@@ -25,7 +25,7 @@
     mov x23, x3
     mov x24, x4
     mov x22, #0
-    adr x8, .Ltimer_vectors
+    adr x8, Ltimer_vectors
     msr vbar_el1, x8
     isb
 
@@ -35,7 +35,7 @@
     str x26, [x19, #FREQUENCY]
     mov x9, #100
     udiv x27, x26, x9
-    cbz x27, .Ltimer_bad_counter
+    cbz x27, Ltimer_bad_counter
     mrs x9, cntvct_el0
     str x9, [x19, #INITIAL_COUNTER]
     add x28, x9, x26       // one second for GIC setup
@@ -44,31 +44,31 @@
     str x8, [x19, #STAGE]
     mov w8, #0x13           // GICD_CTLR.ARE_NS and Group 1 enables
     str w8, [x20]
-.Ltimer_dist_ready:
+Ltimer_dist_ready:
     ldr w8, [x20]
     str x8, [x19, #DISTRIBUTOR]
-    tbz w8, #31, .Ltimer_wake
+    tbz w8, #31, Ltimer_wake
     mrs x9, cntvct_el0
     cmp x9, x28
-    b.lo .Ltimer_dist_ready
-    b .Ltimer_bad_gic
+    b.lo Ltimer_dist_ready
+    b Ltimer_bad_gic
 
-.Ltimer_wake:
+Ltimer_wake:
     mov x8, #3
     str x8, [x19, #STAGE]
     ldr w8, [x21, #0x14]    // GICR_WAKER
     bic w8, w8, #2           // clear ProcessorSleep
     str w8, [x21, #0x14]
-.Ltimer_redist_ready:
+Ltimer_redist_ready:
     ldr w8, [x21, #0x14]
     str x8, [x19, #WAKER]
-    tbz w8, #2, .Ltimer_prepare_ppis
+    tbz w8, #2, Ltimer_prepare_ppis
     mrs x9, cntvct_el0
     cmp x9, x28
-    b.lo .Ltimer_redist_ready
-    b .Ltimer_bad_gic
+    b.lo Ltimer_redist_ready
+    b Ltimer_bad_gic
 
-.Ltimer_prepare_ppis:
+Ltimer_prepare_ppis:
     mov x8, #4
     str x8, [x19, #STAGE]
     add x11, x21, #0x10, lsl #12  // GICR SGI frame, 64 KiB above RD
@@ -93,13 +93,13 @@
     isb
     msr icc_ctlr_el1, xzr           // EOImode 0, EOIR also deactivates
     mrs x9, icc_ctlr_el1
-    tbnz x9, #1, .Ltimer_bad_gic
+    tbnz x9, #1, Ltimer_bad_gic
     mov x9, #0xff
     msr icc_pmr_el1, x9
     msr icc_igrpen1_el1, x8
     isb
 
-.Ltimer_trial:
+Ltimer_trial:
     add x8, x22, #0x10
     str x8, [x19, #STAGE]
     add x25, x23, x22, lsr #1
@@ -108,41 +108,41 @@
     mrs x8, cntvct_el0
     add x28, x8, x26               // one second for this IRQ
     mov x10, #1
-    cbnz x25, .Ltimer_arm_virtual
+    cbnz x25, Ltimer_arm_virtual
     mrs x8, cntpct_el0
     str x8, [x11, #16]
     msr cntp_tval_el0, x27
     msr cntp_ctl_el0, x10
-    b .Ltimer_wait_irq
-.Ltimer_arm_virtual:
+    b Ltimer_wait_irq
+Ltimer_arm_virtual:
     str x8, [x11, #16]
     msr cntv_tval_el0, x27
     msr cntv_ctl_el0, x10
-.Ltimer_wait_irq:
+Ltimer_wait_irq:
     isb
     msr daifclr, #2
-.Ltimer_wait_again:
+Ltimer_wait_again:
     ldr x8, [x19, #IRQ_COUNT]
     cmp x8, x22
-    b.hi .Ltimer_next
+    b.hi Ltimer_next
     mrs x8, cntvct_el0
     cmp x8, x28
-    b.lo .Ltimer_wait_again
+    b.lo Ltimer_wait_again
     mov w0, #2                     // configured, timer IRQ deadline elapsed
-    b .Ltimer_stop
-.Ltimer_next:
+    b Ltimer_stop
+Ltimer_next:
     msr daifset, #2
     add x22, x22, #1
     cmp x22, x24
-    b.lo .Ltimer_trial
+    b.lo Ltimer_trial
     mov w0, #1
-    b .Ltimer_stop
-.Ltimer_bad_gic:
+    b Ltimer_stop
+Ltimer_bad_gic:
     mov w0, #4
-    b .Ltimer_stop
-.Ltimer_bad_counter:
+    b Ltimer_stop
+Ltimer_bad_counter:
     mov w0, #5
-.Ltimer_stop:
+Ltimer_stop:
     msr daifset, #2
     str x0, [x19, #OUTCOME]
     dsb sy
@@ -150,24 +150,24 @@
     str w0, [x1]
     b .
 
-.Ltimer_irq:
+Ltimer_irq:
     mrs x0, icc_iar1_el1
     ldr x1, [x19, #IRQ_COUNT]
     cmp x1, #4
-    b.hs .Ltimer_extra_irq
+    b.hs Ltimer_extra_irq
     add x2, x19, #RECORDS
     add x2, x2, x1, lsl #5
     str x0, [x2]
-    cbnz x25, .Ltimer_clear_virtual
+    cbnz x25, Ltimer_clear_virtual
     mrs x3, cntp_ctl_el0
     mrs x4, cntpct_el0
     msr cntp_ctl_el0, xzr
-    b .Ltimer_ack_irq
-.Ltimer_clear_virtual:
+    b Ltimer_ack_irq
+Ltimer_clear_virtual:
     mrs x3, cntv_ctl_el0
     mrs x4, cntvct_el0
     msr cntv_ctl_el0, xzr
-.Ltimer_ack_irq:
+Ltimer_ack_irq:
     str x3, [x2, #8]
     str x4, [x2, #24]
     isb
@@ -176,31 +176,31 @@
     add x1, x1, #1
     str x1, [x19, #IRQ_COUNT]
     eret
-.Ltimer_extra_irq:
+Ltimer_extra_irq:
     mov w0, #6
-    b .Ltimer_stop
+    b Ltimer_stop
 
-.Ltimer_fault:
+Ltimer_fault:
     mrs x0, esr_el1
     mrs x1, elr_el1
     mrs x2, far_el1
     stp x0, x1, [x19, #FAULT_ESR]
     str x2, [x19, #FAULT_FAR]
     mov w0, #3
-    b .Ltimer_stop
+    b Ltimer_stop
 
 .p2align 11
-.Ltimer_vectors:
+Ltimer_vectors:
     // Current EL, SP_EL0, then current EL, SP_EL1.
     .rept 4
-    b .Ltimer_fault
+    b Ltimer_fault
     .p2align 7
     .endr
-    b .Ltimer_fault
+    b Ltimer_fault
     .p2align 7
-    b .Ltimer_irq
+    b Ltimer_irq
     .p2align 7
     .rept 10
-    b .Ltimer_fault
+    b Ltimer_fault
     .p2align 7
     .endr
