@@ -76,8 +76,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 [[package]]
 name = "applevisor"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "139a0fe60afd3e8c3a42fc0265caf4eb04b84a8b760623f7a6229174c18e4e36"
+source = "git+https://github.com/pichi-vm/applevisor?rev=2e38fb0e372e2bb8fbb90cbf89f5931b710c32a4#2e38fb0e372e2bb8fbb90cbf89f5931b710c32a4"
 dependencies = [
  "applevisor-sys",
 ]
@@ -571,6 +570,7 @@ dependencies = [
  "pmi",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
+ "wait-timeout",
 ]
 
 [[package]]

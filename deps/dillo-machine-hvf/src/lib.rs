@@ -39,13 +39,11 @@ mod imp {
         MmioAttachment, MmioBus, MmioDevice, MmioDeviceHandle, MmioInterrupt,
         MmioInterruptRequirement, MmioRunToken, MmioSpawnError, MmioWriteOutcome, SharedMemory,
     };
-    use vm_memory::mmap::MmapRegionBuilder;
-    use vm_memory::{GuestAddress, GuestMemoryMmap, GuestRegionMmap};
 
     use crate::VcpuHandle;
     use crate::VmExit;
     pub use crate::hypervisor::Error;
-    use crate::hypervisor::force_vcpus_exit;
+    use crate::hypervisor::Vm as NativeVm;
 
     fn install_signal_watchers(_supervisor_shutdown: &'static AtomicBool) {}
 
@@ -125,7 +123,7 @@ mod imp {
     }
 
     pub struct Vm {
-        inner: crate::hypervisor::Vm,
+        inner: NativeVm,
         mmio_bus: Arc<Mutex<MmioBus>>,
         cpu_runtime: Arc<CpuRuntime>,
         shared_memory: Vec<Arc<dyn SharedMemory>>,
@@ -147,20 +145,13 @@ mod imp {
             min_addr_space_bits: u32,
             vcpus: u32,
         ) -> Result<Self, Error> {
+            let inner = NativeVm::new(gic, min_addr_space_bits)?;
             Ok(Self {
-                inner: crate::hypervisor::Vm::new(gic, min_addr_space_bits)?,
+                cpu_runtime: Arc::new(CpuRuntime::new(vcpus, inner.clone())),
+                inner,
                 mmio_bus: Arc::new(Mutex::new(MmioBus::new())),
-                cpu_runtime: Arc::new(CpuRuntime::new(vcpus)),
                 shared_memory: Vec::new(),
             })
-        }
-
-        fn add_memory(&mut self, base: u64, size: u64) -> Result<(), Error> {
-            self.inner.add_memory(base, size)
-        }
-
-        fn region_mappings(&self) -> Vec<(u64, u64, u64)> {
-            self.inner.region_mappings()
         }
 
         fn mmio_bus(&self) -> Arc<Mutex<MmioBus>> {
@@ -171,36 +162,6 @@ mod imp {
             Arc::clone(&self.cpu_runtime)
         }
 
-        /// Build a `vm-memory` view over HVF-mapped guest RAM.
-        ///
-        /// The returned regions borrow the mappings owned by this VM; dropping
-        /// the `GuestMemoryMmap` must not unmap the backend-owned memory.
-        fn guest_memory(&self) -> Result<GuestMemoryMmap, Error> {
-            let mappings = self.region_mappings();
-            let mut built: Vec<GuestRegionMmap> = Vec::with_capacity(mappings.len());
-            for (gpa, host_addr, size) in mappings {
-                #[allow(unsafe_code)]
-                let region = unsafe {
-                    MmapRegionBuilder::new(size as usize)
-                        .with_raw_mmap_pointer(host_addr as *mut u8)
-                }
-                .build()
-                .map_err(|e| Error::Hv(format!("MmapRegionBuilder: {e}")))?;
-                let gr = GuestRegionMmap::new(region, GuestAddress(gpa)).ok_or_else(|| {
-                    Error::Hv(format!(
-                        "GuestRegionMmap: gpa+size overflow at {gpa:#x}+{size}"
-                    ))
-                })?;
-                built.push(gr);
-            }
-            GuestMemoryMmap::from_regions(built)
-                .map_err(|e| Error::Hv(format!("GuestMemoryMmap: {e:?}")))
-        }
-
-        // Mirrors the same method on the KVM/WHP backends (called as
-        // `self.resolve_interrupts(..)`); HVF's interrupt factories happen to be
-        // stateless, so `self` is unused here.
-        #[allow(clippy::unused_self)]
         fn resolve_interrupts(
             &self,
             requirements: &[MmioInterruptRequirement],
@@ -210,11 +171,11 @@ mod imp {
                 .map(|requirement| match requirement {
                     MmioInterruptRequirement::Line { source } => {
                         let irq = Self::wired_irq_from_cells(&source.cells, source.cell_count)?;
-                        Ok(MmioInterrupt::Line(Self::create_line_interrupt(irq)))
+                        Ok(MmioInterrupt::Line(self.create_line_interrupt(irq)))
                     }
                     MmioInterruptRequirement::MessageDomain { vectors, .. } => {
                         Ok(MmioInterrupt::MessageDomain(
-                            Self::create_message_interrupt_domain(*vectors),
+                            self.create_message_interrupt_domain(*vectors),
                         ))
                     }
                 })
@@ -231,16 +192,22 @@ mod imp {
             }
         }
 
-        fn create_line_interrupt(source: u32) -> Interrupt {
+        fn create_line_interrupt(&self, source: u32) -> Interrupt {
             // `source` is the DTB SPI number (0-based); hv_gic's gic_set_spi
             // wants the absolute GIC INTID (SPI + 32 — INTIDs 0..31 are SGI/PPI,
             // so a raw SPI number is rejected as an invalid argument). This
             // mirrors gic_send_msi, which already uses absolute INTIDs (64-95).
-            Interrupt::new(Arc::new(SpiInterruptLine { intid: source + 32 }))
+            Interrupt::new(Arc::new(SpiInterruptLine {
+                intid: source + 32,
+                vm: self.inner.clone(),
+            }))
         }
 
-        fn create_message_interrupt_domain(vectors: u16) -> Arc<dyn MessageInterruptDomain> {
-            Arc::new(GicMessageInterruptDomain::new(vectors))
+        fn create_message_interrupt_domain(&self, vectors: u16) -> Arc<dyn MessageInterruptDomain> {
+            Arc::new(GicMessageInterruptDomain {
+                inner: Arc::new(GicMessageInterruptDomainInner::new(vectors)),
+                vm: self.inner.clone(),
+            })
         }
     }
 
@@ -379,6 +346,7 @@ mod imp {
     #[derive(Debug)]
     struct SpiInterruptLine {
         intid: u32,
+        vm: NativeVm,
     }
 
     impl InterruptLine for SpiInterruptLine {
@@ -397,7 +365,8 @@ mod imp {
         }
 
         fn set_level(&self, level: bool) -> Result<(), InterruptError> {
-            crate::hypervisor::set_spi(self.intid, level)
+            self.vm
+                .set_spi(self.intid, level)
                 .map_err(|e| InterruptError::Delivery(e.to_string()))
         }
     }
@@ -405,6 +374,7 @@ mod imp {
     #[derive(Debug)]
     struct GicMessageInterruptDomain {
         inner: Arc<GicMessageInterruptDomainInner>,
+        vm: NativeVm,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -418,27 +388,23 @@ mod imp {
         vectors: Mutex<Vec<GicMessage>>,
     }
 
-    impl GicMessageInterruptDomain {
+    impl GicMessageInterruptDomainInner {
         fn new(count: u16) -> Self {
             Self {
-                inner: Arc::new(GicMessageInterruptDomainInner {
-                    vectors: Mutex::new(vec![
-                        GicMessage {
-                            message: MessageInterrupt {
-                                address: 0,
-                                data: 0,
-                                masked: true,
-                            },
-                            enabled: false,
-                        };
-                        count as usize
-                    ]),
-                }),
+                vectors: Mutex::new(vec![
+                    GicMessage {
+                        message: MessageInterrupt {
+                            address: 0,
+                            data: 0,
+                            masked: true,
+                        },
+                        enabled: false,
+                    };
+                    count as usize
+                ]),
             }
         }
-    }
 
-    impl GicMessageInterruptDomainInner {
         fn message_for(&self, vector: u16) -> Option<MessageInterrupt> {
             let slot = *self
                 .vectors
@@ -447,40 +413,47 @@ mod imp {
                 .get(vector as usize)?;
             (slot.enabled && !slot.message.masked).then_some(slot.message)
         }
-    }
 
-    impl MessageInterruptDomain for GicMessageInterruptDomain {
-        fn update(&self, vector: u16, msg: MessageInterrupt) -> Result<(), InterruptError> {
+        fn update(&self, vector: u16, msg: MessageInterrupt) {
             let mut vectors = self
-                .inner
                 .vectors
                 .lock()
                 .expect("message interrupt domain poisoned");
             if let Some(slot) = vectors.get_mut(vector as usize) {
                 slot.message = msg;
             }
-            Ok(())
         }
 
-        fn enabled(&self, vector: u16, enabled: bool) -> Result<(), InterruptError> {
+        fn enabled(&self, vector: u16, enabled: bool) {
             let mut vectors = self
-                .inner
                 .vectors
                 .lock()
                 .expect("message interrupt domain poisoned");
             if let Some(slot) = vectors.get_mut(vector as usize) {
                 slot.enabled = enabled;
             }
+        }
+    }
+
+    impl MessageInterruptDomain for GicMessageInterruptDomain {
+        fn update(&self, vector: u16, msg: MessageInterrupt) -> Result<(), InterruptError> {
+            self.inner.update(vector, msg);
+            Ok(())
+        }
+
+        fn enabled(&self, vector: u16, enabled: bool) -> Result<(), InterruptError> {
+            self.inner.enabled(vector, enabled);
             Ok(())
         }
 
         fn interrupt(&self, vector: u16) -> Option<Interrupt> {
             let domain = Arc::clone(&self.inner);
+            let vm = self.vm.clone();
             Some(Interrupt::from_fn(move || {
                 let Some(message) = domain.message_for(vector) else {
                     return;
                 };
-                if let Err(e) = crate::hypervisor::send_msi(message.address, message.data) {
+                if let Err(e) = vm.send_msi(message.address, message.data) {
                     log::warn!("HVF message interrupt inject (vector {vector}) failed: {e}");
                 }
             }))
@@ -540,10 +513,8 @@ mod imp {
         type Output = ();
 
         fn attach(&mut self, item: Memory) -> Result<Self::Output, Self::Error> {
-            for range in item.ranges {
-                self.add_memory(range.gpa, range.size)?;
-            }
-            let guest_mem = self.guest_memory()?;
+            self.inner.attach_memory(&item.ranges)?;
+            let guest_mem = self.inner.guest_memory()?;
             self.shared_memory = vec![Arc::new(dillo_mmio::MappedSharedMemory::for_guest_memory(
                 guest_mem,
                 dillo_mmio::SharedAccess::ReadWrite,
@@ -583,6 +554,7 @@ mod imp {
         type Output = Arc<Cpu>;
 
         fn attach(&mut self, item: CpuState) -> Result<Self::Output, Self::Error> {
+            self.inner.guest_memory()?;
             let boot_state = item
                 .boot_state
                 .ok_or_else(|| Error::Hv("boot vCPU state is not aarch64".to_string()))?;
@@ -692,13 +664,6 @@ mod imp {
         mmio_bus: Arc<Mutex<MmioBus>>,
     }
 
-    fn create_vcpu_current_thread(mmio_bus: Arc<Mutex<MmioBus>>) -> Result<Vcpu, Error> {
-        Ok(Vcpu {
-            inner: crate::hypervisor::create_vcpu_current_thread()?,
-            mmio_bus,
-        })
-    }
-
     impl Vcpu {
         fn set_aarch64_state(&self, state: &pmi::vm::vcpu::aarch64::CpuState) -> Result<(), Error> {
             self.inner.set_aarch64_state(state)
@@ -774,15 +739,17 @@ mod imp {
         shutdown: AtomicBool,
         slots: Vec<CpuSlot>,
         handles: Vec<Mutex<Option<VcpuHandle>>>,
+        vm: NativeVm,
     }
 
     impl CpuRuntime {
-        fn new(vcpus: u32) -> Self {
+        fn new(vcpus: u32, vm: NativeVm) -> Self {
             let count = vcpus.max(1) as usize;
             Self {
                 shutdown: AtomicBool::new(false),
                 slots: (0..count).map(|_| CpuSlot::new()).collect(),
                 handles: (0..count).map(|_| Mutex::new(None)).collect(),
+                vm,
             }
         }
 
@@ -797,7 +764,10 @@ mod imp {
                     None => return Ok(VcpuStop::Stopped),
                 }
             };
-            let vcpu = create_vcpu_current_thread(Arc::clone(&cpu.mmio_bus))?;
+            let vcpu = Vcpu {
+                inner: self.vm.create_vcpu_current_thread()?,
+                mmio_bus: Arc::clone(&cpu.mmio_bus),
+            };
             vcpu.set_mpidr(mpidr_for(idx))?;
             vcpu.set_aarch64_state(&init)?;
             *self.handles[idx].lock().expect("handle poisoned") = Some(vcpu.handle());
@@ -911,7 +881,7 @@ mod imp {
                 .iter()
                 .filter_map(|h| h.lock().expect("handle poisoned").clone())
                 .collect();
-            let _ = force_vcpus_exit(&live);
+            let _ = self.vm.force_vcpus_exit(&live);
         }
     }
 
@@ -1151,44 +1121,42 @@ mod imp {
 
         #[test]
         fn message_vectors_keep_enable_and_mask_independent() {
-            let domain = GicMessageInterruptDomain::new(2);
+            let domain = GicMessageInterruptDomainInner::new(2);
             let message = MessageInterrupt {
                 address: 0x0808_0040,
                 data: 48,
                 masked: false,
             };
-            domain.update(0, message).unwrap();
-            domain.update(1, message).unwrap();
-            assert_eq!(domain.inner.message_for(0), None);
-            domain.enabled(0, true).unwrap();
-            domain.enabled(1, true).unwrap();
-            domain.enabled(0, false).unwrap();
-            assert_eq!(domain.inner.message_for(0), None);
-            assert_eq!(domain.inner.message_for(1), Some(message));
-            domain.enabled(1, false).unwrap();
-            domain.enabled(0, true).unwrap();
-            assert_eq!(domain.inner.message_for(0), Some(message));
-            assert_eq!(domain.inner.message_for(1), None);
+            domain.update(0, message);
+            domain.update(1, message);
+            assert_eq!(domain.message_for(0), None);
+            domain.enabled(0, true);
+            domain.enabled(1, true);
+            domain.enabled(0, false);
+            assert_eq!(domain.message_for(0), None);
+            assert_eq!(domain.message_for(1), Some(message));
+            domain.enabled(1, false);
+            domain.enabled(0, true);
+            assert_eq!(domain.message_for(0), Some(message));
+            assert_eq!(domain.message_for(1), None);
 
             // Table programming must preserve a disabled vector's enable state.
-            domain.update(1, message).unwrap();
-            assert_eq!(domain.inner.message_for(1), None);
-            domain
-                .update(
-                    0,
-                    MessageInterrupt {
-                        masked: true,
-                        ..message
-                    },
-                )
-                .unwrap();
-            domain.enabled(0, false).unwrap();
-            domain.enabled(0, true).unwrap();
-            domain.enabled(1, true).unwrap();
-            assert_eq!(domain.inner.message_for(0), None);
-            assert_eq!(domain.inner.message_for(1), Some(message));
-            domain.update(0, message).unwrap();
-            assert_eq!(domain.inner.message_for(0), Some(message));
+            domain.update(1, message);
+            assert_eq!(domain.message_for(1), None);
+            domain.update(
+                0,
+                MessageInterrupt {
+                    masked: true,
+                    ..message
+                },
+            );
+            domain.enabled(0, false);
+            domain.enabled(0, true);
+            domain.enabled(1, true);
+            assert_eq!(domain.message_for(0), None);
+            assert_eq!(domain.message_for(1), Some(message));
+            domain.update(0, message);
+            assert_eq!(domain.message_for(0), Some(message));
         }
 
         #[test]

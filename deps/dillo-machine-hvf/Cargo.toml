@@ -20,5 +20,8 @@ applevisor.workspace = true
 applevisor-sys.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+wait-timeout = "0.2"
+
 [lints]
 workspace = true
