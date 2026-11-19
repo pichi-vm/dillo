@@ -355,12 +355,13 @@ impl Vcpu {
                 }
                 Ok(VmExit::Hvc { args })
             }
-            // SMC from EL1.
+            // SMC traps leave PC at the instruction, unlike HVC exceptions.
             0x17 => {
                 let mut args = [0u64; 8];
                 for (i, a) in args.iter_mut().enumerate() {
                     *a = self.inner.get_reg(gpr(i as u8))?;
                 }
+                self.advance_pc()?;
                 Ok(VmExit::Smc { args })
             }
             // Data abort from a lower EL → MMIO. IPA in physical_address.
@@ -449,10 +450,10 @@ fn gpr(n: u8) -> Reg {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn boot_state(pc: u64) -> pmi::vm::vcpu::aarch64::CpuState {
+    pub(crate) fn boot_state(pc: u64) -> pmi::vm::vcpu::aarch64::CpuState {
         // aarch64 CpuState has no Default (PState is a validating newtype).
         pmi::vm::vcpu::aarch64::CpuState {
             pc,

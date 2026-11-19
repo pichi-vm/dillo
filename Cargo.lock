@@ -569,8 +569,10 @@ dependencies = [
  "libc",
  "log",
  "pmi",
+ "tempfile",
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
+ "wait-timeout",
 ]
 
 [[package]]

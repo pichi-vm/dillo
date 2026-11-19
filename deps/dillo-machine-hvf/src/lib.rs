@@ -838,7 +838,7 @@ mod imp {
                     VmExit::MmioRead { .. } | VmExit::MmioWrite { .. } => {}
                     VmExit::GuestPoweroff => return Ok(VcpuStop::GuestPoweroff),
                     VmExit::GuestReset => return Ok(VcpuStop::GuestReset),
-                    VmExit::Hvc { args } => match psci::dispatch(&args) {
+                    VmExit::Hvc { args } | VmExit::Smc { args } => match psci::dispatch(&args) {
                         psci::PsciAction::SystemOff => {
                             log::info!("guest issued PSCI SYSTEM_OFF (vCPU{idx})");
                             return Ok(VcpuStop::GuestPoweroff);
@@ -883,9 +883,6 @@ mod imp {
                             vcpu.set_gpr(0, value)?;
                         }
                     },
-                    VmExit::Smc { args } => {
-                        log::warn!("unexpected SMC exit from HVF vCPU: args={args:?}");
-                    }
                     VmExit::Unknown(reason) if self.shutdown.load(Ordering::SeqCst) => {
                         let _ = reason;
                         return Ok(VcpuStop::Stopped);
@@ -1160,6 +1157,124 @@ mod imp {
         use std::thread;
 
         use super::*;
+
+        #[test]
+        fn psci_conduits_return_and_power_off() {
+            use std::process::Command;
+            use std::time::Duration;
+
+            use dillo_machine::{Cpu as _, Machine as _};
+            use vm_memory::Bytes;
+            use wait_timeout::ChildExt;
+
+            if std::env::var_os("DILLO_SIGNED_HVF_PSCI_TEST").is_none() {
+                let directory = tempfile::tempdir().expect("create native-test directory");
+                let executable = directory.path().join("hvf-psci-test");
+                std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+                let entitlements = directory.path().join("hypervisor.plist");
+                std::fs::write(&entitlements, r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>com.apple.security.hypervisor</key><true/></dict></plist>"#)
+                    .expect("write native test entitlements");
+                let signed = Command::new("codesign")
+                    .args(["--force", "--sign", "-", "--entitlements"])
+                    .arg(&entitlements)
+                    .arg(&executable)
+                    .status()
+                    .expect("run codesign");
+                assert!(signed.success(), "sign native HVF PSCI test");
+                let mut child = Command::new(&executable)
+                    .args([
+                        "imp::tests::psci_conduits_return_and_power_off",
+                        "--exact",
+                        "--nocapture",
+                    ])
+                    .env("DILLO_SIGNED_HVF_PSCI_TEST", "1")
+                    .spawn()
+                    .expect("start entitled native test");
+                let status = child.wait_timeout(Duration::from_secs(60));
+                if !matches!(status, Ok(Some(_))) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                let status = status
+                    .expect("wait for native test")
+                    .expect("native test timed out");
+                assert!(status.success(), "native PSCI test failed: {status}");
+                return;
+            }
+
+            let gic = crate::hypervisor::GicParams {
+                dist_base: 0x0800_0000,
+                redist_base: 0x0810_0000,
+                msi_base: 0x0a10_0000,
+                msi_intid_base: 64,
+                msi_intid_count: 32,
+            };
+            for (name, call) in [("HVC", 0xd400_0002), ("SMC", 0xd400_0003)] {
+                let mut vm = Vm::new(&gic, 36, 1).unwrap();
+                vm.attach(
+                    <Memory as dillo_machine::Memory>::from_ranges(&[RamRange {
+                        gpa: 0,
+                        size: 0x4000,
+                    }])
+                    .unwrap(),
+                )
+                .unwrap();
+                let cpu = vm
+                    .attach(CpuState {
+                        index: 0,
+                        boot_state: Some(crate::hypervisor::tests::boot_state(0)),
+                    })
+                    .unwrap();
+                // PSCI_VERSION; save its return; SYSTEM_OFF; record an unexpected return.
+                let code = [
+                    0x5280_0000u32,
+                    0x72b0_8000,
+                    call,
+                    0xd281_0001,
+                    0xb900_0020,
+                    0x5280_0100,
+                    0x72b0_8000,
+                    call,
+                    0xb900_0420,
+                    0x1400_0000,
+                ];
+                let bytes = code
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect::<Vec<_>>();
+                vm.write_guest(0, &bytes).unwrap();
+                vm.write_guest(0x800, &[0xef, 0xbe, 0xad, 0xde, 0xef, 0xbe, 0xad, 0xde])
+                    .unwrap();
+                let memory = vm.guest_memory().unwrap();
+                let stop = Arc::clone(&cpu);
+                let (done, completed) = std::sync::mpsc::channel();
+                let rescue = thread::spawn(move || {
+                    let expired = completed.recv_timeout(Duration::from_secs(3)).is_err();
+                    if expired {
+                        stop.stop().unwrap();
+                    }
+                    expired
+                });
+                let result = cpu.run();
+                let _ = done.send(());
+                let expired = rescue.join().unwrap();
+                let version = memory.read_obj::<u32>(GuestAddress(0x800)).unwrap();
+                let power_return = memory.read_obj::<u32>(GuestAddress(0x804)).unwrap();
+                eprintln!(
+                    "HVF PSCI {name}: version={version:#010x}, power_return={power_return:#010x}, deadline={expired}, result={result:?}"
+                );
+                assert!(!expired, "{name} PSCI required cancellation");
+                assert_eq!(
+                    u64::from(version),
+                    psci::ret::VERSION_1_1,
+                    "{name} PSCI_VERSION return"
+                );
+                assert_eq!(power_return, 0xdead_beef, "{name} SYSTEM_OFF returned");
+                assert!(matches!(result, Ok(VcpuStop::GuestPoweroff)), "{result:?}");
+            }
+        }
 
         #[test]
         fn message_vectors_keep_enable_and_mask_independent() {
