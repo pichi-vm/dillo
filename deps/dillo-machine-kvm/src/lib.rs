@@ -47,6 +47,7 @@ mod imp {
         MmioDeviceHandle, MmioInterrupt, MmioInterruptRequirement, MmioRunToken, MmioSpawnError,
         MmioWriteOutcome, SharedMemory,
     };
+    use vm_memory::{Address, GuestMemoryRegion};
     use vmm_sys_util::eventfd::EventFd;
 
     use crate::VmExit;
@@ -328,20 +329,15 @@ mod imp {
         }
 
         fn attach_mapped_memory(&mut self, mapped: Arc<memory::MappedMemory>) -> Result<(), Error> {
-            for (slot_idx, region) in mapped.regions().iter().enumerate() {
+            for (slot_idx, region) in mapped.regions().enumerate() {
+                let gpa = region.start_addr().raw_value();
+                let size = region.len();
+                let host_addr = region.as_ptr() as u64;
                 log::info!(
-                    "registering KVM memslot {}: [{:#x}..{:#x}) host={:#x}",
-                    slot_idx,
-                    region.gpa(),
-                    region.gpa() + region.size(),
-                    region.host_addr()
+                    "registering KVM memslot {slot_idx}: [{gpa:#x}..{:#x}) host={host_addr:#x}",
+                    gpa + size
                 );
-                self.add_memslot(
-                    slot_idx as u32,
-                    region.gpa(),
-                    region.host_addr(),
-                    region.size(),
-                )?;
+                self.add_memslot(slot_idx as u32, gpa, host_addr, size)?;
             }
             self.shared_memory = vec![Arc::new(dillo_mmio::MappedSharedMemory::for_guest_memory(
                 mapped.guest_memory(),
@@ -606,7 +602,6 @@ mod imp {
                 .as_ref()
                 .ok_or_else(|| Error::UnhandledExit("guest RAM is not attached".to_string()))?;
             memory
-                .gpa_map()
                 .write(gpa, data)
                 .map_err(|e| Error::UnhandledExit(e.to_string()))
         }
