@@ -5,17 +5,19 @@ use std::io;
 use std::sync::Arc;
 
 use dillo_mmio::{MmioWindow, WriteNotification};
-use kvm_ioctls::{IoEventAddress, VmFd};
+use kvm_ioctls::IoEventAddress;
 use vmm_sys_util::eventfd::EventFd;
+
+use crate::hypervisor::Vm;
 
 /// Registration authority restricted to the attached device's declared windows.
 pub(crate) struct Notifications {
-    vm: Arc<VmFd>,
+    vm: Vm,
     windows: Vec<MmioWindow>,
 }
 
 impl Notifications {
-    pub(crate) fn new(vm: Arc<VmFd>, windows: Vec<MmioWindow>) -> Self {
+    pub(crate) fn new(vm: Vm, windows: Vec<MmioWindow>) -> Self {
         Self { vm, windows }
     }
 
@@ -37,6 +39,7 @@ impl Notifications {
             .ok_or(io::ErrorKind::InvalidInput)?;
         if self
             .vm
+            .fd()
             .check_extension_raw(kvm_bindings::KVM_CAP_IOEVENTFD.into())
             <= 0
         {
@@ -45,10 +48,11 @@ impl Notifications {
         let event = EventFd::new(libc::EFD_CLOEXEC)?;
         let address = IoEventAddress::Mmio(address);
         self.vm
+            .fd()
             .register_ioevent(&event, &address, value)
             .map_err(|error| io::Error::from_raw_os_error(error.errno()))?;
         Ok(Some(Arc::new(Notification {
-            vm: Arc::clone(&self.vm),
+            vm: self.vm.clone(),
             event,
             address,
             value,
@@ -58,7 +62,7 @@ impl Notifications {
 
 #[derive(Debug)]
 struct Notification {
-    vm: Arc<VmFd>,
+    vm: Vm,
     event: EventFd,
     address: IoEventAddress,
     value: u32,
@@ -88,6 +92,7 @@ impl Drop for Notification {
     fn drop(&mut self) {
         if let Err(error) = self
             .vm
+            .fd()
             .unregister_ioevent(&self.event, &self.address, self.value)
         {
             log::error!("KVM write-notification unregister failed: {error}");
@@ -101,7 +106,8 @@ mod tests {
 
     fn authority(window: MmioWindow) -> Notifications {
         let kvm = kvm_ioctls::Kvm::new().expect("open /dev/kvm");
-        Notifications::new(Arc::new(kvm.create_vm().unwrap()), vec![window])
+        let vm = kvm.create_vm().unwrap();
+        Notifications::new(Vm::test_from_native(kvm, vm), vec![window])
     }
 
     #[test]
@@ -245,6 +251,7 @@ mod tests {
         unsafe {
             owner
                 .vm
+                .fd()
                 .set_user_memory_region(kvm_bindings::kvm_userspace_memory_region {
                     slot: 0,
                     guest_phys_addr: 0,
@@ -255,7 +262,7 @@ mod tests {
                 .unwrap();
         }
         let notification = owner.register(window, 0x50, 1).unwrap().unwrap();
-        let mut vcpu = owner.vm.create_vcpu(0).unwrap();
+        let mut vcpu = owner.vm.fd().create_vcpu(0).unwrap();
         let mut sregs = vcpu.get_sregs().unwrap();
         sregs.cs.base = 0;
         sregs.cs.selector = 0;
