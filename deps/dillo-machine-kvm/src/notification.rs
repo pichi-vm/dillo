@@ -227,7 +227,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn guest_writes_match_address_width_and_queue_value() {
-        let ram = vm_memory::MmapRegion::<()>::new(0x1000).unwrap();
+        let backing = Arc::new(crate::memory::MappedMemory::test_backing(&[(0, 0x1000)]).unwrap());
         // Real-mode stores: matched dword, wrong value, wrong width,
         // wrong address, then halt. Only the first may bypass userspace.
         let code = [
@@ -235,32 +235,13 @@ mod tests {
             0x02, 0x00, 0x00, 0x00, 0xc7, 0x06, 0x50, 0x10, 0x01, 0x00, 0x66, 0xc7, 0x06, 0x54,
             0x10, 0x01, 0x00, 0x00, 0x00, 0xf4,
         ];
-        // SAFETY: ram owns a writable mapping larger than code, and the
-        // vCPU has not been created yet.
-        #[allow(unsafe_code)]
-        unsafe {
-            std::ptr::copy_nonoverlapping(code.as_ptr(), ram.as_ptr(), code.len());
-        };
+        backing.write(0, &code).unwrap();
         let window = MmioWindow {
             base: 0x1000,
             size: 0x1000,
         };
         let owner = authority(window);
-        // SAFETY: ram remains allocated until after the VM and vCPU drop.
-        #[allow(unsafe_code)]
-        unsafe {
-            owner
-                .vm
-                .fd()
-                .set_user_memory_region(kvm_bindings::kvm_userspace_memory_region {
-                    slot: 0,
-                    guest_phys_addr: 0,
-                    memory_size: 0x1000,
-                    userspace_addr: ram.as_ptr() as u64,
-                    flags: 0,
-                })
-                .unwrap();
-        }
+        owner.vm.attach_memory(backing).unwrap();
         let notification = owner.register(window, 0x50, 1).unwrap().unwrap();
         let mut vcpu = owner.vm.fd().create_vcpu(0).unwrap();
         let mut sregs = vcpu.get_sregs().unwrap();
