@@ -365,8 +365,9 @@ impl Vm {
                 region.start_addr().raw_value() + region.len(),
                 region.as_ptr() as u64
             );
-            // SAFETY: The VM retains the backing before registration. The
-            // current raw mappings also stay mapped for the process lifetime.
+            // SAFETY: The native VM owns the backing. All vCPUs and services
+            // retaining native descriptors hold that owner, whose VM and
+            // vGIC descriptors close before the backing is reclaimed.
             #[allow(unsafe_code)]
             unsafe { self.inner.vm.set_user_memory_region(native) }.map_err(|error| {
                 Error::SetMemRegion {
@@ -977,5 +978,83 @@ impl Drop for KickSignalMask {
         self.previous
             .thread_set_mask()
             .expect("restore vCPU signal mask");
+    }
+}
+
+#[cfg(test)]
+mod memory_registration_tests {
+    use super::*;
+    use crate::irq::IrqManager;
+    use crate::memory::{MappedMemory, MappingProbe};
+
+    #[test]
+    fn partial_memslot_failure_retains_ram_until_native_owner_closes() {
+        let kvm = Kvm::new().expect("native KVM is required");
+        let native = kvm.create_vm().unwrap();
+        let vm = Vm::test_from_native(kvm, native);
+        // A 64 KiB range meets the host page alignment on both supported architectures.
+        let size = 0x10000;
+        let backing =
+            Arc::new(MappedMemory::test_backing(&[(0, size), (2 * size + 1, size)]).unwrap());
+        let probe = MappingProbe::new(&backing);
+        let window = dillo_mmio::MmioWindow {
+            base: 4 * size,
+            size,
+        };
+        let registrar = crate::notification::Notifications::new(vm.clone(), vec![window]);
+        let notification = registrar.register(window, 0x50, 0).unwrap().unwrap();
+        drop(registrar);
+
+        // Slot zero maps successfully. The kernel rejects slot one's unaligned GPA.
+        let error = vm.attach_memory(backing).unwrap_err();
+        assert!(
+            matches!(&error, Error::SetMemRegion { slot: 1, source }
+            if source.raw_os_error() == Some(libc::EINVAL)),
+            "{error}"
+        );
+        assert!(vm.memory().is_err());
+        assert!(matches!(
+            vm.create_vcpu(0, "x86-64-v1"),
+            Err(Error::MemoryRegistration(_))
+        ));
+        let replacement = Arc::new(MappedMemory::test_backing(&[(0, size)]).unwrap());
+        assert!(matches!(
+            vm.attach_memory(replacement),
+            Err(Error::MemoryRegistration(_))
+        ));
+        drop(vm);
+
+        notification.write(3).unwrap();
+        assert_eq!(notification.read().unwrap(), 3);
+        assert!(probe.mappings() > 0);
+        drop(notification);
+        assert_eq!(probe.mappings(), 0);
+    }
+
+    #[test]
+    fn cpu_and_irq_owners_each_retain_registered_ram() {
+        for cpu_last in [false, true] {
+            let kvm = Kvm::new().expect("native KVM is required");
+            let native = kvm.create_vm().unwrap();
+            #[cfg(target_arch = "x86_64")]
+            native.create_irq_chip().unwrap();
+            let vm = Vm::test_from_native(kvm, native);
+            let backing = Arc::new(MappedMemory::test_backing(&[(0, 0x10000)]).unwrap());
+            let probe = MappingProbe::new(&backing);
+            vm.attach_memory(backing).unwrap();
+            let irq = IrqManager::new(vm.clone()).unwrap();
+            let cpu = vm.create_vcpu(0, "x86-64-v1").unwrap();
+            drop(vm);
+            if cpu_last {
+                drop(irq);
+                assert!(probe.mappings() > 0);
+                drop(cpu);
+            } else {
+                drop(cpu);
+                assert!(probe.mappings() > 0);
+                drop(irq);
+            }
+            assert_eq!(probe.mappings(), 0);
+        }
     }
 }
