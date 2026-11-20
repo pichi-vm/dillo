@@ -25,6 +25,7 @@ vmm-sys-util.workspace = true
 
 [dev-dependencies]
 dillo-virtio.workspace = true
+wait-timeout = "0.2"
 
 [lints]
 workspace = true

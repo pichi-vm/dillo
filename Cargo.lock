@@ -599,6 +599,7 @@ dependencies = [
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
  "vmm-sys-util",
+ "wait-timeout",
 ]
 
 [[package]]
