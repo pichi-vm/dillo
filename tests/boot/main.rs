@@ -264,6 +264,18 @@ fn resolve(e: &Entry) -> Option<(PathBuf, Option<String>)> {
         Some(spec) => Some(fetch_config_text(spec)?),
         None => None,
     };
+    if std::env::var_os("DILLO_X86_BOOT_DIAG").is_some() {
+        use sha2::{Digest, Sha256};
+        let image_sha = Sha256::digest(std::fs::read(&image).unwrap());
+        let config_sha = config
+            .as_ref()
+            .map(|config| format!("{:x}", Sha256::digest(config.as_bytes())));
+        eprintln!("diagnostic kernel: {} sha256={image_sha:x}", e.url);
+        eprintln!(
+            "diagnostic published config: {:?} sha256={config_sha:?}",
+            e.config
+        );
+    }
     Some((image, config))
 }
 
@@ -458,6 +470,35 @@ fn boot_with_env(
 
     let out_path = dir.join("console.out");
     let err_path = dir.join("console.err");
+    let diagnostic = std::env::var_os("DILLO_X86_BOOT_DIAG").is_some();
+    if diagnostic {
+        use dillo_launch::pmi_parse::{HostArch, ParseOptions, parse};
+        use sha2::{Digest, Sha256};
+
+        let image = std::fs::read(pmi).unwrap();
+        let config = std::fs::read(dir.join("kernel.config")).unwrap();
+        eprintln!(
+            "diagnostic supplied config sha256={:x}, pmi sha256={:x}",
+            Sha256::digest(config),
+            Sha256::digest(&image)
+        );
+        let options = ParseOptions {
+            host_arch: HostArch::X86_64,
+            memory_mib: mem_mib,
+        };
+        match parse(&image, &options) {
+            Ok(plan) => {
+                eprintln!("diagnostic profile: {:?}", plan.cpu_profile);
+                for (name, section) in plan.sections {
+                    eprintln!(
+                        "diagnostic section {name} gpa={:#x} size={:#x} file_size={:#x}",
+                        section.gpa, section.virtual_size, section.file_size
+                    );
+                }
+            }
+            Err(error) => eprintln!("diagnostic PMI section reporting failed: {error}"),
+        }
+    }
     let mut command = Command::new(env!("CARGO_BIN_EXE_dillo"));
     if !extra.contains(&"--console") {
         command.args(["--console", "endpoint=stdio,bus=pci"]);
@@ -482,6 +523,15 @@ fn boot_with_env(
         .expect("wait dillo")
         .is_none()
     {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if diagnostic {
+            let pid = child.id().to_string();
+            let _ = Command::new("ps")
+                .args(["-L", "-p", &pid, "-o", "pid,tid,stat,wchan:32,time,comm"])
+                .status();
+            let _ = Command::new("kill").args(["-TERM", &pid]).status();
+            let _ = child.wait_timeout(Duration::from_secs(5));
+        }
         let _ = child.kill();
         let _ = child.wait();
         let mut s = std::fs::read_to_string(&out_path).unwrap_or_default();
@@ -489,7 +539,11 @@ fn boot_with_env(
         panic!("dillo boot timed out:\n{s}");
     }
     let mut s = std::fs::read_to_string(&out_path).unwrap_or_default();
-    s.push_str(&std::fs::read_to_string(&err_path).unwrap_or_default());
+    let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
+    if diagnostic {
+        eprintln!("{stderr}");
+    }
+    s.push_str(&stderr);
     s
 }
 

@@ -1,0 +1,63 @@
+name: Diagnose ordinary KVM x86 boot
+
+on:
+  push:
+    branches: [diagnose/x86-ordinary-boot-stall]
+
+jobs:
+  boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      NIGHTLY: nightly-2026-07-06
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_BUILD_RUSTFLAGS: "-D warnings"
+      DILLO_X86_BOOT_DIAG: "1"
+      RUST_LOG: info,dillo::boot=trace,dillo::kvm_boot=debug
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install test toolchain
+        run: |
+          rustup toolchain install "$NIGHTLY" --profile minimal --component rust-src
+          rustup target add --toolchain "$NIGHTLY" x86_64-unknown-none x86_64-unknown-linux-musl
+
+      - name: Record KVM host and prepare matching RAM policy
+        run: |
+          uname -a
+          lscpu
+          for path in /sys/devices/system/clocksource/clocksource0/{current_clocksource,available_clocksource}; do
+            if [ -r "$path" ]; then printf '%s=%s\n' "$path" "$(cat "$path")"; fi
+          done
+          lsmod | grep '^kvm' || true
+          for module in kvm kvm_amd kvm_intel; do
+            for parameter in nested ept npt unrestricted_guest tsc_scaling; do
+              path="/sys/module/$module/parameters/$parameter"
+              if [ -r "$path" ]; then printf '%s=%s\n' "$path" "$(cat "$path")"; fi
+            done
+          done
+          ls -l /dev/kvm
+          sudo chmod 666 /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+          want=4096
+          pages=$(sysctl -n vm.nr_hugepages)
+          for attempt in 1 2 3 4 5 6; do
+            if [ "$pages" -ge "$want" ]; then break; fi
+            sync || true
+            echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null || true
+            echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null || true
+            sudo sysctl -w vm.nr_hugepages=$want || true
+            pages=$(sysctl -n vm.nr_hugepages)
+            echo "hugepage reservation attempt $attempt: nr_hugepages=$pages (want $want)"
+            sleep 3
+          done
+          if [ "$pages" -lt "$want" ]; then exit 1; fi
+          grep -i huge /proc/meminfo
+
+      - name: Run one ordinary boot and one stock control
+        run: |
+          ordinary=0
+          args=(--config .copr/cargo-config.toml test --locked -p dillo --features vm-tests --test boot)
+          cargo +"$NIGHTLY" "${args[@]}" boots_and_reports::mem_mib_1_256::cpus_1_1 -- --exact --nocapture || ordinary=$?
+          cargo +"$NIGHTLY" "${args[@]}" bootconfig::bootconfig_input_requires_a_requested_reservation -- --exact --nocapture
+          exit "$ordinary"

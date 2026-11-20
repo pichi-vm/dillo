@@ -531,6 +531,16 @@ impl Vm {
                 });
             }
             cpuid_x86::set_apic_id(&mut supported, idx);
+            if idx == 0 && log::log_enabled!(target: "dillo::kvm_boot", log::Level::Debug) {
+                for entry in supported.as_slice().iter().filter(|entry| {
+                    matches!(
+                        entry.function,
+                        0 | 1 | 0x4000_0000 | 0x4000_0001 | 0x8000_0001 | 0x8000_0007 | 0x8000_0008
+                    )
+                }) {
+                    log::debug!(target: "dillo::kvm_boot", "admitted {entry:x?}");
+                }
+            }
             fd.set_cpuid2(&supported)
                 .map_err(|e| Error::CreateVcpu(idx, io(e)))?;
             fd.initialize_amd_tsc(&supported)
@@ -563,6 +573,8 @@ impl Vm {
             fd,
             idx,
             vm: self.clone(),
+            #[cfg(target_arch = "x86_64")]
+            traced_exits: 0,
         })
     }
 }
@@ -575,9 +587,39 @@ pub(crate) struct Vcpu {
     idx: u32,
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     vm: Vm,
+    #[cfg(target_arch = "x86_64")]
+    traced_exits: u8,
 }
 
 impl Vcpu {
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn trace_boot_state(&self, phase: &str) {
+        if !log::log_enabled!(target: "dillo::kvm_boot", log::Level::Debug) {
+            return;
+        }
+        let (regs, sregs) = match (self.fd.get_regs(), self.fd.get_sregs()) {
+            (Ok(regs), Ok(sregs)) => (regs, sregs),
+            (regs, sregs) => {
+                log::debug!(target: "dillo::kvm_boot",
+                    "vCPU{} {phase}: registers unavailable regs={:?}, sregs={:?}",
+                    self.idx, regs.err(), sregs.err());
+                return;
+            }
+        };
+        let linear_ip = if sregs.efer & (1 << 10) != 0 && sregs.cs.l != 0 {
+            regs.rip
+        } else {
+            regs.rip.wrapping_add(sregs.cs.base)
+        };
+        let translation = self.fd.translate_gva(linear_ip);
+        let tsc_khz = self.fd.get_tsc_khz();
+        let mp_state = self.fd.get_mp_state().map(|state| state.mp_state);
+        log::debug!(target: "dillo::kvm_boot",
+            "vCPU{} {phase}: RIP={:#x} CS={:x?} RFLAGS={:#x} CR0={:#x} CR2={:#x} CR3={:#x} CR4={:#x}              EFER={:#x} MP={mp_state:?} TSC_kHz={tsc_khz:?} GVA={linear_ip:#x} translation={translation:x?}",
+            self.idx, regs.rip, sregs.cs, regs.rflags, sregs.cr0, sregs.cr2, sregs.cr3, sregs.cr4,
+            sregs.efer);
+    }
+
     /// Apply PMI's fixed vm BSP state. APs retain native guest-startup state.
     #[cfg(target_arch = "x86_64")]
     pub(crate) fn initialize_bsp(&self) -> Result<(), Error> {
@@ -776,6 +818,13 @@ impl Vcpu {
                 Err(e) => return Err(Error::RunVcpu(self.idx, io(e))),
             }
         };
+        #[cfg(target_arch = "x86_64")]
+        if self.traced_exits < 12 && log::log_enabled!(target: "dillo::kvm_boot", log::Level::Debug)
+        {
+            self.traced_exits += 1;
+            log::debug!(target: "dillo::kvm_boot", "vCPU{} exit {}: {exit:x?}",
+                self.idx, self.traced_exits);
+        }
         if matches!(exit, kvm_ioctls::VcpuExit::InternalError) {
             let run = self.fd.get_kvm_run();
             // SAFETY: kvm_run is kernel-mediated; union fields valid for the active variant.

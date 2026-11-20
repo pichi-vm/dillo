@@ -672,6 +672,14 @@ mod imp {
         type Error = Error;
 
         fn run(&mut self) -> Result<VcpuStop, Self::Error> {
+            #[cfg(target_arch = "x86_64")]
+            {
+                self.vcpu.inner.trace_boot_state("before entry");
+                let result = self.vcpu.run_to_stop();
+                self.vcpu.inner.trace_boot_state("after run");
+                result
+            }
+            #[cfg(target_arch = "aarch64")]
             self.vcpu.run_to_stop()
         }
     }
