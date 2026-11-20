@@ -46,13 +46,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p target/native-state-evidence .cargo
-          cp .copr/cargo-config.toml .cargo/config.toml
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = a9387f3d67d0d9dd5ecf0b898c53c4d22f4d74d0
-          test -z "$(git status --porcelain --untracked-files=no)"
+          mkdir -p target/native-state-evidence
           {
             git log -1 --format=fuller
+            test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+            test "$(git rev-parse HEAD^)" = c03ea3c9cb91dce9e509effe43d3ef7561d7eafb
+            git diff --exit-code HEAD^ HEAD -- . ':!.github/workflows/current-pmi-native-state.yml'
+            git status --short
+            test -z "$(git status --porcelain --untracked-files=no)"
             uname -a
             rustup show
             cargo --version
