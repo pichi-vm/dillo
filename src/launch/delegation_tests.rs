@@ -253,6 +253,38 @@ fn invalid_image_does_not_require_a_hypervisor() {
     assert!(matches!(error, LaunchError::PmiParse(_)));
 }
 
+#[test]
+fn load_validation_checks_raw_size_and_backing_end() {
+    use dillo_launch::pmi_parse::{Error, parse};
+    let arch = HostArchitecture::X86_64;
+    let mut bytes = image(
+        arch,
+        BaseChannel::Bundled,
+        &base(arch, false, false),
+        Some(4096),
+    );
+    let opts = ParseOptions {
+        host_arch: pmi_arch(arch),
+        memory_mib: 4,
+    };
+    let code_virtual_size = 0x188 + 2 * 40 + 8;
+    bytes[code_virtual_size..code_virtual_size + 4].copy_from_slice(&0xfffu32.to_le_bytes());
+    assert!(
+        matches!(parse(&bytes, &opts), Err(Error::InvalidLoadSize(section)) if section == ".code")
+    );
+
+    bytes[code_virtual_size..code_virtual_size + 4].copy_from_slice(&0x1000u32.to_le_bytes());
+    let mut manifest: serde_json::Value = ciborium::from_reader(&bytes[0x1000..0x2000]).unwrap();
+    manifest["actions"][0]["gpa"] = json!(u64::MAX - 0x1fff);
+    let mut cbor = Vec::new();
+    ciborium::ser::into_writer(&manifest, &mut cbor).unwrap();
+    bytes[0x1000..0x1000 + cbor.len()].copy_from_slice(&cbor);
+    bytes[0x198..0x19c].copy_from_slice(&(cbor.len() as u32).to_le_bytes());
+    assert!(
+        matches!(parse(&bytes, &opts), Err(Error::VirtualAddressOverflow { name }) if name == ".code")
+    );
+}
+
 // Use a non-arma section name and a 4 KiB capacity. Action GPAs remain the
 // authority even though the PE section's VirtualAddress is deliberately zero.
 fn with_bootconfig(mut bytes: Vec<u8>, gpas: &[u64], capacity: u32, raw_size: u32) -> Vec<u8> {
