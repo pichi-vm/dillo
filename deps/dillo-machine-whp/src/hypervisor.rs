@@ -24,7 +24,7 @@ use windows_sys::Win32::System::Hypervisor::{
 };
 
 use crate::VmExit;
-use crate::cpuid_x86;
+use dillo_machine::cpuid_x86::{Reg, X86Level};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -108,9 +108,7 @@ pub enum Error {
     #[error("cpu:profile {profile:?} not recognized by dillo")]
     UnknownCpuProfile { profile: String },
 
-    #[error(
-        "cpu:profile {profile:?} requires host CPUID feature `{feature}` which is not available"
-    )]
+    #[error("cpu:profile {profile:?} requires guest CPU feature {feature}")]
     HostMissingCpuFeature {
         profile: String,
         feature: &'static str,
@@ -297,18 +295,24 @@ impl Vm {
     }
 
     fn create_vcpu_without_ram_check(&self, idx: u32, cpu_profile: &str) -> Result<Vcpu, Error> {
-        validate_cpu_profile(cpu_profile)?;
+        let profile = X86Level::parse(cpu_profile).ok_or_else(|| Error::UnknownCpuProfile {
+            profile: cpu_profile.to_string(),
+        })?;
         raw::create_virtual_processor(self.inner.partition, idx).map_err(|hr| {
             Error::CreateVcpu {
                 idx,
                 hr: status(hr),
             }
         })?;
-        Ok(Vcpu {
+        let mut vcpu = Vcpu {
             partition: Arc::clone(&self.inner),
             idx,
             delete_pending: true,
-        })
+        };
+        if let Err(operation) = vcpu.validate_profile(profile) {
+            return Err(vcpu.cleanup_error(operation));
+        }
+        Ok(vcpu)
     }
 
     pub(crate) fn interrupt_controller(&self) -> InterruptController {
@@ -316,20 +320,6 @@ impl Vm {
             inner: Arc::clone(&self.inner),
         }
     }
-}
-
-fn validate_cpu_profile(cpu_profile: &str) -> Result<(), Error> {
-    let level =
-        cpuid_x86::X86Level::parse(cpu_profile).ok_or_else(|| Error::UnknownCpuProfile {
-            profile: cpu_profile.to_string(),
-        })?;
-    if let Some(missing) = cpuid_x86::first_missing_native(level) {
-        return Err(Error::HostMissingCpuFeature {
-            profile: level.as_str().to_string(),
-            feature: missing,
-        });
-    }
-    Ok(())
 }
 
 pub(crate) fn guest_address_bits() -> Result<u32, Error> {
@@ -597,6 +587,52 @@ impl Vcpu {
         }
     }
 
+    fn validate_profile(&self, profile: X86Level) -> Result<(), Error> {
+        let cpuid = |leaf, subleaf| {
+            raw::vcpu_cpuid(self.partition.partition, self.idx, leaf, subleaf)
+                .map_err(|hr| Error::Capability(status(hr)))
+        };
+        let max_standard = cpuid(0, 0)?.Eax;
+        let max_extended = cpuid(0x8000_0000, 0)?.Eax;
+        for feat in profile.cumulative_features() {
+            let max = if feat.function >= 0x8000_0000 {
+                max_extended
+            } else {
+                max_standard
+            };
+            if feat.function > max {
+                return Err(Error::HostMissingCpuFeature {
+                    profile: profile.as_str().to_string(),
+                    feature: feat.name,
+                });
+            }
+            let value = cpuid(feat.function, feat.index)?;
+            let word = match feat.reg {
+                Reg::Eax => value.Eax,
+                Reg::Ebx => value.Ebx,
+                Reg::Ecx => value.Ecx,
+                Reg::Edx => value.Edx,
+            };
+            if word & (1 << feat.bit) == 0 {
+                return Err(Error::HostMissingCpuFeature {
+                    profile: profile.as_str().to_string(),
+                    feature: feat.name,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_error(&mut self, operation: Error) -> Error {
+        match self.retire() {
+            Ok(()) => operation,
+            Err(retirement) => Error::VcpuCleanup {
+                operation: Box::new(operation),
+                retirement: Box::new(retirement),
+            },
+        }
+    }
+
     pub(crate) fn set_x86_64_state(
         &mut self,
         state: &pmi::vm::vcpu::x86_64::CpuState,
@@ -837,15 +873,7 @@ mod raw {
         if FAIL_NEXT_GUEST_PHYSICAL_BITS.with(|fail| fail.replace(false)) {
             return Err(HResult(E_FAIL));
         }
-        let mut output = WHV_CPUID_OUTPUT::default();
-        // SAFETY: the partition/vCPU are live and output is a correctly sized
-        // writable CPUID result. This queries the value exposed to the guest.
-        let hr = unsafe {
-            WHvGetVirtualProcessorCpuidOutput(partition, idx, 0x8000_0008, 0, &raw mut output)
-        };
-        if failed(hr) {
-            return Err(HResult(hr));
-        }
+        let output = vcpu_cpuid(partition, idx, 0x8000_0008, 0)?;
         let physical = output.Eax & 0xff;
         // WHvCapabilityCodePhysicalAddressWidth is newer than windows-sys's
         // headers. Older WHP versions expose their limit through guest CPUID.
@@ -854,6 +882,23 @@ mod raw {
             Err(HResult(windows_sys::Win32::Foundation::WHV_E_UNKNOWN_CAPABILITY)) => Ok(physical),
             Err(err) => Err(err),
         }
+    }
+
+    pub(super) fn vcpu_cpuid(
+        partition: PartitionHandle,
+        idx: u32,
+        leaf: u32,
+        subleaf: u32,
+    ) -> Result<WHV_CPUID_OUTPUT, HResult> {
+        let mut output = WHV_CPUID_OUTPUT::default();
+        // SAFETY: the VP is live and the result buffer is initialized and writable.
+        let hr = unsafe {
+            WHvGetVirtualProcessorCpuidOutput(partition, idx, leaf, subleaf, &raw mut output)
+        };
+        if failed(hr) {
+            return Err(HResult(hr));
+        }
+        Ok(output)
     }
 
     #[derive(Clone, Copy, Debug)]
