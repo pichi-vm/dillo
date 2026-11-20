@@ -133,7 +133,7 @@ dependencies = [
 [[package]]
 name = "arma"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
+source = "git+https://github.com/pichi-vm/arma?rev=8409e60d772bf253a8398ed19b56a6a9a0d43713#8409e60d772bf253a8398ed19b56a6a9a0d43713"
 dependencies = [
  "anyhow",
  "ciborium",
@@ -775,7 +775,7 @@ checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
 [[package]]
 name = "dtb2acpi"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
+source = "git+https://github.com/pichi-vm/arma?rev=8409e60d772bf253a8398ed19b56a6a9a0d43713#8409e60d772bf253a8398ed19b56a6a9a0d43713"
 dependencies = [
  "devtree",
  "zerocopy",
@@ -784,7 +784,7 @@ dependencies = [
 [[package]]
 name = "dtb2e820"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
+source = "git+https://github.com/pichi-vm/arma?rev=8409e60d772bf253a8398ed19b56a6a9a0d43713#8409e60d772bf253a8398ed19b56a6a9a0d43713"
 dependencies = [
  "devtree",
 ]
@@ -2007,7 +2007,7 @@ dependencies = [
 [[package]]
 name = "tatu"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
+source = "git+https://github.com/pichi-vm/arma?rev=8409e60d772bf253a8398ed19b56a6a9a0d43713#8409e60d772bf253a8398ed19b56a6a9a0d43713"
 dependencies = [
  "arrayvec",
  "devtree",
