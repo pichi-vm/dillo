@@ -831,7 +831,7 @@ mod imp {
                                 );
                                 psci::ret::INVALID_PARAMETERS
                             } else if self.slots[tgt]
-                                .try_deposit(vcpu.inner.cpu_on_request(entry, context)?)
+                                .try_deposit(|| vcpu.inner.cpu_on_request(entry, context))?
                             {
                                 log::info!("vCPU{idx} powers on vCPU{tgt} at pc={entry:#x}");
                                 psci::ret::SUCCESS
@@ -896,13 +896,19 @@ mod imp {
             }
         }
 
-        fn try_deposit(&self, request: CpuOnRequest) -> bool {
-            if self.started.swap(true, Ordering::SeqCst) {
-                return false;
+        fn try_deposit(
+            &self,
+            make_request: impl FnOnce() -> Result<CpuOnRequest, Error>,
+        ) -> Result<bool, Error> {
+            let mut request = self.request.lock().expect("cpu-slot poisoned");
+            if self.started.load(Ordering::SeqCst) {
+                return Ok(false);
             }
-            *self.request.lock().expect("cpu-slot poisoned") = Some(request);
+            *request = Some(make_request()?);
+            self.started.store(true, Ordering::SeqCst);
+            drop(request);
             self.cv.notify_all();
-            true
+            Ok(true)
         }
 
         fn wake(&self) {
@@ -1389,19 +1395,32 @@ mod imp {
             assert_eq!((mpidr_for(2) & 0x00ff_ffff) as usize, 2);
 
             let slot = Arc::new(CpuSlot::new());
+            assert!(
+                slot.try_deposit(|| Err(Error::Hv("read caller EE".into())))
+                    .is_err()
+            );
+            assert!(!slot.started.load(Ordering::Acquire));
             let shutdown = Arc::new(AtomicBool::new(false));
             let s2 = Arc::clone(&slot);
             let sd2 = Arc::clone(&shutdown);
             let waiter = thread::spawn(move || s2.wait(&sd2));
-            assert!(slot.try_deposit(CpuOnRequest {
-                entry: 0x4000_0000,
-                context: 0xabcd,
-                big_endian: true,
-            }));
+            assert!(
+                slot.try_deposit(|| Ok(CpuOnRequest {
+                    entry: 0x4000_0000,
+                    context: 0xabcd,
+                    big_endian: true,
+                }))
+                .unwrap()
+            );
             let request = waiter.join().unwrap().unwrap();
             assert_eq!(request.entry, 0x4000_0000);
             assert_eq!(request.context, 0xabcd);
             assert!(request.big_endian);
+            assert!(
+                !slot
+                    .try_deposit(|| panic!("already-on target must skip reading caller EE"))
+                    .unwrap()
+            );
 
             let slot = Arc::new(CpuSlot::new());
             let shutdown = Arc::new(AtomicBool::new(false));
