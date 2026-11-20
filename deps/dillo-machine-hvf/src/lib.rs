@@ -164,10 +164,6 @@ mod imp {
             Arc::clone(&self.mmio_bus)
         }
 
-        fn cpu_runtime(&self) -> Arc<CpuRuntime> {
-            Arc::clone(&self.cpu_runtime)
-        }
-
         fn resolve_interrupts(
             &self,
             requirements: &[MmioInterruptRequirement],
@@ -469,8 +465,32 @@ mod imp {
     impl dillo_machine::Machine for Vm {
         type Error = Error;
         type Platform = PlatformMachine;
-        type Cpu = Cpu;
-        type CpuState = CpuState;
+        type CpuPreparation = CpuPreparation;
+
+        fn cpu_preparation(
+            &mut self,
+            index: u32,
+            _profile: &str,
+            boot_state: &dyn BootVcpuState,
+        ) -> Result<Self::CpuPreparation, Self::Error> {
+            self.inner.guest_memory()?;
+            let index = index as usize;
+            if index >= self.cpu_runtime.slots.len() {
+                return Err(Error::Hv(format!(
+                    "vCPU index {index} exceeds configured count"
+                )));
+            }
+            let boot_state = boot_state
+                .aarch64()
+                .cloned()
+                .ok_or_else(|| Error::Hv("boot vCPU state is not aarch64".to_string()))?;
+            Ok(CpuPreparation {
+                index,
+                boot_state,
+                mmio_bus: self.mmio_bus(),
+                runtime: Arc::clone(&self.cpu_runtime),
+            })
+        }
 
         fn guest_address_bits() -> Result<u32, Self::Error> {
             crate::hypervisor::guest_address_bits()
@@ -501,67 +521,93 @@ mod imp {
     }
 
     #[derive(Debug)]
-    pub struct CpuState {
-        index: u32,
-        boot_state: Option<pmi::vm::vcpu::aarch64::CpuState>,
-    }
-
-    impl dillo_machine::CpuState for CpuState {
-        type Error = Error;
-
-        fn new(
-            index: u32,
-            _cpu_profile: &str,
-            boot_state: Option<&dyn BootVcpuState>,
-        ) -> Result<Self, Self::Error> {
-            let boot_state = boot_state
-                .map(|state| {
-                    state
-                        .aarch64()
-                        .cloned()
-                        .ok_or_else(|| Error::Hv("boot vCPU state is not aarch64".to_string()))
-                })
-                .transpose()?;
-            Ok(Self { index, boot_state })
-        }
-    }
-
-    impl Attach<CpuState> for Vm {
-        type Error = Error;
-        type Output = Arc<Cpu>;
-
-        fn attach(&mut self, item: CpuState) -> Result<Self::Output, Self::Error> {
-            self.inner.guest_memory()?;
-            let boot_state = item
-                .boot_state
-                .ok_or_else(|| Error::Hv("boot vCPU state is not aarch64".to_string()))?;
-            Ok(Arc::new(Cpu {
-                index: item.index as usize,
-                boot_state,
-                mmio_bus: self.mmio_bus(),
-                runtime: self.cpu_runtime(),
-            }))
-        }
-    }
-
-    #[derive(Debug)]
-    pub struct Cpu {
+    pub struct CpuPreparation {
         index: usize,
         boot_state: pmi::vm::vcpu::aarch64::CpuState,
         mmio_bus: Arc<Mutex<MmioBus>>,
         runtime: Arc<CpuRuntime>,
     }
 
-    impl dillo_machine::Cpu for Cpu {
+    impl dillo_machine::CpuPreparation for CpuPreparation {
+        type Error = Error;
+        type Runner = CpuRunner;
+        type Control = CpuControl;
+
+        fn prepare(self) -> Result<(CpuRunner, CpuControl), Error> {
+            let vcpu = Vcpu {
+                inner: self.runtime.vm.create_vcpu_current_thread()?,
+                mmio_bus: self.mmio_bus,
+            };
+            vcpu.set_mpidr(mpidr_for(self.index))?;
+            if self.index == 0 {
+                vcpu.set_aarch64_state(&self.boot_state)?;
+                self.runtime.slots[0].started.store(true, Ordering::SeqCst);
+            }
+            *self.runtime.handles[self.index]
+                .lock()
+                .expect("handle poisoned") = Some(vcpu.handle());
+            let control = CpuControl {
+                index: self.index,
+                runtime: Arc::clone(&self.runtime),
+            };
+            Ok((
+                CpuRunner {
+                    vcpu,
+                    index: self.index,
+                    boot_state: self.boot_state,
+                    runtime: self.runtime,
+                },
+                control,
+            ))
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct CpuRunner {
+        vcpu: Vcpu,
+        index: usize,
+        boot_state: pmi::vm::vcpu::aarch64::CpuState,
+        runtime: Arc<CpuRuntime>,
+    }
+
+    impl Drop for CpuRunner {
+        fn drop(&mut self) {
+            self.runtime.handles[self.index]
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        }
+    }
+
+    impl dillo_machine::CpuRunner for CpuRunner {
         type Error = Error;
 
-        fn run(&self) -> Result<VcpuStop, Self::Error> {
-            self.runtime.run_cpu(self)
+        fn run(&mut self) -> Result<VcpuStop, Self::Error> {
+            let runtime = &self.runtime;
+            if self.index != 0 {
+                let Some((entry, context)) = runtime.slots[self.index].wait(&runtime.shutdown)
+                else {
+                    return Ok(VcpuStop::Stopped);
+                };
+                self.vcpu
+                    .set_aarch64_state(&secondary_state(entry, context, &self.boot_state))?;
+                log::info!("vCPU{} powered on: pc={entry:#x}", self.index);
+            }
+            runtime.run_vcpu_loop(self.index, &self.vcpu, &self.boot_state)
         }
+    }
+
+    #[derive(Debug)]
+    pub struct CpuControl {
+        index: usize,
+        runtime: Arc<CpuRuntime>,
+    }
+
+    impl dillo_machine::CpuControl for CpuControl {
+        type Error = Error;
 
         fn stop(&self) -> Result<(), Self::Error> {
-            self.runtime.request_exit();
-            Ok(())
+            self.runtime.request_exit(self.index)
         }
     }
 
@@ -730,35 +776,6 @@ mod imp {
             }
         }
 
-        fn run_cpu(&self, cpu: &Cpu) -> Result<VcpuStop, Error> {
-            let idx = cpu.index;
-            let init = if idx == 0 {
-                self.slots[0].started.store(true, Ordering::SeqCst);
-                cpu.boot_state.clone()
-            } else {
-                match self.slots[idx].wait(&self.shutdown) {
-                    Some((entry, context)) => secondary_state(entry, context, &cpu.boot_state),
-                    None => return Ok(VcpuStop::Stopped),
-                }
-            };
-            let vcpu = Vcpu {
-                inner: self.vm.create_vcpu_current_thread()?,
-                mmio_bus: Arc::clone(&cpu.mmio_bus),
-            };
-            vcpu.set_mpidr(mpidr_for(idx))?;
-            vcpu.set_aarch64_state(&init)?;
-            *self.handles[idx].lock().expect("handle poisoned") = Some(vcpu.handle());
-            if idx != 0 {
-                log::info!("vCPU{idx} powered on: pc={:#x}", init.pc);
-            }
-
-            let result = self.run_vcpu_loop(idx, &vcpu, &cpu.boot_state);
-            self.shutdown.store(true, Ordering::SeqCst);
-            self.wake_waiters();
-            self.force_exit_live();
-            result
-        }
-
         fn run_vcpu_loop(
             &self,
             idx: usize,
@@ -840,25 +857,18 @@ mod imp {
             }
         }
 
-        fn request_exit(&self) {
+        fn request_exit(&self, index: usize) -> Result<(), Error> {
             self.shutdown.store(true, Ordering::SeqCst);
-            self.wake_waiters();
-            self.force_exit_live();
-        }
-
-        fn wake_waiters(&self) {
-            for slot in &self.slots {
-                slot.cv.notify_all();
+            self.slots[index].wake();
+            // Keep the handle bound through the native wake. The owner
+            // clears this binding under the same lock before destruction.
+            let handle = self.handles[index]
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(handle) = handle.as_ref() {
+                self.vm.force_vcpus_exit(std::slice::from_ref(handle))?;
             }
-        }
-
-        fn force_exit_live(&self) {
-            let live: Vec<VcpuHandle> = self
-                .handles
-                .iter()
-                .filter_map(|h| h.lock().expect("handle poisoned").clone())
-                .collect();
-            let _ = self.vm.force_vcpus_exit(&live);
+            Ok(())
         }
     }
 
@@ -885,20 +895,24 @@ mod imp {
             self.cv.notify_all();
         }
 
+        fn wake(&self) {
+            let _request = self
+                .request
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.cv.notify_all();
+        }
+
         fn wait(&self, shutdown: &AtomicBool) -> Option<(u64, u64)> {
             let mut g = self.request.lock().expect("cpu-slot poisoned");
             loop {
-                if let Some(req) = g.take() {
-                    return Some(req);
-                }
                 if shutdown.load(Ordering::SeqCst) {
                     return None;
                 }
-                let (ng, _) = self
-                    .cv
-                    .wait_timeout(g, std::time::Duration::from_millis(100))
-                    .expect("cpu-slot poisoned");
-                g = ng;
+                if let Some(req) = g.take() {
+                    return Some(req);
+                }
+                g = self.cv.wait(g).expect("cpu-slot poisoned");
             }
         }
     }
@@ -1156,7 +1170,7 @@ mod imp {
             let sd2 = Arc::clone(&shutdown);
             let waiter = thread::spawn(move || s2.wait(&sd2));
             shutdown.store(true, Ordering::SeqCst);
-            slot.cv.notify_all();
+            slot.wake();
             assert_eq!(waiter.join().unwrap(), None);
         }
     }

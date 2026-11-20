@@ -202,7 +202,6 @@ mod imp {
     pub struct Vm {
         inner: crate::hypervisor::Vm,
         mmio_bus: Arc<Mutex<MmioBus>>,
-        exit_requester: VcpuExitRequester,
         shared_memory: Vec<Arc<dyn SharedMemory>>,
         irq_manager: Arc<Mutex<IrqManager>>,
     }
@@ -212,7 +211,6 @@ mod imp {
             f.debug_struct("Vm")
                 .field("inner", &self.inner)
                 .field("mmio_bus", &self.mmio_bus)
-                .field("exit_requester", &self.exit_requester)
                 .field("shared_memory", &self.shared_memory.len())
                 .field("irq_manager", &"<backend-owned>")
                 .finish()
@@ -329,18 +327,6 @@ mod imp {
             Ok(())
         }
 
-        fn create_vcpu_inner(&self, idx: u32, cpu_profile: &str) -> Result<Vcpu, Error> {
-            Ok(Vcpu {
-                inner: self.inner.create_vcpu(idx, cpu_profile)?,
-                mmio_bus: Arc::clone(&self.mmio_bus),
-                exit_requester: self.exit_requester(),
-            })
-        }
-
-        fn exit_requester(&self) -> VcpuExitRequester {
-            self.exit_requester.clone()
-        }
-
         fn resolve_interrupts(
             &self,
             requirements: &[MmioInterruptRequirement],
@@ -426,7 +412,6 @@ mod imp {
 
     impl Vm {
         fn from_dtb(dtb: &[u8]) -> Result<Self, Error> {
-            let exit_requester = VcpuExitRequester::new();
             // The devicetree is the machine contract: the interrupt-controller
             // substrate is constructed from what it declares, on both arches.
             let parsed: Tree<'_> = Tree::parse(dtb).map_err(Error::ParseDtb)?;
@@ -448,7 +433,6 @@ mod imp {
             Ok(Self {
                 inner,
                 mmio_bus: Arc::new(Mutex::new(MmioBus::new())),
-                exit_requester,
                 shared_memory: Vec::new(),
                 irq_manager,
             })
@@ -553,8 +537,39 @@ mod imp {
     impl dillo_machine::Machine for Vm {
         type Error = Error;
         type Platform = PlatformMachine;
-        type Cpu = Cpu;
-        type CpuState = CpuState;
+        type CpuPreparation = CpuPreparation;
+
+        fn cpu_preparation(
+            &mut self,
+            index: u32,
+            profile: &str,
+            boot_state: &dyn BootVcpuState,
+        ) -> Result<Self::CpuPreparation, Self::Error> {
+            #[cfg(target_arch = "x86_64")]
+            let boot_state = (index == 0)
+                .then(|| {
+                    boot_state
+                        .x86_64()
+                        .cloned()
+                        .ok_or_else(|| Error::UnhandledExit("boot vCPU state is not x86_64".into()))
+                })
+                .transpose()?;
+            #[cfg(target_arch = "aarch64")]
+            let boot_state = (index == 0)
+                .then(|| {
+                    boot_state.aarch64().cloned().ok_or_else(|| {
+                        Error::UnhandledExit("boot vCPU state is not aarch64".into())
+                    })
+                })
+                .transpose()?;
+            Ok(CpuPreparation {
+                index,
+                profile: profile.into(),
+                boot_state,
+                machine: self.inner.clone(),
+                mmio_bus: Arc::clone(&self.mmio_bus),
+            })
+        }
 
         fn guest_address_bits() -> Result<u32, Self::Error> {
             crate::hypervisor::guest_address_bits()
@@ -606,97 +621,79 @@ mod imp {
     }
 
     #[derive(Debug)]
-    pub struct CpuState {
+    pub struct CpuPreparation {
         index: u32,
-        cpu_profile: String,
+        profile: String,
         #[cfg(target_arch = "x86_64")]
         boot_state: Option<pmi::vm::vcpu::x86_64::CpuState>,
         #[cfg(target_arch = "aarch64")]
         boot_state: Option<pmi::vm::vcpu::aarch64::CpuState>,
+        machine: crate::hypervisor::Vm,
+        mmio_bus: Arc<Mutex<MmioBus>>,
     }
 
-    impl dillo_machine::CpuState for CpuState {
+    impl dillo_machine::CpuPreparation for CpuPreparation {
         type Error = Error;
+        type Runner = CpuRunner;
+        type Control = CpuControl;
 
-        fn new(
-            index: u32,
-            cpu_profile: &str,
-            boot_state: Option<&dyn BootVcpuState>,
-        ) -> Result<Self, Self::Error> {
+        fn prepare(self) -> Result<(CpuRunner, CpuControl), Error> {
+            let requester = VcpuExitRequester::new();
+            let mut vcpu = Vcpu {
+                inner: self.machine.create_vcpu(self.index, &self.profile)?,
+                mmio_bus: self.mmio_bus,
+                exit_requester: requester.clone(),
+            };
             #[cfg(target_arch = "x86_64")]
-            let boot_state = (index == 0)
-                .then_some(boot_state)
-                .flatten()
-                .map(|state| {
-                    state
-                        .x86_64()
-                        .cloned()
-                        .ok_or_else(|| Error::UnhandledExit("boot vCPU state is not x86_64".into()))
-                })
-                .transpose()?;
-            #[cfg(target_arch = "aarch64")]
-            let boot_state = (index == 0)
-                .then_some(boot_state)
-                .flatten()
-                .map(|state| {
-                    state.aarch64().cloned().ok_or_else(|| {
-                        Error::UnhandledExit("boot vCPU state is not aarch64".into())
-                    })
-                })
-                .transpose()?;
-            Ok(Self {
-                index,
-                cpu_profile: cpu_profile.into(),
-                boot_state,
-            })
-        }
-    }
-
-    impl Attach<CpuState> for Vm {
-        type Error = Error;
-        type Output = Arc<Cpu>;
-
-        fn attach(&mut self, item: CpuState) -> Result<Self::Output, Self::Error> {
-            let mut vcpu = self.create_vcpu_inner(item.index, &item.cpu_profile)?;
-            #[cfg(target_arch = "x86_64")]
-            if let Some(state) = &item.boot_state {
+            if let Some(state) = &self.boot_state {
                 vcpu.set_x86_64_state(state)?;
             }
             #[cfg(target_arch = "aarch64")]
-            if let Some(state) = &item.boot_state {
+            if let Some(state) = &self.boot_state {
                 vcpu.set_aarch64_state(state)?;
             }
-            let exit_requester = vcpu.exit_requester.clone();
-            Ok(Arc::new(Cpu {
-                vcpu: Mutex::new(vcpu),
-                exit_requester,
-            }))
+            let signal_mask = crate::hypervisor::block_kick_signal(&vcpu.inner, VCPU_KICK_SIGNAL)?;
+            let registration = requester.register_current_thread();
+            Ok((
+                CpuRunner {
+                    _registration: registration,
+                    _signal_mask: signal_mask,
+                    vcpu,
+                },
+                CpuControl(requester),
+            ))
         }
     }
 
-    pub struct Cpu {
-        vcpu: Mutex<Vcpu>,
-        exit_requester: VcpuExitRequester,
+    pub struct CpuRunner {
+        // Unregister the owner before restoring its mask.
+        _registration: VcpuRegistration,
+        _signal_mask: crate::hypervisor::KickSignalMask,
+        vcpu: Vcpu,
     }
 
-    impl std::fmt::Debug for Cpu {
+    impl std::fmt::Debug for CpuRunner {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("Cpu").finish_non_exhaustive()
+            f.debug_struct("CpuRunner").finish_non_exhaustive()
         }
     }
 
-    impl dillo_machine::Cpu for Cpu {
+    impl dillo_machine::CpuRunner for CpuRunner {
         type Error = Error;
 
-        fn run(&self) -> Result<VcpuStop, Self::Error> {
-            self.vcpu
-                .lock()
-                .expect("KVM vCPU lock poisoned")
-                .run_to_stop()
+        fn run(&mut self) -> Result<VcpuStop, Self::Error> {
+            self.vcpu.run_to_stop()
         }
+    }
+
+    #[derive(Debug)]
+    pub struct CpuControl(VcpuExitRequester);
+
+    impl dillo_machine::CpuControl for CpuControl {
+        type Error = Error;
 
         fn stop(&self) -> Result<(), Self::Error> {
-            self.exit_requester.request_exit();
+            self.0.request_exit();
             Ok(())
         }
     }
@@ -1122,8 +1119,6 @@ mod imp {
         }
 
         fn run_to_stop(&mut self) -> Result<VcpuStop, Error> {
-            let _signal_mask = crate::hypervisor::block_kick_signal(&self.inner, VCPU_KICK_SIGNAL)?;
-            let _registration = self.exit_requester.register_current_thread();
             loop {
                 if self.exit_requester.requested() {
                     return Ok(VcpuStop::Stopped);
@@ -1188,9 +1183,9 @@ mod imp {
 
         /// The base a freshly created vCPU's LAPIC actually decodes at.
         fn realized_lapic_base(vm: &Vm, idx: u32) -> u64 {
-            vm.create_vcpu_inner(idx, "x86-64-v1")
+            vm.inner
+                .create_vcpu(idx, "x86-64-v1")
                 .expect("create vCPU")
-                .inner
                 .realized_lapic_base()
                 .expect("read back IA32_APIC_BASE")
         }

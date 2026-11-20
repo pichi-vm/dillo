@@ -7,6 +7,7 @@ members = [
     "deps/dillo-devtree",
     "deps/dillo-machine",
     "deps/dillo-launch",
+    "deps/dillo-runtime",
     "deps/dillo-machine-hvf",
     "deps/dillo-machine-kvm",
     "deps/dillo-machine-whp",
@@ -76,6 +77,7 @@ dillo-storage = { path = "deps/dillo-storage" }
 dillo-config = { path = "deps/dillo-config" }
 dillo-devtree = { path = "deps/dillo-devtree" }
 dillo-machine = { path = "deps/dillo-machine" }
+dillo-runtime = { path = "deps/dillo-runtime" }
 dillo-launch = { path = "deps/dillo-launch" }
 dillo-machine-hvf = { path = "deps/dillo-machine-hvf" }
 dillo-machine-kvm = { path = "deps/dillo-machine-kvm" }
@@ -187,6 +189,7 @@ tempfile.workspace = true
 dillo-storage.workspace = true
 imago.workspace = true
 dillo-machine.workspace = true
+dillo-runtime.workspace = true
 dillo-launch.workspace = true
 dillo-mmio.workspace = true
 dillo-mmio-uart.workspace = true

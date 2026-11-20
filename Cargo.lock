@@ -485,6 +485,7 @@ dependencies = [
  "dillo-mmio-virtio",
  "dillo-pci",
  "dillo-pci-virtio",
+ "dillo-runtime",
  "dillo-storage",
  "dillo-virtio",
  "dillo-virtio-blk",
@@ -552,7 +553,6 @@ dependencies = [
 name = "dillo-machine"
 version = "0.1.0"
 dependencies = [
- "dillo-mmio",
  "pmi",
 ]
 
@@ -651,6 +651,14 @@ dependencies = [
  "dillo-virtio",
  "log",
  "vm-memory 0.17.2",
+]
+
+[[package]]
+name = "dillo-runtime"
+version = "0.1.0"
+dependencies = [
+ "dillo-machine",
+ "log",
 ]
 
 [[package]]

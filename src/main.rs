@@ -2170,16 +2170,12 @@ mod machine_select {
         }
 
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-        use std::thread;
+        use std::sync::atomic::{AtomicBool, AtomicU32};
 
         use super::machine as selected_machine;
         use dillo_devtree::platform::Machine as PlatformMachine;
         use dillo_devtree::platform::{MsiParentage, WiredInterrupt};
-        use dillo_machine::{
-            BootVcpuState, Cpu as MachineCpu, CpuState as MachineCpuState, LaunchConfig, Machine,
-            VcpuStop,
-        };
+        use dillo_machine::{LaunchConfig, Machine, VcpuStop};
         use dillo_mmio::syscon;
         use dillo_mmio::{
             Attach, InterruptSource, MessageInterruptSource, MmioAttachment,
@@ -2263,19 +2259,6 @@ mod machine_select {
                     self.placements,
                     self.pmi,
                 )
-            }
-        }
-
-        #[derive(Debug)]
-        struct SupervisorControl {
-            supervisor_shutdown: &'static AtomicBool,
-        }
-
-        impl SupervisorControl {
-            fn stop_requested(&self) -> Option<VcpuStop> {
-                self.supervisor_shutdown
-                    .load(Ordering::Acquire)
-                    .then_some(VcpuStop::Stopped)
             }
         }
 
@@ -2565,105 +2548,6 @@ mod machine_select {
             Ok(())
         }
 
-        fn run_vcpus<M, E>(
-            vm: &mut M,
-            count: u32,
-            cpu_profile: &str,
-            boot_state: &dyn BootVcpuState,
-            control: Arc<SupervisorControl>,
-        ) -> Result<VcpuStop, RunError>
-        where
-            E: std::error::Error + Send + Sync + 'static,
-            M: Machine<Error = E>,
-            M: Attach<M::CpuState, Error = E, Output = Arc<M::Cpu>>,
-        {
-            let mut cpus = Vec::with_capacity(count as usize);
-            for index in 0..count {
-                let state = M::CpuState::new(index, cpu_profile, Some(boot_state))
-                    .map_err(RunError::machine)?;
-                cpus.push(Attach::attach(vm, state).map_err(RunError::machine)?);
-            }
-            vm.prepare_vcpu_run().map_err(RunError::machine)?;
-
-            let shutdown = Arc::new(AtomicBool::new(false));
-            let mut first_stop = VcpuStop::Stopped;
-            let mut first_error = None;
-
-            thread::scope(|scope| {
-                let mut joins = Vec::with_capacity(cpus.len());
-                for cpu in &cpus {
-                    let cpu = Arc::clone(cpu);
-                    let all_cpus = cpus.clone();
-                    let shutdown = Arc::clone(&shutdown);
-                    joins.push(scope.spawn(move || -> Result<VcpuStop, String> {
-                        if shutdown.load(Ordering::Acquire) {
-                            return Ok(VcpuStop::Stopped);
-                        }
-                        let result = cpu.run().map_err(|e| e.to_string());
-                        shutdown.store(true, Ordering::Release);
-                        for cpu in &all_cpus {
-                            let _ = cpu.stop();
-                        }
-                        result
-                    }));
-                }
-
-                let monitor = {
-                    let control = Arc::clone(&control);
-                    let cpus = cpus.clone();
-                    let shutdown = Arc::clone(&shutdown);
-                    scope.spawn(move || {
-                        let mut stop_requested = false;
-                        while !shutdown.load(Ordering::Acquire) {
-                            if stop_requested || control.stop_requested().is_some() {
-                                stop_requested = true;
-                                for cpu in &cpus {
-                                    let _ = cpu.stop();
-                                }
-                            }
-                            thread::sleep(std::time::Duration::from_millis(10));
-                        }
-                    })
-                };
-
-                for join in joins {
-                    match join.join() {
-                        Ok(Ok(stop)) => {
-                            if matches!(stop, VcpuStop::GuestReset | VcpuStop::GuestPoweroff) {
-                                first_stop = stop;
-                            }
-                            for cpu in &cpus {
-                                let _ = cpu.stop();
-                            }
-                        }
-                        Ok(Err(error)) => {
-                            first_error.get_or_insert(error);
-                            for cpu in &cpus {
-                                let _ = cpu.stop();
-                            }
-                        }
-                        Err(_) => {
-                            first_error.get_or_insert_with(|| "vCPU thread panicked".to_string());
-                            for cpu in &cpus {
-                                let _ = cpu.stop();
-                            }
-                        }
-                    }
-                }
-                shutdown.store(true, Ordering::Release);
-                monitor.join().expect("vCPU stop monitor panicked");
-                if let Some(stop) = control.stop_requested() {
-                    first_stop = stop;
-                }
-                Ok::<(), RunError>(())
-            })?;
-
-            if let Some(error) = first_error {
-                return Err(RunError::Machine(error));
-            }
-            Ok(first_stop)
-        }
-
         fn run_selected<M, E>(
             preflight: Preflight,
             vcpus: u32,
@@ -2672,7 +2556,6 @@ mod machine_select {
         where
             E: std::error::Error + Send + Sync + 'static,
             M: Machine<Error = E, Platform = PlatformMachine>,
-            M: Attach<M::CpuState, Error = E, Output = Arc<M::Cpu>>,
             M: Attach<Arc<PciRoot>, Error = E, Output = Arc<dyn MmioAttachment>>,
             M: Attach<Arc<dillo_mmio_virtio::EmptySlot>, Error = E>,
             M: Attach<
@@ -2728,18 +2611,16 @@ mod machine_select {
             attach_devices(&mut vm, &platform, placements)?;
             drop(platform);
 
-            let control = Arc::new(SupervisorControl {
-                supervisor_shutdown,
-            });
             let cpu_profile = parsed.cpu_profile.as_str();
             crate::boot_trace::mark("guest_loaded");
-            let mut outcome = run_vcpus::<M, E>(
+            let mut outcome = dillo_runtime::run_cpus(
                 &mut vm,
                 vcpus,
                 cpu_profile,
-                &parsed.vcpu as &dyn BootVcpuState,
-                control,
-            )?;
+                &parsed.vcpu,
+                supervisor_shutdown,
+            )
+            .map_err(RunError::machine)?;
             while matches!(outcome, VcpuStop::GuestReset) {
                 log::info!("guest requested reboot - replaying launch writes");
                 vm.reset_for_reboot().map_err(RunError::machine)?;
@@ -2750,16 +2631,14 @@ mod machine_select {
                     vm.write_guest(gpa, data).map_err(RunError::machine)
                 })?;
                 pmi.release();
-                let control = Arc::new(SupervisorControl {
-                    supervisor_shutdown,
-                });
-                outcome = run_vcpus::<M, E>(
+                outcome = dillo_runtime::run_cpus(
                     &mut vm,
                     vcpus,
                     cpu_profile,
-                    &parsed.vcpu as &dyn BootVcpuState,
-                    control,
-                )?;
+                    &parsed.vcpu,
+                    supervisor_shutdown,
+                )
+                .map_err(RunError::machine)?;
             }
 
             if matches!(outcome, VcpuStop::GuestPoweroff) {

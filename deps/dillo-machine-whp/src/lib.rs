@@ -122,15 +122,6 @@ mod imp {
             Ok(())
         }
 
-        fn create_vcpu_inner(&self, idx: u32, cpu_profile: &str) -> Result<Vcpu, Error> {
-            let inner = self.inner.create_vcpu(idx, cpu_profile)?;
-            Ok(Vcpu {
-                inner,
-                mmio_bus: Arc::clone(&self.mmio_bus),
-                stop_requested: Arc::new(AtomicBool::new(false)),
-            })
-        }
-
         fn fixed_interrupt_requester(&self) -> FixedInterruptRequester {
             FixedInterruptRequester {
                 interrupt_controller: self.inner.interrupt_controller(),
@@ -194,8 +185,30 @@ mod imp {
     impl dillo_machine::Machine for Vm {
         type Error = Error;
         type Platform = PlatformMachine;
-        type Cpu = Cpu;
-        type CpuState = CpuState;
+        type CpuPreparation = CpuPreparation;
+
+        fn cpu_preparation(
+            &mut self,
+            index: u32,
+            profile: &str,
+            boot_state: &dyn BootVcpuState,
+        ) -> Result<Self::CpuPreparation, Self::Error> {
+            let boot_state = (index == 0)
+                .then(|| {
+                    boot_state
+                        .x86_64()
+                        .cloned()
+                        .ok_or_else(|| Error::UnhandledExit("boot vCPU state is not x86_64".into()))
+                })
+                .transpose()?;
+            Ok(CpuPreparation {
+                index,
+                profile: profile.into(),
+                boot_state,
+                machine: self.inner.clone(),
+                mmio_bus: Arc::clone(&self.mmio_bus),
+            })
+        }
 
         fn guest_address_bits() -> Result<u32, Self::Error> {
             crate::hypervisor::guest_address_bits()
@@ -310,83 +323,61 @@ mod imp {
     }
 
     #[derive(Debug)]
-    pub struct CpuState {
+    pub struct CpuPreparation {
         index: u32,
-        cpu_profile: String,
+        profile: String,
         boot_state: Option<pmi::vm::vcpu::x86_64::CpuState>,
+        machine: crate::hypervisor::Vm,
+        mmio_bus: Arc<Mutex<MmioBus>>,
     }
 
-    impl dillo_machine::CpuState for CpuState {
+    impl dillo_machine::CpuPreparation for CpuPreparation {
         type Error = Error;
+        type Runner = CpuRunner;
+        type Control = CpuControl;
 
-        fn new(
-            index: u32,
-            cpu_profile: &str,
-            boot_state: Option<&dyn BootVcpuState>,
-        ) -> Result<Self, Self::Error> {
-            let boot_state = (index == 0)
-                .then_some(boot_state)
-                .flatten()
-                .map(|state| {
-                    state
-                        .x86_64()
-                        .cloned()
-                        .ok_or_else(|| Error::UnhandledExit("boot vCPU state is not x86_64".into()))
-                })
-                .transpose()?;
-            Ok(Self {
-                index,
-                cpu_profile: cpu_profile.into(),
-                boot_state,
-            })
-        }
-    }
-
-    impl Attach<CpuState> for Vm {
-        type Error = Error;
-        type Output = Arc<Cpu>;
-
-        fn attach(&mut self, item: CpuState) -> Result<Self::Output, Self::Error> {
-            let mut vcpu = self.create_vcpu_inner(item.index, &item.cpu_profile)?;
-            if let Some(state) = &item.boot_state {
-                vcpu.set_x86_64_state(state)?;
+        fn prepare(self) -> Result<(CpuRunner, CpuControl), Error> {
+            let mut inner = self.machine.create_vcpu(self.index, &self.profile)?;
+            if let Some(state) = &self.boot_state {
+                inner.set_x86_64_state(state)?;
             }
-            let stop_requested = Arc::new(AtomicBool::new(false));
-            vcpu.stop_requested = Arc::clone(&stop_requested);
-            let cancel = vcpu.inner.cancel_handle();
-            Ok(Arc::new(Cpu {
-                vcpu: Mutex::new(vcpu),
-                cancel,
-                stop_requested,
-            }))
+            let target = Arc::new(StopTarget {
+                requested: AtomicBool::new(false),
+                cancel: Mutex::new(Some(inner.cancel_handle())),
+            });
+            Ok((
+                CpuRunner {
+                    inner,
+                    mmio_bus: self.mmio_bus,
+                    stop: Arc::clone(&target),
+                },
+                CpuControl(target),
+            ))
         }
     }
 
-    pub struct Cpu {
-        vcpu: Mutex<Vcpu>,
-        cancel: crate::hypervisor::VcpuCancel,
-        stop_requested: Arc<AtomicBool>,
+    #[derive(Debug)]
+    struct StopTarget {
+        requested: AtomicBool,
+        cancel: Mutex<Option<crate::hypervisor::VcpuCancel>>,
     }
 
-    impl std::fmt::Debug for Cpu {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("Cpu").finish_non_exhaustive()
-        }
-    }
+    #[derive(Debug)]
+    pub struct CpuControl(Arc<StopTarget>);
 
-    impl dillo_machine::Cpu for Cpu {
+    impl dillo_machine::CpuControl for CpuControl {
         type Error = Error;
-
-        fn run(&self) -> Result<VcpuStop, Self::Error> {
-            self.vcpu
-                .lock()
-                .expect("WHP vCPU lock poisoned")
-                .run_to_stop()
-        }
 
         fn stop(&self) -> Result<(), Self::Error> {
-            self.stop_requested.store(true, Ordering::Release);
-            self.cancel.cancel()
+            self.0.requested.store(true, Ordering::Release);
+            let cancel = self
+                .0
+                .cancel
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cancel
+                .as_ref()
+                .map_or(Ok(()), crate::hypervisor::VcpuCancel::cancel)
         }
     }
 
@@ -688,10 +679,22 @@ mod imp {
         }
     }
 
-    struct Vcpu {
+    #[derive(Debug)]
+    pub struct CpuRunner {
         inner: crate::hypervisor::Vcpu,
         mmio_bus: Arc<Mutex<MmioBus>>,
-        stop_requested: Arc<AtomicBool>,
+        stop: Arc<StopTarget>,
+    }
+
+    impl Drop for CpuRunner {
+        fn drop(&mut self) {
+            // Serialize cancel against retirement before the VP index is deleted.
+            self.stop
+                .cancel
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        }
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -707,24 +710,8 @@ mod imp {
         GuestReset,
     }
 
-    impl std::fmt::Debug for Vcpu {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("Vcpu")
-                .field("inner", &self.inner)
-                .field("mmio_bus", &self.mmio_bus)
-                .finish_non_exhaustive()
-        }
-    }
-
-    impl Vcpu {
-        fn set_x86_64_state(
-            &mut self,
-            state: &pmi::vm::vcpu::x86_64::CpuState,
-        ) -> Result<(), Error> {
-            self.inner.set_x86_64_state(state)
-        }
-
-        fn run(&mut self) -> Result<VcpuExit, Error> {
+    impl CpuRunner {
+        fn run_until_exit(&mut self) -> Result<VcpuExit, Error> {
             loop {
                 let bus = Arc::clone(&self.mmio_bus);
                 let exit = self.inner.run(
@@ -782,13 +769,17 @@ mod imp {
                 }
             }
         }
+    }
 
-        fn run_to_stop(&mut self) -> Result<VcpuStop, Error> {
+    impl dillo_machine::CpuRunner for CpuRunner {
+        type Error = Error;
+
+        fn run(&mut self) -> Result<VcpuStop, Error> {
             loop {
-                if self.stop_requested.load(Ordering::Acquire) {
+                if self.stop.requested.load(Ordering::Acquire) {
                     return Ok(VcpuStop::Stopped);
                 }
-                match self.run()? {
+                match self.run_until_exit()? {
                     VcpuExit::MmioWrite { .. } => {}
                     VcpuExit::Interrupted => return Ok(VcpuStop::Stopped),
                     VcpuExit::GuestPoweroff => return Ok(VcpuStop::GuestPoweroff),

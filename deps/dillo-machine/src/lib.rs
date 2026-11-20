@@ -79,27 +79,27 @@ pub trait Host {
     fn install_signal_watchers(supervisor_shutdown: &'static AtomicBool);
 }
 
-/// Backend-owned CPU input constructed from PMI/DTB-derived launch facts.
-pub trait CpuState: Send + 'static {
+/// Machine-bound input consumed on a CPU's owner thread.
+pub trait CpuPreparation: Send + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
+    type Runner: CpuRunner<Error = Self::Error>;
+    type Control: CpuControl<Error = Self::Error>;
 
-    fn new(
-        index: u32,
-        cpu_profile: &str,
-        boot_state: Option<&dyn BootVcpuState>,
-    ) -> Result<Self, Self::Error>
-    where
-        Self: Sized;
+    fn prepare(self) -> Result<(Self::Runner, Self::Control), Self::Error>;
 }
 
-/// Backend-owned CPU object attached to a machine.
-pub trait Cpu: Send + Sync + 'static {
+/// Native execution state operated and destroyed by its preparing thread.
+pub trait CpuRunner: 'static {
     type Error: std::error::Error + Send + Sync + 'static;
 
-    /// Run this CPU on the current thread until guest or supervisor stop.
-    fn run(&self) -> Result<VcpuStop, Self::Error>;
+    fn run(&mut self) -> Result<VcpuStop, Self::Error>;
+}
 
-    /// Make a currently running `run()` call return as soon as the backend can.
+/// A shareable endpoint for requesting stop and waking the CPU's owner.
+pub trait CpuControl: Send + Sync + 'static {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Record the stop request and wake the owner if it is still live.
     fn stop(&self) -> Result<(), Self::Error>;
 }
 
@@ -108,8 +108,15 @@ pub trait Machine: Sized + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
     /// Platform input accepted by this Machine's launch constructor.
     type Platform;
-    type Cpu: Cpu<Error = Self::Error> + Send;
-    type CpuState: CpuState<Error = Self::Error>;
+    type CpuPreparation: CpuPreparation<Error = Self::Error>;
+
+    /// Bind launch CPU inputs to this machine without creating a native runner.
+    fn cpu_preparation(
+        &mut self,
+        index: u32,
+        profile: &str,
+        boot_state: &dyn BootVcpuState,
+    ) -> Result<Self::CpuPreparation, Self::Error>;
 
     /// Maximum usable guest address width under this backend's CPU/VM policy.
     /// Intersects guest-visible physical width with backend GPA/IPA capacity.
@@ -148,11 +155,8 @@ pub enum VcpuStop {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt;
-    use std::sync::Arc;
-
     use super::*;
-    use dillo_mmio::Attach;
+    use std::fmt;
 
     #[test]
     fn arm_physical_width_uses_parange_only() {
@@ -175,30 +179,35 @@ mod tests {
 
     impl std::error::Error for TestError {}
 
-    struct TestCpuState;
+    struct TestBoot;
+    impl BootVcpuState for TestBoot {}
 
-    impl CpuState for TestCpuState {
+    struct TestCpuPreparation;
+
+    impl CpuPreparation for TestCpuPreparation {
         type Error = TestError;
+        type Runner = TestCpu;
+        type Control = TestCpuControl;
 
-        fn new(
-            _index: u32,
-            _cpu_profile: &str,
-            _boot_state: Option<&dyn BootVcpuState>,
-        ) -> Result<Self, Self::Error> {
-            Ok(Self)
+        fn prepare(self) -> Result<(Self::Runner, Self::Control), Self::Error> {
+            Ok((TestCpu, TestCpuControl))
         }
     }
 
-    struct TestCpu {
-        stop: VcpuStop,
-    }
+    struct TestCpu;
 
-    impl Cpu for TestCpu {
+    impl CpuRunner for TestCpu {
         type Error = TestError;
 
-        fn run(&self) -> Result<VcpuStop, Self::Error> {
-            Ok(self.stop)
+        fn run(&mut self) -> Result<VcpuStop, Self::Error> {
+            Ok(VcpuStop::Stopped)
         }
+    }
+
+    struct TestCpuControl;
+
+    impl CpuControl for TestCpuControl {
+        type Error = TestError;
 
         fn stop(&self) -> Result<(), Self::Error> {
             Ok(())
@@ -207,22 +216,19 @@ mod tests {
 
     struct TestMachine;
 
-    impl Attach<TestCpuState> for TestMachine {
-        type Error = TestError;
-        type Output = Arc<TestCpu>;
-
-        fn attach(&mut self, _item: TestCpuState) -> Result<Self::Output, Self::Error> {
-            Ok(Arc::new(TestCpu {
-                stop: VcpuStop::Stopped,
-            }))
-        }
-    }
-
     impl Machine for TestMachine {
         type Error = TestError;
         type Platform = ();
-        type Cpu = TestCpu;
-        type CpuState = TestCpuState;
+        type CpuPreparation = TestCpuPreparation;
+
+        fn cpu_preparation(
+            &mut self,
+            _index: u32,
+            _profile: &str,
+            _boot_state: &dyn BootVcpuState,
+        ) -> Result<Self::CpuPreparation, Self::Error> {
+            Ok(TestCpuPreparation)
+        }
 
         fn guest_address_bits() -> Result<u32, Self::Error> {
             Ok(48)
@@ -253,10 +259,11 @@ mod tests {
         machine
             .write_guest(0x1000, b"boot")
             .expect("guest write accepted");
-        let state = TestCpuState::new(0, "test-profile", None).expect("CPU state constructed");
-        let cpu = Attach::attach(&mut machine, state).expect("CPU attached");
-
-        cpu.stop().expect("CPU stopped");
+        let preparation = machine
+            .cpu_preparation(0, "test-profile", &TestBoot)
+            .unwrap();
+        let (mut cpu, control) = preparation.prepare().unwrap();
+        control.stop().expect("CPU stopped");
         assert_eq!(cpu.run().expect("CPU ran"), VcpuStop::Stopped);
     }
 }
