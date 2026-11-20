@@ -11,10 +11,8 @@
 //! Microarchitecture levels per the System V x86-64 psABI. Each level
 //! is a strict superset of the one below.
 //!
-//! This module owns profile parse, the mandatory feature table, and the
-//! native CPUID missing-feature check. Backends keep host probing that
-//! needs hypervisor types (KVM `CpuId` / `GET_SUPPORTED_CPUID`) and
-//! apply (`set_cpuid2`, WHP) local.
+//! This module owns profile parsing and the mandatory guest feature table.
+//! Backends query the capabilities they actually expose to guest CPUs.
 
 /// Microarchitecture level parsed from a `cpu:profile` string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,43 +176,6 @@ const _: () = {
     );
 };
 
-/// Return the first mandatory feature the current Windows/Linux host CPU
-/// does not expose through the native CPUID instruction.
-///
-/// This is used by WHP, which does not have KVM's `GET_SUPPORTED_CPUID`
-/// ioctl. It is still a per-feature check against concrete CPUID bits, not a
-/// vendor/family/model shortcut.
-#[cfg(any(target_os = "windows", test))]
-pub fn first_missing_native(level: X86Level) -> Option<&'static str> {
-    for feat in level.cumulative_features() {
-        if !native_has_feature(feat) {
-            return Some(feat.name);
-        }
-    }
-    None
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn native_has_feature(feat: &CpuidFeature) -> bool {
-    let max = if feat.function >= 0x8000_0000 {
-        core::arch::x86_64::__cpuid(0x8000_0000).eax
-    } else {
-        core::arch::x86_64::__cpuid(0).eax
-    };
-    if feat.function > max {
-        return false;
-    }
-
-    let cpuid = core::arch::x86_64::__cpuid_count(feat.function, feat.index);
-    let value = match feat.reg {
-        Reg::Eax => cpuid.eax,
-        Reg::Ebx => cpuid.ebx,
-        Reg::Ecx => cpuid.ecx,
-        Reg::Edx => cpuid.edx,
-    };
-    (value >> feat.bit) & 1 == 1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,10 +215,5 @@ mod tests {
         assert!(v1.is_subset(&v2));
         assert!(v2.is_subset(&v3));
         assert!(v3.is_subset(&v4));
-    }
-
-    #[test]
-    fn native_cpuid_supports_at_least_v1() {
-        assert_eq!(first_missing_native(X86Level::V1), None);
     }
 }

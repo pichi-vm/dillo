@@ -3,7 +3,6 @@
 
 #![cfg(target_os = "windows")]
 
-mod cpuid_x86;
 mod hypervisor;
 mod ioapic;
 
@@ -341,13 +340,7 @@ mod imp {
             if let Some(state) = &self.boot_state
                 && let Err(operation) = inner.set_x86_64_state(state)
             {
-                return Err(match inner.retire() {
-                    Ok(()) => operation,
-                    Err(retirement) => Error::VcpuCleanup {
-                        operation: Box::new(operation),
-                        retirement: Box::new(retirement),
-                    },
-                });
+                return Err(inner.cleanup_error(operation));
             }
             let target = Arc::new(StopTarget {
                 requested: AtomicBool::new(false),
