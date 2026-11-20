@@ -1592,6 +1592,17 @@ mod raw {
         idx: u32,
         name: WHV_REGISTER_NAME,
     ) -> Result<u64, HResult> {
+        let value = get_virtual_processor_register(partition, idx, name)?;
+        // SAFETY: caller requests a scalar u64 register.
+        Ok(unsafe { value.Reg64 })
+    }
+
+    #[cfg(test)]
+    pub(super) fn get_virtual_processor_register(
+        partition: PartitionHandle,
+        idx: u32,
+        name: WHV_REGISTER_NAME,
+    ) -> Result<WHV_REGISTER_VALUE, HResult> {
         let names = [name];
         let mut values = [WHV_REGISTER_VALUE::default()];
         // SAFETY: `names` and `values` point to one initialized register
@@ -1608,9 +1619,7 @@ mod raw {
         if failed(hr) {
             return Err(HResult(hr));
         }
-        // SAFETY: caller requests only scalar u64 registers through this test
-        // helper, so the Reg64 union member is the expected interpretation.
-        Ok(unsafe { values[0].Reg64 })
+        Ok(values[0])
     }
 
     pub(super) fn map_gpa_range(
@@ -1855,6 +1864,190 @@ mod tests {
             .expect("create WHP vCPU 0");
         vm.create_vcpu_without_ram_check(1, "x86-64-v2")
             .expect("create WHP vCPU 1");
+    }
+
+    #[test]
+    fn whp_guest_directed_ap_startup() {
+        use std::time::Duration;
+        use windows_sys::Win32::System::Hypervisor::WHvX64RegisterApicBase;
+
+        const BSP: u64 = 0x1000;
+        const SIPI: u64 = 0x7000;
+        const WAIT: Duration = Duration::from_millis(300);
+        const RUN: Duration = Duration::from_secs(2);
+        const STARTUP_SUSPEND: u64 = 1;
+
+        if !native_test_child("whp_guest_directed_ap_startup") {
+            return;
+        }
+
+        let mut vm = Vm::new_x86_64_with_local_apic_count(2).unwrap();
+        vm.set_memory(
+            GuestMemoryMmap::from_ranges(&[
+                (GuestAddress(0), 0x10_0000),
+                (GuestAddress(0xffff_f000), 0x1000),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+
+        vm.write_guest(
+            BSP,
+            &[
+                0xc7, 0x05, 0xf0, 0x00, 0xe0, 0xfe, 0xff, 0x01, 0x00, 0x00, // enable LAPIC
+                0xc7, 0x05, 0x10, 0x03, 0xe0, 0xfe, 0x00, 0x00, 0x00, 0x01, // APIC ID 1
+                0xba, 0x00, 0x03, 0xe0, 0xfe, // mov edx, LAPIC ICR low
+                0xc7, 0x02, 0x00, 0xc5, 0x00, 0x00, // assert INIT
+                0xf7, 0x02, 0x00, 0x10, 0x00, 0x00, 0x75, 0xf8, // wait for ICR idle
+                0xc7, 0x02, 0x00, 0x85, 0x00, 0x00, // deassert INIT
+                0xf7, 0x02, 0x00, 0x10, 0x00, 0x00, 0x75, 0xf8, // wait for ICR idle
+                0xb0, 0xb1, 0xe6, 0x42, // INIT marker
+                0xc7, 0x02, 0x07, 0x46, 0x00, 0x00, // SIPI vector 7
+                0xf7, 0x02, 0x00, 0x10, 0x00, 0x00, 0x75, 0xf8, // wait for ICR idle
+                0xb0, 0xb2, 0xe6, 0x42, 0xf4, // SIPI marker, hlt
+            ],
+        )
+        .unwrap();
+        // The AP can emit this marker only after reaching the requested real-mode vector.
+        vm.write_guest(SIPI, &[0xb0, 0xa7, 0xe6, 0x42, 0xf4])
+            .unwrap();
+
+        // Each VP is created, run and retired on this test owner thread.
+        let mut bsp = vm.create_vcpu(0, "x86-64-v1").unwrap();
+        let mut ap = vm.create_vcpu(1, "x86-64-v1").unwrap();
+        let initial = ap_activity(&ap, "created");
+
+        let mut state = real_mode_state(0, BSP);
+        state.cr0 = 0x21;
+        for (segment, flags) in [
+            (&mut state.cs, 0x0c9b),
+            (&mut state.ds, 0x0c93),
+            (&mut state.es, 0x0c93),
+            (&mut state.fs, 0x0c93),
+            (&mut state.gs, 0x0c93),
+            (&mut state.ss, 0x0c93),
+        ] {
+            segment.limit = u32::MAX;
+            segment.attributes = pmi::vm::vcpu::x86_64::SegAttributes::new(flags).unwrap();
+        }
+        bsp.set_x86_64_state(&state).unwrap();
+        let apic_base = raw::get_virtual_processor_register_u64(
+            bsp.partition.partition,
+            bsp.idx,
+            WHvX64RegisterApicBase,
+        )
+        .map_err(super::status);
+        eprintln!("WHP BSP APIC base: {apic_base:#x?}");
+
+        place_ap_reset_marker(&mut vm, &ap, "created");
+        let before = run_ap_probe(&mut ap, "AP before INIT", WAIT);
+        let init = run_ap_probe(&mut bsp, "BSP INIT", RUN);
+        let after_init = ap_activity(&ap, "after INIT");
+        place_ap_reset_marker(&mut vm, &ap, "after INIT");
+        let waiting = run_ap_probe(&mut ap, "AP before SIPI", WAIT);
+        let sipi = run_ap_probe(&mut bsp, "BSP SIPI", RUN);
+        let entered = run_ap_probe(&mut ap, "AP after SIPI", RUN);
+        let after_sipi = ap_activity(&ap, "after SIPI");
+        let entry_base = ap_cs_base(&ap);
+        eprintln!("WHP AP SIPI CS base: {entry_base:#x}");
+
+        ap.retire().unwrap();
+        bsp.retire().unwrap();
+        assert!(matches!(initial, Ok(value) if value & STARTUP_SUSPEND != 0));
+        assert!(matches!(after_init, Ok(value) if value & STARTUP_SUSPEND != 0));
+        for run in [before, waiting] {
+            assert!(
+                matches!(run, (Ok(VmExit::Interrupted), Some(Ok(())), elapsed) if elapsed >= WAIT / 2),
+                "expected suspended AP to wait for cancellation, got {run:?}"
+            );
+        }
+        for (run, expected) in [(init, 0xb1), (sipi, 0xb2), (entered, 0xa7)] {
+            assert!(
+                matches!(&run, (Ok(VmExit::PioWrite { port: 0x42, size: 1, data }), None, _)
+                    if data[0] == expected),
+                "expected guest marker {expected:#x}, got {run:?}"
+            );
+        }
+        assert!(matches!(after_sipi, Ok(value) if value & STARTUP_SUSPEND == 0));
+        assert_eq!(entry_base, SIPI);
+    }
+
+    fn ap_activity(ap: &super::Vcpu, phase: &str) -> Result<u64, String> {
+        use windows_sys::Win32::System::Hypervisor::WHvRegisterInternalActivityState;
+
+        let activity = raw::get_virtual_processor_register(
+            ap.partition.partition,
+            ap.idx,
+            WHvRegisterInternalActivityState,
+        )
+        .map(|value| {
+            // SAFETY: this WHP register returns an InternalActivity value.
+            #[allow(unsafe_code)]
+            unsafe {
+                value.InternalActivity.AsUINT64
+            }
+        })
+        .map_err(super::status);
+        eprintln!("WHP AP activity {phase}: {activity:#x?}");
+        activity
+    }
+
+    fn ap_cs_base(ap: &super::Vcpu) -> u64 {
+        use windows_sys::Win32::System::Hypervisor::WHvX64RegisterCs;
+
+        let cs =
+            raw::get_virtual_processor_register(ap.partition.partition, ap.idx, WHvX64RegisterCs)
+                .map_err(super::status)
+                .expect("read AP CS");
+        // SAFETY: WHvX64RegisterCs returns a Segment value.
+        #[allow(unsafe_code)]
+        unsafe {
+            cs.Segment.Base
+        }
+    }
+
+    fn place_ap_reset_marker(vm: &mut Vm, ap: &super::Vcpu, phase: &str) {
+        let rip = raw::get_virtual_processor_register_u64(
+            ap.partition.partition,
+            ap.idx,
+            WHvX64RegisterRip,
+        )
+        .map_err(super::status)
+        .expect("read AP RIP");
+        let reset = ap_cs_base(ap).checked_add(rip).unwrap();
+        eprintln!("WHP AP reset entry {phase}: {reset:#x}");
+        // A running AP at its native reset location visibly diverges from the
+        // SIPI path. No AP registers are written by the fixture.
+        vm.write_guest(reset, &[0xb0, 0xee, 0xe6, 0x42, 0xf4])
+            .expect("write AP reset marker");
+    }
+
+    fn run_ap_probe(
+        cpu: &mut super::Vcpu,
+        phase: &str,
+        timeout: std::time::Duration,
+    ) -> (
+        Result<VmExit, Error>,
+        Option<Result<(), Error>>,
+        std::time::Duration,
+    ) {
+        eprintln!("WHP {phase}: entering with deadline {timeout:?}");
+        let cancel = cpu.cancel_handle();
+        let (done, completed) = std::sync::mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            matches!(
+                completed.recv_timeout(timeout),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            )
+            .then(|| cancel.cancel())
+        });
+        let start = std::time::Instant::now();
+        let exit = cpu.run(|_, _| 0, |_, _| false);
+        let elapsed = start.elapsed();
+        let _ = done.send(());
+        let cancellation = watchdog.join().unwrap();
+        eprintln!("WHP {phase}: exit={exit:?} cancellation={cancellation:?} elapsed={elapsed:?}");
+        (exit, cancellation, elapsed)
     }
 
     #[test]

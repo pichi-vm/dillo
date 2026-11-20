@@ -1,0 +1,69 @@
+name: Native WHP AP startup probe
+
+on:
+  push:
+    branches: [diag/current-pmi-whp-ap]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    if: github.ref == 'refs/heads/diag/current-pmi-whp-ap'
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      RUSTFLAGS: -D warnings
+      EVIDENCE: target/whp-ap-startup-evidence
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+
+      - name: Record source and Windows platform
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:EVIDENCE | Out-Null
+          $source = git rev-parse HEAD
+          $base = git rev-parse HEAD^
+          "source=$source parent=$base" | Tee-Object "$env:EVIDENCE/platform.log"
+          if ($source -cne $env:GITHUB_SHA) { throw 'Unexpected checkout' }
+          if ($base -cne 'a9387f3d67d0d9dd5ecf0b898c53c4d22f4d74d0') { throw 'Unexpected probe base' }
+          if (git status --porcelain --untracked-files=no) { throw 'Modified tracked files' }
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber |
+            Out-String | Tee-Object -Append "$env:EVIDENCE/platform.log"
+          Get-CimInstance Win32_Processor | Select-Object Name,Manufacturer |
+            Out-String | Tee-Object -Append "$env:EVIDENCE/platform.log"
+          Get-Item "$env:SystemRoot/System32/WinHvPlatform.dll" |
+            ForEach-Object { $_.VersionInfo.FileVersion } | Tee-Object -Append "$env:EVIDENCE/platform.log"
+          rustup show 2>&1 | Tee-Object -Append "$env:EVIDENCE/platform.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run the native WHP probe
+        shell: pwsh
+        run: |
+          $fixture = 'hypervisor::tests::whp_guest_directed_ap_startup'
+          cargo --config .copr/cargo-config.toml test --locked -p dillo-machine-whp --lib $fixture -- --list 2>&1 |
+            Tee-Object "$env:EVIDENCE/list.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Select-String -Path "$env:EVIDENCE/list.log" -SimpleMatch "${fixture}: test")) {
+            throw 'Missing native probe'
+          }
+          cargo --config .copr/cargo-config.toml test --locked -p dillo-machine-whp --lib $fixture -- --exact --nocapture --test-threads=1 2>&1 |
+            Tee-Object "$env:EVIDENCE/native.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($marker in 'AP activity created', 'AP before SIPI: exit=', 'AP after SIPI: exit=') {
+            if (-not (Select-String -Path "$env:EVIDENCE/native.log" -SimpleMatch "WHP $marker")) {
+              throw "Missing native evidence for $marker"
+            }
+          }
+
+      - name: Preserve native logs
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: whp-ap-startup-${{ github.sha }}
+          path: target/whp-ap-startup-evidence/
