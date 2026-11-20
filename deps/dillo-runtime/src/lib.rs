@@ -126,7 +126,7 @@ impl<'scope, C: CpuControl> Owners<'scope, C> {
         let (complete, results) = mpsc::channel();
         for index in 0..count {
             if shutdown.load(Ordering::Acquire) {
-                return Ok(VcpuStop::Stopped);
+                break;
             }
             let preparation = machine
                 .cpu_preparation(index, profile, boot_state)
@@ -159,18 +159,18 @@ impl<'scope, C: CpuControl> Owners<'scope, C> {
                 .push(prepared.recv().map_err(|_| owner_panic(index))??);
         }
         drop(complete);
-        machine
-            .prepare_vcpu_run()
-            .map_err(|error| CpuError(format!("finalize vCPUs: {error}")))?;
-        if shutdown.load(Ordering::Acquire) {
-            return Ok(VcpuStop::Stopped);
+        let mut remaining = self.threads.len();
+        if remaining == count as usize && !shutdown.load(Ordering::Acquire) {
+            machine
+                .prepare_vcpu_run()
+                .map_err(|error| CpuError(format!("finalize vCPUs: {error}")))?;
+            *permitted = !shutdown.load(Ordering::Acquire);
         }
-        *permitted = true;
         drop(permitted);
 
+        // Even without entry permission, retiring a prepared owner can fail.
         let mut outcome = VcpuStop::Stopped;
         let mut failure = None;
-        let mut remaining = count;
         while remaining > 0 {
             if !gate.admits(shutdown) {
                 self.stop();
