@@ -73,6 +73,7 @@ impl InvariantTsc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hypervisor::Vm;
     use kvm_bindings::kvm_cpuid_entry2;
     use kvm_ioctls::Kvm;
 
@@ -125,8 +126,7 @@ mod tests {
         let supported = kvm
             .get_supported_cpuid(kvm_bindings::KVM_MAX_CPUID_ENTRIES)
             .unwrap();
-        let vm = kvm.create_vm().unwrap();
-        vm.create_irq_chip().unwrap();
+        let vm = Vm::test_new().unwrap();
         println!(
             "AMD invariant TSC advertised: {}",
             InvariantTsc::advertised(&supported)
@@ -134,7 +134,7 @@ mod tests {
         for id in [0, 1] {
             let mut cpuid = supported.clone();
             crate::cpuid_x86::set_apic_id(&mut cpuid, id);
-            let cpu = vm.create_vcpu(u64::from(id)).unwrap();
+            let cpu = vm.fd().create_vcpu(u64::from(id)).unwrap();
             cpu.set_cpuid2(&cpuid).unwrap();
             let mut registers = Msrs::from_entries(&[kvm_msr_entry {
                 index: HWCR,
