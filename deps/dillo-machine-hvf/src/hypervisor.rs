@@ -753,9 +753,101 @@ mod tests {
         }
         vm.write_guest(base, &bytes).expect("write_guest");
 
+        // Guest MRS X0 followed by STR X0,[X1,#offset].
+        let mrs = [
+            0xd538_0400u32,
+            0xd538_0600,
+            0xd538_0700,
+            0xd538_0500,
+            0xd53b_0020,
+            0xd538_1000,
+        ];
+        let mut probe = Vec::new();
+        for (offset, instruction) in mrs.into_iter().enumerate() {
+            probe.extend_from_slice(&instruction.to_le_bytes());
+            probe.extend_from_slice(&(0xf900_0020 | ((offset as u32) << 10)).to_le_bytes());
+        }
+        probe.extend_from_slice(&0xd400_0002u32.to_le_bytes());
+        vm.write_guest(base + 0x100, &probe).unwrap();
+
         let exported = vm.guest_memory().unwrap();
         let vcpu = vm.create_vcpu_current_thread().expect("create_vcpu");
         drop(vm);
+
+        for n in 0..=30 {
+            vcpu.set_gpr(n, u64::from(n) + 1).unwrap();
+        }
+        vcpu.inner.set_reg(Reg::PC, base).unwrap();
+        vcpu.inner.set_reg(Reg::CPSR, 0x385).unwrap();
+        vcpu.inner.set_sys_reg(SysReg::SP_EL0, 0x1000).unwrap();
+        vcpu.inner.set_sys_reg(SysReg::SP_EL1, 0x2000).unwrap();
+        let mask = 0x0200_1005;
+        let sctlr = vcpu.inner.get_sys_reg(SysReg::SCTLR_EL1).unwrap();
+        vcpu.inner
+            .set_sys_reg(SysReg::SCTLR_EL1, sctlr | mask)
+            .unwrap();
+        let dirty_sctlr = vcpu.inner.get_sys_reg(SysReg::SCTLR_EL1).unwrap();
+        vcpu.initialize_bsp().unwrap();
+        for n in 0..=30 {
+            assert_eq!(vcpu.inner.get_reg(gpr(n)).unwrap(), 0);
+        }
+        assert_eq!(vcpu.inner.get_reg(Reg::PC).unwrap(), 0);
+        assert_eq!(vcpu.inner.get_reg(Reg::CPSR).unwrap(), 0x3c5);
+        assert_eq!(vcpu.inner.get_sys_reg(SysReg::SP_EL0).unwrap(), 0);
+        assert_eq!(vcpu.inner.get_sys_reg(SysReg::SP_EL1).unwrap(), 0);
+        assert_eq!(
+            vcpu.inner.get_sys_reg(SysReg::SCTLR_EL1).unwrap(),
+            dirty_sctlr & !mask
+        );
+
+        vcpu.admit_arm_v8_0().unwrap();
+        vcpu.inner.set_reg(Reg::PC, base + 0x100).unwrap();
+        vcpu.set_gpr(1, base + 0x800).unwrap();
+        assert!(matches!(
+            vcpu.run().unwrap(),
+            VmExit::Smccc {
+                method: PsciMethod::Hvc,
+                ..
+            }
+        ));
+        let saved_sctlr = vcpu.inner.get_sys_reg(SysReg::SCTLR_EL1).unwrap();
+        let expected = [
+            ("ID_AA64PFR0_EL1", vcpu.evidence.pfr0),
+            ("ID_AA64ISAR0_EL1", vcpu.evidence.isar0),
+            ("ID_AA64MMFR0_EL1", vcpu.evidence.mmfr0),
+            ("ID_AA64DFR0_EL1", vcpu.evidence.dfr0),
+            ("CTR_EL0", vcpu.evidence.ctr),
+            ("SCTLR_EL1", saved_sctlr),
+        ];
+        let guest: [u64; 6] = std::array::from_fn(|idx| {
+            exported
+                .read_obj(GuestAddress(base + 0x800 + idx as u64 * 8))
+                .unwrap()
+        });
+        for ((name, expected), value) in expected.iter().zip(guest) {
+            eprintln!("HVF {name}: guest={value:#x}, native={expected:#x}");
+        }
+        assert_eq!(guest[5] & 0x0200_1005, 0);
+        for (((name, wanted), value), instruction) in expected.into_iter().zip(guest).zip(mrs) {
+            assert_eq!(value, wanted, "guest {name}");
+            // Exercise the trapped path even when the native owner handles
+            // this particular MRS directly. Rt is X3, with ISS[0] set for MRS.
+            let op = instruction >> 5;
+            let iss = (((op >> 14) & 3) << 20)
+                | ((op & 7) << 17)
+                | (((op >> 11) & 7) << 14)
+                | (((op >> 7) & 15) << 10)
+                | (((op >> 3) & 15) << 1)
+                | (3 << 5)
+                | 1;
+            vcpu.handle_sysreg_trap((0x18 << 26) | u64::from(iss))
+                .unwrap();
+            assert_eq!(
+                vcpu.inner.get_reg(Reg::X3).unwrap(),
+                wanted,
+                "trapped {name}"
+            );
+        }
 
         // 1) HVC.
         vcpu.initialize_el1(base, 0, false).expect("state");
@@ -912,6 +1004,7 @@ mod tests {
     fn hvf_psci_uses_only_the_surveyed_conduit() {
         if native_test_child("hypervisor::tests::hvf_psci_uses_only_the_surveyed_conduit") {
             crate::imp::tests::check_psci_conduits(RAM_SIZE);
+            crate::imp::tests::check_psci_ap_start(RAM_SIZE);
         }
     }
 
