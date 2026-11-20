@@ -64,16 +64,6 @@ struct Owners<'scope, C: CpuControl> {
     controls: Vec<C>,
 }
 
-impl<C: CpuControl> Owners<'_, C> {
-    fn stop(&self) {
-        for control in &self.controls {
-            if let Err(error) = control.stop() {
-                log::debug!("vCPU stop wake failed: {error}");
-            }
-        }
-    }
-}
-
 impl<C: CpuControl> Drop for Owners<'_, C> {
     fn drop(&mut self) {
         // On unwind the gate guard has already denied entry. After permission,
@@ -100,13 +90,38 @@ pub fn run_cpus<M: Machine>(
 ) -> Result<VcpuStop, CpuError> {
     let gate = ExecutionGate(Mutex::new(false));
     thread::scope(|scope| {
-        let mut owners = Owners {
+        Owners {
             gate: &gate,
             threads: Vec::with_capacity(count as usize),
             controls: Vec::with_capacity(count as usize),
-        };
-        // Acquire after constructing Owners so any return drops the guard
-        // before Owners waits for the prepared threads to finish.
+        }
+        .run(scope, machine, count, profile, boot_state, shutdown)
+    })
+}
+
+impl<'scope, C: CpuControl> Owners<'scope, C> {
+    fn stop(&self) {
+        for control in &self.controls {
+            if let Err(error) = control.stop() {
+                log::debug!("vCPU stop wake failed: {error}");
+            }
+        }
+    }
+
+    fn run<M: Machine>(
+        mut self,
+        scope: &'scope thread::Scope<'scope, '_>,
+        machine: &mut M,
+        count: u32,
+        profile: &str,
+        boot_state: &dyn BootVcpuState,
+        shutdown: &'scope AtomicBool,
+    ) -> Result<VcpuStop, CpuError>
+    where
+        M::CpuPreparation: CpuPreparation<Control = C>,
+    {
+        // This guard drops before self joins any owners on error or unwind.
+        let gate = self.gate;
         let mut permitted = gate.0.lock().expect("initial execution gate");
         let (complete, results) = mpsc::channel();
         for index in 0..count {
@@ -118,7 +133,6 @@ pub fn run_cpus<M: Machine>(
                 .map_err(|error| CpuError(format!("bind vCPU {index}: {error}")))?;
             let (ready, prepared) = mpsc::sync_channel(1);
             let complete = complete.clone();
-            let gate = &gate;
             let owner = thread::Builder::new()
                 .name(format!("dillo-vcpu-{index}"))
                 .spawn_scoped(scope, move || {
@@ -140,9 +154,8 @@ pub fn run_cpus<M: Machine>(
                     let _ = complete.send(result.unwrap_or_else(|_| Err(owner_panic(index))));
                 })
                 .map_err(|error| CpuError(format!("spawn vCPU {index}: {error}")))?;
-            owners.threads.push(owner);
-            owners
-                .controls
+            self.threads.push(owner);
+            self.controls
                 .push(prepared.recv().map_err(|_| owner_panic(index))??);
         }
         drop(complete);
@@ -160,7 +173,7 @@ pub fn run_cpus<M: Machine>(
         let mut remaining = count;
         while remaining > 0 {
             if !gate.admits(shutdown) {
-                owners.stop();
+                self.stop();
             }
             match results.recv_timeout(WAKE_INTERVAL) {
                 Ok(result) => {
@@ -185,7 +198,7 @@ pub fn run_cpus<M: Machine>(
                 }
             }
         }
-        drop(owners);
+        drop(self);
         if let Some(error) = failure {
             Err(error)
         } else if shutdown.load(Ordering::Acquire) {
@@ -193,7 +206,7 @@ pub fn run_cpus<M: Machine>(
         } else {
             Ok(outcome)
         }
-    })
+    }
 }
 
 fn owner_panic(index: u32) -> CpuError {
