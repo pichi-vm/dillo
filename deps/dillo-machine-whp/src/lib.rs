@@ -28,7 +28,7 @@ mod imp {
         devtree::{OwnedTree, Tree},
         platform::Machine as PlatformMachine,
     };
-    use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
+    use dillo_machine::{CpuProfile, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
     use dillo_mmio::{
         Attach, Interrupt, InterruptError, InterruptLine, MessageInterrupt, MessageInterruptDomain,
         MmioAttachment, MmioBus, MmioDevice, MmioDeviceHandle, MmioInterrupt,
@@ -189,21 +189,14 @@ mod imp {
         fn cpu_preparation(
             &mut self,
             index: u32,
-            profile: &str,
-            boot_state: &dyn BootVcpuState,
+            profile: CpuProfile,
         ) -> Result<Self::CpuPreparation, Self::Error> {
-            let boot_state = (index == 0)
-                .then(|| {
-                    boot_state
-                        .x86_64()
-                        .cloned()
-                        .ok_or_else(|| Error::UnhandledExit("boot vCPU state is not x86_64".into()))
-                })
-                .transpose()?;
+            let CpuProfile::X86_64(profile) = profile else {
+                return Err(Error::UnsupportedCpuProfile(profile));
+            };
             Ok(CpuPreparation {
                 index,
-                profile: profile.into(),
-                boot_state,
+                profile,
                 machine: self.inner.clone(),
                 mmio_bus: Arc::clone(&self.mmio_bus),
             })
@@ -324,8 +317,7 @@ mod imp {
     #[derive(Debug)]
     pub struct CpuPreparation {
         index: u32,
-        profile: String,
-        boot_state: Option<pmi::vm::vcpu::x86_64::CpuState>,
+        profile: pmi::x86_64::Profile,
         machine: crate::hypervisor::Vm,
         mmio_bus: Arc<Mutex<MmioBus>>,
     }
@@ -336,9 +328,9 @@ mod imp {
         type Control = CpuControl;
 
         fn prepare(self) -> Result<(CpuRunner, CpuControl), Error> {
-            let mut inner = self.machine.create_vcpu(self.index, &self.profile)?;
-            if let Some(state) = &self.boot_state
-                && let Err(operation) = inner.set_x86_64_state(state)
+            let mut inner = self.machine.create_vcpu(self.index, self.profile)?;
+            if self.index == 0
+                && let Err(operation) = inner.initialize_bsp()
             {
                 return Err(inner.cleanup_error(operation));
             }

@@ -24,7 +24,7 @@ use applevisor::prelude::{
 };
 
 use dillo_devtree::platform::PsciMethod;
-use dillo_machine::RamRange;
+use dillo_machine::{ArmV8Evidence, RamRange};
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 
 use crate::VmExit;
@@ -33,6 +33,8 @@ use crate::VmExit;
 /// `arma/src/base_dtb/aarch64.rs` and TODO.md #10).
 /// AArch64 instruction length (no 16-bit encodings).
 const INSN_LEN: u64 = 4;
+
+const SCTLR_EE: u64 = 1 << 25;
 
 /// In-kernel GICv3 placement, derived by the platform layer from the DTB
 /// (`/intc`+`/v2m`) and handed to [`Vm::new`]. The hypervisor never hardcodes
@@ -67,6 +69,15 @@ pub enum Error {
     },
     #[error("hvf: VM not initialized")]
     NoVm,
+    #[error("unsupported cpu:profile {0:?}")]
+    UnsupportedCpuProfile(dillo_machine::CpuProfile),
+    #[error("read Arm guest profile register {register}: {source}")]
+    ArmProfileRead {
+        register: &'static str,
+        source: HypervisorError,
+    },
+    #[error("Armv8.0-A guest CPU admission: {0}")]
+    ArmProfileAdmission(&'static str),
     #[error("hvf: guest address {0:#x} not in any mapped region")]
     UnmappedGuestAddr(u64),
 }
@@ -340,8 +351,31 @@ impl Vm {
     }
 
     fn create_vcpu(&self) -> Result<Vcpu, Error> {
+        let config = VcpuConfig::default();
+        let ctr = config
+            .get_feature_reg(FeatureReg::CTR_EL0)
+            .map_err(|source| Error::ArmProfileRead {
+                register: "CTR_EL0",
+                source,
+            })?;
+        let inner = self.instance().vcpu_with_config(config)?;
+        let read = |register, selector| {
+            inner
+                .get_sys_reg(selector)
+                .map_err(|source| Error::ArmProfileRead { register, source })
+        };
+        let evidence = ArmV8Evidence {
+            pfr0: read("ID_AA64PFR0_EL1", SysReg::ID_AA64PFR0_EL1)?,
+            isar0: read("ID_AA64ISAR0_EL1", SysReg::ID_AA64ISAR0_EL1)?,
+            // The pinned HVF API exposes no typed ID_ISAR5_EL1 selector.
+            isar5: None,
+            mmfr0: read("ID_AA64MMFR0_EL1", SysReg::ID_AA64MMFR0_EL1)?,
+            dfr0: read("ID_AA64DFR0_EL1", SysReg::ID_AA64DFR0_EL1)?,
+            ctr,
+        };
         Ok(Vcpu {
-            inner: self.instance().vcpu_create()?,
+            inner,
+            evidence,
             pending_mmio: Cell::new(None),
             _vm: self.clone(),
         })
@@ -368,41 +402,81 @@ struct PendingMmio {
     srt: u8,
 }
 
+#[derive(Debug)]
+pub(crate) struct CpuOnRequest {
+    pub(crate) entry: u64,
+    pub(crate) context: u64,
+    pub(crate) big_endian: bool,
+}
+
 /// A single vCPU, bound to the thread that created it.
 #[derive(Debug)]
 pub(crate) struct Vcpu {
     inner: AvVcpu,
+    evidence: ArmV8Evidence,
     pending_mmio: Cell<Option<PendingMmio>>,
     // Destroy the native vCPU before releasing its VM.
     _vm: Vm,
 }
 
 impl Vcpu {
-    /// Program the boot vCPU register state from the PMI `vm:vcpu` map.
-    pub(crate) fn set_aarch64_state(
-        &self,
-        state: &pmi::vm::vcpu::aarch64::CpuState,
-    ) -> Result<(), Error> {
-        // General-purpose registers x0..x30.
-        let gprs = [
-            state.x0, state.x1, state.x2, state.x3, state.x4, state.x5, state.x6, state.x7,
-            state.x8, state.x9, state.x10, state.x11, state.x12, state.x13, state.x14, state.x15,
-            state.x16, state.x17, state.x18, state.x19, state.x20, state.x21, state.x22, state.x23,
-            state.x24, state.x25, state.x26, state.x27, state.x28, state.x29, state.x30,
-        ];
-        for (n, &v) in gprs.iter().enumerate() {
-            self.inner.set_reg(gpr(n as u8), v)?;
+    pub(crate) fn admit_arm_v8_0(&self) -> Result<(), Error> {
+        let sctlr = self
+            .inner
+            .get_sys_reg(SysReg::SCTLR_EL1)
+            .map_err(|source| Error::ArmProfileRead {
+                register: "SCTLR_EL1",
+                source,
+            })?;
+        self.evidence
+            .validate(sctlr)
+            .map_err(Error::ArmProfileAdmission)
+    }
+
+    /// Apply only the register values fixed by PMI's AArch64 vm contract.
+    pub(crate) fn initialize_bsp(&self) -> Result<(), Error> {
+        self.initialize_el1(0, 0, false)
+    }
+
+    pub(crate) fn cpu_on_request(&self, entry: u64, context: u64) -> Result<CpuOnRequest, Error> {
+        Ok(CpuOnRequest {
+            entry,
+            context,
+            // PSCI DEN0022F.b §6.4.3.2 requires the caller's live EL1 endianness.
+            big_endian: self.el1_big_endian()?,
+        })
+    }
+
+    pub(crate) fn initialize_secondary(&self, request: CpuOnRequest) -> Result<(), Error> {
+        self.initialize_el1(request.entry, request.context, request.big_endian)?;
+        if self.el1_big_endian()? != request.big_endian {
+            return Err(Error::Hv(format!(
+                "CPU_ON target did not accept SCTLR_EL1.EE={}",
+                u8::from(request.big_endian)
+            )));
         }
-        self.inner.set_reg(Reg::PC, state.pc)?;
-        self.inner.set_reg(Reg::CPSR, state.pstate.get())?;
-        self.inner.set_sys_reg(SysReg::SP_EL1, state.sp_el1)?;
-        self.inner.set_sys_reg(SysReg::SCTLR_EL1, state.sctlr_el1)?;
-        self.inner.set_sys_reg(SysReg::VBAR_EL1, state.vbar_el1)?;
-        self.inner.set_sys_reg(SysReg::CPACR_EL1, state.cpacr_el1)?;
-        self.inner.set_sys_reg(SysReg::TCR_EL1, state.tcr_el1)?;
-        self.inner.set_sys_reg(SysReg::TTBR0_EL1, state.ttbr0_el1)?;
-        self.inner.set_sys_reg(SysReg::TTBR1_EL1, state.ttbr1_el1)?;
-        self.inner.set_sys_reg(SysReg::MAIR_EL1, state.mair_el1)?;
+        Ok(())
+    }
+
+    fn el1_big_endian(&self) -> Result<bool, Error> {
+        Ok(self.inner.get_sys_reg(SysReg::SCTLR_EL1)? & SCTLR_EE != 0)
+    }
+
+    fn initialize_el1(&self, entry: u64, context: u64, big_endian: bool) -> Result<(), Error> {
+        for n in 0..=30 {
+            self.inner
+                .set_reg(gpr(n), if n == 0 { context } else { 0 })?;
+        }
+        self.inner.set_reg(Reg::PC, entry)?;
+        self.inner.set_reg(Reg::CPSR, 0x3c5)?;
+        self.inner.set_sys_reg(SysReg::SP_EL0, 0)?;
+        self.inner.set_sys_reg(SysReg::SP_EL1, 0)?;
+        let sctlr = self.inner.get_sys_reg(SysReg::SCTLR_EL1)?;
+        let endian = if big_endian { SCTLR_EE } else { 0 };
+        self.inner.set_sys_reg(
+            SysReg::SCTLR_EL1,
+            (sctlr & !((1 << 0) | (1 << 2) | (1 << 12) | SCTLR_EE)) | endian,
+        )?;
         Ok(())
     }
 
@@ -469,7 +543,16 @@ impl Vcpu {
         if is_read {
             let rt = ((iss >> 5) & 0x1F) as u8; // ISS[9:5]
             if rt != 31 {
-                self.inner.set_reg(gpr(rt), 0)?;
+                let value = match iss & 0x003f_fc1e {
+                    0x0030_0008 => self.evidence.pfr0,  // ID_AA64PFR0_EL1
+                    0x0030_000c => self.evidence.isar0, // ID_AA64ISAR0_EL1
+                    0x0030_000e => self.evidence.mmfr0, // ID_AA64MMFR0_EL1
+                    0x0030_000a => self.evidence.dfr0,  // ID_AA64DFR0_EL1
+                    0x0032_c000 => self.evidence.ctr,   // CTR_EL0
+                    0x0030_0400 => self.inner.get_sys_reg(SysReg::SCTLR_EL1)?,
+                    _ => 0,
+                };
+                self.inner.set_reg(gpr(rt), value)?;
             }
         }
         self.advance_pc()
@@ -620,61 +703,14 @@ mod tests {
         }
     }
 
-    fn boot_state(pc: u64) -> pmi::vm::vcpu::aarch64::CpuState {
-        // aarch64 CpuState has no Default (PState is a validating newtype).
-        pmi::vm::vcpu::aarch64::CpuState {
-            pc,
-            pstate: pmi::vm::vcpu::aarch64::PState::new(0x3c5).unwrap(), // EL1h, DAIF masked
-            sctlr_el1: 0,                                                // MMU off → flat IPA=VA
-            x0: 0,
-            x1: 0,
-            x2: 0,
-            x3: 0,
-            x4: 0,
-            x5: 0,
-            x6: 0,
-            x7: 0,
-            x8: 0,
-            x9: 0,
-            x10: 0,
-            x11: 0,
-            x12: 0,
-            x13: 0,
-            x14: 0,
-            x15: 0,
-            x16: 0,
-            x17: 0,
-            x18: 0,
-            x19: 0,
-            x20: 0,
-            x21: 0,
-            x22: 0,
-            x23: 0,
-            x24: 0,
-            x25: 0,
-            x26: 0,
-            x27: 0,
-            x28: 0,
-            x29: 0,
-            x30: 0,
-            sp_el1: 0,
-            tcr_el1: 0,
-            ttbr0_el1: 0,
-            ttbr1_el1: 0,
-            mair_el1: 0,
-            vbar_el1: 0,
-            cpacr_el1: 0,
-        }
-    }
-
     /// Runtime verification: a tiny guest (HVC → faulting load → faulting
     /// store) must produce the expected decoded `VmExit`s. This exercises
-    /// vCPU register programming (`set_aarch64_state`/`set_gpr`), the run
+    /// vCPU register programming, the run
     /// loop, ESR/ISS decoding, and MMIO write-data extraction.
     ///
     /// NB: WFI is intentionally NOT tested — with the in-kernel GIC enabled,
     /// `WFI` waits for an interrupt instead of trapping, so `hv_vcpu_run`
-    /// blocks (correct arch behavior). PSCI SYSTEM_OFF uses HVC, not WFI.
+    /// blocks while the guest waits for an interrupt.
     ///
     /// Requires a codesigned binary with `com.apple.security.hypervisor`.
     #[test]
@@ -722,7 +758,7 @@ mod tests {
         drop(vm);
 
         // 1) HVC.
-        vcpu.set_aarch64_state(&boot_state(base)).expect("state");
+        vcpu.initialize_el1(base, 0, false).expect("state");
         let e = vcpu.run().expect("run hvc");
         eprintln!("exit 1 (expect Hvc): {e:?}");
         assert!(
@@ -737,8 +773,7 @@ mod tests {
         );
 
         // 2) Faulting load from an unmapped IPA → MmioRead (64-bit → size 8).
-        vcpu.set_aarch64_state(&boot_state(base + 4))
-            .expect("state");
+        vcpu.initialize_el1(base + 4, 0, false).expect("state");
         vcpu.set_gpr(2, mmio).expect("x2");
         let e = vcpu.run().expect("run ldr");
         eprintln!("exit 2 (expect MmioRead): {e:?}");
@@ -752,8 +787,7 @@ mod tests {
         vcpu.complete_mmio_read(0).expect("complete read");
 
         // 3) Faulting store → MmioWrite carrying the source register's value.
-        vcpu.set_aarch64_state(&boot_state(base + 8))
-            .expect("state");
+        vcpu.initialize_el1(base + 8, 0, false).expect("state");
         vcpu.set_gpr(1, 0xDEAD_BEEF_u64).expect("x1");
         vcpu.set_gpr(2, mmio).expect("x2");
         let e = vcpu.run().expect("run str");
@@ -827,7 +861,7 @@ mod tests {
         // Bypass only the readiness check in this fixture to read the earlier
         // native map through a real guest instruction fetch.
         let cpu = vm.create_vcpu().unwrap();
-        cpu.set_aarch64_state(&boot_state(RAM_BASE)).unwrap();
+        cpu.initialize_el1(RAM_BASE, 0, false).unwrap();
         drop(vm);
         assert!(matches!(
             cpu.run().unwrap(),
@@ -877,7 +911,7 @@ mod tests {
     #[ignore = "requires a codesigned binary with com.apple.security.hypervisor"]
     fn hvf_psci_uses_only_the_surveyed_conduit() {
         if native_test_child("hypervisor::tests::hvf_psci_uses_only_the_surveyed_conduit") {
-            crate::imp::tests::check_psci_conduits(boot_state(RAM_BASE), RAM_SIZE);
+            crate::imp::tests::check_psci_conduits(RAM_SIZE);
         }
     }
 

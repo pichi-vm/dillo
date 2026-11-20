@@ -30,18 +30,11 @@ pub struct RamRange {
     pub size: u64,
 }
 
-/// Arch-erased view of the PMI boot vCPU state.
-///
-/// Backends pick the arm they support; dillo never constructs backend-specific
-/// CPU input structs directly.
-pub trait BootVcpuState {
-    fn x86_64(&self) -> Option<&pmi::vm::vcpu::x86_64::CpuState> {
-        None
-    }
-
-    fn aarch64(&self) -> Option<&pmi::vm::vcpu::aarch64::CpuState> {
-        None
-    }
+/// PMI ISA baseline for the architecture selected by the image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuProfile {
+    X86_64(pmi::x86_64::Profile),
+    Aarch64(pmi::aarch64::Profile),
 }
 
 /// Host architecture exposed by the selected machine backend.
@@ -58,6 +51,101 @@ pub fn aarch64_pa_bits(mmfr0: u64) -> Option<u32> {
     [32, 36, 40, 42, 44, 48, 52, 56]
         .get((mmfr0 & 0xf) as usize)
         .copied()
+}
+
+/// Immutable ID register values exposed by an Armv8.0-A guest owner.
+#[derive(Clone, Copy, Debug)]
+pub struct ArmV8Evidence {
+    pub pfr0: u64,
+    pub isar0: u64,
+    /// Required when PFR0 exposes AArch32.
+    pub isar5: Option<u64>,
+    pub mmfr0: u64,
+    pub dfr0: u64,
+    pub ctr: u64,
+}
+
+impl ArmV8Evidence {
+    pub fn exposes_aarch32(&self) -> bool {
+        self.pfr0 & 15 >= 2
+    }
+
+    /// Check the architectural minimum and its direct conditions (Arm DDI0487
+    /// M.c A2.2.1, D7.3, D8.18.2, D24.1.3 and the individual ID registers).
+    pub fn validate(self, sctlr: u64) -> Result<(), &'static str> {
+        // D24.2.92: PFR0 uses unsigned monotonic fields. 1 supports AArch64
+        // and 2 adds AArch32.
+        let el0 = self.pfr0 & 15;
+        let el1 = (self.pfr0 >> 4) & 15;
+        let el2 = (self.pfr0 >> 8) & 15;
+        let el3 = (self.pfr0 >> 12) & 15;
+        if el0 == 0 {
+            return Err("FEAT_EL0 is missing");
+        }
+        if el1 == 0 {
+            return Err("FEAT_EL1 is missing");
+        }
+        if (el1 >= 2 && el0 < 2)
+            || (el2 >= 2 && el1 < 2)
+            || (el3 >= 2 && (el1 < 2 || (el2 != 0 && el2 < 2)))
+        {
+            return Err("AArch32 exception levels require support at lower levels");
+        }
+        let snsmem = (self.mmfr0 >> 12) & 15; // D24.2.87
+        if el3 != 0 && snsmem == 0 {
+            return Err("EL3 requires the Secure/Nonsecure memory distinction");
+        }
+
+        // D8.18.2 and D24.2.41: CTR.L1Ip must identify VIPT or PIPT.
+        if !matches!((self.ctr >> 14) & 3, 2 | 3) {
+            return Err("CTR_EL0.L1Ip does not establish FEAT_IVIPT");
+        }
+        // Both signed fields may report absence (0xf).
+        if (self.pfr0 >> 16) & 15 != (self.pfr0 >> 20) & 15 {
+            return Err("FP and AdvSIMD encodings must agree");
+        }
+        // The two ISAR registers encode these four baseline capabilities at
+        // the same offsets. Later encodings can add features such as SHA512.
+        let crypto = |isar: u64| {
+            let aes = (isar >> 4) & 15;
+            [
+                aes >= 1,
+                aes >= 2,
+                (isar >> 8) & 15 != 0,
+                (isar >> 12) & 15 != 0,
+            ]
+        };
+        let aarch64_crypto = crypto(self.isar0);
+        let [_, _, sha1, sha256] = aarch64_crypto;
+        if sha1 != sha256 {
+            return Err("SHA1 and SHA2 must agree on presence");
+        }
+        if self.exposes_aarch32() {
+            let isar5 = self
+                .isar5
+                .ok_or("AArch32 crypto requires ID_ISAR5_EL1 evidence")?;
+            if crypto(isar5) != aarch64_crypto {
+                return Err("AES, PMULL, SHA1 and SHA256 must agree across AArch32 and AArch64");
+            }
+        }
+
+        // D7.3 and D24.2.87: use live SCTLR for the fixed-endian condition.
+        let mixed_el1 = (self.mmfr0 >> 8) & 15 != 0;
+        let mixed_el0 = (self.mmfr0 >> 16) & 15 != 0;
+        if mixed_el1 && mixed_el0 {
+            return Err("MMFR0.BigEndEL0 must be zero with MMFR0.BigEnd");
+        }
+        let ee = (sctlr >> 25) & 1;
+        let e0e = (sctlr >> 24) & 1;
+        if !mixed_el1 && !mixed_el0 && ee != e0e {
+            return Err("fixed-endian EL0 and EL1 must use the same endianness");
+        }
+        // D24.2.79: TraceVer describes guest trace system registers.
+        if (self.dfr0 >> 4) & 15 != 0 {
+            return Err("FEAT_TRC_SR requires guest trace system-register support");
+        }
+        Ok(())
+    }
 }
 
 /// Host-level services exposed by the selected machine backend.
@@ -123,8 +211,7 @@ pub trait Machine: Sized + 'static {
     fn cpu_preparation(
         &mut self,
         index: u32,
-        profile: &str,
-        boot_state: &dyn BootVcpuState,
+        profile: CpuProfile,
     ) -> Result<Self::CpuPreparation, Self::Error>;
 
     /// Maximum usable guest address width under this backend's CPU/VM policy.
@@ -188,9 +275,6 @@ mod tests {
 
     impl std::error::Error for TestError {}
 
-    struct TestBoot;
-    impl BootVcpuState for TestBoot {}
-
     struct TestCpuPreparation;
 
     impl CpuPreparation for TestCpuPreparation {
@@ -233,8 +317,7 @@ mod tests {
         fn cpu_preparation(
             &mut self,
             _index: u32,
-            _profile: &str,
-            _boot_state: &dyn BootVcpuState,
+            _profile: CpuProfile,
         ) -> Result<Self::CpuPreparation, Self::Error> {
             Ok(TestCpuPreparation)
         }
@@ -269,7 +352,7 @@ mod tests {
             .write_guest(0x1000, b"boot")
             .expect("guest write accepted");
         let preparation = machine
-            .cpu_preparation(0, "test-profile", &TestBoot)
+            .cpu_preparation(0, CpuProfile::X86_64(pmi::x86_64::Profile::V1))
             .unwrap();
         let (mut cpu, control) = preparation.prepare().unwrap();
         control.stop().expect("CPU stopped");
