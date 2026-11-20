@@ -620,6 +620,13 @@ impl Vcpu {
                 });
             }
         }
+        let xcr0 = profile.required_xcr0();
+        if xcr0 != 0 && (max_standard < 0x0d || cpuid(0x0d, 0)?.Eax & xcr0 != xcr0) {
+            return Err(Error::HostMissingCpuFeature {
+                profile: profile.as_str().to_string(),
+                feature: "XCR0 components",
+            });
+        }
         Ok(())
     }
 

@@ -46,6 +46,15 @@ impl X86Level {
         }
     }
 
+    /// XCR0 components the guest must be able to enable.
+    pub fn required_xcr0(self) -> u32 {
+        match self {
+            Self::V1 | Self::V2 => 0,
+            Self::V3 => 0x07, // x87, SSE, AVX
+            Self::V4 => 0xe7, // also opmask and ZMM state
+        }
+    }
+
     /// Mandatory features at and below this level (cumulative).
     pub fn cumulative_features(self) -> &'static [CpuidFeature] {
         match self {
@@ -118,7 +127,8 @@ const AVX512CD: CpuidFeature = bit(0x0000_0007, 0, Reg::Ebx, 28, "avx512cd");
 const AVX512BW: CpuidFeature = bit(0x0000_0007, 0, Reg::Ebx, 30, "avx512bw");
 const AVX512VL: CpuidFeature = bit(0x0000_0007, 0, Reg::Ebx, 31, "avx512vl");
 
-// Leaf 0x8000_0001 (ECX): LAHF, LZCNT.
+// Leaf 0x8000_0001 carries SYSCALL in EDX and LAHF/LZCNT in ECX.
+const SYSCALL: CpuidFeature = bit(0x8000_0001, 0, Reg::Edx, 11, "syscall");
 const LAHF_LM: CpuidFeature = bit(0x8000_0001, 0, Reg::Ecx, 0, "lahf-lm");
 const LZCNT: CpuidFeature = bit(0x8000_0001, 0, Reg::Ecx, 5, "lzcnt");
 
@@ -135,7 +145,7 @@ const fn bit(function: u32, index: u32, reg: Reg, bit: u8, name: &'static str) -
 // Per psABI: each level is a strict superset. Tables are pre-flattened
 // so the validator iterates one slice — no recursion, no allocation.
 
-const V1_FEATURES: &[CpuidFeature] = &[FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2];
+const V1_FEATURES: &[CpuidFeature] = &[FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2, SYSCALL];
 
 const V2_ADDITIONS: &[CpuidFeature] = &[CX16, LAHF_LM, POPCNT, SSE3, SSSE3, SSE4_1, SSE4_2];
 
@@ -145,18 +155,19 @@ const V4_ADDITIONS: &[CpuidFeature] = &[AVX512F, AVX512BW, AVX512CD, AVX512DQ, A
 
 // Pre-flattened cumulative tables (const concat would need nightly).
 const V1_V2_FEATURES: &[CpuidFeature] = &[
-    FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2, CX16, LAHF_LM, POPCNT, SSE3, SSSE3, SSE4_1, SSE4_2,
+    FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2, SYSCALL, CX16, LAHF_LM, POPCNT, SSE3, SSSE3, SSE4_1,
+    SSE4_2,
 ];
 
 const V1_V2_V3_FEATURES: &[CpuidFeature] = &[
-    FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2, CX16, LAHF_LM, POPCNT, SSE3, SSSE3, SSE4_1, SSE4_2, AVX,
-    AVX2, BMI1, BMI2, F16C, FMA, LZCNT, MOVBE, XSAVE,
+    FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2, SYSCALL, CX16, LAHF_LM, POPCNT, SSE3, SSSE3, SSE4_1,
+    SSE4_2, AVX, AVX2, BMI1, BMI2, F16C, FMA, LZCNT, MOVBE, XSAVE,
 ];
 
 const V1_V2_V3_V4_FEATURES: &[CpuidFeature] = &[
-    FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2, CX16, LAHF_LM, POPCNT, SSE3, SSSE3, SSE4_1, SSE4_2, AVX,
-    AVX2, BMI1, BMI2, F16C, FMA, LZCNT, MOVBE, XSAVE, AVX512F, AVX512BW, AVX512CD, AVX512DQ,
-    AVX512VL,
+    FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2, SYSCALL, CX16, LAHF_LM, POPCNT, SSE3, SSSE3, SSE4_1,
+    SSE4_2, AVX, AVX2, BMI1, BMI2, F16C, FMA, LZCNT, MOVBE, XSAVE, AVX512F, AVX512BW, AVX512CD,
+    AVX512DQ, AVX512VL,
 ];
 
 // Static asserts keep the cumulative tables honest: the per-level
