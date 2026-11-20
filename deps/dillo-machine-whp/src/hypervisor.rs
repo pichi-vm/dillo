@@ -1713,6 +1713,68 @@ mod tests {
     };
 
     #[test]
+    #[ignore = "native WHP mode observation"]
+    fn whp_cpuid_mode_observation() {
+        let vm = Vm::new_x86_64_with_local_apic_count(1).unwrap();
+        raw::create_virtual_processor(vm.inner.partition, 0).unwrap();
+        let mut cpu = super::Vcpu {
+            partition: Arc::clone(&vm.inner),
+            idx: 0,
+            delete_pending: true,
+        };
+        let names = [
+            WHvX64RegisterCr0,
+            WHvX64RegisterCr4,
+            WHvX64RegisterEfer,
+            WHvX64RegisterCs,
+        ];
+        let saved: Vec<_> = names
+            .iter()
+            .map(|&name| {
+                let words =
+                    raw::get_virtual_processor_register_words(vm.inner.partition, 0, name).unwrap();
+                eprintln!("initial register {name:?}: {words:x?}");
+                (
+                    name,
+                    WHV_REGISTER_VALUE {
+                        Reg128: WHV_UINT128 { Dword: words },
+                    },
+                )
+            })
+            .collect();
+        let observe = |phase| {
+            let result = raw::vcpu_cpuid(vm.inner.partition, 0, 0x8000_0001, 0).unwrap();
+            eprintln!(
+                "{phase}: extended EDX={:#x}, SYSCALL={}",
+                result.Edx,
+                result.Edx & (1 << 11) != 0
+            );
+        };
+        observe("reset");
+        cpu.set_registers(vec![
+            (WHvX64RegisterCr0, WHV_REGISTER_VALUE { Reg64: 0x8000_0021 }),
+            (WHvX64RegisterCr4, WHV_REGISTER_VALUE { Reg64: 0x20 }),
+            (WHvX64RegisterEfer, WHV_REGISTER_VALUE { Reg64: 0xd01 }),
+            (
+                WHvX64RegisterCs,
+                WHV_REGISTER_VALUE {
+                    Segment: WHV_X64_SEGMENT_REGISTER {
+                        Base: 0,
+                        Limit: u32::MAX,
+                        Selector: 0,
+                        Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xa09b },
+                    },
+                },
+            ),
+        ])
+        .unwrap();
+        observe("64-bit");
+        cpu.set_registers(saved).unwrap();
+        observe("restored");
+        cpu.retire().unwrap();
+    }
+
+    #[test]
     fn hyperv_cpuid_does_not_expose_root_partition_privileges() {
         let mut leaves = BTreeMap::new();
         leaves.insert(
