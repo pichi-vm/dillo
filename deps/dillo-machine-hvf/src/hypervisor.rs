@@ -1004,6 +1004,7 @@ mod tests {
     fn hvf_psci_uses_only_the_surveyed_conduit() {
         if native_test_child("hypervisor::tests::hvf_psci_uses_only_the_surveyed_conduit") {
             crate::imp::tests::check_psci_conduits(RAM_SIZE);
+            crate::imp::tests::check_psci_ap_start(RAM_SIZE);
         }
     }
 

@@ -1174,6 +1174,130 @@ mod imp {
         }
 
         #[cfg(target_arch = "aarch64")]
+        pub(crate) fn check_psci_ap_start(ram_size: u64) {
+            use dillo_machine::{
+                CpuControl as _, CpuPreparation as _, CpuRunner as _, Machine as _,
+            };
+            use vm_memory::{Bytes, GuestAddress};
+
+            let platform = psci_platform("smc");
+            let mut vm = Vm::from_launch_config(LaunchConfig {
+                platform: &platform,
+                vcpus: 2,
+                ram: vec![RamRange {
+                    gpa: 0,
+                    size: ram_size,
+                }],
+            })
+            .unwrap();
+            for (gpa, code) in [
+                (
+                    0,
+                    &[
+                        0xd281_0004u32, // x4 = 0x800
+                        0xd538_0705,
+                        0xd348_2ca5,
+                        0x3900_6085, // Save MMFR0.BigEnd at 0x818.
+                        0xb400_00a5, // Set EE only for mixed-endian EL1.
+                        0xd538_1006,
+                        0xb267_00c6,
+                        0xd518_1006,
+                        0xd503_3fdf, // Set EE; ISB.
+                        0xd282_4683,
+                        0xf900_0883, // Store caller's context bytes at 0x810.
+                        0xd280_0060,
+                        0xf2b8_8000,
+                        0xd280_0021,
+                        0xd288_0002,
+                        0xd400_0003,
+                        0xf900_0080, // CPU_ON(1, 0x4000, 0x1234); status at 0x800.
+                        0xf940_0485,
+                        0xb4ff_ffe5, // Wait for first AP store.
+                        0xd538_1006,
+                        0x9266_f8c6,
+                        0xd518_1006,
+                        0xd503_3fdf, // Clear EE; ISB.
+                        0xd280_0060,
+                        0xf2b8_8000,
+                        0xd280_0021,
+                        0xd288_0802,
+                        0xd28a_cf03,
+                        0xd400_0003, // CPU_ON(1, 0x4040, 0x5678)
+                        0xb100_101f,
+                        0x54ff_ff20, // Retry ALREADY_ON until the AP parks.
+                        0xf900_1480,
+                        0xf940_1085,
+                        0xb4ff_ffe5, // Status at 0x828; wait for second store.
+                        0x5280_0100,
+                        0x72b0_8000,
+                        0xd400_0003, // SYSTEM_OFF
+                    ][..],
+                ),
+                (
+                    0x4000,
+                    &[
+                        0xd281_0004,
+                        0xf900_0480, // Save first context at 0x808.
+                        0x5280_0040,
+                        0x72b0_8000,
+                        0xd400_0003, // CPU_OFF
+                        0xd420_0000, // CPU_OFF must not return.
+                    ][..],
+                ),
+                (0x4040, &[0xd281_0004, 0xf900_1080, 0x1400_0000][..]), // Second context at 0x820.
+            ] {
+                let bytes: Vec<_> = code.iter().copied().flat_map(u32::to_le_bytes).collect();
+                vm.write_guest(gpa, &bytes).unwrap();
+            }
+            for status in [0x800, 0x828] {
+                vm.write_guest(status, &[0xff; 8]).unwrap();
+            }
+
+            let profile = CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0);
+            let (mut bsp, _bsp_control) =
+                vm.cpu_preparation(0, profile).unwrap().prepare().unwrap();
+            let ap = vm.cpu_preparation(1, profile).unwrap();
+            let (ready, prepared) = std::sync::mpsc::sync_channel(1);
+            let ap = thread::spawn(move || {
+                let (mut runner, control) = ap.prepare().unwrap();
+                ready.send(control).unwrap();
+                let stop = runner.run().unwrap();
+                runner.retire().unwrap();
+                stop
+            });
+            let control = prepared
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            let memory = vm.inner.guest_memory().unwrap();
+            let read = |gpa| {
+                let mut bytes = [0; 8];
+                memory.read_slice(&mut bytes, GuestAddress(gpa)).unwrap();
+                bytes
+            };
+            assert_eq!(read(0x808), [0; 8]);
+            assert_eq!(read(0x820), [0; 8]);
+            assert!(!vm.cpu_runtime.slots[1].started.load(Ordering::Acquire));
+            assert_eq!(bsp.run().unwrap(), VcpuStop::GuestPoweroff);
+            bsp.retire().unwrap();
+            control.stop().unwrap();
+            assert_eq!(ap.join().unwrap(), VcpuStop::Stopped);
+            assert_eq!(read(0x800), [0; 8]);
+            assert_eq!(read(0x828), [0; 8]);
+            let first = if read(0x818)[0] != 0 {
+                0x1234_u64.to_be_bytes()
+            } else {
+                0x1234_u64.to_le_bytes()
+            };
+            assert_eq!(read(0x810), first, "caller context bytes");
+            assert_eq!(read(0x808), first, "first CPU_ON context bytes");
+            assert_eq!(
+                read(0x820),
+                0x5678_u64.to_le_bytes(),
+                "second CPU_ON context bytes"
+            );
+        }
+
+        #[cfg(target_arch = "aarch64")]
         fn psci_platform(method: &str) -> PlatformMachine {
             use dillo_devtree::{
                 devtree::{OwnedNode, OwnedProperty},
