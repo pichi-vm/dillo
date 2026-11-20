@@ -1,0 +1,81 @@
+name: Native Arm KVM conduit probe
+
+on:
+  push:
+    branches: [diag/current-pmi-arm-conduit]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    if: github.ref == 'refs/heads/diag/current-pmi-arm-conduit'
+    runs-on: [self-hosted, Linux, ARM64, bare-metal, aarch64, kvm]
+    timeout-minutes: 10
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      RUSTFLAGS: -D warnings
+      EVIDENCE: target/arm-kvm-conduit-evidence
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+
+      - name: Record source and native platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE"
+          {
+            git log -1 --format='source=%H parent=%P'
+            test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+            test "$(git rev-parse HEAD^)" = 8bfb286e0c687ac559a4f07ff8f651dbde572ac1
+            test -z "$(git status --porcelain --untracked-files=no)"
+            uname -a
+            test "$(uname -m)" = aarch64
+            cat /proc/version
+            getconf PAGESIZE
+            grep -E '^CPU (implementer|architecture|variant|part|revision)' /proc/cpuinfo | sort -u || true
+            grep -oE 'kvm-arm\.[^ ]+' /proc/cmdline || true
+            ls -l /dev/kvm
+            test -r /dev/kvm
+            test -w /dev/kvm
+            if [ -r /proc/config.gz ]; then
+              echo 'kernel config source=/proc/config.gz'
+              gzip -dc /proc/config.gz > "$EVIDENCE/kernel.config"
+            elif [ -r "/boot/config-$(uname -r)" ]; then
+              echo "kernel config source=/boot/config-$(uname -r)"
+              cp "/boot/config-$(uname -r)" "$EVIDENCE/kernel.config"
+            else
+              echo 'kernel config unavailable'
+            fi
+            if [ -f "$EVIDENCE/kernel.config" ]; then
+              sha256sum "$EVIDENCE/kernel.config"
+              grep -E '^(# )?CONFIG_(KVM[A-Z0-9_]*|VIRTUALIZATION|ARM64_VHE)(=| is not set)' \
+                "$EVIDENCE/kernel.config" || true
+            fi
+            rustup show
+          } 2>&1 | tee "$EVIDENCE/platform.log"
+
+      - name: Run the native conduit diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$(mktemp -d "$RUNNER_TEMP/dillo-arm-conduit.XXXXXX")"
+          trap 'rm -rf -- "$CARGO_TARGET_DIR"' EXIT
+          cargo --config .copr/cargo-config.toml test --locked -p dillo-machine-kvm --lib \
+            --no-run 2>&1 | tee "$EVIDENCE/build.log"
+          timeout --kill-after=5s 30s cargo --config .copr/cargo-config.toml test --locked \
+            -p dillo-machine-kvm --lib hypervisor::arm_conduit_probe::ordinary_arm_kvm_conduits \
+            -- --ignored --exact --nocapture 2>&1 | tee "$EVIDENCE/native.log"
+          grep -F 'KVM HVC SMCCC_VERSION guest:' "$EVIDENCE/native.log"
+          grep -F 'KVM SMC SMCCC_VERSION guest:' "$EVIDENCE/native.log"
+
+      - name: Preserve native diagnostic output
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: arm-kvm-conduit-${{ github.sha }}
+          path: target/arm-kvm-conduit-evidence/

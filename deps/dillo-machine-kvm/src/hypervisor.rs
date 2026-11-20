@@ -1059,6 +1059,10 @@ impl Drop for KickSignalMask {
     }
 }
 
+#[cfg(all(test, target_arch = "aarch64"))]
+#[path = "arm_conduit_probe.rs"]
+mod arm_conduit_probe;
+
 #[cfg(all(test, target_arch = "x86_64"))]
 mod backend_tests {
     use super::*;

@@ -911,6 +911,26 @@ mod imp {
         }
     }
 
+    #[cfg(all(test, target_arch = "aarch64"))]
+    pub(crate) fn run_arm_conduit_probe(
+        vcpu: &mut kvm_ioctls::VcpuFd,
+    ) -> (bool, Result<kvm_ioctls::VcpuExit<'_>, kvm_ioctls::Error>) {
+        let requester = VcpuExitRequester::new();
+        let _mask = crate::hypervisor::block_kick_signal(vcpu, VCPU_KICK_SIGNAL).unwrap();
+        let _registration = requester.register_current_thread();
+        let (done, completed) = std::sync::mpsc::channel();
+        let watchdog = thread::spawn(move || {
+            let expired = completed.recv_timeout(Duration::from_secs(3)).is_err();
+            if expired {
+                requester.request_exit();
+            }
+            expired
+        });
+        let exit = vcpu.run();
+        let _ = done.send(());
+        (watchdog.join().unwrap(), exit)
+    }
+
     #[cfg(test)]
     mod registration_tests {
         use super::*;
