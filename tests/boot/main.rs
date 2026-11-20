@@ -1429,6 +1429,13 @@ fn boots_with_named_console_ports() {
         .arg(&pmi)
         .args(["--memory", "256", "--cpus", "1"])
         .args(["--console", &console])
+        .env(
+            "RUST_LOG",
+            format!(
+                "info,dillo_virtio_console=debug,dillo_pci_virtio=debug,{}",
+                std::env::var("RUST_LOG").unwrap_or_default()
+            ),
+        )
         .stdin(std::process::Stdio::piped())
         .stdout(File::create(&out_path).unwrap())
         .stderr(File::create(&err_path).unwrap());
@@ -1475,7 +1482,12 @@ fn boots_with_named_console_ports() {
     {
         let _ = child.kill();
         let _ = child.wait();
-        panic!("dillo boot timed out");
+        let mut output = std::fs::read(&out_path).unwrap_or_default();
+        output.extend_from_slice(&std::fs::read(&err_path).unwrap_or_default());
+        panic!(
+            "dillo boot timed out:\n{}",
+            String::from_utf8_lossy(&output)
+        );
     }
     // Drop the write end so the reader thread sees EOF rather than blocking.
     drop(host_tx);
@@ -1642,6 +1654,13 @@ fn boots_with_named_console_ports() {
         .arg(&pmi)
         .args(["--memory", "256", "--cpus", "1"])
         .args(["--console", &console])
+        .env(
+            "RUST_LOG",
+            format!(
+                "info,dillo_virtio_console=debug,dillo_pci_virtio=debug,{}",
+                std::env::var("RUST_LOG").unwrap_or_default()
+            ),
+        )
         .stdin(std::process::Stdio::piped())
         .stdout(File::create(&out_path).unwrap())
         .stderr(File::create(&err_path).unwrap())
@@ -1680,7 +1699,12 @@ fn boots_with_named_console_ports() {
     {
         let _ = child.kill();
         let _ = child.wait();
-        panic!("dillo boot timed out");
+        let mut output = std::fs::read(&out_path).unwrap_or_default();
+        output.extend_from_slice(&std::fs::read(&err_path).unwrap_or_default());
+        panic!(
+            "dillo boot timed out:\n{}",
+            String::from_utf8_lossy(&output)
+        );
     }
     drop(host_tx);
 
