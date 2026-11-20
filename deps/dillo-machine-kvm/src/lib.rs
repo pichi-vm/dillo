@@ -816,7 +816,7 @@ mod imp {
 
     #[derive(Clone, Debug)]
     struct VcpuExitRequester {
-        threads: Arc<Mutex<Vec<libc::pthread_t>>>,
+        thread: Arc<Mutex<Option<libc::pthread_t>>>,
         requested: Arc<AtomicBool>,
     }
 
@@ -824,7 +824,7 @@ mod imp {
         fn new() -> Self {
             Self::install_kick_handler();
             Self {
-                threads: Arc::new(Mutex::new(Vec::new())),
+                thread: Arc::new(Mutex::new(None)),
                 requested: Arc::new(AtomicBool::new(false)),
             }
         }
@@ -853,28 +853,21 @@ mod imp {
             // the vCPU worker thread may be blocked in KVM_RUN.
             #[allow(unsafe_code)]
             let thread = unsafe { libc::pthread_self() };
-            let mut threads = self.threads.lock().expect("vCPU thread list poisoned");
-            threads.push(thread);
-            drop(threads);
+            *self.thread.lock().expect("vCPU owner lock poisoned") = Some(thread);
             if self.requested.load(Ordering::Acquire) {
                 Self::kick_thread(thread);
             }
             VcpuRegistration {
                 requester: self.clone(),
-                thread,
                 _thread_bound: std::marker::PhantomData,
             }
         }
 
         fn request_exit(&self) {
             self.requested.store(true, Ordering::Release);
-            for thread in self
-                .threads
-                .lock()
-                .expect("vCPU thread list poisoned")
-                .iter()
-            {
-                Self::kick_thread(*thread);
+            let owner = self.thread.lock().expect("vCPU owner lock poisoned");
+            if let Some(thread) = *owner {
+                Self::kick_thread(thread);
             }
         }
 
@@ -885,7 +878,7 @@ mod imp {
         fn kick_thread(thread: libc::pthread_t) {
             // SAFETY: pthread_t values come from vCPU worker threads that
             // registered themselves before entering KVM_RUN. Remote kicks
-            // hold the list lock to prevent retirement; registration can also
+            // hold the owner lock to prevent retirement; registration can also
             // kick its own still-running thread after releasing that lock.
             #[allow(unsafe_code)]
             let rc = unsafe { libc::pthread_kill(thread, VCPU_KICK_SIGNAL as libc::c_int) };
@@ -897,17 +890,16 @@ mod imp {
 
     struct VcpuRegistration {
         requester: VcpuExitRequester,
-        thread: libc::pthread_t,
         _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
     }
 
     impl Drop for VcpuRegistration {
         fn drop(&mut self) {
-            self.requester
-                .threads
+            *self
+                .requester
+                .thread
                 .lock()
-                .expect("vCPU thread list poisoned")
-                .retain(|thread| *thread != self.thread);
+                .expect("vCPU owner lock poisoned") = None;
         }
     }
 
@@ -921,11 +913,11 @@ mod imp {
             let worker_requester = requester.clone();
             std::thread::spawn(move || {
                 let _registration = worker_requester.register_current_thread();
-                assert_eq!(worker_requester.threads.lock().unwrap().len(), 1);
+                assert!(worker_requester.thread.lock().unwrap().is_some());
             })
             .join()
             .unwrap();
-            assert!(requester.threads.lock().unwrap().is_empty());
+            assert!(requester.thread.lock().unwrap().is_none());
             requester.request_exit();
         }
 
@@ -936,7 +928,7 @@ mod imp {
                 let _registration = requester.register_current_thread();
                 panic!("worker failure");
             });
-            assert!(requester.threads.lock().unwrap().is_empty());
+            assert!(requester.thread.lock().unwrap().is_none());
             requester.request_exit();
         }
     }
