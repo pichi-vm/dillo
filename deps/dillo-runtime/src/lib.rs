@@ -145,13 +145,30 @@ impl<'scope, C: CpuControl> Owners<'scope, C> {
                                 return Ok(VcpuStop::Stopped);
                             }
                         };
-                        if ready.send(Ok(control)).is_err() {
-                            return Ok(VcpuStop::Stopped);
-                        }
+                        let ready_delivered = ready.send(Ok(control)).is_ok();
                         drop(ready);
-                        gate.run(&mut runner, index, shutdown)
+                        let execution = if ready_delivered {
+                            gate.run(&mut runner, index, shutdown)
+                        } else {
+                            Ok(VcpuStop::Stopped)
+                        };
+                        let retirement = catch_unwind(AssertUnwindSafe(|| {
+                            runner
+                                .retire()
+                                .map_err(|error| CpuError(format!("retire vCPU {index}: {error}")))
+                        }))
+                        .unwrap_or_else(|_| Err(owner_panic(index)));
+                        match (execution, retirement) {
+                            (Err(execution), Err(retirement)) => {
+                                Err(CpuError(format!("{execution}. {retirement}")))
+                            }
+                            (execution, retirement) => retirement.and(execution),
+                        }
                     }));
-                    let _ = complete.send(result.unwrap_or_else(|_| Err(owner_panic(index))));
+                    let result = result.unwrap_or_else(|_| Err(owner_panic(index)));
+                    if let Err(mpsc::SendError(Err(error))) = complete.send(result) {
+                        log::error!("{error}");
+                    }
                 })
                 .map_err(|error| CpuError(format!("spawn vCPU {index}: {error}")))?;
             self.threads.push(owner);
@@ -185,7 +202,11 @@ impl<'scope, C: CpuControl> Owners<'scope, C> {
                         }
                         Ok(_) => {}
                         Err(error) => {
-                            failure.get_or_insert(error);
+                            if failure.is_some() {
+                                log::error!("{error}");
+                            } else {
+                                failure = Some(error);
+                            }
                         }
                     }
                 }

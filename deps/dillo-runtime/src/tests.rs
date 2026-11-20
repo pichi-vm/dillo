@@ -24,6 +24,7 @@ enum Scenario {
     Reset,
     ResetThenPoweroff,
     ResetThenShutdown,
+    RunError,
     RunPanic,
 }
 
@@ -38,6 +39,7 @@ struct State {
     finalized: AtomicBool,
     shutdown: AtomicBool,
     stop: AtomicBool,
+    retirement_error: Option<u32>,
     panic_on_retirement: bool,
 }
 
@@ -182,12 +184,22 @@ impl CpuRunner for TestRunner {
         }
         wait_for(&self.state.entered);
         assert!(self.scenario != Scenario::RunPanic, "run fixture");
+        if self.scenario == Scenario::RunError {
+            return Err(io::Error::other("run fixture"));
+        }
         Ok(match self.scenario {
             Scenario::Reset | Scenario::ResetThenPoweroff | Scenario::ResetThenShutdown => {
                 VcpuStop::GuestReset
             }
             _ => VcpuStop::GuestPoweroff,
         })
+    }
+
+    fn retire(self) -> Result<(), Self::Error> {
+        if self.state.retirement_error == Some(self.index) {
+            return Err(io::Error::other("retirement fixture"));
+        }
+        Ok(())
     }
 }
 
@@ -263,6 +275,44 @@ fn startup_shutdown_reports_owner_retirement_failure() {
             assert!(!state.entered.load(Ordering::Acquire));
             assert_owners_released(&state, count);
         }
+    }
+}
+
+#[test]
+fn retirement_errors_prevent_success_and_preserve_run_failure() {
+    for (scenario, index, count, error) in [
+        (
+            Scenario::PrepareShutdown,
+            0,
+            1,
+            "retire vCPU 0: retirement fixture",
+        ),
+        (
+            Scenario::FinalizeShutdown,
+            0,
+            2,
+            "retire vCPU 0: retirement fixture",
+        ),
+        (
+            Scenario::Poweroff,
+            1,
+            2,
+            "retire vCPU 1: retirement fixture",
+        ),
+        (Scenario::Reset, 1, 2, "retire vCPU 1: retirement fixture"),
+        (
+            Scenario::RunError,
+            1,
+            2,
+            "run vCPU 1: run fixture. retire vCPU 1: retirement fixture",
+        ),
+    ] {
+        let state = Arc::new(State {
+            retirement_error: Some(index),
+            ..Default::default()
+        });
+        assert_eq!(run(scenario, &state).unwrap_err().to_string(), error);
+        assert_owners_released(&state, count);
     }
 }
 
