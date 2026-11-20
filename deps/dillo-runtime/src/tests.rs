@@ -16,6 +16,7 @@ enum Scenario {
     BindError,
     PrepareError,
     PreparePanic,
+    PrepareShutdown,
     FinalizeError,
     FinalizePanic,
     FinalizeShutdown,
@@ -37,6 +38,7 @@ struct State {
     finalized: AtomicBool,
     shutdown: AtomicBool,
     stop: AtomicBool,
+    panic_on_retirement: bool,
 }
 
 struct TestMachine(Scenario, Arc<State>);
@@ -105,6 +107,9 @@ impl CpuPreparation for TestPreparation {
             .lock()
             .unwrap()
             .push((index, thread::current().id()));
+        if scenario == Scenario::PrepareShutdown {
+            state.shutdown.store(true, Ordering::Release);
+        }
         let control = TestControl(Arc::clone(&state));
         Ok((
             TestRunner {
@@ -146,6 +151,10 @@ impl Drop for TestRunner {
             .lock()
             .unwrap()
             .push((self.index, thread::current().id()));
+        assert!(
+            self.index != 0 || !self.state.panic_on_retirement,
+            "retirement fixture"
+        );
     }
 }
 
@@ -220,19 +229,41 @@ fn preparation_and_finalization_failures_prevent_entry() {
 }
 
 #[test]
-fn shutdown_and_unwind_deny_initial_permission() {
-    let state = Arc::new(State::default());
-    assert_eq!(
-        run(Scenario::FinalizeShutdown, &state).unwrap(),
-        VcpuStop::Stopped
-    );
-    assert!(!state.entered.load(Ordering::Acquire));
-    assert_owners_released(&state, 2);
-
+fn unwind_denies_initial_permission() {
     let state = Arc::new(State::default());
     assert!(catch_unwind(|| run(Scenario::FinalizePanic, &state)).is_err());
     assert!(!state.entered.load(Ordering::Acquire));
     assert_owners_released(&state, 2);
+}
+
+#[test]
+fn startup_shutdown_reports_owner_retirement_failure() {
+    for (scenario, count) in [
+        (Scenario::PrepareShutdown, 1),
+        (Scenario::FinalizeShutdown, 2),
+    ] {
+        for panic_on_retirement in [false, true] {
+            let state = Arc::new(State {
+                panic_on_retirement,
+                ..Default::default()
+            });
+            let supervisor_state = Arc::clone(&state);
+            let (send, receive) = mpsc::channel();
+            let supervisor =
+                thread::spawn(move || send.send(run(scenario, &supervisor_state)).unwrap());
+            let result = receive
+                .recv_timeout(Duration::from_secs(3))
+                .expect("owner retirement timed out");
+            supervisor.join().unwrap();
+            if panic_on_retirement {
+                assert_eq!(result.unwrap_err().to_string(), "vCPU 0 owner panicked");
+            } else {
+                assert_eq!(result.unwrap(), VcpuStop::Stopped);
+            }
+            assert!(!state.entered.load(Ordering::Acquire));
+            assert_owners_released(&state, count);
+        }
+    }
 }
 
 #[test]
