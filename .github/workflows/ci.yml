@@ -1,267 +1,141 @@
-name: CI
-
+name: Current PMI Intel KVM mode admission
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
-
-# A newer push to the same pull request or branch cancels the older run.
-# Each run on main gets its own group, so runs on main are never
-# cancelled or dropped while waiting.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-  NIGHTLY: nightly-2026-07-06
-
-# dillo needs nightly: it consumes arma as a `-Z bindeps` artifact dependency
-# (which cross-builds tatu for a bare-metal target) and snuffler as a musl
-# artifact. See the pichi-vm split checklist's toolchain carve-out.
+    inputs:
+      revision:
+        description: Exact production source SHA to qualify
+        required: true
+        type: string
+permissions:
+  contents: read
 jobs:
-  license-headers:
-    name: license headers
+  intel-mode:
     runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - name: Install HawkEye
-        uses: taiki-e/install-action@v2.90.0
-        with:
-          tool: hawkeye@6.5.0
-      - run: hawkeye check --config licenserc.toml
-
-  cargo-deny:
-    name: cargo-deny
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - name: Install cargo config
-        shell: bash
-        run: mkdir -p .cargo && cp .copr/cargo-config.toml .cargo/config.toml
-      # artifact deps make `cargo metadata` nightly-only, so install the pinned
-      # toolchain (from rust-toolchain.toml) before cargo-deny reads the tree.
-      - run: rustup show
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
-
-  commit-messages:
-    name: commit messages
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Check commit messages
-        env:
-          PR_BASE: ${{ github.base_ref }}
-          PUSH_BEFORE: ${{ github.event.before }}
-        run: |
-          if [ -n "$PR_BASE" ]; then
-            commit_range="origin/$PR_BASE..HEAD"
-          elif [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ] &&
-               git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null &&
-               git merge-base --is-ancestor "$PUSH_BEFORE" HEAD; then
-            commit_range="$PUSH_BEFORE..HEAD"
-          else
-            git fetch --no-tags origin main:refs/remotes/origin/main
-            commit_range="origin/main..HEAD"
-            if [ "$(git rev-list --count "$commit_range")" -eq 0 ]; then
-              echo "No new commits to check"
-              exit 0
-            fi
-          fi
-          pipx run gitlint --commits "$commit_range"
-
-  lint:
-    name: fmt + clippy
-    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     env:
-      RUSTFLAGS: -D warnings
+      NIGHTLY: nightly-2026-07-06
+      SOURCE_REVISION: ${{ inputs.revision }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Install cargo config
-        shell: bash
-        run: mkdir -p .cargo && cp .copr/cargo-config.toml .cargo/config.toml
-      - name: Install toolchain
-        shell: bash
-        run: |
-          rustup toolchain install "$NIGHTLY" --profile minimal --component rustfmt,clippy,rust-src
-          rustup default "$NIGHTLY"
-          # arma embeds native-arch tatu (bare-metal); snuffler cross-builds for
-          # the x86_64 guest musl triple on this x86_64 lint host.
-          rustup target add x86_64-unknown-none aarch64-unknown-none x86_64-unknown-linux-musl
-
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features
-      - run: cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets --all-features
-
-  # Real same-arch guest boot on every supported platform. dillo builds its
-  # per-OS backend (KVM on Linux, WHP on Windows, HVF on macOS) and boots an
-  # Alpine guest; the boot suite asserts the guest's self-report.
-  ci:
-    name: ${{ matrix.name }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: ubuntu-24.04      # Linux x86_64 - full workspace + real KVM boot
-            os: ubuntu-24.04
-            runs_on: '["ubuntu-24.04"]'
-            guest_musl: x86_64-unknown-linux-musl
-          - name: linux-arm64       # Linux arm64 - full workspace + real KVM boot
-            os: linux-arm64
-            runs_on: '["self-hosted","Linux","ARM64","bare-metal","aarch64","kvm"]'
-            guest_musl: aarch64-unknown-linux-musl
-          - name: windows-2025      # Windows x86_64 - build + real WHP boot
-            os: windows-2025
-            runs_on: '["windows-2025"]'
-            guest_musl: x86_64-unknown-linux-musl
-          - name: macos-arm64       # macOS arm64 - build + real HVF boot
-            os: macos-arm64
-            runs_on: '["self-hosted","macOS","ARM64","bare-metal","m1"]'
-            guest_musl: aarch64-unknown-linux-musl
-    runs-on: ${{ fromJSON(matrix.runs_on) }}
-    # There is only one macOS runner, so a stuck macOS test must not hold it
-    # for hours. A normal macOS job takes 2 to 7 minutes.
-    timeout-minutes: ${{ matrix.os == 'macos-arm64' && 15 || 60 }}
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Install cargo config
-        shell: bash
-        run: mkdir -p .cargo && cp .copr/cargo-config.toml .cargo/config.toml
-
-      - name: Install toolchain
-        shell: bash
-        run: |
-          rustup toolchain install "$NIGHTLY" --profile minimal --component rust-src
-          rustup default "$NIGHTLY"
-          # arma embeds native-arch tatu; snuffler is cross-built for the guest
-          # musl triple matching this host's arch.
-          rustup target add x86_64-unknown-none aarch64-unknown-none "${{ matrix.guest_musl }}"
-
-      # The sandbox-denied sudo purge fix is unreleased; switch to @v2 once
-      # it ships in a release.
-      - uses: Swatinem/rust-cache@master
         with:
-          save-if: ${{ runner.environment == 'github-hosted' || github.ref == 'refs/heads/main' }}
-
-      - name: Versions
-        shell: bash
-        run: |
-          cargo --version
-          rustc --version
-
-      - name: Enable KVM (Linux)
-        if: runner.os == 'Linux'
-        run: ls -l /dev/kvm && sudo chmod 666 /dev/kvm || true
-
-      - name: Test (Linux, full workspace)
-        if: runner.os == 'Linux'
+          ref: ${{ inputs.revision }}
+      - name: Verify revision and isolated runner
         shell: bash
         env:
-          CARGO_BUILD_RUSTFLAGS: "-D warnings"
-        run: cargo test --workspace
-
-      - name: Test (Windows, workspace minus Unix-only crates)
-        if: runner.os == 'Windows'
-        shell: bash
-        env:
-          CARGO_BUILD_RUSTFLAGS: "-D warnings"
-        run: |
-          # dillo-virtio-vsock bridges vsock to host Unix sockets (UnixStream),
-          # so it is Unix-only; dillo depends on it via cfg(unix) and never
-          # builds it on Windows. snuffler is the Linux guest probe.
-          cargo test --workspace --exclude snuffler --exclude dillo-virtio-vsock
-
-      - name: Test (macOS, workspace minus Linux-only crates)
-        if: runner.os == 'macOS'
-        shell: bash
-        env:
-          CARGO_BUILD_RUSTFLAGS: "-D warnings"
-        run: cargo test --workspace --exclude snuffler
-
-      - name: Signed HVF native ownership tests
-        if: runner.os == 'macOS'
-        timeout-minutes: 2
-        shell: bash
-        env:
-          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+          QUALIFICATION_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          binary="$(cargo test --locked -p dillo-machine-hvf --lib --no-run --message-format=json \
-            | python3 -c '
-          import json, sys
-          for line in sys.stdin:
-              event = json.loads(line)
-              if (event.get("reason") == "compiler-artifact"
-                      and event["target"]["name"] == "dillo_machine_hvf"
-                      and event["profile"]["test"]):
-                  print(event["executable"])
-          ')"
-          test -x "$binary"
-          entitlements="$(mktemp)"
-          trap 'rm -f "$entitlements"' EXIT
-          cat > "$entitlements" <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict><key>com.apple.security.hypervisor</key><true/></dict>
-          </plist>
-          EOF
-          codesign --force --sign - --entitlements "$entitlements" "$binary"
-          "$binary" --ignored --test-threads=1 hypervisor::tests::hvf_
-
-      - name: Reserve hugepages for guest RAM (Linux/KVM)
-        if: runner.os == 'Linux'
+          [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          test "$QUALIFICATION_ENVIRONMENT" = github-hosted
+          mkdir -p target/mode-evidence .cargo
+          cp .copr/cargo-config.toml .cargo/config.toml
+          uname -a | tee target/mode-evidence/kernel.txt
+          lscpu | tee target/mode-evidence/cpu.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          flags = Path('/proc/cpuinfo').read_text().split('flags', 1)[1].splitlines()[0].split()
+          assert 'vmx' in flags and 'svm' not in flags, 'requires a VMX-only Intel runner'
+          for name in ('ept', 'unrestricted_guest'):
+              value = Path('/sys/module/kvm_intel/parameters', name).read_text().strip()
+              assert value == 'Y', (name, value)
+          PY
+      - name: Install toolchain and tracing
         shell: bash
         run: |
-          # Hosted runners start with a fragmented page allocator, so a single
-          # `sysctl -w vm.nr_hugepages=4096` often only secures a fraction. Free
-          # the page cache + compact memory and retry so enough 2 MiB-contiguous
-          # regions become available. This is allocation flakiness, not a gap.
-          # The explicit large-memory tests run one 8 GiB guest at a time.
-          want=4096
-          pages=$(sysctl -n vm.nr_hugepages)
-          for attempt in 1 2 3 4 5 6; do
-            if [ "$pages" -ge "$want" ]; then break; fi
-            sync || true
-            echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null || true
-            echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null || true
-            sudo sysctl -w vm.nr_hugepages=$want || true
-            pages=$(sysctl -n vm.nr_hugepages)
-            echo "hugepage reservation attempt $attempt: nr_hugepages=$pages (want $want)"
-            sleep 3
-          done
-          if [ "$pages" -lt "$want" ]; then
-            echo "Linux runner must provide vm.nr_hugepages >= $want; got $pages" >&2
-            exit 1
+          set -euo pipefail
+          rustup toolchain install "$NIGHTLY" --profile minimal --component rust-src
+          rustup default "$NIGHTLY"
+          rustup target add x86_64-unknown-none aarch64-unknown-none x86_64-unknown-linux-musl
+          if ! command -v strace >/dev/null; then
+            sudo -n apt-get update
+            sudo -n apt-get install -y strace
           fi
-          grep -i huge /proc/meminfo
-
-      - name: Boot tests (KVM / WHP / HVF)
+      - uses: Swatinem/rust-cache@v2
+      - name: Reserve RAM for native guest boots
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n sysctl -w vm.nr_hugepages=1024
+          test "$(cat /proc/sys/vm/nr_hugepages)" -ge 1024
+      - name: Build exact-source native fixtures
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p dillo-machine-kvm --lib --no-run --message-format=json > target/build.jsonl
+          mapfile -t binaries < <(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "dillo_machine_kvm") | .executable // empty' target/build.jsonl)
+          test "${#binaries[@]}" -eq 1
+          echo "test_binary=${binaries[0]}" >> "$GITHUB_OUTPUT"
+      - name: Qualify native supported and disabled modes
         shell: bash
         env:
-          CARGO_BUILD_RUSTFLAGS: "-D warnings"
-        run: cargo test -p dillo --features vm-tests -- --test-threads=1 --nocapture
-
-      - name: Large-memory boots (Linux x86_64 / ARM64)
-        if: runner.os == 'Linux'
+          TEST_BINARY: ${{ steps.build.outputs.test_binary }}
+          QUALIFICATION_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          test "$QUALIFICATION_ENVIRONMENT" = github-hosted
+          mode_dir=/sys/module/kvm_intel/parameters
+          initial_ug=$(cat "$mode_dir/unrestricted_guest")
+          initial_ept=$(cat "$mode_dir/ept")
+          test "$initial_ug" = Y
+          test "$initial_ept" = Y
+          restore() {
+            if test -d /sys/module/kvm_intel; then
+              sudo -n modprobe -r kvm_intel || return
+            fi
+            sudo -n modprobe kvm_intel "unrestricted_guest=$initial_ug" "ept=$initial_ept"
+          }
+          qualify() {
+            local label=$1 fixture=$2
+            sudo -n chmod a+rw /dev/kvm
+            printf 'unrestricted_guest=%s ept=%s\n' "$(cat "$mode_dir/unrestricted_guest")" "$(cat "$mode_dir/ept")" | tee "target/mode-evidence/$label.mode"
+            timeout --kill-after=5s 45s strace -f -X raw -e trace=ioctl -o "target/mode-evidence/$label.trace" "$TEST_BINARY" --exact "$fixture" --include-ignored --nocapture 2>&1 | tee "target/mode-evidence/$label.log"
+          }
+          qualify supported notification::tests::guest_writes_match_address_width_and_queue_value
+          sudo -n modprobe -r kvm_intel
+          trap restore EXIT
+          sudo -n modprobe kvm_intel unrestricted_guest=0 ept=1
+          test "$(cat "$mode_dir/unrestricted_guest")" = N
+          test "$(cat "$mode_dir/ept")" = Y
+          qualify disabled hypervisor::backend_tests::rejects_restricted_intel_before_vm_create
+          sudo -n modprobe -r kvm_intel
+          sudo -n modprobe kvm_intel unrestricted_guest=1 ept=0
+          test "$(cat "$mode_dir/unrestricted_guest")" = N
+          test "$(cat "$mode_dir/ept")" = N
+          qualify ept_disabled hypervisor::backend_tests::rejects_restricted_intel_before_vm_create
+          restore
+          trap - EXIT
+          qualify restored notification::tests::guest_writes_match_address_width_and_queue_value
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          root = Path('target/mode-evidence')
+          for label in ('supported', 'restored', 'disabled', 'ept_disabled'):
+              calls = {int(value, 16) for value in re.findall(r'ioctl\(\d+, (0x[0-9a-f]+)', (root / f'{label}.trace').read_text())}
+              assert 0xae00 in calls, (label, 'KVM_GET_API_VERSION not observed')
+              assert 0xae47 not in calls and 0x4008ae48 not in calls, (label, 'scratch ioctl observed')
+              if label in ('disabled', 'ept_disabled'):
+                  assert 0xae01 not in calls, (label, 'KVM_CREATE_VM observed before refusal')
+              else:
+                  assert {0xae01, 0xae41, 0xae80} <= calls, (label, 'native VM/vCPU/run proof missing')
+              assert '1 passed' in (root / f'{label}.log').read_text(), (label, 'fixture did not execute')
+          PY
+      - name: Boot two fresh two-CPU Linux guests on Intel
         shell: bash
-        env:
-          CARGO_BUILD_RUSTFLAGS: "-D warnings"
-        run: >-
-          cargo test -p dillo --features vm-tests --test boot
-          boots_with_large_memory -- --ignored --test-threads=1 --nocapture
-
-      - name: Upload large-memory boot evidence
-        if: always() && runner.os == 'Linux'
-        uses: actions/upload-artifact@v7.0.2
+        run: |
+          set -euo pipefail
+          test "$(cat /sys/module/kvm_intel/parameters/unrestricted_guest)" = Y
+          timeout --kill-after=10s 300s cargo test --locked -p dillo --features vm-tests --test boot cpus_2_2 -- --test-threads=1 --nocapture 2>&1 | tee target/mode-evidence/intel-boots.log
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          log = Path('target/mode-evidence/intel-boots.log').read_text()
+          assert '2 passed; 0 failed; 0 ignored' in log, 'both native boot assertions must execute'
+          assert 'skip: no usable' not in log, 'native KVM unavailable'
+          PYCODE
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
         with:
-          name: memory-evidence-${{ matrix.name }}
-          path: target/memory-evidence
+          name: intel-kvm-mode-evidence
+          path: target/mode-evidence
+          if-no-files-found: error
