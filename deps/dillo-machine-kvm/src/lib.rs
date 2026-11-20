@@ -49,7 +49,7 @@ mod imp {
         devtree::{OwnedTree, Tree},
         platform::Machine as PlatformMachine,
     };
-    use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, VcpuStop};
+    use dillo_machine::{CpuProfile, Host, HostArchitecture, LaunchConfig, VcpuStop};
     use dillo_mmio::{
         Attach, InterruptError, InterruptLine, MmioAttachment, MmioBus, MmioDevice,
         MmioDeviceHandle, MmioInterrupt, MmioInterruptRequirement, MmioRunToken, MmioSpawnError,
@@ -550,30 +550,19 @@ mod imp {
         fn cpu_preparation(
             &mut self,
             index: u32,
-            profile: &str,
-            boot_state: &dyn BootVcpuState,
+            profile: CpuProfile,
         ) -> Result<Self::CpuPreparation, Self::Error> {
             #[cfg(target_arch = "x86_64")]
-            let boot_state = (index == 0)
-                .then(|| {
-                    boot_state
-                        .x86_64()
-                        .cloned()
-                        .ok_or_else(|| Error::UnhandledExit("boot vCPU state is not x86_64".into()))
-                })
-                .transpose()?;
+            let CpuProfile::X86_64(profile) = profile else {
+                return Err(Error::UnsupportedCpuProfile(profile));
+            };
             #[cfg(target_arch = "aarch64")]
-            let boot_state = (index == 0)
-                .then(|| {
-                    boot_state.aarch64().cloned().ok_or_else(|| {
-                        Error::UnhandledExit("boot vCPU state is not aarch64".into())
-                    })
-                })
-                .transpose()?;
+            let CpuProfile::Aarch64(profile) = profile else {
+                return Err(Error::UnsupportedCpuProfile(profile));
+            };
             Ok(CpuPreparation {
                 index,
-                profile: profile.into(),
-                boot_state,
+                profile,
                 machine: self.inner.clone(),
                 mmio_bus: Arc::clone(&self.mmio_bus),
             })
@@ -631,11 +620,7 @@ mod imp {
     #[derive(Debug)]
     pub struct CpuPreparation {
         index: u32,
-        profile: String,
-        #[cfg(target_arch = "x86_64")]
-        boot_state: Option<pmi::vm::vcpu::x86_64::CpuState>,
-        #[cfg(target_arch = "aarch64")]
-        boot_state: Option<pmi::vm::vcpu::aarch64::CpuState>,
+        profile: crate::hypervisor::Profile,
         machine: crate::hypervisor::Vm,
         mmio_bus: Arc<Mutex<MmioBus>>,
     }
@@ -647,19 +632,16 @@ mod imp {
 
         fn prepare(self) -> Result<(CpuRunner, CpuControl), Error> {
             let requester = VcpuExitRequester::new();
-            let mut vcpu = Vcpu {
-                inner: self.machine.create_vcpu(self.index, &self.profile)?,
+            let vcpu = Vcpu {
+                inner: self.machine.create_vcpu(self.index, self.profile)?,
                 mmio_bus: self.mmio_bus,
                 exit_requester: requester.clone(),
             };
-            #[cfg(target_arch = "x86_64")]
-            if let Some(state) = &self.boot_state {
-                vcpu.set_x86_64_state(state)?;
+            if self.index == 0 {
+                vcpu.inner.initialize_bsp()?;
             }
             #[cfg(target_arch = "aarch64")]
-            if let Some(state) = &self.boot_state {
-                vcpu.set_aarch64_state(state)?;
-            }
+            vcpu.inner.admit_arm_v8_0()?;
             let signal_mask = crate::hypervisor::block_kick_signal(&vcpu.inner, VCPU_KICK_SIGNAL)?;
             let registration = requester.register_current_thread();
             Ok((
@@ -1040,22 +1022,6 @@ mod imp {
     }
 
     impl Vcpu {
-        #[cfg(target_arch = "x86_64")]
-        fn set_x86_64_state(
-            &mut self,
-            state: &pmi::vm::vcpu::x86_64::CpuState,
-        ) -> Result<(), Error> {
-            self.inner.set_x86_64_state(state)
-        }
-
-        #[cfg(target_arch = "aarch64")]
-        fn set_aarch64_state(
-            &mut self,
-            state: &pmi::vm::vcpu::aarch64::CpuState,
-        ) -> Result<(), Error> {
-            self.inner.set_aarch64_state(state)
-        }
-
         fn run(&mut self) -> Result<VcpuExit, Error> {
             loop {
                 let bus = Arc::clone(&self.mmio_bus);
@@ -1180,10 +1146,52 @@ mod imp {
             Vm::from_dtb(platform.dtb())
         }
 
+        #[test]
+        fn native_ap_creation_failure_prevents_bsp_entry() {
+            use dillo_machine::{CpuPreparation as _, CpuRunner as _, Machine as _};
+            use vm_memory::{Bytes, GuestAddress};
+
+            let mut vm = vm_from(LAPIC_STD, 0x1000, IOAPIC_FIXED_BASE, 0x1000).unwrap();
+            let ranges = [(0, 0x10000), (0xffff_0000, 0x10000)];
+            let memory = Arc::new(memory::MappedMemory::test_backing(&ranges).unwrap());
+            vm.attach_mapped_memory(Arc::clone(&memory)).unwrap();
+            // Entry would store 0x5a at 0x1000, then fault.
+            vm.write_guest(0xffff_fff0, &[0xc6, 0x05, 0, 0x10, 0, 0, 0x5a, 0x0f, 0x0b])
+                .unwrap();
+
+            let profile = CpuProfile::X86_64(pmi::x86_64::Profile::V1);
+            let ap = vm.cpu_preparation(1, profile).unwrap();
+            std::thread::scope(|scope| {
+                let (ready, retained) = std::sync::mpsc::sync_channel(1);
+                let (release, released) = std::sync::mpsc::sync_channel::<()>(0);
+                let existing = scope.spawn(move || {
+                    let (owner, _control) = ap.prepare().unwrap();
+                    ready.send(()).unwrap();
+                    let _ = released.recv();
+                    owner.retire().unwrap();
+                });
+                retained
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .unwrap();
+                let result = dillo_runtime::run_cpus(&mut vm, 2, profile, &AtomicBool::new(false));
+                drop(release);
+                existing.join().unwrap();
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("prepare vCPU 1: create vCPU 1"), "{error}");
+            });
+            assert_eq!(
+                memory
+                    .guest_memory()
+                    .read_obj::<u8>(GuestAddress(0x1000))
+                    .unwrap(),
+                0
+            );
+        }
+
         /// The base a freshly created vCPU's LAPIC actually decodes at.
         fn realized_lapic_base(vm: &Vm, idx: u32) -> u64 {
             vm.inner
-                .create_vcpu(idx, "x86-64-v1")
+                .create_vcpu(idx, pmi::x86_64::Profile::V1)
                 .expect("create vCPU")
                 .realized_lapic_base()
                 .expect("read back IA32_APIC_BASE")

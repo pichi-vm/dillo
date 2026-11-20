@@ -10,7 +10,7 @@ use std::sync::{Mutex, mpsc};
 use std::thread::{self, ScopedJoinHandle};
 use std::time::Duration;
 
-use dillo_machine::{BootVcpuState, CpuControl, CpuPreparation, CpuRunner, Machine, VcpuStop};
+use dillo_machine::{CpuControl, CpuPreparation, CpuProfile, CpuRunner, Machine, VcpuStop};
 
 const WAKE_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -84,8 +84,7 @@ impl<C: CpuControl> Drop for Owners<'_, C> {
 pub fn run_cpus<M: Machine>(
     machine: &mut M,
     count: u32,
-    profile: &str,
-    boot_state: &dyn BootVcpuState,
+    profile: CpuProfile,
     shutdown: &AtomicBool,
 ) -> Result<VcpuStop, CpuError> {
     let gate = ExecutionGate(Mutex::new(false));
@@ -95,7 +94,7 @@ pub fn run_cpus<M: Machine>(
             threads: Vec::with_capacity(count as usize),
             controls: Vec::with_capacity(count as usize),
         }
-        .run(scope, machine, count, profile, boot_state, shutdown)
+        .run(scope, machine, count, profile, shutdown)
     })
 }
 
@@ -113,8 +112,7 @@ impl<'scope, C: CpuControl> Owners<'scope, C> {
         scope: &'scope thread::Scope<'scope, '_>,
         machine: &mut M,
         count: u32,
-        profile: &str,
-        boot_state: &dyn BootVcpuState,
+        profile: CpuProfile,
         shutdown: &'scope AtomicBool,
     ) -> Result<VcpuStop, CpuError>
     where
@@ -129,7 +127,7 @@ impl<'scope, C: CpuControl> Owners<'scope, C> {
                 break;
             }
             let preparation = machine
-                .cpu_preparation(index, profile, boot_state)
+                .cpu_preparation(index, profile)
                 .map_err(|error| CpuError(format!("bind vCPU {index}: {error}")))?;
             let (ready, prepared) = mpsc::sync_channel(1);
             let complete = complete.clone();
