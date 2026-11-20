@@ -1139,7 +1139,6 @@ mod memory_registration_tests {
     use crate::irq::IrqManager;
     use crate::memory::{MappedMemory, MappingProbe};
 
-    #[cfg(target_arch = "x86_64")]
     fn native_cpu_test_child(name: &str) -> bool {
         use std::{process::Command, time::Duration};
         use wait_timeout::ChildExt;
@@ -1317,6 +1316,141 @@ mod memory_registration_tests {
         let exit = ap.run(|_, _| 0, |_, _| false).unwrap();
         assert!(
             matches!(exit, VmExit::PioWrite { port: 0x43, size: 1, data } if data[0] == 0x5a),
+            "{exit:?}"
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn arm_fixed_bsp_state_and_guest_cpu_on() {
+        use vm_memory::{Bytes, GuestAddress};
+
+        if !native_cpu_test_child(
+            "hypervisor::memory_registration_tests::arm_fixed_bsp_state_and_guest_cpu_on",
+        ) {
+            return;
+        }
+        let vm = Vm::new_with_gic(&crate::imp::Aarch64Substrate {
+            dist_base: 0x0800_0000,
+            redist_base: 0x0810_0000,
+            spi_count: 64,
+        })
+        .unwrap();
+        let memory = Arc::new(MappedMemory::test_backing(&[(0, 0x10000)]).unwrap());
+        vm.attach_memory(Arc::clone(&memory)).unwrap();
+        let mut bsp = vm.create_vcpu(0, Profile::default()).unwrap();
+        let mut ap = vm.create_vcpu(1, Profile::default()).unwrap();
+
+        for index in 0..=32 {
+            bsp.set_one_u64(core_reg(index), 0x8000 + index * 16)
+                .unwrap();
+        }
+        bsp.set_one_u64(core_reg(34), 0x9000).unwrap();
+        let sctlr = sys_reg(3, 0, 1, 0, 0);
+        let read = |id| read_one_u64(&bsp.fd, bsp.idx, id).unwrap();
+        bsp.set_one_u64(sctlr, read(sctlr) | 0x0200_1005).unwrap();
+        let dirty_sctlr = read(sctlr);
+        bsp.initialize_bsp().unwrap();
+        for index in 0..=32 {
+            assert_eq!(read(core_reg(index)), 0);
+        }
+        assert_eq!(read(core_reg(33)), 0x3c5);
+        assert_eq!(read(core_reg(34)), 0);
+        assert_eq!(read(sctlr), dirty_sctlr & !0x0200_1005);
+        assert_eq!(
+            ap.fd.get_mp_state().unwrap().mp_state,
+            kvm_bindings::KVM_MP_STATE_STOPPED
+        );
+        let admitted = bsp.admit_arm_v8_0().unwrap();
+        ap.admit_arm_v8_0().unwrap();
+        let read_isar5 = if admitted.isar5.is_some() {
+            0xd538_02a0 // mrs x0, ID_ISAR5_EL1
+        } else {
+            0xd280_0000 // mov x0, #0
+        };
+        for (addr, code) in [
+            (
+                0,
+                &[
+                    0xd281_0001u32, // x1 = RAM witness at 0x800
+                    0xd538_0400,
+                    0xf900_0020, // PFR0
+                    0xd538_0600,
+                    0xf900_0420, // ISAR0
+                    0xd538_0700,
+                    0xf900_0820, // MMFR0
+                    0xd538_0500,
+                    0xf900_0c20, // DFR0
+                    0xd53b_0020,
+                    0xf900_1020, // CTR
+                    0xd538_1000,
+                    0xf900_1420, // SCTLR
+                    read_isar5,
+                    0xf900_1820, // AArch32 ISAR5, if this owner exposes AArch32
+                    0xd280_0060,
+                    0xf2b8_8000,
+                    0xd280_0021,
+                    0xd288_0002,
+                    0xd282_4683,
+                    0xd400_0003,
+                    0xd2a0_0204,
+                    0xf900_0080,
+                ][..],
+            ), // CPU_ON64(1, 0x4000, 0x1234); report x0
+            (0x4000, &[0xd2a0_0204, 0xf900_0080][..]), // AP reports its context
+        ] {
+            memory
+                .write(
+                    addr,
+                    &code
+                        .iter()
+                        .copied()
+                        .flat_map(u32::to_le_bytes)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+        }
+        let initial_sctlr = read(sctlr);
+        vm.init_gic().unwrap();
+        let exit = bsp.fd.run().unwrap();
+        assert!(
+            matches!(exit, VcpuExit::MmioWrite(0x0010_0000, data) if data == 0u64.to_le_bytes()),
+            "{exit:?}"
+        );
+        let memory = memory.guest_memory();
+        let comparisons = [
+            ("ID_AA64PFR0_EL1", admitted.pfr0, u64::MAX),
+            ("ID_AA64ISAR0_EL1", admitted.isar0, u64::MAX),
+            ("ID_AA64MMFR0_EL1", admitted.mmfr0, u64::MAX),
+            ("ID_AA64DFR0_EL1", admitted.dfr0, u64::MAX),
+            // KVM can expose other CTR/SCTLR bits differently in native EL1
+            // than in the saved pre-entry context. Compare all consumed bits.
+            ("CTR_EL0", admitted.ctr, 3 << 14),
+            ("SCTLR_EL1", initial_sctlr, 0x0300_1005),
+        ];
+        let guest: [u64; 6] = std::array::from_fn(|idx| {
+            memory
+                .read_obj(GuestAddress(0x800 + idx as u64 * 8))
+                .unwrap()
+        });
+        let saved_sctlr = read_one_u64(&bsp.fd, bsp.idx, sctlr).unwrap();
+        for ((name, expected, _), value) in comparisons.iter().zip(guest) {
+            eprintln!("KVM {name}: guest={value:#x}, admitted API={expected:#x}");
+        }
+        eprintln!("KVM SCTLR_EL1: saved API={saved_sctlr:#x}");
+        for ((name, expected, mask), value) in comparisons.into_iter().zip(guest) {
+            assert_eq!(value & mask, expected & mask, "{name}");
+        }
+        assert_eq!(guest[5] & 0x0200_1005, 0);
+        assert_eq!(guest[5], saved_sctlr);
+        if let Some(admitted_isar5) = admitted.isar5 {
+            let guest_isar5 = memory.read_obj::<u64>(GuestAddress(0x830)).unwrap();
+            eprintln!("KVM ID_ISAR5_EL1: guest={guest_isar5:#x}, admitted API={admitted_isar5:#x}");
+            assert_eq!(guest_isar5, admitted_isar5);
+        }
+        let exit = ap.fd.run().unwrap();
+        assert!(
+            matches!(exit, VcpuExit::MmioWrite(0x0010_0000, data) if data == 0x1234u64.to_le_bytes()),
             "{exit:?}"
         );
     }
