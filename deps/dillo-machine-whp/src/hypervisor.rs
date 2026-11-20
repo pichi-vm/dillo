@@ -1619,6 +1619,32 @@ mod raw {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn get_virtual_processor_register_words(
+        partition: PartitionHandle,
+        idx: u32,
+        name: WHV_REGISTER_NAME,
+    ) -> Result<[u32; 4], HResult> {
+        let names = [name];
+        let mut values = [WHV_REGISTER_VALUE::default()];
+        // SAFETY: `names` and `values` point to one initialized register
+        // name/value slot, and WHP writes the result before returning.
+        let hr = unsafe {
+            WHvGetVirtualProcessorRegisters(
+                partition,
+                idx,
+                names.as_ptr(),
+                names.len() as u32,
+                values.as_mut_ptr(),
+            )
+        };
+        if failed(hr) {
+            return Err(HResult(hr));
+        }
+        // SAFETY: every bit of this fixed-size integer array is valid.
+        Ok(unsafe { values[0].Reg128.Dword })
+    }
+
     pub(super) fn map_gpa_range(
         partition: PartitionHandle,
         host: *mut c_void,
@@ -2159,6 +2185,152 @@ mod tests {
             assert!(self.original.upgrade().is_none());
             assert_eq!(self.query().State, MEM_FREE);
         }
+    }
+
+    #[test]
+    fn whp_fixed_bsp_state_and_guest_sipi() {
+        if !native_test_child("whp_fixed_bsp_state_and_guest_sipi") {
+            return;
+        }
+        let mut vm = Vm::new_x86_64_with_local_apic_count(2).unwrap();
+        vm.set_memory(
+            GuestMemoryMmap::from_ranges(&[
+                (GuestAddress(0), 0x10000),
+                (GuestAddress(0xffff_f000), 0x1000),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        vm.write_guest(0xffff_fff0, &[0xe9, 0x0b, 0xf0, 0xff, 0xff])
+            .unwrap();
+        vm.write_guest(
+            0xffff_f000,
+            &[
+                0xc7, 0x05, 0xf0, 0x00, 0xe0, 0xfe, 0xff, 0x01, 0x00, 0x00, // enable LAPIC
+                0xc7, 0x05, 0x10, 0x03, 0xe0, 0xfe, 0x00, 0x00, 0x00, 0x01, // APIC ID 1
+                0xba, 0x00, 0x03, 0xe0, 0xfe, // mov edx, ICR low
+                0xc7, 0x02, 0x00, 0xc5, 0x00, 0x00, // assert INIT
+                0xf7, 0x02, 0x00, 0x10, 0x00, 0x00, 0x75, 0xf8, // wait for ICR idle
+                0xc7, 0x02, 0x00, 0x85, 0x00, 0x00, // deassert INIT
+                0xf7, 0x02, 0x00, 0x10, 0x00, 0x00, 0x75, 0xf8, 0xb0, 0xb1, 0xe6,
+                0x42, // INIT marker
+                0xc7, 0x02, 0x07, 0x46, 0x00, 0x00, // startup IPI, vector 7
+                0xf7, 0x02, 0x00, 0x10, 0x00, 0x00, 0x75, 0xf8, 0xb0, 0xb2, 0xe6, 0x42, 0x0f,
+                0x0b, // SIPI marker; ud2
+            ],
+        )
+        .unwrap();
+        vm.write_guest(0x7000, &[0xb0, 0xa7, 0xe6, 0x42, 0x0f, 0x0b])
+            .unwrap();
+        let mut bsp = vm.create_vcpu(0, Profile::V1).unwrap();
+        let mut ap = vm.create_vcpu(1, Profile::V1).unwrap();
+        let startup_suspend = |vcpu: &super::Vcpu| {
+            raw::get_virtual_processor_register_words(
+                vcpu.partition.partition,
+                vcpu.idx,
+                WHvRegisterInternalActivityState,
+            )
+            .unwrap()[0]
+                & 1
+                != 0
+        };
+        assert!(startup_suspend(&ap));
+        bsp.set_registers(vec![
+            (WHvX64RegisterRax, WHV_REGISTER_VALUE { Reg64: 0x55aa }),
+            (WHvX64RegisterRip, WHV_REGISTER_VALUE { Reg64: 0x1000 }),
+            (
+                WHvX64RegisterXmm0,
+                WHV_REGISTER_VALUE {
+                    Reg128: WHV_UINT128 {
+                        Dword: [0x55aa, 0, 0, 0],
+                    },
+                },
+            ),
+        ])
+        .unwrap();
+        bsp.initialize_bsp().unwrap();
+        let read = |name| {
+            raw::get_virtual_processor_register_words(bsp.partition.partition, bsp.idx, name)
+                .unwrap()
+        };
+        assert_eq!(read(WHvX64RegisterRax), [0x55aa, 0, 0, 0]);
+        for (name, expected) in [
+            (WHvX64RegisterRip, 0xffff_fff0),
+            (WHvX64RegisterRflags, 2),
+            (WHvX64RegisterCr0, 0x21),
+            (WHvX64RegisterCr3, 0),
+            (WHvX64RegisterCr4, 0x40),
+            (WHvX64RegisterEfer, 0x901),
+            (WHvX64RegisterDr6, 0xffff_0ff0),
+            (WHvX64RegisterDr7, 0x400),
+            (WHvX64RegisterPat, 0x0007_0406_0007_0406),
+            (WHvX64RegisterXCr0, 1),
+        ] {
+            let words = read(name);
+            let actual = u64::from(words[0]) | (u64::from(words[1]) << 32);
+            if name == WHvX64RegisterCr0 {
+                assert_eq!(
+                    actual & !0x10,
+                    expected,
+                    "CR0 allows architectural ET normalization"
+                );
+            } else {
+                assert_eq!(actual, expected, "register {name:#x}");
+            }
+        }
+        for (name, attributes, limit) in [
+            (WHvX64RegisterCs, 0xc09b_u32, u32::MAX),
+            (WHvX64RegisterDs, 0xc093, u32::MAX),
+            (WHvX64RegisterEs, 0xc093, u32::MAX),
+            (WHvX64RegisterFs, 0xc093, u32::MAX),
+            (WHvX64RegisterGs, 0xc093, u32::MAX),
+            (WHvX64RegisterSs, 0xc093, u32::MAX),
+            (WHvX64RegisterTr, 0x8b, 0xffff),
+        ] {
+            // Native layout: base[63:0], limit[31:0], selector[15:0], attributes[15:0].
+            assert_eq!(
+                read(name),
+                [0, 0, limit, attributes << 16],
+                "segment {name:#x}"
+            );
+        }
+        assert_eq!(read(WHvX64RegisterLdtr)[3] & 0xffff, 0);
+        assert_eq!(read(WHvX64RegisterGdtr), [0, 0xffff_0000, 0, 0]);
+        assert_eq!(read(WHvX64RegisterIdtr), [0; 4]);
+        assert_eq!(read(WHvX64RegisterFpControlStatus), [0x37f, 0, 0, 0]);
+        // XMM control contains the native read-only mask in its last word;
+        // PMI fixes MXCSR and the last-data pointer, which occupy words0..3.
+        let xmm_control = read(WHvX64RegisterXmmControlStatus);
+        assert_eq!(&xmm_control[..3], &[0, 0, 0x1f80]);
+        for name in WHvX64RegisterXmm0..=WHvX64RegisterFpMmx7 {
+            assert_eq!(read(name), [0; 4], "FP/SSE register {name:#x}");
+        }
+
+        for expected in [0xb1, 0xb2] {
+            let exit = bsp.run(|_, _| 0, |_, _| false).unwrap();
+            assert!(
+                matches!(exit, VmExit::PioWrite { port: 0x42, size: 1, data } if data[0] == expected),
+                "{exit:?}"
+            );
+            if expected == 0xb1 {
+                assert!(startup_suspend(&ap));
+            }
+        }
+        let exit = ap.run(|_, _| 0, |_, _| false).unwrap();
+        assert!(
+            matches!(exit, VmExit::PioWrite { port: 0x42, size: 1, data } if data[0] == 0xa7),
+            "{exit:?}"
+        );
+        assert!(!startup_suspend(&ap));
+        let cs = raw::get_virtual_processor_register_words(
+            ap.partition.partition,
+            ap.idx,
+            WHvX64RegisterCs,
+        )
+        .unwrap();
+        assert_eq!(&cs[..2], &[0x7000, 0]);
+        ap.retire().unwrap();
+        bsp.retire().unwrap();
     }
 
     #[test]
