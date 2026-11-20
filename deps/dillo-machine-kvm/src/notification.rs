@@ -105,9 +105,7 @@ mod tests {
     use super::*;
 
     fn authority(window: MmioWindow) -> Notifications {
-        let kvm = kvm_ioctls::Kvm::new().expect("open /dev/kvm");
-        let vm = kvm.create_vm().unwrap();
-        Notifications::new(Vm::test_from_native(kvm, vm), vec![window])
+        Notifications::new(Vm::test_new().unwrap(), vec![window])
     }
 
     #[test]
@@ -229,11 +227,12 @@ mod tests {
     fn guest_writes_match_address_width_and_queue_value() {
         let backing = Arc::new(crate::memory::MappedMemory::test_backing(&[(0, 0x1000)]).unwrap());
         // Real-mode stores: matched dword, wrong value, wrong width,
-        // wrong address, then halt. Only the first may bypass userspace.
+        // wrong address, then OUT to signal completion. Only the matched
+        // store may bypass userspace.
         let code = [
             0x66, 0xc7, 0x06, 0x50, 0x10, 0x01, 0x00, 0x00, 0x00, 0x66, 0xc7, 0x06, 0x50, 0x10,
             0x02, 0x00, 0x00, 0x00, 0xc7, 0x06, 0x50, 0x10, 0x01, 0x00, 0x66, 0xc7, 0x06, 0x54,
-            0x10, 0x01, 0x00, 0x00, 0x00, 0xf4,
+            0x10, 0x01, 0x00, 0x00, 0x00, 0xe6, 0x42,
         ];
         backing.write(0, &code).unwrap();
         let window = MmioWindow {
@@ -267,7 +266,10 @@ mod tests {
                 exit => panic!("unexpected exit: {exit:?}"),
             }
         }
-        assert!(matches!(vcpu.run().unwrap(), kvm_ioctls::VcpuExit::Hlt));
+        assert!(matches!(
+            vcpu.run().unwrap(),
+            kvm_ioctls::VcpuExit::IoOut(0x42, [0])
+        ));
         // Add a userspace wake so a missed guest notification fails instead
         // of blocking forever. Exactly one guest write must have arrived.
         notification.write(1).unwrap();

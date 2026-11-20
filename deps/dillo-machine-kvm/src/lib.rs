@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Linux KVM machine backend.
+//!
+//! Ordinary Intel VMs require effective unrestricted guest mode. The kernel
+//! must report `Y` at `/sys/module/kvm_intel/parameters/unrestricted_guest`
+//! before VM creation. KVM accounts for EPT and CPU support in this value.
+//! Host CPUID and kernel sysfs must describe the kernel backing `/dev/kvm`.
+//! AMD SVM starts independently of the Intel parameter.
+
 #![cfg(target_os = "linux")]
 
 #[cfg(target_arch = "x86_64")]
@@ -936,6 +944,7 @@ mod imp {
     #[cfg(all(test, target_arch = "x86_64"))]
     mod stop_signal_tests {
         use super::*;
+        use crate::hypervisor::Vm;
         use nix::sys::signal::{SigSet, SigmaskHow};
 
         struct RestoreMask(SigSet);
@@ -966,9 +975,8 @@ mod imp {
 
         #[test]
         fn stop_before_guest_entry_interrupts_kvm_run() {
-            let kvm = kvm_ioctls::Kvm::new().unwrap();
-            let vm = kvm.create_vm().unwrap();
-            let mut cpu = vm.create_vcpu(0).unwrap();
+            let vm = Vm::test_new().unwrap();
+            let mut cpu = vm.fd().create_vcpu(0).unwrap();
             let requester = VcpuExitRequester::new();
             let _restore = RestoreMask(
                 SigSet::all()
@@ -995,9 +1003,8 @@ mod imp {
             let file = std::fs::File::open("/dev/null").unwrap();
             assert!(crate::hypervisor::block_kick_signal(&file, VCPU_KICK_SIGNAL).is_err());
             assert_current_mask(previous);
-            let kvm = kvm_ioctls::Kvm::new().unwrap();
-            let vm = kvm.create_vm().unwrap();
-            let cpu = vm.create_vcpu(0).unwrap();
+            let vm = Vm::test_new().unwrap();
+            let cpu = vm.fd().create_vcpu(0).unwrap();
             let result = std::panic::catch_unwind(|| {
                 let _mask = crate::hypervisor::block_kick_signal(&cpu, VCPU_KICK_SIGNAL).unwrap();
                 let mut blocked = previous;

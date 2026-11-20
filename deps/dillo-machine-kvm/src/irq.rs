@@ -424,8 +424,7 @@ fn make_msi_entry(gsi: u32, addr_lo: u32, addr_hi: u32, data: u32) -> kvm_irq_ro
     entry
 }
 
-// These tests drive the x86 in-kernel IRQCHIP (IOAPIC/PIC defaults + MSI
-// routing) via create_irq_chip/set_tss, which are x86-only KVM facilities.
+// These tests drive the x86 in-kernel IRQCHIP (IOAPIC/PIC defaults + MSI routing).
 #[cfg(all(test, target_arch = "x86_64"))]
 #[allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
 mod tests {
@@ -436,15 +435,11 @@ mod tests {
     ///
     /// Returns an owning VM with irqchip and PIT2 configured.
     fn create_test_vm() -> Vm {
-        let kvm = kvm_ioctls::Kvm::new().expect("open /dev/kvm");
-        let vm = kvm.create_vm().expect("create VM");
-        vm.set_tss_address(0xFFFB_C000).expect("set TSS");
-        vm.set_identity_map_address(0xFFFB_8000)
-            .expect("set identity map");
-        vm.create_irq_chip().expect("create irqchip");
-        vm.create_pit2(kvm_pit_config::default())
+        let vm = Vm::test_new().unwrap();
+        vm.fd()
+            .create_pit2(kvm_pit_config::default())
             .expect("create PIT2");
-        Vm::test_from_native(kvm, vm)
+        vm
     }
 
     #[test]
