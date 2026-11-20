@@ -1482,6 +1482,7 @@ mod launch {
     use thiserror::Error;
 
     use crate::placement::{self, MemoryPlan};
+    use crate::runner::RunError;
     use dillo_launch::pmi_parse::{Action as PmiAction, FillKind, HostArch, ParseOptions};
 
     /// The PMI byte source. Raw section loads are copied straight from it into
@@ -1596,8 +1597,8 @@ mod launch {
     }
 
     /// Bytes synthesized by Dillo or a section loaded directly from the PMI.
-    #[derive(Debug, Clone)]
-    pub(crate) enum WriteSrc {
+    #[derive(Debug)]
+    enum WriteSrc {
         Owned(Vec<u8>),
         Image {
             offset: usize,
@@ -1619,9 +1620,57 @@ mod launch {
     /// One launch-time write into guest RAM.
     #[derive(Debug)]
     pub(crate) struct GuestWrite {
-        pub(crate) section: String,
-        pub(crate) gpa: u64,
-        pub(crate) data: WriteSrc,
+        section: String,
+        gpa: u64,
+        data: WriteSrc,
+    }
+
+    impl GuestWrite {
+        pub(crate) fn apply(
+            &self,
+            pmi_bytes: &[u8],
+            mut write_guest: impl FnMut(u64, &[u8]) -> Result<(), RunError>,
+        ) -> Result<(), RunError> {
+            static ZEROES: [u8; 64 * 1024] = [0; 64 * 1024];
+            let (data, mut zero_tail) = match &self.data {
+                WriteSrc::Owned(v) => (v.as_slice(), 0),
+                WriteSrc::Image {
+                    len: 0, zero_tail, ..
+                } => (&[][..], *zero_tail),
+                WriteSrc::Image {
+                    offset,
+                    len,
+                    zero_tail,
+                } => (
+                    pmi_bytes
+                        .get(*offset..offset.saturating_add(*len))
+                        .ok_or_else(|| {
+                            RunError::Machine(format!(
+                                "launch section `{}` range {:#x}+{:#x} out of PMI bounds",
+                                self.section, offset, len
+                            ))
+                        })?,
+                    *zero_tail,
+                ),
+            };
+            log::debug!(
+                "writing launch section `{}` to GPA {:#x} ({} bytes)",
+                self.section,
+                self.gpa,
+                data.len() as u64 + zero_tail
+            );
+            if !data.is_empty() {
+                write_guest(self.gpa, data)?;
+            }
+            let mut gpa = self.gpa + data.len() as u64;
+            while zero_tail > 0 {
+                let len = zero_tail.min(ZEROES.len() as u64) as usize;
+                write_guest(gpa, &ZEROES[..len])?;
+                gpa += len as u64;
+                zero_tail -= len as u64;
+            }
+            Ok(())
+        }
     }
 
     impl LaunchPlan {
@@ -1735,7 +1784,6 @@ mod launch {
                 platform.placement_regions(),
             )?;
             let guest_writes = guest_writes(
-                bytes,
                 &parsed,
                 &memory,
                 platform.arch(),
@@ -1835,9 +1883,6 @@ mod launch {
         #[error("unrecognized cpu:profile {0:?} for {1:?}")]
         UnknownCpuProfile(String, HostArch),
 
-        #[error("load section `{0}` lies outside the PMI file")]
-        MalformedLoadSection(String),
-
         #[error("synthesize host DTBO: {0}")]
         DtboSynth(#[source] anyhow::Error),
 
@@ -1858,7 +1903,6 @@ mod launch {
                 | Self::DelegatedAllocationRequiresDtbo
                 | Self::DtbCrossValidate(_)
                 | Self::MalformedMergedDtb
-                | Self::MalformedLoadSection(_)
                 | Self::DtboSynth(_)
                 | Self::Bootconfig(_) => 11,
                 Self::Placement(_) | Self::AddressSpace { .. } | Self::AddressSpaceProbe(_) => 13,
@@ -1873,7 +1917,6 @@ mod launch {
     }
 
     fn guest_writes(
-        bytes: &[u8],
         parsed: &dillo_launch::pmi_parse::ParsedPmi,
         memory: &MemoryPlan,
         arch: Arch,
@@ -1904,14 +1947,6 @@ mod launch {
                     let size = s
                         .virtual_size
                         .next_multiple_of(dillo_launch::pmi_parse::caps::SMALL_PAGE);
-                    // Bounds-check the section against the image (as the old copy
-                    // path did), but record the byte range instead of copying it:
-                    // apply_load_sections copies it straight from the PMI image
-                    // into guest RAM (one copy, not two).
-                    if s.file_size != 0 {
-                        read_section(bytes, s.file_offset, s.file_size)
-                            .ok_or_else(|| LaunchError::MalformedLoadSection(section.clone()))?;
-                    }
                     writes.push(GuestWrite {
                         section: section.clone(),
                         gpa: s.gpa,
@@ -2504,55 +2539,6 @@ mod machine_select {
             Ok(())
         }
 
-        pub(crate) fn apply_load_sections(
-            guest_writes: &[GuestWrite],
-            pmi_bytes: &[u8],
-            mut write_guest: impl FnMut(u64, &[u8]) -> Result<(), RunError>,
-        ) -> Result<(), RunError> {
-            use crate::launch::WriteSrc;
-            static ZEROES: [u8; 64 * 1024] = [0; 64 * 1024];
-            for write in guest_writes {
-                let (data, mut zero_tail) = match &write.data {
-                    WriteSrc::Owned(v) => (v.as_slice(), 0),
-                    WriteSrc::Image {
-                        len: 0, zero_tail, ..
-                    } => (&[][..], *zero_tail),
-                    WriteSrc::Image {
-                        offset,
-                        len,
-                        zero_tail,
-                    } => (
-                        pmi_bytes
-                            .get(*offset..offset.saturating_add(*len))
-                            .ok_or_else(|| {
-                                RunError::Machine(format!(
-                                    "launch section `{}` range {:#x}+{:#x} out of PMI bounds",
-                                    write.section, offset, len
-                                ))
-                            })?,
-                        *zero_tail,
-                    ),
-                };
-                log::debug!(
-                    "writing launch section `{}` to GPA {:#x} ({} bytes)",
-                    write.section,
-                    write.gpa,
-                    data.len() as u64 + zero_tail
-                );
-                if !data.is_empty() {
-                    write_guest(write.gpa, data)?;
-                }
-                let mut gpa = write.gpa + data.len() as u64;
-                while zero_tail > 0 {
-                    let len = zero_tail.min(ZEROES.len() as u64) as usize;
-                    write_guest(gpa, &ZEROES[..len])?;
-                    gpa += len as u64;
-                    zero_tail -= len as u64;
-                }
-            }
-            Ok(())
-        }
-
         fn run_selected<M, E>(
             preflight: Preflight,
             vcpus: u32,
@@ -2603,9 +2589,11 @@ mod machine_select {
             })
             .map_err(RunError::machine)?;
             crate::boot_trace::mark("machine_ready");
-            apply_load_sections(&guest_writes, pmi.bytes(), |gpa, data| {
-                vm.write_guest(gpa, data).map_err(RunError::machine)
-            })?;
+            for write in &guest_writes {
+                write.apply(pmi.bytes(), |gpa, data| {
+                    vm.write_guest(gpa, data).map_err(RunError::machine)
+                })?;
+            }
             // Sections are now in guest RAM; drop the PMI backing so it does not
             // stay resident for the VM's lifetime. A guest reboot re-maps it.
             pmi.release();
@@ -2632,9 +2620,11 @@ mod machine_select {
                 // Re-map the PMI just to replay the raw section loads, then drop
                 // it again — it is not held resident between boots.
                 pmi.remap().map_err(RunError::machine)?;
-                apply_load_sections(&guest_writes, pmi.bytes(), |gpa, data| {
-                    vm.write_guest(gpa, data).map_err(RunError::machine)
-                })?;
+                for write in &guest_writes {
+                    write.apply(pmi.bytes(), |gpa, data| {
+                        vm.write_guest(gpa, data).map_err(RunError::machine)
+                    })?;
+                }
                 pmi.release();
                 outcome = dillo_runtime::run_cpus(
                     &mut vm,

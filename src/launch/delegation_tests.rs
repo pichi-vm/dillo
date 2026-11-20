@@ -227,12 +227,21 @@ fn section_loads_clear_zero_pages_and_padded_tails() {
     std::fs::write(&path, bytes).unwrap();
     let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 4, 1, None, None).unwrap();
     let mut ram = vec![0xcc; 0x20_4000];
-    crate::runner::apply_load_sections(&plan.guest_writes, plan.pmi.bytes(), |gpa, data| {
-        let gpa = gpa as usize;
-        ram[gpa..gpa + data.len()].copy_from_slice(data);
-        Ok(())
-    })
-    .unwrap();
+    for write in &plan.guest_writes {
+        write
+            .apply(plan.pmi.bytes(), |gpa, data| {
+                let gpa = gpa as usize;
+                ram[gpa..gpa + data.len()].copy_from_slice(data);
+                Ok(())
+            })
+            .unwrap();
+    }
+    let error = plan.guest_writes[0]
+        .apply(&[], |_, _| {
+            panic!("source bounds must be checked before writing")
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("out of PMI bounds"));
     assert!(ram[..0x1000].iter().all(|&byte| byte == 0x66));
     assert!(ram[0x1000..0x20_0000].iter().all(|&byte| byte == 0));
     assert!(ram[0x20_2000..0x20_3000].iter().all(|&byte| byte == 0));
