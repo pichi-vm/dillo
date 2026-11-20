@@ -114,7 +114,10 @@ pub mod pmi_parse {
             file_size: u64,
         },
 
-        #[error("section `{name}`: gpa + VirtualSize overflows u64")]
+        #[error("load section `{0}` has SizeOfRawData greater than VirtualSize")]
+        InvalidLoadSize(String),
+
+        #[error("section `{name}`: guest backing range overflows u64")]
         VirtualAddressOverflow { name: String },
 
         #[error("sections `{a}` and `{b}` overlap in [gpa, gpa + VirtualSize)")]
@@ -431,17 +434,16 @@ pub mod pmi_parse {
         }
 
         // §5.5 sum-of-loaded cap.
-        let load_section_names: Vec<&String> = actions
-            .iter()
-            .filter_map(|a| match a {
-                Action::Load { section } => Some(section),
-                Action::Fill { .. } => None,
-            })
-            .collect();
-        let total_loaded: u64 = load_section_names
-            .iter()
-            .map(|n| raw_sections[*n].virtual_size)
-            .sum();
+        let mut total_loaded = 0;
+        for action in &actions {
+            if let Action::Load { section } = action {
+                let s = &raw_sections[section];
+                if s.raw_size > s.virtual_size {
+                    return Err(Error::InvalidLoadSize(section.clone()));
+                }
+                total_loaded += s.virtual_size;
+            }
+        }
         let memory_cap = effective_memory_cap(opts.memory_mib);
         if total_loaded > memory_cap {
             return Err(Error::LoadedBytesExceedMemory {
@@ -523,6 +525,7 @@ pub mod pmi_parse {
     struct RawSection {
         file_offset: u64,
         file_size: u64,
+        raw_size: u64,
         gpa: u64,
         virtual_size: u64,
         is_discardable: bool,
@@ -566,6 +569,10 @@ pub mod pmi_parse {
             let gpa = section.address();
             let virtual_size = section.size();
             let (file_offset, file_size_field) = section.file_range().unwrap_or((0, 0));
+            let raw_size = section
+                .pe_section()
+                .size_of_raw_data
+                .get(object::LittleEndian);
 
             // §5.4 PE bytes-on-disk fit in file.
             if file_size_field > 0 {
@@ -613,6 +620,7 @@ pub mod pmi_parse {
                 RawSection {
                     file_offset,
                     file_size: file_size_field,
+                    raw_size: u64::from(raw_size),
                     gpa,
                     virtual_size,
                     is_discardable,
@@ -774,9 +782,12 @@ pub mod pmi_parse {
     }
 
     fn validate_section(name: &str, s: &RawSection) -> Result<(), Error> {
-        // gpa + VirtualSize doesn't overflow u64.
+        // The section and the backing extent used by the spread check must fit.
         s.gpa
             .checked_add(s.virtual_size)
+            .filter(|end| {
+                s.virtual_size == 0 || end.checked_next_multiple_of(caps::HUGE_PAGE).is_some()
+            })
             .ok_or_else(|| Error::VirtualAddressOverflow {
                 name: name.to_string(),
             })?;
