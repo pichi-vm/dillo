@@ -1,0 +1,111 @@
+name: Current PMI native state probe
+
+on:
+  push:
+    branches: [diag/current-pmi-native-state]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: KVM x86
+            runner: '["ubuntu-24.04"]'
+            backend: dillo-machine-kvm
+            witness: x86_fixed_bsp_state_and_guest_sipi
+          - name: KVM Arm
+            runner: '["self-hosted","Linux","ARM64","bare-metal","aarch64","kvm"]'
+            backend: dillo-machine-kvm
+            witness: arm_fixed_bsp_state_and_guest_cpu_on
+          - name: WHP x86
+            runner: '["windows-2025"]'
+            backend: dillo-machine-whp
+            witness: whp_fixed_bsp_state_and_guest_sipi
+          - name: HVF Arm
+            runner: '["self-hosted","macOS","ARM64","bare-metal","m1"]'
+            backend: dillo-machine-hvf
+            witness: hvf_psci_uses_only_the_surveyed_conduit
+    name: ${{ matrix.name }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 15
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
+      RUSTFLAGS: -D warnings
+      BACKEND: ${{ matrix.backend }}
+      WITNESS: ${{ matrix.witness }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 2
+      - name: Record exact source and platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/native-state-evidence .cargo
+          cp .copr/cargo-config.toml .cargo/config.toml
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = a9387f3d67d0d9dd5ecf0b898c53c4d22f4d74d0
+          test -z "$(git status --porcelain --untracked-files=no)"
+          {
+            git log -1 --format=fuller
+            uname -a
+            rustup show
+            cargo --version
+            rustc --version
+          } 2>&1 | tee target/native-state-evidence/platform.log
+      - name: Enable KVM access
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -c /dev/kvm
+          sudo chmod 666 /dev/kvm
+      - name: Native backend and shared launch checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p dillo-launch -p dillo-machine -p dillo-runtime \
+            -p "$BACKEND" --lib -- --nocapture 2>&1 \
+            | tee target/native-state-evidence/native.log
+      - name: Sign and execute HVF fixtures
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$(cargo test --locked -p dillo-machine-hvf --lib --no-run --message-format=json \
+            | python3 -c '
+          import json, sys
+          for line in sys.stdin:
+              event = json.loads(line)
+              if (event.get("reason") == "compiler-artifact"
+                      and event["target"]["name"] == "dillo_machine_hvf"
+                      and event["profile"]["test"]):
+                  print(event["executable"])
+          ')"
+          test -x "$binary"
+          entitlement="$(mktemp)"
+          trap 'rm -f "$entitlement"' EXIT
+          cat > "$entitlement" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict><key>com.apple.security.hypervisor</key><true/></dict></plist>
+          EOF
+          codesign --force --sign - --entitlements "$entitlement" "$binary"
+          "$binary" --ignored --test-threads=1 --nocapture hypervisor::tests::hvf_ \
+            2>&1 | tee -a target/native-state-evidence/native.log
+      - name: Require the native state and AP witness
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -E "test .*${WITNESS} .*ok" target/native-state-evidence/native.log
+      - uses: actions/upload-artifact@v4.6.2
+        if: always()
+        with:
+          name: native-state-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          path: target/native-state-evidence
+          if-no-files-found: error

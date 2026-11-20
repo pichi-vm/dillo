@@ -3,7 +3,7 @@
 
 //! KVM-typed CPUID validation glue over shared x86 profile policy.
 //!
-//! Profile parse, feature table, and native CPUID checks live in
+//! The required feature table lives in
 //! [`dillo_machine::cpuid_x86`]. This module keeps the `CpuId` /
 //! `kvm_cpuid_entry2` path local so `dillo-machine` stays free of
 //! `kvm-bindings`.
@@ -18,9 +18,8 @@
 
 use kvm_bindings::CpuId;
 
-use dillo_machine::cpuid_x86::{CpuidFeature, Reg};
-
-pub(crate) use dillo_machine::cpuid_x86::X86Level;
+use dillo_machine::cpuid_x86::{CpuidFeature, Reg, cumulative_features, required_xcr0};
+use pmi::x86_64::Profile;
 
 /// Match CPUID's APIC identifiers to the ID given to KVM_CREATE_VCPU.
 pub(crate) fn set_apic_id(cpuid: &mut CpuId, id: u32) {
@@ -57,11 +56,20 @@ pub(crate) fn guest_address_bits(supported: &CpuId) -> Option<u32> {
 
 /// Return the first mandatory feature the host's supported CPUID
 /// doesn't expose, if any.
-pub(crate) fn first_missing(level: X86Level, supported: &CpuId) -> Option<&'static str> {
-    for feat in level.cumulative_features() {
+pub(crate) fn first_missing(level: Profile, supported: &CpuId) -> Option<&'static str> {
+    for feat in cumulative_features(level) {
         if !host_has_feature(supported, feat) {
             return Some(feat.name);
         }
+    }
+    let xcr0 = required_xcr0(level);
+    if xcr0 != 0
+        && !supported
+            .as_slice()
+            .iter()
+            .any(|entry| entry.function == 0x0d && entry.index == 0 && entry.eax & xcr0 == xcr0)
+    {
+        return Some("XCR0 components");
     }
     None
 }
@@ -171,13 +179,11 @@ mod tests {
     #[test]
     fn first_missing_on_empty_cpuid_reports_fpu() {
         let empty = CpuId::from_entries(&[]).expect("empty CpuId");
-        assert_eq!(first_missing(X86Level::V1, &empty), Some("fpu"));
+        assert_eq!(first_missing(Profile::V1, &empty), Some("fpu"));
     }
 
     #[test]
-    fn first_missing_accepts_v1_when_leaf1_edx_bits_present() {
-        // V1 demands only leaf-1 EDX bits; an entry with those set and
-        // nothing else must clear first_missing for V1.
+    fn first_missing_accepts_v1_with_its_required_features() {
         let edx = (1 << 0) | (1 << 8) | (1 << 15) | (1 << 23) | (1 << 24) | (1 << 25) | (1 << 26);
         let entries = [kvm_cpuid_entry2 {
             function: 0x0000_0001,
@@ -189,7 +195,17 @@ mod tests {
             edx,
             padding: [0; 3],
         }];
-        let supported = CpuId::from_entries(&entries).expect("leaf1 CpuId");
-        assert_eq!(first_missing(X86Level::V1, &supported), None);
+        let supported = CpuId::from_entries(&entries).unwrap();
+        assert_eq!(first_missing(Profile::V1, &supported), Some("syscall"));
+        let supported = CpuId::from_entries(&[
+            entries[0],
+            kvm_cpuid_entry2 {
+                function: 0x8000_0001,
+                edx: 1 << 11,
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+        assert_eq!(first_missing(Profile::V1, &supported), None);
     }
 }

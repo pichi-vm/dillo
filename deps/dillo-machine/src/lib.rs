@@ -30,18 +30,11 @@ pub struct RamRange {
     pub size: u64,
 }
 
-/// Arch-erased view of the PMI boot vCPU state.
-///
-/// Backends pick the arm they support; dillo never constructs backend-specific
-/// CPU input structs directly.
-pub trait BootVcpuState {
-    fn x86_64(&self) -> Option<&pmi::vm::vcpu::x86_64::CpuState> {
-        None
-    }
-
-    fn aarch64(&self) -> Option<&pmi::vm::vcpu::aarch64::CpuState> {
-        None
-    }
+/// PMI ISA baseline for the architecture selected by the image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuProfile {
+    X86_64(pmi::x86_64::Profile),
+    Aarch64(pmi::aarch64::Profile),
 }
 
 /// Host architecture exposed by the selected machine backend.
@@ -58,6 +51,20 @@ pub fn aarch64_pa_bits(mmfr0: u64) -> Option<u32> {
     [32, 36, 40, 42, 44, 48, 52, 56]
         .get((mmfr0 & 0xf) as usize)
         .copied()
+}
+
+/// Mandatory Armv8.0-A features for an AArch64 guest (Arm 109697 §9.1).
+/// Check the native guest-visible ID_AA64PFR0_EL1 and CTR_EL0 values.
+pub fn armv8_0_missing_feature(pfr0: u64, ctr: u64) -> Option<&'static str> {
+    if !matches!(pfr0 & 0xf, 1 | 2) {
+        Some("FEAT_EL0")
+    } else if !matches!((pfr0 >> 4) & 0xf, 1 | 2) {
+        Some("FEAT_EL1")
+    } else if !matches!((ctr >> 14) & 0x3, 2 | 3) {
+        Some("FEAT_IVIPT")
+    } else {
+        None
+    }
 }
 
 /// Host-level services exposed by the selected machine backend.
@@ -123,8 +130,7 @@ pub trait Machine: Sized + 'static {
     fn cpu_preparation(
         &mut self,
         index: u32,
-        profile: &str,
-        boot_state: &dyn BootVcpuState,
+        profile: CpuProfile,
     ) -> Result<Self::CpuPreparation, Self::Error>;
 
     /// Maximum usable guest address width under this backend's CPU/VM policy.
@@ -177,6 +183,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn arm_floor_requires_each_guest_visible_feature() {
+        assert_eq!(armv8_0_missing_feature(0x11, 3 << 14), None);
+        assert_eq!(armv8_0_missing_feature(0x22, 2 << 14), None);
+        assert_eq!(armv8_0_missing_feature(0x10, 3 << 14), Some("FEAT_EL0"));
+        assert_eq!(armv8_0_missing_feature(0x01, 3 << 14), Some("FEAT_EL1"));
+        assert_eq!(armv8_0_missing_feature(0x11, 1 << 14), Some("FEAT_IVIPT"));
+    }
+
     #[derive(Debug)]
     struct TestError;
 
@@ -187,9 +202,6 @@ mod tests {
     }
 
     impl std::error::Error for TestError {}
-
-    struct TestBoot;
-    impl BootVcpuState for TestBoot {}
 
     struct TestCpuPreparation;
 
@@ -233,8 +245,7 @@ mod tests {
         fn cpu_preparation(
             &mut self,
             _index: u32,
-            _profile: &str,
-            _boot_state: &dyn BootVcpuState,
+            _profile: CpuProfile,
         ) -> Result<Self::CpuPreparation, Self::Error> {
             Ok(TestCpuPreparation)
         }
@@ -269,7 +280,7 @@ mod tests {
             .write_guest(0x1000, b"boot")
             .expect("guest write accepted");
         let preparation = machine
-            .cpu_preparation(0, "test-profile", &TestBoot)
+            .cpu_preparation(0, CpuProfile::X86_64(pmi::x86_64::Profile::V1))
             .unwrap();
         let (mut cpu, control) = preparation.prepare().unwrap();
         control.stop().expect("CPU stopped");

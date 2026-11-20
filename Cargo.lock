@@ -581,6 +581,7 @@ dependencies = [
  "dillo-devtree",
  "dillo-machine",
  "dillo-mmio",
+ "dillo-runtime",
  "dillo-virtio",
  "kvm-bindings",
  "kvm-ioctls",
@@ -591,6 +592,7 @@ dependencies = [
  "thiserror 2.0.18",
  "vm-memory 0.17.2",
  "vmm-sys-util",
+ "wait-timeout",
 ]
 
 [[package]]
@@ -659,6 +661,7 @@ version = "0.1.0"
 dependencies = [
  "dillo-machine",
  "log",
+ "pmi",
 ]
 
 [[package]]
@@ -847,6 +850,15 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[package]]
+name = "flagset"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "flate2"
@@ -1547,8 +1559,9 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "pmi"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/pmi?branch=main#5d6fe93b87d5af20d7387491f97aa89f31361ef9"
+source = "git+https://github.com/pichi-vm/pmi?branch=main#7a5028f15087652bc055f5b139efa48b8511c887"
 dependencies = [
+ "flagset",
  "serde",
 ]
 

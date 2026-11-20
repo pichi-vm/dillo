@@ -33,7 +33,7 @@ mod imp {
         devtree::{OwnedTree, Tree},
         platform::{Machine as PlatformMachine, PsciMethod},
     };
-    use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
+    use dillo_machine::{CpuProfile, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
     use dillo_mmio::{
         Attach, Interrupt, InterruptError, InterruptLine, MessageInterrupt, MessageInterruptDomain,
         MmioAttachment, MmioBus, MmioDevice, MmioDeviceHandle, MmioInterrupt,
@@ -471,9 +471,11 @@ mod imp {
         fn cpu_preparation(
             &mut self,
             index: u32,
-            _profile: &str,
-            boot_state: &dyn BootVcpuState,
+            profile: CpuProfile,
         ) -> Result<Self::CpuPreparation, Self::Error> {
+            if profile != CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0) {
+                return Err(Error::UnsupportedCpuProfile(profile));
+            }
             self.inner.guest_memory()?;
             let index = index as usize;
             if index >= self.cpu_runtime.slots.len() {
@@ -481,13 +483,8 @@ mod imp {
                     "vCPU index {index} exceeds configured count"
                 )));
             }
-            let boot_state = boot_state
-                .aarch64()
-                .cloned()
-                .ok_or_else(|| Error::Hv("boot vCPU state is not aarch64".to_string()))?;
             Ok(CpuPreparation {
                 index,
-                boot_state,
                 mmio_bus: self.mmio_bus(),
                 runtime: Arc::clone(&self.cpu_runtime),
             })
@@ -528,7 +525,6 @@ mod imp {
     #[derive(Debug)]
     pub struct CpuPreparation {
         index: usize,
-        boot_state: pmi::vm::vcpu::aarch64::CpuState,
         mmio_bus: Arc<Mutex<MmioBus>>,
         runtime: Arc<CpuRuntime>,
     }
@@ -545,7 +541,7 @@ mod imp {
             };
             vcpu.set_mpidr(mpidr_for(self.index))?;
             if self.index == 0 {
-                vcpu.set_aarch64_state(&self.boot_state)?;
+                vcpu.inner.initialize_bsp()?;
                 self.runtime.slots[0].started.store(true, Ordering::SeqCst);
             }
             *self.runtime.handles[self.index]
@@ -559,7 +555,6 @@ mod imp {
                 CpuRunner {
                     vcpu,
                     index: self.index,
-                    boot_state: self.boot_state,
                     runtime: self.runtime,
                 },
                 control,
@@ -571,7 +566,6 @@ mod imp {
     pub struct CpuRunner {
         vcpu: Vcpu,
         index: usize,
-        boot_state: pmi::vm::vcpu::aarch64::CpuState,
         runtime: Arc<CpuRuntime>,
     }
 
@@ -594,11 +588,10 @@ mod imp {
                 else {
                     return Ok(VcpuStop::Stopped);
                 };
-                self.vcpu
-                    .set_aarch64_state(&secondary_state(entry, context, &self.boot_state))?;
+                self.vcpu.inner.initialize_secondary(entry, context)?;
                 log::info!("vCPU{} powered on: pc={entry:#x}", self.index);
             }
-            runtime.run_vcpu_loop(self.index, &self.vcpu, &self.boot_state)
+            runtime.run_vcpu_loop(self.index, &self.vcpu)
         }
     }
 
@@ -693,10 +686,6 @@ mod imp {
     }
 
     impl Vcpu {
-        fn set_aarch64_state(&self, state: &pmi::vm::vcpu::aarch64::CpuState) -> Result<(), Error> {
-            self.inner.set_aarch64_state(state)
-        }
-
         fn set_mpidr(&self, mpidr: u64) -> Result<(), Error> {
             self.inner.set_mpidr(mpidr)
         }
@@ -795,12 +784,7 @@ mod imp {
             }
         }
 
-        fn run_vcpu_loop(
-            &self,
-            idx: usize,
-            vcpu: &Vcpu,
-            boot_state: &pmi::vm::vcpu::aarch64::CpuState,
-        ) -> Result<VcpuStop, Error> {
+        fn run_vcpu_loop(&self, idx: usize, vcpu: &Vcpu) -> Result<VcpuStop, Error> {
             loop {
                 if self.shutdown.load(Ordering::SeqCst) {
                     return Ok(VcpuStop::Stopped);
@@ -829,8 +813,7 @@ mod imp {
                             self.slots[idx].started.store(false, Ordering::SeqCst);
                             match self.slots[idx].wait(&self.shutdown) {
                                 Some((entry, context)) => {
-                                    let st = secondary_state(entry, context, boot_state);
-                                    vcpu.set_aarch64_state(&st)?;
+                                    vcpu.inner.initialize_secondary(entry, context)?;
                                 }
                                 None => return Ok(VcpuStop::Stopped),
                             }
@@ -936,59 +919,6 @@ mod imp {
                 }
                 g = self.cv.wait(g).expect("cpu-slot poisoned");
             }
-        }
-    }
-
-    fn secondary_state(
-        entry: u64,
-        context: u64,
-        boot: &pmi::vm::vcpu::aarch64::CpuState,
-    ) -> pmi::vm::vcpu::aarch64::CpuState {
-        // aarch64 CpuState has no Default (PState is a validating newtype), so
-        // spell out the fresh secondary state: zeroed but for the entry pc, the
-        // context in x0, and the inherited pstate / cpacr_el1.
-        pmi::vm::vcpu::aarch64::CpuState {
-            pc: entry,
-            x0: context,
-            pstate: boot.pstate,
-            cpacr_el1: boot.cpacr_el1,
-            x1: 0,
-            x2: 0,
-            x3: 0,
-            x4: 0,
-            x5: 0,
-            x6: 0,
-            x7: 0,
-            x8: 0,
-            x9: 0,
-            x10: 0,
-            x11: 0,
-            x12: 0,
-            x13: 0,
-            x14: 0,
-            x15: 0,
-            x16: 0,
-            x17: 0,
-            x18: 0,
-            x19: 0,
-            x20: 0,
-            x21: 0,
-            x22: 0,
-            x23: 0,
-            x24: 0,
-            x25: 0,
-            x26: 0,
-            x27: 0,
-            x28: 0,
-            x29: 0,
-            x30: 0,
-            sp_el1: 0,
-            sctlr_el1: 0,
-            tcr_el1: 0,
-            ttbr0_el1: 0,
-            ttbr1_el1: 0,
-            mair_el1: 0,
-            vbar_el1: 0,
         }
     }
 
@@ -1133,21 +1063,11 @@ mod imp {
         use super::*;
 
         #[cfg(target_arch = "aarch64")]
-        pub(crate) fn check_psci_conduits(
-            mut boot: pmi::vm::vcpu::aarch64::CpuState,
-            ram_size: u64,
-        ) {
+        pub(crate) fn check_psci_conduits(ram_size: u64) {
             use dillo_machine::{CpuPreparation as _, CpuRunner as _, Machine as _};
             use vm_memory::{Bytes, GuestAddress};
 
-            struct Boot(pmi::vm::vcpu::aarch64::CpuState);
-            impl BootVcpuState for Boot {
-                fn aarch64(&self) -> Option<&pmi::vm::vcpu::aarch64::CpuState> {
-                    Some(&self.0)
-                }
-            }
-
-            boot.x1 = boot.pc + 0x800;
+            let marker = 0x800;
             let not_returned = 0xa5a5_a5a5_a5a5_a5a5;
             for (name, declared) in [("hvc", PsciMethod::Hvc), ("smc", PsciMethod::Smc)] {
                 let platform = psci_platform(name);
@@ -1164,7 +1084,7 @@ mod imp {
                         platform: &platform,
                         vcpus: 1,
                         ram: vec![RamRange {
-                            gpa: boot.pc,
+                            gpa: 0,
                             size: ram_size,
                         }],
                     })
@@ -1176,6 +1096,7 @@ mod imp {
                         0x5280_0000u32
                     };
                     let code = [
+                        0xd281_0001, // x1 = marker
                         first_function,
                         0x72b0_8000,
                         instruction,
@@ -1191,10 +1112,10 @@ mod imp {
                         0x1400_0000,
                     ];
                     let bytes: Vec<_> = code.into_iter().flat_map(u32::to_le_bytes).collect();
-                    vm.write_guest(boot.pc, &bytes).unwrap();
-                    vm.write_guest(boot.x1, &[0xa5; 24]).unwrap();
+                    vm.write_guest(0, &bytes).unwrap();
+                    vm.write_guest(marker, &[0xa5; 24]).unwrap();
                     let preparation = vm
-                        .cpu_preparation(0, "armv8.0-a", &Boot(boot.clone()))
+                        .cpu_preparation(0, CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0))
                         .unwrap();
                     let result = thread::spawn(move || {
                         let (mut runner, _control) = preparation.prepare().unwrap();
@@ -1207,7 +1128,7 @@ mod imp {
                     let memory = vm.inner.guest_memory().unwrap();
                     let read = |offset| {
                         memory
-                            .read_obj::<u64>(GuestAddress(boot.x1 + offset))
+                            .read_obj::<u64>(GuestAddress(marker + offset))
                             .unwrap()
                     };
                     if nonzero_immediate {
@@ -1239,6 +1160,75 @@ mod imp {
                     assert_eq!(read(16), not_returned, "SYSTEM_OFF returned");
                 }
             }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        pub(crate) fn check_psci_ap_start(ram_size: u64) {
+            use dillo_machine::{
+                CpuControl as _, CpuPreparation as _, CpuRunner as _, Machine as _,
+            };
+            use vm_memory::{Bytes, GuestAddress};
+
+            let platform = psci_platform("smc");
+            let mut vm = Vm::from_launch_config(LaunchConfig {
+                platform: &platform,
+                vcpus: 2,
+                ram: vec![RamRange {
+                    gpa: 0,
+                    size: ram_size,
+                }],
+            })
+            .unwrap();
+            for (gpa, code) in [
+                (
+                    0,
+                    &[
+                        0xd280_0060u32,
+                        0xf2b8_8000,
+                        0xd280_0021,
+                        0xd288_0002,
+                        0xd282_4683,
+                        0xd400_0003, // CPU_ON64(1, 0x4000, 0x1234)
+                        0xd281_0004,
+                        0xf900_0080, // Store return at 0x800.
+                        0xf940_0485,
+                        0xb4ff_ffe5, // Wait for AP's context store.
+                        0x5280_0100,
+                        0x72b0_8000,
+                        0xd400_0003, // SYSTEM_OFF
+                    ][..],
+                ),
+                (0x4000, &[0xd281_0004, 0xf900_0480, 0x1400_0000][..]), // Store x0 at 0x808.
+            ] {
+                let bytes: Vec<_> = code.iter().copied().flat_map(u32::to_le_bytes).collect();
+                vm.write_guest(gpa, &bytes).unwrap();
+            }
+            vm.write_guest(0x800, &u64::MAX.to_le_bytes()).unwrap();
+
+            let profile = CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0);
+            let (mut bsp, _bsp_control) =
+                vm.cpu_preparation(0, profile).unwrap().prepare().unwrap();
+            let ap = vm.cpu_preparation(1, profile).unwrap();
+            let (ready, prepared) = std::sync::mpsc::sync_channel(1);
+            let ap = thread::spawn(move || {
+                let (mut runner, control) = ap.prepare().unwrap();
+                ready.send(control).unwrap();
+                let stop = runner.run().unwrap();
+                runner.retire().unwrap();
+                stop
+            });
+            let control = prepared
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            let memory = vm.inner.guest_memory().unwrap();
+            assert_eq!(memory.read_obj::<u64>(GuestAddress(0x808)).unwrap(), 0);
+            assert!(!vm.cpu_runtime.slots[1].started.load(Ordering::Acquire));
+            assert_eq!(bsp.run().unwrap(), VcpuStop::GuestPoweroff);
+            bsp.retire().unwrap();
+            control.stop().unwrap();
+            assert_eq!(ap.join().unwrap(), VcpuStop::Stopped);
+            assert_eq!(memory.read_obj::<u64>(GuestAddress(0x800)).unwrap(), 0);
+            assert_eq!(memory.read_obj::<u64>(GuestAddress(0x808)).unwrap(), 0x1234);
         }
 
         #[cfg(target_arch = "aarch64")]

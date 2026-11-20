@@ -11,51 +11,26 @@
 //! Microarchitecture levels per the System V x86-64 psABI. Each level
 //! is a strict superset of the one below.
 //!
-//! This module owns profile parse, the mandatory feature table, and the
-//! native CPUID missing-feature check. Backends keep host probing that
-//! needs hypervisor types (KVM `CpuId` / `GET_SUPPORTED_CPUID`) and
-//! apply (`set_cpuid2`, WHP) local.
+//! This module defines the requirements checked against each native vCPU.
 
-/// Microarchitecture level parsed from a `cpu:profile` string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum X86Level {
-    V1,
-    V2,
-    V3,
-    V4,
+use pmi::x86_64::Profile;
+
+/// Mandatory CPUID features at and below the requested level.
+pub fn cumulative_features(profile: Profile) -> &'static [CpuidFeature] {
+    match profile {
+        Profile::V1 => V1_FEATURES,
+        Profile::V2 => V1_V2_FEATURES,
+        Profile::V3 => V1_V2_V3_FEATURES,
+        Profile::V4 => V1_V2_V3_V4_FEATURES,
+    }
 }
 
-impl X86Level {
-    /// Parse `x86-64-vN` (N ∈ {1,2,3,4}). Returns `None` for any
-    /// other string; caller produces a "profile not recognized"
-    /// error so the message names the bad input.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "x86-64-v1" => Some(Self::V1),
-            "x86-64-v2" => Some(Self::V2),
-            "x86-64-v3" => Some(Self::V3),
-            "x86-64-v4" => Some(Self::V4),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::V1 => "x86-64-v1",
-            Self::V2 => "x86-64-v2",
-            Self::V3 => "x86-64-v3",
-            Self::V4 => "x86-64-v4",
-        }
-    }
-
-    /// Mandatory features at and below this level (cumulative).
-    pub fn cumulative_features(self) -> &'static [CpuidFeature] {
-        match self {
-            Self::V1 => V1_FEATURES,
-            Self::V2 => V1_V2_FEATURES,
-            Self::V3 => V1_V2_V3_FEATURES,
-            Self::V4 => V1_V2_V3_V4_FEATURES,
-        }
+/// XCR0 components the guest must be able to enable.
+pub fn required_xcr0(profile: Profile) -> u32 {
+    match profile {
+        Profile::V1 | Profile::V2 => 0,
+        Profile::V3 => 0x07, // x87, SSE, AVX
+        Profile::V4 => 0xe7, // also opmask and ZMM state
     }
 }
 
@@ -121,6 +96,7 @@ const AVX512BW: CpuidFeature = bit(0x0000_0007, 0, Reg::Ebx, 30, "avx512bw");
 const AVX512VL: CpuidFeature = bit(0x0000_0007, 0, Reg::Ebx, 31, "avx512vl");
 
 // Leaf 0x8000_0001 (ECX): LAHF, LZCNT.
+const SYSCALL: CpuidFeature = bit(0x8000_0001, 0, Reg::Edx, 11, "syscall");
 const LAHF_LM: CpuidFeature = bit(0x8000_0001, 0, Reg::Ecx, 0, "lahf-lm");
 const LZCNT: CpuidFeature = bit(0x8000_0001, 0, Reg::Ecx, 5, "lzcnt");
 
@@ -137,7 +113,7 @@ const fn bit(function: u32, index: u32, reg: Reg, bit: u8, name: &'static str) -
 // Per psABI: each level is a strict superset. Tables are pre-flattened
 // so the validator iterates one slice — no recursion, no allocation.
 
-const V1_FEATURES: &[CpuidFeature] = &[FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2];
+const V1_FEATURES: &[CpuidFeature] = &[FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2, SYSCALL];
 
 const V2_ADDITIONS: &[CpuidFeature] = &[CX16, LAHF_LM, POPCNT, SSE3, SSSE3, SSE4_1, SSE4_2];
 
@@ -147,18 +123,19 @@ const V4_ADDITIONS: &[CpuidFeature] = &[AVX512F, AVX512BW, AVX512CD, AVX512DQ, A
 
 // Pre-flattened cumulative tables (const concat would need nightly).
 const V1_V2_FEATURES: &[CpuidFeature] = &[
-    FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2, CX16, LAHF_LM, POPCNT, SSE3, SSSE3, SSE4_1, SSE4_2,
+    FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2, SYSCALL, CX16, LAHF_LM, POPCNT, SSE3, SSSE3, SSE4_1,
+    SSE4_2,
 ];
 
 const V1_V2_V3_FEATURES: &[CpuidFeature] = &[
-    FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2, CX16, LAHF_LM, POPCNT, SSE3, SSSE3, SSE4_1, SSE4_2, AVX,
-    AVX2, BMI1, BMI2, F16C, FMA, LZCNT, MOVBE, XSAVE,
+    FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2, SYSCALL, CX16, LAHF_LM, POPCNT, SSE3, SSSE3, SSE4_1,
+    SSE4_2, AVX, AVX2, BMI1, BMI2, F16C, FMA, LZCNT, MOVBE, XSAVE,
 ];
 
 const V1_V2_V3_V4_FEATURES: &[CpuidFeature] = &[
-    FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2, CX16, LAHF_LM, POPCNT, SSE3, SSSE3, SSE4_1, SSE4_2, AVX,
-    AVX2, BMI1, BMI2, F16C, FMA, LZCNT, MOVBE, XSAVE, AVX512F, AVX512BW, AVX512CD, AVX512DQ,
-    AVX512VL,
+    FPU, CX8, CMOV, MMX, FXSR, SSE, SSE2, SYSCALL, CX16, LAHF_LM, POPCNT, SSE3, SSSE3, SSE4_1,
+    SSE4_2, AVX, AVX2, BMI1, BMI2, F16C, FMA, LZCNT, MOVBE, XSAVE, AVX512F, AVX512BW, AVX512CD,
+    AVX512DQ, AVX512VL,
 ];
 
 // Static asserts keep the cumulative tables honest: the per-level
@@ -178,86 +155,30 @@ const _: () = {
     );
 };
 
-/// Return the first mandatory feature the current Windows/Linux host CPU
-/// does not expose through the native CPUID instruction.
-///
-/// This is used by WHP, which does not have KVM's `GET_SUPPORTED_CPUID`
-/// ioctl. It is still a per-feature check against concrete CPUID bits, not a
-/// vendor/family/model shortcut.
-#[cfg(any(target_os = "windows", test))]
-pub fn first_missing_native(level: X86Level) -> Option<&'static str> {
-    for feat in level.cumulative_features() {
-        if !native_has_feature(feat) {
-            return Some(feat.name);
-        }
-    }
-    None
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn native_has_feature(feat: &CpuidFeature) -> bool {
-    let max = if feat.function >= 0x8000_0000 {
-        core::arch::x86_64::__cpuid(0x8000_0000).eax
-    } else {
-        core::arch::x86_64::__cpuid(0).eax
-    };
-    if feat.function > max {
-        return false;
-    }
-
-    let cpuid = core::arch::x86_64::__cpuid_count(feat.function, feat.index);
-    let value = match feat.reg {
-        Reg::Eax => cpuid.eax,
-        Reg::Ebx => cpuid.ebx,
-        Reg::Ecx => cpuid.ecx,
-        Reg::Edx => cpuid.edx,
-    };
-    (value >> feat.bit) & 1 == 1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parse_levels() {
-        assert_eq!(X86Level::parse("x86-64-v1"), Some(X86Level::V1));
-        assert_eq!(X86Level::parse("x86-64-v2"), Some(X86Level::V2));
-        assert_eq!(X86Level::parse("x86-64-v3"), Some(X86Level::V3));
-        assert_eq!(X86Level::parse("x86-64-v4"), Some(X86Level::V4));
-        assert_eq!(X86Level::parse("x86-64-v5"), None);
-        assert_eq!(X86Level::parse("armv8.2-a"), None);
-    }
-
-    #[test]
     fn levels_are_supersets() {
-        let v1: std::collections::HashSet<_> = X86Level::V1
-            .cumulative_features()
+        let v1: std::collections::HashSet<_> = cumulative_features(Profile::V1)
             .iter()
             .map(|f| f.name)
             .collect();
-        let v2: std::collections::HashSet<_> = X86Level::V2
-            .cumulative_features()
+        let v2: std::collections::HashSet<_> = cumulative_features(Profile::V2)
             .iter()
             .map(|f| f.name)
             .collect();
-        let v3: std::collections::HashSet<_> = X86Level::V3
-            .cumulative_features()
+        let v3: std::collections::HashSet<_> = cumulative_features(Profile::V3)
             .iter()
             .map(|f| f.name)
             .collect();
-        let v4: std::collections::HashSet<_> = X86Level::V4
-            .cumulative_features()
+        let v4: std::collections::HashSet<_> = cumulative_features(Profile::V4)
             .iter()
             .map(|f| f.name)
             .collect();
         assert!(v1.is_subset(&v2));
         assert!(v2.is_subset(&v3));
         assert!(v3.is_subset(&v4));
-    }
-
-    #[test]
-    fn native_cpuid_supports_at_least_v1() {
-        assert_eq!(first_missing_native(X86Level::V1), None);
     }
 }
