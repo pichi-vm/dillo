@@ -6,14 +6,14 @@
 mod hypervisor;
 
 use applevisor::prelude::VcpuHandle;
+use dillo_devtree::platform::PsciMethod;
 
 /// Reasons an HVF vCPU run returned to backend code.
 #[derive(Debug)]
 enum VmExit {
     MmioRead { addr: u64, size: u8 },
     MmioWrite { addr: u64, data: [u8; 8], size: u8 },
-    Hvc { args: [u64; 8] },
-    Smc { args: [u64; 8] },
+    Smccc { method: PsciMethod, args: [u64; 8] },
     Halted,
     GuestPoweroff,
     GuestReset,
@@ -31,7 +31,7 @@ mod imp {
     use dillo_devtree::{
         CompatMismatch, FromDevTree, NodeExt, OwnedNodeExt, PropExt,
         devtree::{OwnedTree, Tree},
-        platform::Machine as PlatformMachine,
+        platform::{Machine as PlatformMachine, PsciMethod},
     };
     use dillo_machine::{BootVcpuState, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
     use dillo_mmio::{
@@ -145,6 +145,7 @@ mod imp {
             min_addr_space_bits: u32,
             vcpus: u32,
             ram: &[RamRange],
+            psci_method: PsciMethod,
         ) -> Result<Self, Error> {
             let inner = NativeVm::new(gic, min_addr_space_bits)?.with_memory(ram)?;
             let shared_memory: Vec<Arc<dyn SharedMemory>> =
@@ -153,7 +154,7 @@ mod imp {
                     dillo_mmio::SharedAccess::ReadWrite,
                 ))];
             Ok(Self {
-                cpu_runtime: Arc::new(CpuRuntime::new(vcpus, inner.clone())),
+                cpu_runtime: Arc::new(CpuRuntime::new(vcpus, inner.clone(), psci_method)),
                 inner,
                 mmio_bus: Arc::new(Mutex::new(MmioBus::new())),
                 shared_memory,
@@ -499,6 +500,10 @@ mod imp {
         fn from_launch_config(
             config: LaunchConfig<'_, Self::Platform>,
         ) -> Result<Self, Self::Error> {
+            let psci = config
+                .platform
+                .psci()
+                .ok_or(Error::MissingSubstrate("/psci"))?;
             let required = config
                 .platform
                 .required_address_bits_for_ram(config.ram.iter().map(|r| (r.gpa, r.size)))
@@ -508,7 +513,7 @@ mod imp {
             let gic = crate::hypervisor::GicParams::from_devtree(&mut tree)?
                 .ok_or(Error::MissingSubstrate("/interrupt-controller@*"))?;
 
-            Self::new(&gic, required, config.vcpus, &config.ram)
+            Self::new(&gic, required, config.vcpus, &config.ram, psci.method)
         }
 
         fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Self::Error> {
@@ -700,6 +705,18 @@ mod imp {
             self.inner.set_gpr(n, value)
         }
 
+        fn dispatch_psci(
+            &self,
+            method: PsciMethod,
+            args: &[u64; 8],
+        ) -> Result<psci::PsciAction, Error> {
+            if method == PsciMethod::Smc {
+                // SMC leaves PC at the instruction. HVC already advanced it.
+                self.inner.advance_pc()?;
+            }
+            Ok(psci::dispatch(args))
+        }
+
         fn el1_exception_state(&self) -> (u64, u64, u64) {
             self.inner.el1_exception_state()
         }
@@ -760,16 +777,18 @@ mod imp {
     #[derive(Debug)]
     struct CpuRuntime {
         shutdown: AtomicBool,
+        psci_method: PsciMethod,
         slots: Vec<CpuSlot>,
         handles: Vec<Mutex<Option<VcpuHandle>>>,
         vm: NativeVm,
     }
 
     impl CpuRuntime {
-        fn new(vcpus: u32, vm: NativeVm) -> Self {
+        fn new(vcpus: u32, vm: NativeVm, psci_method: PsciMethod) -> Self {
             let count = vcpus.max(1) as usize;
             Self {
                 shutdown: AtomicBool::new(false),
+                psci_method,
                 slots: (0..count).map(|_| CpuSlot::new()).collect(),
                 handles: (0..count).map(|_| Mutex::new(None)).collect(),
                 vm,
@@ -790,7 +809,13 @@ mod imp {
                     VmExit::MmioRead { .. } | VmExit::MmioWrite { .. } => {}
                     VmExit::GuestPoweroff => return Ok(VcpuStop::GuestPoweroff),
                     VmExit::GuestReset => return Ok(VcpuStop::GuestReset),
-                    VmExit::Hvc { args } => match psci::dispatch(&args) {
+                    VmExit::Smccc { method, .. } if method != self.psci_method => {
+                        return Err(Error::UnexpectedPsciConduit {
+                            actual: method,
+                            declared: self.psci_method,
+                        });
+                    }
+                    VmExit::Smccc { method, args } => match vcpu.dispatch_psci(method, &args)? {
                         psci::PsciAction::SystemOff => {
                             log::info!("guest issued PSCI SYSTEM_OFF (vCPU{idx})");
                             return Ok(VcpuStop::GuestPoweroff);
@@ -835,9 +860,6 @@ mod imp {
                             vcpu.set_gpr(0, value)?;
                         }
                     },
-                    VmExit::Smc { args } => {
-                        log::warn!("unexpected SMC exit from HVF vCPU: args={args:?}");
-                    }
                     VmExit::Unknown(reason) if self.shutdown.load(Ordering::SeqCst) => {
                         let _ = reason;
                         return Ok(VcpuStop::Stopped);
@@ -1104,11 +1126,149 @@ mod imp {
     }
 
     #[cfg(test)]
-    mod tests {
+    pub(super) mod tests {
         use std::sync::Arc;
         use std::thread;
 
         use super::*;
+
+        #[cfg(target_arch = "aarch64")]
+        pub(crate) fn check_psci_conduits(
+            mut boot: pmi::vm::vcpu::aarch64::CpuState,
+            ram_size: u64,
+        ) {
+            use dillo_machine::{CpuPreparation as _, CpuRunner as _, Machine as _};
+            use vm_memory::{Bytes, GuestAddress};
+
+            struct Boot(pmi::vm::vcpu::aarch64::CpuState);
+            impl BootVcpuState for Boot {
+                fn aarch64(&self) -> Option<&pmi::vm::vcpu::aarch64::CpuState> {
+                    Some(&self.0)
+                }
+            }
+
+            boot.x1 = boot.pc + 0x800;
+            let not_returned = 0xa5a5_a5a5_a5a5_a5a5;
+            for (name, declared) in [("hvc", PsciMethod::Hvc), ("smc", PsciMethod::Smc)] {
+                let platform = psci_platform(name);
+                for (instruction, actual) in [
+                    (0xd400_0002, PsciMethod::Hvc),
+                    (0xd400_0003, PsciMethod::Smc),
+                ] {
+                    let mut vm = Vm::from_launch_config(LaunchConfig {
+                        platform: &platform,
+                        vcpus: 1,
+                        ram: vec![RamRange {
+                            gpa: boot.pc,
+                            size: ram_size,
+                        }],
+                    })
+                    .unwrap();
+                    let code = [
+                        0x5280_0000u32,
+                        0x72b0_8000,
+                        instruction,
+                        0xf900_0020, // PSCI_VERSION
+                        0x5280_3200,
+                        0x72b8_8000,
+                        instruction,
+                        0xf900_0420, // RSI_ABI_VERSION
+                        0x5280_0100,
+                        0x72b0_8000,
+                        instruction,
+                        0xf900_0820, // SYSTEM_OFF
+                        0x1400_0000,
+                    ];
+                    let bytes: Vec<_> = code.into_iter().flat_map(u32::to_le_bytes).collect();
+                    vm.write_guest(boot.pc, &bytes).unwrap();
+                    vm.write_guest(boot.x1, &[0xa5; 24]).unwrap();
+                    let preparation = vm
+                        .cpu_preparation(0, "armv8.0-a", &Boot(boot.clone()))
+                        .unwrap();
+                    let result = thread::spawn(move || {
+                        let (mut runner, _control) = preparation.prepare().unwrap();
+                        let result = runner.run();
+                        runner.retire().unwrap();
+                        result
+                    })
+                    .join()
+                    .unwrap();
+                    let memory = vm.inner.guest_memory().unwrap();
+                    let read = |offset| {
+                        memory
+                            .read_obj::<u64>(GuestAddress(boot.x1 + offset))
+                            .unwrap()
+                    };
+                    if declared == actual {
+                        assert_eq!(result.unwrap(), VcpuStop::GuestPoweroff);
+                        assert_eq!(read(0), 0x0001_0001, "PSCI_VERSION");
+                        assert_eq!(read(8), u64::MAX, "RSI_ABI_VERSION");
+                    } else {
+                        assert!(
+                            matches!(
+                                result,
+                                Err(Error::UnexpectedPsciConduit { actual: observed, declared: config })
+                                    if observed == actual && config == declared
+                            ),
+                            "{result:?}"
+                        );
+                        assert_eq!([read(0), read(8)], [not_returned; 2]);
+                    }
+                    assert_eq!(read(16), not_returned, "SYSTEM_OFF returned");
+                }
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        fn psci_platform(method: &str) -> PlatformMachine {
+            use dillo_devtree::{
+                devtree::{OwnedNode, OwnedProperty},
+                platform::Arch,
+            };
+
+            let gic = OwnedNode::new("interrupt-controller@8000000")
+                .with_property(OwnedProperty::new("compatible").with_str("arm,gic-v3"))
+                .with_property(OwnedProperty::new("#interrupt-cells").with_u32(3))
+                .with_property(OwnedProperty::new("interrupt-controller"))
+                .with_property(OwnedProperty::new("reg").with_u32s(&[
+                    0,
+                    0x0800_0000,
+                    0,
+                    0x1_0000,
+                    0,
+                    0x0810_0000,
+                    0,
+                    0x200_0000,
+                ]))
+                .with_property(OwnedProperty::new("phandle").with_u32(1));
+            let msi = OwnedNode::new("msi-controller@a100000")
+                .with_property(OwnedProperty::new("compatible").with_str("arm,gic-v2m-frame"))
+                .with_property(OwnedProperty::new("msi-controller"))
+                .with_property(OwnedProperty::new("reg").with_u32s(&[0, 0x0a10_0000, 0, 0x1_0000]))
+                .with_property(OwnedProperty::new("arm,msi-base-spi").with_u32(64))
+                .with_property(OwnedProperty::new("arm,msi-num-spis").with_u32(32))
+                .with_property(OwnedProperty::new("phandle").with_u32(3));
+            let timer = OwnedNode::new("timer")
+                .with_property(OwnedProperty::new("compatible").with_str("arm,armv8-timer"))
+                .with_property(OwnedProperty::new("interrupt-parent").with_u32(1))
+                .with_property(
+                    OwnedProperty::new("interrupts")
+                        .with_u32s(&[1, 13, 4, 1, 14, 4, 1, 11, 4, 1, 10, 4]),
+                );
+            let psci = OwnedNode::new("psci")
+                .with_property(
+                    OwnedProperty::new("compatible").with_strs(&["arm,psci-1.0", "arm,psci-0.2"]),
+                )
+                .with_property(OwnedProperty::new("method").with_str(method));
+            let root = OwnedNode::new("")
+                .with_property(OwnedProperty::new("#address-cells").with_u32(2))
+                .with_property(OwnedProperty::new("#size-cells").with_u32(2))
+                .with_child(gic)
+                .with_child(msi)
+                .with_child(timer)
+                .with_child(psci);
+            PlatformMachine::survey(OwnedTree::new(root).encode().unwrap(), Arch::Aarch64).unwrap()
+        }
 
         #[test]
         fn message_vectors_keep_enable_and_mask_independent() {

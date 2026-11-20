@@ -23,6 +23,7 @@ use applevisor::prelude::{
     VcpuConfig, VcpuExit, VcpuHandle, VirtualMachine, VirtualMachineConfig, VirtualMachineInstance,
 };
 
+use dillo_devtree::platform::PsciMethod;
 use dillo_machine::RamRange;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 
@@ -53,6 +54,11 @@ pub enum Error {
     ParseDtb(dillo_devtree::devtree::Error),
     #[error("hvf: missing required DTB substrate {0}")]
     MissingSubstrate(&'static str),
+    #[error("hvf: guest used {actual:?} while /psci declares {declared:?}")]
+    UnexpectedPsciConduit {
+        actual: PsciMethod,
+        declared: PsciMethod,
+    },
     #[error("hvf: bad DTB substrate property {node}:{prop}: {reason}")]
     BadSubstrateProperty {
         node: &'static str,
@@ -497,21 +503,18 @@ impl Vcpu {
         let esr = exit.exception.syndrome;
         let ec = esr >> 26;
         match ec {
-            // HVC from EL1. ELR already points past the HVC.
-            0x16 => {
+            // HVC (0x16) and SMC (0x17) from EL1.
+            0x16 | 0x17 => {
+                let method = if ec == 0x16 {
+                    PsciMethod::Hvc
+                } else {
+                    PsciMethod::Smc
+                };
                 let mut args = [0u64; 8];
                 for (i, a) in args.iter_mut().enumerate() {
                     *a = self.inner.get_reg(gpr(i as u8))?;
                 }
-                Ok(VmExit::Hvc { args })
-            }
-            // SMC from EL1.
-            0x17 => {
-                let mut args = [0u64; 8];
-                for (i, a) in args.iter_mut().enumerate() {
-                    *a = self.inner.get_reg(gpr(i as u8))?;
-                }
-                Ok(VmExit::Smc { args })
+                Ok(VmExit::Smccc { method, args })
             }
             // Data abort from a lower EL → MMIO. IPA in physical_address.
             0x24 => self.translate_mmio(esr, exit.exception.physical_address),
@@ -721,7 +724,16 @@ mod tests {
         vcpu.set_aarch64_state(&boot_state(base)).expect("state");
         let e = vcpu.run().expect("run hvc");
         eprintln!("exit 1 (expect Hvc): {e:?}");
-        assert!(matches!(e, VmExit::Hvc { .. }), "expected Hvc, got {e:?}");
+        assert!(
+            matches!(
+                e,
+                VmExit::Smccc {
+                    method: PsciMethod::Hvc,
+                    ..
+                }
+            ),
+            "expected Hvc, got {e:?}"
+        );
 
         // 2) Faulting load from an unmapped IPA → MmioRead (64-bit → size 8).
         vcpu.set_aarch64_state(&boot_state(base + 4))
@@ -816,7 +828,13 @@ mod tests {
         let cpu = vm.create_vcpu().unwrap();
         cpu.set_aarch64_state(&boot_state(RAM_BASE)).unwrap();
         drop(vm);
-        assert!(matches!(cpu.run().unwrap(), VmExit::Hvc { .. }));
+        assert!(matches!(
+            cpu.run().unwrap(),
+            VmExit::Smccc {
+                method: PsciMethod::Hvc,
+                ..
+            }
+        ));
         assert!(Vm::new(&gic(), 36).is_err());
         drop(cpu);
         assert!(pages.iter().all(|page| page.upgrade().is_none()));
@@ -826,37 +844,10 @@ mod tests {
     #[test]
     #[ignore = "requires a codesigned binary with com.apple.security.hypervisor"]
     fn hvf_failed_retirement_keeps_backing_and_process_reservation() {
-        const CHILD: &str = "DILLO_HVF_RETIREMENT_TEST_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            // This test deliberately keeps the VM process slot occupied until
-            // process exit. Isolate it from every other test in the harness.
-            use std::process::Stdio;
-            use std::time::Duration;
-            use wait_timeout::ChildExt;
-
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--ignored", "--exact", "hypervisor::tests::hvf_failed_retirement_keeps_backing_and_process_reservation"])
-                .env(CHILD, "1")
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            if child
-                .wait_timeout(Duration::from_secs(15))
-                .unwrap()
-                .is_none()
-            {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("HVF retirement fixture timed out");
-            }
-            let output = child.wait_with_output().unwrap();
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                output.status.success() && stdout.contains("1 passed"),
-                "{stdout}{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+        // The failure leaves the VM process slot occupied until process exit.
+        if !native_test_child(
+            "hypervisor::tests::hvf_failed_retirement_keeps_backing_and_process_reservation",
+        ) {
             return;
         }
 
@@ -878,5 +869,46 @@ mod tests {
         assert!(witness.upgrade().is_some());
         let error = Vm::new(&gic(), 36).unwrap_err();
         assert!(error.to_string().contains("already has a native VM owner"));
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "requires a codesigned binary with com.apple.security.hypervisor"]
+    fn hvf_psci_uses_only_the_surveyed_conduit() {
+        if native_test_child("hypervisor::tests::hvf_psci_uses_only_the_surveyed_conduit") {
+            crate::imp::tests::check_psci_conduits(boot_state(RAM_BASE), RAM_SIZE);
+        }
+    }
+
+    fn native_test_child(name: &str) -> bool {
+        use std::process::Stdio;
+        use std::time::Duration;
+        use wait_timeout::ChildExt;
+
+        const CHILD: &str = "DILLO_HVF_NATIVE_TEST_CHILD";
+        if std::env::var_os(CHILD).as_deref() == Some(name.as_ref()) {
+            return true;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", name])
+            .env(CHILD, name)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let finished = child.wait_timeout(Duration::from_secs(15));
+        if !matches!(finished, Ok(Some(_))) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{name} did not complete: {finished:?}");
+        }
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
     }
 }
