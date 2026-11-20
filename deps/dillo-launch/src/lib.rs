@@ -308,29 +308,11 @@ pub mod pmi_parse {
         // PE parse via `object`.
         let pe = PeFile64::parse(bytes).map_err(|e| Error::PeParse(e.to_string()))?;
 
-        // Host-arch match — pe.architecture() returns object::Architecture, but
-        // we want the raw u16 to be explicit about the spec wording.
-        let machine = match opts.host_arch {
-            HostArch::X86_64 => {
-                if !matches!(pe.architecture(), object::Architecture::X86_64) {
-                    return Err(Error::HostArchMismatch {
-                        actual: machine_value(&pe),
-                        expected: opts.host_arch.pe_machine(),
-                    });
-                }
-                IMAGE_FILE_MACHINE_AMD64
-            }
-            HostArch::Aarch64 => {
-                if !matches!(pe.architecture(), object::Architecture::Aarch64) {
-                    return Err(Error::HostArchMismatch {
-                        actual: machine_value(&pe),
-                        expected: opts.host_arch.pe_machine(),
-                    });
-                }
-                IMAGE_FILE_MACHINE_ARM64
-            }
-        };
-        let _ = machine;
+        let actual = machine_value(&pe);
+        let expected = opts.host_arch.pe_machine();
+        if actual != expected {
+            return Err(Error::HostArchMismatch { actual, expected });
+        }
 
         // Enumerate sections once into a typed table.
         let mut raw_sections = collect_sections(&pe, file_size, bytes)?;
@@ -538,6 +520,42 @@ pub mod pmi_parse {
     fn machine_value(pe: &PeFile64<'_>) -> u16 {
         use object::LittleEndian as LE;
         pe.nt_headers().file_header.machine.get(LE)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn arm64ec_is_not_a_pmi_machine_type() {
+        use object::pe::IMAGE_FILE_MACHINE_ARM64EC;
+
+        let mut bytes = vec![0u8; 240];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[60..64].copy_from_slice(&64u32.to_le_bytes());
+        bytes[64..68].copy_from_slice(b"PE\0\0");
+        bytes[84..86].copy_from_slice(&112u16.to_le_bytes());
+        bytes[88..90].copy_from_slice(&0x20bu16.to_le_bytes());
+        let opts = ParseOptions {
+            host_arch: HostArch::Aarch64,
+            memory_mib: 256,
+        };
+
+        bytes[68..70].copy_from_slice(&IMAGE_FILE_MACHINE_ARM64EC.to_le_bytes());
+        let result = parse(&bytes, &opts);
+        assert!(
+            matches!(
+                result,
+                Err(Error::HostArchMismatch {
+                    actual: IMAGE_FILE_MACHINE_ARM64EC,
+                    expected: IMAGE_FILE_MACHINE_ARM64,
+                })
+            ),
+            "{result:?}"
+        );
+
+        bytes[68..70].copy_from_slice(&IMAGE_FILE_MACHINE_ARM64.to_le_bytes());
+        assert!(matches!(
+            parse(&bytes, &opts),
+            Err(Error::TargetSectionMissing { .. })
+        ));
     }
 
     fn collect_sections(
