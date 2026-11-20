@@ -83,6 +83,13 @@ pub enum Error {
     #[error("WHP delete vCPU {idx} failed: {hr}")]
     DeleteVcpu { idx: u32, hr: String },
 
+    #[error("{operation}. {retirement}")]
+    VcpuCleanup {
+        #[source]
+        operation: Box<Error>,
+        retirement: Box<Error>,
+    },
+
     #[error("WHP set vCPU {idx} registers failed: {hr}")]
     SetRegisters { idx: u32, hr: String },
 
@@ -300,6 +307,7 @@ impl Vm {
         Ok(Vcpu {
             partition: Arc::clone(&self.inner),
             idx,
+            delete_pending: true,
         })
     }
 
@@ -565,9 +573,23 @@ impl Drop for VmInner {
 pub(crate) struct Vcpu {
     partition: Arc<VmInner>,
     idx: u32,
+    delete_pending: bool,
 }
 
 impl Vcpu {
+    pub(crate) fn retire(&mut self) -> Result<(), Error> {
+        // A failed native call leaves the deletion state uncertain.
+        if !std::mem::take(&mut self.delete_pending) {
+            return Ok(());
+        }
+        raw::delete_virtual_processor(self.partition.partition, self.idx).map_err(|hr| {
+            Error::DeleteVcpu {
+                idx: self.idx,
+                hr: status(hr),
+            }
+        })
+    }
+
     pub(crate) fn cancel_handle(&self) -> VcpuCancel {
         VcpuCancel {
             partition: Arc::clone(&self.partition),
@@ -676,7 +698,9 @@ impl VcpuCancel {
 
 impl Drop for Vcpu {
     fn drop(&mut self) {
-        raw::delete_virtual_processor(self.partition.partition, self.idx);
+        if let Err(error) = self.retire() {
+            log::error!("{error}");
+        }
     }
 }
 
@@ -866,6 +890,7 @@ mod raw {
     std::thread_local! {
         pub(super) static FAIL_MAP_GPA: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
         pub(super) static FAIL_NEXT_DELETE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        pub(super) static FAIL_NEXT_VCPU_DELETE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         pub(super) static FAIL_NEXT_GUEST_PHYSICAL_BITS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         pub(super) static DELETED_PARTITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
@@ -1151,10 +1176,20 @@ mod raw {
         Ok(())
     }
 
-    pub(super) fn delete_virtual_processor(partition: PartitionHandle, idx: u32) {
-        // SAFETY: best-effort cleanup for a vCPU index created on this
-        // partition. WHP tolerates process teardown even if this fails.
-        let _ = unsafe { WHvDeleteVirtualProcessor(partition, idx) };
+    pub(super) fn delete_virtual_processor(
+        partition: PartitionHandle,
+        idx: u32,
+    ) -> Result<(), HResult> {
+        #[cfg(test)]
+        if FAIL_NEXT_VCPU_DELETE.with(|fail| fail.replace(false)) {
+            return Err(HResult(E_FAIL));
+        }
+        // SAFETY: the partition is live and the owner has finished running this vCPU.
+        let hr = unsafe { WHvDeleteVirtualProcessor(partition, idx) };
+        if hr != S_OK {
+            return Err(HResult(hr));
+        }
+        Ok(())
     }
 
     pub(super) fn set_virtual_processor_registers(
@@ -1986,6 +2021,28 @@ mod tests {
     }
 
     #[test]
+    fn whp_vcpu_retirement_checks_deletion_without_retry() {
+        if !native_test_child("whp_vcpu_retirement_checks_deletion_without_retry") {
+            return;
+        }
+        let mut vm = Vm::new_x86_64_with_local_apic_count(1).unwrap();
+        let create = || vm.create_vcpu_without_ram_check(0, "x86-64-v1").unwrap();
+        create().retire().unwrap();
+
+        let mut vcpu = create();
+        raw::FAIL_NEXT_VCPU_DELETE.with(|fail| fail.set(true));
+        let error = vcpu.retire().unwrap_err();
+        assert!(
+            matches!(error, Error::DeleteVcpu { idx: 0, ref hr } if hr == "0x80004005"),
+            "{error:?}"
+        );
+        drop(vcpu);
+        // The injected failure left a live vCPU for the partition to reclaim.
+        raw::guest_physical_bits(vm.inner.partition, 0).unwrap();
+        Arc::get_mut(&mut vm.inner).unwrap().retire().unwrap();
+    }
+
+    #[test]
     fn whp_failed_partition_delete_retains_live_backing() {
         if native_test_child("whp_failed_partition_delete_retains_live_backing") {
             check_failed_partition_delete(false);
@@ -2036,7 +2093,7 @@ mod tests {
         }
         // Both the actual partition and its backing remain live after Drop.
         raw::create_virtual_processor(partition, 0).unwrap();
-        raw::delete_virtual_processor(partition, 0);
+        raw::delete_virtual_processor(partition, 0).unwrap();
     }
 
     struct AllocationProbe {

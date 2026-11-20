@@ -338,8 +338,16 @@ mod imp {
 
         fn prepare(self) -> Result<(CpuRunner, CpuControl), Error> {
             let mut inner = self.machine.create_vcpu(self.index, &self.profile)?;
-            if let Some(state) = &self.boot_state {
-                inner.set_x86_64_state(state)?;
+            if let Some(state) = &self.boot_state
+                && let Err(operation) = inner.set_x86_64_state(state)
+            {
+                return Err(match inner.retire() {
+                    Ok(()) => operation,
+                    Err(retirement) => Error::VcpuCleanup {
+                        operation: Box::new(operation),
+                        retirement: Box::new(retirement),
+                    },
+                });
             }
             let target = Arc::new(StopTarget {
                 requested: AtomicBool::new(false),
@@ -688,12 +696,7 @@ mod imp {
 
     impl Drop for CpuRunner {
         fn drop(&mut self) {
-            // Serialize cancel against retirement before the VP index is deleted.
-            self.stop
-                .cancel
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
+            self.unbind_cancel();
         }
     }
 
@@ -711,6 +714,15 @@ mod imp {
     }
 
     impl CpuRunner {
+        fn unbind_cancel(&self) {
+            // Serialize cancel against retirement before the VP index is deleted.
+            self.stop
+                .cancel
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        }
+
         fn run_until_exit(&mut self) -> Result<VcpuExit, Error> {
             loop {
                 let bus = Arc::clone(&self.mmio_bus);
@@ -773,6 +785,11 @@ mod imp {
 
     impl dillo_machine::CpuRunner for CpuRunner {
         type Error = Error;
+
+        fn retire(mut self) -> Result<(), Self::Error> {
+            self.unbind_cancel();
+            self.inner.retire()
+        }
 
         fn run(&mut self) -> Result<VcpuStop, Error> {
             loop {

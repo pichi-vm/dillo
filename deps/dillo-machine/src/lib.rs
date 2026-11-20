@@ -93,6 +93,15 @@ pub trait CpuRunner: 'static {
     type Error: std::error::Error + Send + Sync + 'static;
 
     fn run(&mut self) -> Result<VcpuStop, Self::Error>;
+
+    /// Release native execution state before the owner reports completion.
+    fn retire(self) -> Result<(), Self::Error>
+    where
+        Self: Sized,
+    {
+        drop(self);
+        Ok(())
+    }
 }
 
 /// A shareable endpoint for requesting stop and waking the CPU's owner.
