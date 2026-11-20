@@ -43,7 +43,7 @@ mod imp {
     use crate::VcpuHandle;
     use crate::VmExit;
     pub use crate::hypervisor::Error;
-    use crate::hypervisor::Vm as NativeVm;
+    use crate::hypervisor::{CpuOnRequest, Vm as NativeVm};
 
     fn install_signal_watchers(_supervisor_shutdown: &'static AtomicBool) {}
 
@@ -587,12 +587,11 @@ mod imp {
         fn run(&mut self) -> Result<VcpuStop, Self::Error> {
             let runtime = &self.runtime;
             if self.index != 0 {
-                let Some((entry, context)) = runtime.slots[self.index].wait(&runtime.shutdown)
-                else {
+                let Some(request) = runtime.slots[self.index].wait(&runtime.shutdown) else {
                     return Ok(VcpuStop::Stopped);
                 };
-                self.vcpu.inner.initialize_secondary(entry, context)?;
-                log::info!("vCPU{} powered on: pc={entry:#x}", self.index);
+                log::info!("vCPU{} powered on: pc={:#x}", self.index, request.entry);
+                self.vcpu.inner.initialize_secondary(request)?;
             }
             runtime.run_vcpu_loop(self.index, &self.vcpu)
         }
@@ -815,9 +814,7 @@ mod imp {
                             log::info!("vCPU{idx} PSCI CPU_OFF; parking");
                             self.slots[idx].started.store(false, Ordering::SeqCst);
                             match self.slots[idx].wait(&self.shutdown) {
-                                Some((entry, context)) => {
-                                    vcpu.inner.initialize_secondary(entry, context)?;
-                                }
+                                Some(request) => vcpu.inner.initialize_secondary(request)?,
                                 None => return Ok(VcpuStop::Stopped),
                             }
                         }
@@ -833,12 +830,13 @@ mod imp {
                                     self.slots.len()
                                 );
                                 psci::ret::INVALID_PARAMETERS
-                            } else if self.slots[tgt].started.swap(true, Ordering::SeqCst) {
-                                psci::ret::ALREADY_ON
-                            } else {
+                            } else if self.slots[tgt]
+                                .try_deposit(vcpu.inner.cpu_on_request(entry, context)?)
+                            {
                                 log::info!("vCPU{idx} powers on vCPU{tgt} at pc={entry:#x}");
-                                self.slots[tgt].deposit(entry, context);
                                 psci::ret::SUCCESS
+                            } else {
+                                psci::ret::ALREADY_ON
                             };
                             vcpu.set_gpr(0, code)?;
                         }
@@ -881,11 +879,11 @@ mod imp {
     }
 
     /// Per-vCPU power-on mailbox. A parked secondary waits here until another
-    /// core's PSCI `CPU_ON` deposits a target entry point and context.
+    /// core's PSCI `CPU_ON` deposits a startup request.
     #[derive(Debug)]
     struct CpuSlot {
         started: AtomicBool,
-        request: Mutex<Option<(u64, u64)>>,
+        request: Mutex<Option<CpuOnRequest>>,
         cv: Condvar,
     }
 
@@ -898,9 +896,13 @@ mod imp {
             }
         }
 
-        fn deposit(&self, entry: u64, context: u64) {
-            *self.request.lock().expect("cpu-slot poisoned") = Some((entry, context));
+        fn try_deposit(&self, request: CpuOnRequest) -> bool {
+            if self.started.swap(true, Ordering::SeqCst) {
+                return false;
+            }
+            *self.request.lock().expect("cpu-slot poisoned") = Some(request);
             self.cv.notify_all();
+            true
         }
 
         fn wake(&self) {
@@ -911,7 +913,7 @@ mod imp {
             self.cv.notify_all();
         }
 
-        fn wait(&self, shutdown: &AtomicBool) -> Option<(u64, u64)> {
+        fn wait(&self, shutdown: &AtomicBool) -> Option<CpuOnRequest> {
             let mut g = self.request.lock().expect("cpu-slot poisoned");
             loop {
                 if shutdown.load(Ordering::SeqCst) {
@@ -1186,27 +1188,64 @@ mod imp {
                 (
                     0,
                     &[
-                        0xd280_0060u32,
+                        0xd281_0004u32, // x4 = 0x800
+                        0xd538_0705,
+                        0xd348_2ca5,
+                        0x3900_6085, // Save MMFR0.BigEnd at 0x818.
+                        0xb400_00a5, // Set EE only for mixed-endian EL1.
+                        0xd538_1006,
+                        0xb267_00c6,
+                        0xd518_1006,
+                        0xd503_3fdf, // Set EE; ISB.
+                        0xd282_4683,
+                        0xf900_0883, // Store caller's context bytes at 0x810.
+                        0xd280_0060,
                         0xf2b8_8000,
                         0xd280_0021,
                         0xd288_0002,
-                        0xd282_4683,
-                        0xd400_0003, // CPU_ON64(1, 0x4000, 0x1234)
-                        0xd281_0004,
-                        0xf900_0080, // Store return at 0x800.
+                        0xd400_0003,
+                        0xf900_0080, // CPU_ON(1, 0x4000, 0x1234); status at 0x800.
                         0xf940_0485,
-                        0xb4ff_ffe5, // Wait for AP's context store.
+                        0xb4ff_ffe5, // Wait for first AP store.
+                        0xd538_1006,
+                        0x9266_f8c6,
+                        0xd518_1006,
+                        0xd503_3fdf, // Clear EE; ISB.
+                        0xd280_0060,
+                        0xf2b8_8000,
+                        0xd280_0021,
+                        0xd288_0802,
+                        0xd28a_cf03,
+                        0xd400_0003, // CPU_ON(1, 0x4040, 0x5678)
+                        0xb100_101f,
+                        0x54ff_ff20, // Retry ALREADY_ON until the AP parks.
+                        0xf900_1480,
+                        0xf940_1085,
+                        0xb4ff_ffe5, // Status at 0x828; wait for second store.
                         0x5280_0100,
                         0x72b0_8000,
                         0xd400_0003, // SYSTEM_OFF
                     ][..],
                 ),
-                (0x4000, &[0xd281_0004, 0xf900_0480, 0x1400_0000][..]), // Store x0 at 0x808.
+                (
+                    0x4000,
+                    &[
+                        0xd281_0004,
+                        0xf900_0480, // Save first context at 0x808.
+                        0x5280_0040,
+                        0x72b0_8000,
+                        0xd400_0003, // CPU_OFF
+                        0xd420_0000, // CPU_OFF must not return.
+                    ][..],
+                ),
+                (0x4040, &[0xd281_0004, 0xf900_1080, 0x1400_0000][..]), // Second context at 0x820.
             ] {
                 let bytes: Vec<_> = code.iter().copied().flat_map(u32::to_le_bytes).collect();
                 vm.write_guest(gpa, &bytes).unwrap();
             }
-            vm.write_guest(0x800, &u64::MAX.to_le_bytes()).unwrap();
+            for status in [0x800, 0x828] {
+                vm.write_guest(status, &[0xff; 8]).unwrap();
+            }
 
             let profile = CpuProfile::Aarch64(pmi::aarch64::Profile::V8_0);
             let (mut bsp, _bsp_control) =
@@ -1224,14 +1263,32 @@ mod imp {
                 .recv_timeout(std::time::Duration::from_secs(3))
                 .unwrap();
             let memory = vm.inner.guest_memory().unwrap();
-            assert_eq!(memory.read_obj::<u64>(GuestAddress(0x808)).unwrap(), 0);
+            let read = |gpa| {
+                let mut bytes = [0; 8];
+                memory.read_slice(&mut bytes, GuestAddress(gpa)).unwrap();
+                bytes
+            };
+            assert_eq!(read(0x808), [0; 8]);
+            assert_eq!(read(0x820), [0; 8]);
             assert!(!vm.cpu_runtime.slots[1].started.load(Ordering::Acquire));
             assert_eq!(bsp.run().unwrap(), VcpuStop::GuestPoweroff);
             bsp.retire().unwrap();
             control.stop().unwrap();
             assert_eq!(ap.join().unwrap(), VcpuStop::Stopped);
-            assert_eq!(memory.read_obj::<u64>(GuestAddress(0x800)).unwrap(), 0);
-            assert_eq!(memory.read_obj::<u64>(GuestAddress(0x808)).unwrap(), 0x1234);
+            assert_eq!(read(0x800), [0; 8]);
+            assert_eq!(read(0x828), [0; 8]);
+            let first = if read(0x818)[0] != 0 {
+                0x1234_u64.to_be_bytes()
+            } else {
+                0x1234_u64.to_le_bytes()
+            };
+            assert_eq!(read(0x810), first, "caller context bytes");
+            assert_eq!(read(0x808), first, "first CPU_ON context bytes");
+            assert_eq!(
+                read(0x820),
+                0x5678_u64.to_le_bytes(),
+                "second CPU_ON context bytes"
+            );
         }
 
         #[cfg(target_arch = "aarch64")]
@@ -1336,8 +1393,15 @@ mod imp {
             let s2 = Arc::clone(&slot);
             let sd2 = Arc::clone(&shutdown);
             let waiter = thread::spawn(move || s2.wait(&sd2));
-            slot.deposit(0x4000_0000, 0xABCD);
-            assert_eq!(waiter.join().unwrap(), Some((0x4000_0000, 0xABCD)));
+            assert!(slot.try_deposit(CpuOnRequest {
+                entry: 0x4000_0000,
+                context: 0xabcd,
+                big_endian: true,
+            }));
+            let request = waiter.join().unwrap().unwrap();
+            assert_eq!(request.entry, 0x4000_0000);
+            assert_eq!(request.context, 0xabcd);
+            assert!(request.big_endian);
 
             let slot = Arc::new(CpuSlot::new());
             let shutdown = Arc::new(AtomicBool::new(false));
@@ -1346,7 +1410,7 @@ mod imp {
             let waiter = thread::spawn(move || s2.wait(&sd2));
             shutdown.store(true, Ordering::SeqCst);
             slot.wake();
-            assert_eq!(waiter.join().unwrap(), None);
+            assert!(waiter.join().unwrap().is_none());
         }
     }
 }

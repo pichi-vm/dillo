@@ -215,7 +215,7 @@ jobs:
           </plist>
           EOF
           codesign --force --sign - --entitlements "$entitlements" "$binary"
-          "$binary" --ignored --test-threads=1 hypervisor::tests::hvf_
+          "$binary" --ignored --test-threads=1 --nocapture hypervisor::tests::hvf_
 
       - name: Reserve hugepages for guest RAM (Linux/KVM)
         if: runner.os == 'Linux'

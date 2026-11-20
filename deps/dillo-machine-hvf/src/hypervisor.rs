@@ -34,6 +34,8 @@ use crate::VmExit;
 /// AArch64 instruction length (no 16-bit encodings).
 const INSN_LEN: u64 = 4;
 
+const SCTLR_EE: u64 = 1 << 25;
+
 /// In-kernel GICv3 placement, derived by the platform layer from the DTB
 /// (`/intc`+`/v2m`) and handed to [`Vm::new`]. The hypervisor never hardcodes
 /// these — addresses are the image's to assign (device-model §4); F7a.
@@ -365,6 +367,8 @@ impl Vm {
         let evidence = ArmV8Evidence {
             pfr0: read("ID_AA64PFR0_EL1", SysReg::ID_AA64PFR0_EL1)?,
             isar0: read("ID_AA64ISAR0_EL1", SysReg::ID_AA64ISAR0_EL1)?,
+            // The pinned HVF API exposes no typed ID_ISAR5_EL1 selector.
+            isar5: None,
             mmfr0: read("ID_AA64MMFR0_EL1", SysReg::ID_AA64MMFR0_EL1)?,
             dfr0: read("ID_AA64DFR0_EL1", SysReg::ID_AA64DFR0_EL1)?,
             ctr,
@@ -398,6 +402,13 @@ struct PendingMmio {
     srt: u8,
 }
 
+#[derive(Debug)]
+pub(crate) struct CpuOnRequest {
+    pub(crate) entry: u64,
+    pub(crate) context: u64,
+    pub(crate) big_endian: bool,
+}
+
 /// A single vCPU, bound to the thread that created it.
 #[derive(Debug)]
 pub(crate) struct Vcpu {
@@ -424,15 +435,34 @@ impl Vcpu {
 
     /// Apply only the register values fixed by PMI's AArch64 vm contract.
     pub(crate) fn initialize_bsp(&self) -> Result<(), Error> {
-        self.initialize_el1(0, 0)
+        self.initialize_el1(0, 0, false)
     }
 
-    /// PSCI CPU_ON supplies a guest-selected entry and context at EL1.
-    pub(crate) fn initialize_secondary(&self, entry: u64, context: u64) -> Result<(), Error> {
-        self.initialize_el1(entry, context)
+    pub(crate) fn cpu_on_request(&self, entry: u64, context: u64) -> Result<CpuOnRequest, Error> {
+        Ok(CpuOnRequest {
+            entry,
+            context,
+            // PSCI DEN0022F.b §6.4.3.2 requires the caller's live EL1 endianness.
+            big_endian: self.el1_big_endian()?,
+        })
     }
 
-    fn initialize_el1(&self, entry: u64, context: u64) -> Result<(), Error> {
+    pub(crate) fn initialize_secondary(&self, request: CpuOnRequest) -> Result<(), Error> {
+        self.initialize_el1(request.entry, request.context, request.big_endian)?;
+        if self.el1_big_endian()? != request.big_endian {
+            return Err(Error::Hv(format!(
+                "CPU_ON target did not accept SCTLR_EL1.EE={}",
+                u8::from(request.big_endian)
+            )));
+        }
+        Ok(())
+    }
+
+    fn el1_big_endian(&self) -> Result<bool, Error> {
+        Ok(self.inner.get_sys_reg(SysReg::SCTLR_EL1)? & SCTLR_EE != 0)
+    }
+
+    fn initialize_el1(&self, entry: u64, context: u64, big_endian: bool) -> Result<(), Error> {
         for n in 0..=30 {
             self.inner
                 .set_reg(gpr(n), if n == 0 { context } else { 0 })?;
@@ -442,9 +472,10 @@ impl Vcpu {
         self.inner.set_sys_reg(SysReg::SP_EL0, 0)?;
         self.inner.set_sys_reg(SysReg::SP_EL1, 0)?;
         let sctlr = self.inner.get_sys_reg(SysReg::SCTLR_EL1)?;
+        let endian = if big_endian { SCTLR_EE } else { 0 };
         self.inner.set_sys_reg(
             SysReg::SCTLR_EL1,
-            sctlr & !((1 << 0) | (1 << 2) | (1 << 12) | (1 << 25)),
+            (sctlr & !((1 << 0) | (1 << 2) | (1 << 12) | SCTLR_EE)) | endian,
         )?;
         Ok(())
     }
@@ -819,7 +850,7 @@ mod tests {
         }
 
         // 1) HVC.
-        vcpu.initialize_el1(base, 0).expect("state");
+        vcpu.initialize_el1(base, 0, false).expect("state");
         let e = vcpu.run().expect("run hvc");
         eprintln!("exit 1 (expect Hvc): {e:?}");
         assert!(
@@ -834,7 +865,7 @@ mod tests {
         );
 
         // 2) Faulting load from an unmapped IPA → MmioRead (64-bit → size 8).
-        vcpu.initialize_el1(base + 4, 0).expect("state");
+        vcpu.initialize_el1(base + 4, 0, false).expect("state");
         vcpu.set_gpr(2, mmio).expect("x2");
         let e = vcpu.run().expect("run ldr");
         eprintln!("exit 2 (expect MmioRead): {e:?}");
@@ -848,7 +879,7 @@ mod tests {
         vcpu.complete_mmio_read(0).expect("complete read");
 
         // 3) Faulting store → MmioWrite carrying the source register's value.
-        vcpu.initialize_el1(base + 8, 0).expect("state");
+        vcpu.initialize_el1(base + 8, 0, false).expect("state");
         vcpu.set_gpr(1, 0xDEAD_BEEF_u64).expect("x1");
         vcpu.set_gpr(2, mmio).expect("x2");
         let e = vcpu.run().expect("run str");
@@ -922,7 +953,7 @@ mod tests {
         // Bypass only the readiness check in this fixture to read the earlier
         // native map through a real guest instruction fetch.
         let cpu = vm.create_vcpu().unwrap();
-        cpu.initialize_el1(RAM_BASE, 0).unwrap();
+        cpu.initialize_el1(RAM_BASE, 0, false).unwrap();
         drop(vm);
         assert!(matches!(
             cpu.run().unwrap(),

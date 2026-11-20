@@ -58,12 +58,18 @@ pub fn aarch64_pa_bits(mmfr0: u64) -> Option<u32> {
 pub struct ArmV8Evidence {
     pub pfr0: u64,
     pub isar0: u64,
+    /// Required when PFR0 exposes AArch32.
+    pub isar5: Option<u64>,
     pub mmfr0: u64,
     pub dfr0: u64,
     pub ctr: u64,
 }
 
 impl ArmV8Evidence {
+    pub fn exposes_aarch32(&self) -> bool {
+        self.pfr0 & 15 >= 2
+    }
+
     /// Check the architectural minimum and its direct conditions (Arm DDI0487
     /// M.c A2.2.1, D7.3, D8.18.2, D24.1.3 and the individual ID registers).
     pub fn validate(self, sctlr: u64) -> Result<(), &'static str> {
@@ -98,11 +104,29 @@ impl ArmV8Evidence {
         if (self.pfr0 >> 16) & 15 != (self.pfr0 >> 20) & 15 {
             return Err("FP and AdvSIMD encodings must agree");
         }
-        // D24.2.83: the shared AES field encodes PMULL at a level that includes AES.
-        let sha1 = (self.isar0 >> 8) & 15 != 0;
-        let sha2 = (self.isar0 >> 12) & 15 != 0;
-        if sha1 != sha2 {
+        // The two ISAR registers encode these four baseline capabilities at
+        // the same offsets. Later encodings can add features such as SHA512.
+        let crypto = |isar: u64| {
+            let aes = (isar >> 4) & 15;
+            [
+                aes >= 1,
+                aes >= 2,
+                (isar >> 8) & 15 != 0,
+                (isar >> 12) & 15 != 0,
+            ]
+        };
+        let aarch64_crypto = crypto(self.isar0);
+        let [_, _, sha1, sha256] = aarch64_crypto;
+        if sha1 != sha256 {
             return Err("SHA1 and SHA2 must agree on presence");
+        }
+        if self.exposes_aarch32() {
+            let isar5 = self
+                .isar5
+                .ok_or("AArch32 crypto requires ID_ISAR5_EL1 evidence")?;
+            if crypto(isar5) != aarch64_crypto {
+                return Err("AES, PMULL, SHA1 and SHA256 must agree across AArch32 and AArch64");
+            }
         }
 
         // D7.3 and D24.2.87: use live SCTLR for the fixed-endian condition.
@@ -243,6 +267,7 @@ mod tests {
     const ARM_MINIMUM: ArmV8Evidence = ArmV8Evidence {
         pfr0: 0x00ff_0011,
         isar0: 0,
+        isar5: None,
         mmfr0: 0,
         dfr0: 0,
         ctr: 3 << 14,
@@ -253,6 +278,7 @@ mod tests {
         ARM_MINIMUM.validate(0).unwrap();
         ArmV8Evidence {
             pfr0: 0x0022_0033,
+            isar5: Some(0),
             ctr: 2 << 14,
             ..ARM_MINIMUM
         }
@@ -260,6 +286,7 @@ mod tests {
         .unwrap();
         ArmV8Evidence {
             pfr0: 0x00ff_2222,
+            isar5: Some(0),
             mmfr0: 1 << 12,
             ..ARM_MINIMUM
         }
@@ -278,6 +305,44 @@ mod tests {
             }
             .validate(1 << 25)
             .unwrap();
+        }
+    }
+
+    #[test]
+    fn arm_baseline_checks_dual_state_crypto() {
+        let aarch64_crypto = (2 << 4) | (1 << 8) | (2 << 12);
+        let aarch32_crypto = (2 << 4) | (1 << 8) | (1 << 12);
+        let evidence = ArmV8Evidence {
+            pfr0: 0x12,
+            isar0: aarch64_crypto,
+            isar5: Some(aarch32_crypto),
+            ..ARM_MINIMUM
+        };
+        evidence.validate(0).unwrap();
+        assert!(
+            ArmV8Evidence {
+                isar5: None,
+                ..evidence
+            }
+            .validate(0)
+            .unwrap_err()
+            .contains("ID_ISAR5_EL1")
+        );
+        for isar5 in [
+            aarch32_crypto & !(15 << 4),  // No AES or PMULL.
+            aarch32_crypto - (1 << 4),    // AES without PMULL.
+            aarch32_crypto & !(15 << 8),  // No SHA1.
+            aarch32_crypto & !(15 << 12), // No SHA256.
+        ] {
+            assert!(
+                ArmV8Evidence {
+                    isar5: Some(isar5),
+                    ..evidence
+                }
+                .validate(0)
+                .unwrap_err()
+                .contains("across AArch32 and AArch64")
+            );
         }
     }
 

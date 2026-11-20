@@ -35,6 +35,14 @@ pub enum Error {
     #[error("WHP capability HypervisorPresent query failed: {0}")]
     Capability(String),
 
+    #[error("WHP query vCPU {idx} CPUID leaf {leaf:#010x} subleaf {subleaf:#x} failed: {hr}")]
+    QueryVcpuCpuid {
+        idx: u32,
+        leaf: u32,
+        subleaf: u32,
+        hr: String,
+    },
+
     #[error("WHP hypervisor is not present")]
     HypervisorNotPresent,
 
@@ -326,17 +334,20 @@ pub(crate) fn guest_address_bits() -> Result<u32, Error> {
     let mut vm = Vm::new_x86_64_with_local_apic_count(1)?;
     let width = vm
         .create_vcpu_without_ram_check(0, Profile::V1)
-        .and_then(|vcpu| {
-            let physical = raw::guest_physical_bits(vcpu.partition.partition, vcpu.idx)
-                .map_err(|hr| Error::AddressSpace(status(hr)))?;
-            if !(32..=52).contains(&physical) {
-                return Err(Error::AddressSpace(format!(
+        .and_then(|mut vcpu| {
+            let width = match raw::guest_physical_bits(vcpu.partition.partition, vcpu.idx) {
+                Ok(physical) if (32..=52).contains(&physical) => Ok(physical),
+                Ok(physical) => Err(Error::AddressSpace(format!(
                     "invalid guest width {physical}"
-                )));
+                ))),
+                Err(hr) => Err(Error::AddressSpace(status(hr))),
+            };
+            match width {
+                Ok(physical) => vcpu.retire().map(|()| physical),
+                Err(operation) => Err(vcpu.cleanup_error(operation)),
             }
-            Ok(physical)
         });
-    // The temporary vCPU drops at the end of the query, leaving the sole owner.
+    // The temporary vCPU has released its partition reference.
     let inner = Arc::get_mut(&mut vm.inner)
         .ok_or_else(|| Error::AddressSpace("probe partition is still shared".into()))?;
     match width {
@@ -588,8 +599,14 @@ impl Vcpu {
 
     fn validate_profile(&self, profile: Profile) -> Result<(), Error> {
         let cpuid = |leaf, subleaf| {
-            raw::vcpu_cpuid(self.partition.partition, self.idx, leaf, subleaf)
-                .map_err(|hr| Error::Capability(status(hr)))
+            raw::vcpu_cpuid(self.partition.partition, self.idx, leaf, subleaf).map_err(|hr| {
+                Error::QueryVcpuCpuid {
+                    idx: self.idx,
+                    leaf,
+                    subleaf,
+                    hr: status(hr),
+                }
+            })
         };
         let max_standard = cpuid(0, 0)?.Eax;
         let max_extended = cpuid(0x8000_0000, 0)?.Eax;
@@ -1987,8 +2004,8 @@ mod tests {
     }
 
     #[test]
-    fn whp_address_width_probe_reports_partition_cleanup_failure() {
-        if !native_test_child("whp_address_width_probe_reports_partition_cleanup_failure") {
+    fn whp_address_width_probe_reports_cleanup_failures() {
+        if !native_test_child("whp_address_width_probe_reports_cleanup_failures") {
             return;
         }
         let deleted = || raw::DELETED_PARTITIONS.with(std::cell::Cell::get);
@@ -2022,6 +2039,25 @@ mod tests {
         assert!(matches!(*operation, Error::AddressSpace(hr) if hr == failed));
         assert_eq!(hr, failed);
         assert_eq!(deleted(), before + 2);
+
+        raw::FAIL_NEXT_VCPU_DELETE.with(|fail| fail.set(true));
+        let error = guest_address_bits().unwrap_err();
+        assert!(matches!(error, Error::DeleteVcpu { idx: 0, hr } if hr == failed));
+        assert_eq!(deleted(), before + 3);
+
+        raw::FAIL_NEXT_GUEST_PHYSICAL_BITS.with(|fail| fail.set(true));
+        raw::FAIL_NEXT_VCPU_DELETE.with(|fail| fail.set(true));
+        let error = guest_address_bits().unwrap_err();
+        let Error::VcpuCleanup {
+            operation,
+            retirement,
+        } = error
+        else {
+            panic!("expected query and vCPU cleanup errors, got {error:?}");
+        };
+        assert!(matches!(*operation, Error::AddressSpace(hr) if hr == failed));
+        assert!(matches!(*retirement, Error::DeleteVcpu { idx: 0, hr } if hr == failed));
+        assert_eq!(deleted(), before + 4);
     }
 
     #[test]

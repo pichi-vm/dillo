@@ -701,13 +701,17 @@ impl Vcpu {
                 })?;
             Ok::<_, Error>(u64::from_le_bytes(value))
         };
-        let evidence = dillo_machine::ArmV8Evidence {
+        let mut evidence = dillo_machine::ArmV8Evidence {
             pfr0: read("ID_AA64PFR0_EL1", sys_reg(3, 0, 0, 4, 0))?,
             isar0: read("ID_AA64ISAR0_EL1", sys_reg(3, 0, 0, 6, 0))?,
+            isar5: None,
             mmfr0: read("ID_AA64MMFR0_EL1", sys_reg(3, 0, 0, 7, 0))?,
             dfr0: read("ID_AA64DFR0_EL1", sys_reg(3, 0, 0, 5, 0))?,
             ctr: read("CTR_EL0", sys_reg(3, 3, 0, 0, 1))?,
         };
+        if evidence.exposes_aarch32() {
+            evidence.isar5 = Some(read("ID_ISAR5_EL1", sys_reg(3, 0, 0, 2, 5))?);
+        }
         let sctlr = read("SCTLR_EL1", sys_reg(3, 0, 1, 0, 0))?;
         evidence
             .validate(sctlr)
@@ -1334,46 +1338,6 @@ mod memory_registration_tests {
         .unwrap();
         let memory = Arc::new(MappedMemory::test_backing(&[(0, 0x10000)]).unwrap());
         vm.attach_memory(Arc::clone(&memory)).unwrap();
-        for (addr, code) in [
-            (
-                0,
-                &[
-                    0xd281_0001u32, // x1 = RAM witness at 0x800
-                    0xd538_0400,
-                    0xf900_0020, // PFR0
-                    0xd538_0600,
-                    0xf900_0420, // ISAR0
-                    0xd538_0700,
-                    0xf900_0820, // MMFR0
-                    0xd538_0500,
-                    0xf900_0c20, // DFR0
-                    0xd53b_0020,
-                    0xf900_1020, // CTR
-                    0xd538_1000,
-                    0xf900_1420, // SCTLR
-                    0xd280_0060,
-                    0xf2b8_8000,
-                    0xd280_0021,
-                    0xd288_0002,
-                    0xd282_4683,
-                    0xd400_0003,
-                    0xd2a0_0204,
-                    0xf900_0080,
-                ][..],
-            ), // CPU_ON64(1, 0x4000, 0x1234); report x0
-            (0x4000, &[0xd2a0_0204, 0xf900_0080][..]), // AP reports its context
-        ] {
-            memory
-                .write(
-                    addr,
-                    &code
-                        .iter()
-                        .copied()
-                        .flat_map(u32::to_le_bytes)
-                        .collect::<Vec<_>>(),
-                )
-                .unwrap();
-        }
         let mut bsp = vm.create_vcpu(0, Profile::default()).unwrap();
         let mut ap = vm.create_vcpu(1, Profile::default()).unwrap();
 
@@ -1399,6 +1363,53 @@ mod memory_registration_tests {
         );
         let admitted = bsp.admit_arm_v8_0().unwrap();
         ap.admit_arm_v8_0().unwrap();
+        let read_isar5 = if admitted.isar5.is_some() {
+            0xd538_02a0 // mrs x0, ID_ISAR5_EL1
+        } else {
+            0xd280_0000 // mov x0, #0
+        };
+        for (addr, code) in [
+            (
+                0,
+                &[
+                    0xd281_0001u32, // x1 = RAM witness at 0x800
+                    0xd538_0400,
+                    0xf900_0020, // PFR0
+                    0xd538_0600,
+                    0xf900_0420, // ISAR0
+                    0xd538_0700,
+                    0xf900_0820, // MMFR0
+                    0xd538_0500,
+                    0xf900_0c20, // DFR0
+                    0xd53b_0020,
+                    0xf900_1020, // CTR
+                    0xd538_1000,
+                    0xf900_1420, // SCTLR
+                    read_isar5,
+                    0xf900_1820, // AArch32 ISAR5, if this owner exposes AArch32
+                    0xd280_0060,
+                    0xf2b8_8000,
+                    0xd280_0021,
+                    0xd288_0002,
+                    0xd282_4683,
+                    0xd400_0003,
+                    0xd2a0_0204,
+                    0xf900_0080,
+                ][..],
+            ), // CPU_ON64(1, 0x4000, 0x1234); report x0
+            (0x4000, &[0xd2a0_0204, 0xf900_0080][..]), // AP reports its context
+        ] {
+            memory
+                .write(
+                    addr,
+                    &code
+                        .iter()
+                        .copied()
+                        .flat_map(u32::to_le_bytes)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+        }
         let initial_sctlr = read(sctlr);
         vm.init_gic().unwrap();
         let exit = bsp.fd.run().unwrap();
@@ -1432,6 +1443,11 @@ mod memory_registration_tests {
         }
         assert_eq!(guest[5] & 0x0200_1005, 0);
         assert_eq!(guest[5], saved_sctlr);
+        if let Some(admitted_isar5) = admitted.isar5 {
+            let guest_isar5 = memory.read_obj::<u64>(GuestAddress(0x830)).unwrap();
+            eprintln!("KVM ID_ISAR5_EL1: guest={guest_isar5:#x}, admitted API={admitted_isar5:#x}");
+            assert_eq!(guest_isar5, admitted_isar5);
+        }
         let exit = ap.fd.run().unwrap();
         assert!(
             matches!(exit, VcpuExit::MmioWrite(0x0010_0000, data) if data == 0x1234u64.to_le_bytes()),

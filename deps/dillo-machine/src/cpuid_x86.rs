@@ -95,7 +95,7 @@ const AVX512CD: CpuidFeature = bit(0x0000_0007, 0, Reg::Ebx, 28, "avx512cd");
 const AVX512BW: CpuidFeature = bit(0x0000_0007, 0, Reg::Ebx, 30, "avx512bw");
 const AVX512VL: CpuidFeature = bit(0x0000_0007, 0, Reg::Ebx, 31, "avx512vl");
 
-// Leaf 0x8000_0001 (ECX): LAHF, LZCNT.
+// Leaf 0x8000_0001 carries SYSCALL in EDX and LAHF/LZCNT in ECX.
 const SYSCALL: CpuidFeature = bit(0x8000_0001, 0, Reg::Edx, 11, "syscall");
 const LAHF_LM: CpuidFeature = bit(0x8000_0001, 0, Reg::Ecx, 0, "lahf-lm");
 const LZCNT: CpuidFeature = bit(0x8000_0001, 0, Reg::Ecx, 5, "lzcnt");
