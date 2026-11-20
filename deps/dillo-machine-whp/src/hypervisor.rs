@@ -156,7 +156,7 @@ fn status(hr: HResult) -> String {
     hr.to_string()
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Vm {
     inner: Arc<VmInner>,
 }
