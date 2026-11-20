@@ -218,6 +218,8 @@ fn section_loads_clear_zero_pages_and_padded_tails() {
     bytes[0x198..0x19c].copy_from_slice(&(cbor.len() as u32).to_le_bytes());
     let code_virtual_size = 0x188 + 2 * 40 + 8;
     bytes[code_virtual_size..code_virtual_size + 4].copy_from_slice(&0x1f_ffffu32.to_le_bytes());
+    let zero_file_offset = 0x188 + 3 * 40 + 20;
+    bytes[zero_file_offset..zero_file_offset + 4].copy_from_slice(&0x40_0000u32.to_le_bytes());
     bytes[0x20_0000..0x20_1000].fill(0x66);
 
     let dir = tempfile::tempdir().unwrap();
@@ -321,6 +323,37 @@ fn load_validation_checks_raw_size_and_backing_end() {
     assert!(
         matches!(parse(&bytes, &opts), Err(Error::VirtualAddressOverflow { name }) if name == ".code")
     );
+}
+
+#[test]
+fn zero_load_requires_positive_size_and_aligned_pointer() {
+    use dillo_launch::pmi_parse::{Error, parse};
+    let arch = HostArchitecture::X86_64;
+    let mut bytes = image(
+        arch,
+        BaseChannel::Bundled,
+        &base(arch, false, false),
+        Some(4096),
+    );
+    let opts = ParseOptions {
+        host_arch: pmi_arch(arch),
+        memory_mib: 4,
+    };
+    let code_header = 0x188 + 2 * 40;
+    bytes[code_header + 16..code_header + 20].fill(0);
+    bytes[code_header + 8..code_header + 12].fill(0);
+    assert!(
+        matches!(parse(&bytes, &opts), Err(Error::InvalidLoadSize(section)) if section == ".code")
+    );
+    for size in [0x10_0000u32, 0x20_0000] {
+        bytes[code_header + 8..code_header + 12].copy_from_slice(&size.to_le_bytes());
+        bytes[code_header + 20..code_header + 24].copy_from_slice(&1u32.to_le_bytes());
+        assert!(
+            matches!(parse(&bytes, &opts), Err(Error::AlignmentViolation { name, .. }) if name == ".code")
+        );
+        bytes[code_header + 20..code_header + 24].fill(0);
+        parse(&bytes, &opts).expect("aligned Zero load");
+    }
 }
 
 // Use a non-arma section name and a 4 KiB capacity. Action GPAs remain the
