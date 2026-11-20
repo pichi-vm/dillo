@@ -24,6 +24,7 @@ nix.workspace = true
 vmm-sys-util.workspace = true
 
 [dev-dependencies]
+dillo-runtime.workspace = true
 dillo-virtio.workspace = true
 wait-timeout = "0.2"
 
