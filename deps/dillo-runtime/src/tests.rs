@@ -20,6 +20,9 @@ enum Scenario {
     FinalizePanic,
     FinalizeShutdown,
     Poweroff,
+    Reset,
+    ResetThenPoweroff,
+    ResetThenShutdown,
     RunPanic,
 }
 
@@ -135,6 +138,9 @@ struct TestRunner {
 
 impl Drop for TestRunner {
     fn drop(&mut self) {
+        if self.index == 0 && self.scenario == Scenario::ResetThenShutdown {
+            self.state.shutdown.store(true, Ordering::Release);
+        }
         self.state
             .dropped
             .lock()
@@ -159,11 +165,20 @@ impl CpuRunner for TestRunner {
         if self.index == 0 {
             self.state.entered.store(true, Ordering::Release);
             wait_for(&self.state.stop);
-            return Ok(VcpuStop::Stopped);
+            return Ok(if self.scenario == Scenario::ResetThenPoweroff {
+                VcpuStop::GuestPoweroff
+            } else {
+                VcpuStop::Stopped
+            });
         }
         wait_for(&self.state.entered);
         assert!(self.scenario != Scenario::RunPanic, "run fixture");
-        Ok(VcpuStop::GuestPoweroff)
+        Ok(match self.scenario {
+            Scenario::Reset | Scenario::ResetThenPoweroff | Scenario::ResetThenShutdown => {
+                VcpuStop::GuestReset
+            }
+            _ => VcpuStop::GuestPoweroff,
+        })
     }
 }
 
@@ -235,4 +250,56 @@ fn later_owner_poweroff_or_panic_stops_earlier_waiter() {
         "vCPU 1 owner panicked"
     );
     assert_owners_released(&state, 2);
+}
+
+#[test]
+fn observed_termination_supersedes_pending_reset() {
+    for (scenario, expected) in [
+        (Scenario::Reset, VcpuStop::GuestReset),
+        (Scenario::ResetThenPoweroff, VcpuStop::GuestPoweroff),
+        (Scenario::ResetThenShutdown, VcpuStop::Stopped),
+    ] {
+        let state = Arc::new(State::default());
+        assert_eq!(run(scenario, &state).unwrap(), expected);
+        assert_owners_released(&state, 2);
+    }
+}
+
+#[test]
+fn delayed_entry_observes_operator_and_peer_termination() {
+    for scenario in [Scenario::Poweroff, Scenario::RunPanic] {
+        let state = Arc::new(State::default());
+        let mut delayed = TestRunner {
+            index: 0,
+            scenario,
+            state: Arc::clone(&state),
+            _affine: Rc::new(()),
+        };
+        let gate = ExecutionGate(Mutex::new(true));
+        state.shutdown.store(true, Ordering::Release);
+        assert_eq!(
+            gate.run(&mut delayed, 0, &state.shutdown).unwrap(),
+            VcpuStop::Stopped
+        );
+        assert!(!state.entered.load(Ordering::Acquire));
+
+        let peer_state = Arc::new(State::default());
+        peer_state.entered.store(true, Ordering::Release);
+        peer_state.finalized.store(true, Ordering::Release);
+        let mut peer = TestRunner {
+            index: 1,
+            scenario,
+            state: peer_state,
+            _affine: Rc::new(()),
+        };
+        let gate = ExecutionGate(Mutex::new(true));
+        let shutdown = AtomicBool::new(false);
+        let result = gate.run(&mut peer, 1, &shutdown);
+        assert_eq!(result.is_err(), scenario == Scenario::RunPanic);
+        assert_eq!(
+            gate.run(&mut delayed, 0, &shutdown).unwrap(),
+            VcpuStop::Stopped
+        );
+        assert!(!state.entered.load(Ordering::Acquire));
+    }
 }

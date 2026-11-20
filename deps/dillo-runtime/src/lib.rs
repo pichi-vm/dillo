@@ -25,7 +25,41 @@ impl fmt::Display for CpuError {
 
 impl std::error::Error for CpuError {}
 
+struct ExecutionGate(Mutex<bool>);
+
+impl ExecutionGate {
+    fn admits(&self, shutdown: &AtomicBool) -> bool {
+        self.0
+            .lock()
+            .is_ok_and(|permitted| *permitted && !shutdown.load(Ordering::Acquire))
+    }
+
+    fn revoke(&self) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+    }
+
+    fn run(
+        &self,
+        runner: &mut impl CpuRunner,
+        index: u32,
+        shutdown: &AtomicBool,
+    ) -> Result<VcpuStop, CpuError> {
+        if !self.admits(shutdown) {
+            return Ok(VcpuStop::Stopped);
+        }
+        let result = catch_unwind(AssertUnwindSafe(|| runner.run()));
+        self.revoke();
+        result
+            .map_err(|_| owner_panic(index))?
+            .map_err(|error| CpuError(format!("run vCPU {index}: {error}")))
+    }
+}
+
 struct Owners<'scope, C: CpuControl> {
+    gate: &'scope ExecutionGate,
     threads: Vec<ScopedJoinHandle<'scope, ()>>,
     controls: Vec<C>,
 }
@@ -44,6 +78,7 @@ impl<C: CpuControl> Drop for Owners<'_, C> {
     fn drop(&mut self) {
         // On unwind the gate guard has already denied entry. After permission,
         // keep waking owners until even a CPU entering native execution stops.
+        self.gate.revoke();
         while self.threads.iter().any(|owner| !owner.is_finished()) {
             self.stop();
             thread::sleep(WAKE_INTERVAL);
@@ -63,15 +98,16 @@ pub fn run_cpus<M: Machine>(
     boot_state: &dyn BootVcpuState,
     shutdown: &AtomicBool,
 ) -> Result<VcpuStop, CpuError> {
-    let gate = Mutex::new(false);
+    let gate = ExecutionGate(Mutex::new(false));
     thread::scope(|scope| {
         let mut owners = Owners {
+            gate: &gate,
             threads: Vec::with_capacity(count as usize),
             controls: Vec::with_capacity(count as usize),
         };
         // Acquire after constructing Owners so any return drops the guard
         // before Owners waits for the prepared threads to finish.
-        let mut permitted = gate.lock().expect("initial execution gate");
+        let mut permitted = gate.0.lock().expect("initial execution gate");
         let (complete, results) = mpsc::channel();
         for index in 0..count {
             if shutdown.load(Ordering::Acquire) {
@@ -99,13 +135,7 @@ pub fn run_cpus<M: Machine>(
                             return Ok(VcpuStop::Stopped);
                         }
                         drop(ready);
-                        if gate.lock().is_ok_and(|decision| *decision) {
-                            runner
-                                .run()
-                                .map_err(|error| CpuError(format!("run vCPU {index}: {error}")))
-                        } else {
-                            Ok(VcpuStop::Stopped)
-                        }
+                        gate.run(&mut runner, index, shutdown)
                     }));
                     let _ = complete.send(result.unwrap_or_else(|_| Err(owner_panic(index))));
                 })
@@ -125,23 +155,22 @@ pub fn run_cpus<M: Machine>(
         *permitted = true;
         drop(permitted);
 
-        let mut outcome = None;
+        let mut outcome = VcpuStop::Stopped;
         let mut failure = None;
         let mut remaining = count;
         while remaining > 0 {
-            if shutdown.load(Ordering::Acquire) {
-                outcome.get_or_insert(VcpuStop::Stopped);
-            }
-            if outcome.is_some() || failure.is_some() {
+            if !gate.admits(shutdown) {
                 owners.stop();
             }
             match results.recv_timeout(WAKE_INTERVAL) {
                 Ok(result) => {
                     remaining -= 1;
                     match result {
-                        Ok(stop) => {
-                            outcome.get_or_insert(stop);
+                        Ok(VcpuStop::GuestPoweroff) => outcome = VcpuStop::GuestPoweroff,
+                        Ok(VcpuStop::GuestReset) if outcome == VcpuStop::Stopped => {
+                            outcome = VcpuStop::GuestReset;
                         }
+                        Ok(_) => {}
                         Err(error) => {
                             failure.get_or_insert(error);
                         }
@@ -156,7 +185,14 @@ pub fn run_cpus<M: Machine>(
                 }
             }
         }
-        failure.map_or_else(|| Ok(outcome.unwrap_or(VcpuStop::Stopped)), Err)
+        drop(owners);
+        if let Some(error) = failure {
+            Err(error)
+        } else if shutdown.load(Ordering::Acquire) {
+            Ok(VcpuStop::Stopped)
+        } else {
+            Ok(outcome)
+        }
     })
 }
 
