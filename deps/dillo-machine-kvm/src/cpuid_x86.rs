@@ -63,6 +63,15 @@ pub(crate) fn first_missing(level: X86Level, supported: &CpuId) -> Option<&'stat
             return Some(feat.name);
         }
     }
+    let xcr0 = level.required_xcr0();
+    if xcr0 != 0
+        && !supported
+            .as_slice()
+            .iter()
+            .any(|entry| entry.function == 0x0d && entry.index == 0 && entry.eax & xcr0 == xcr0)
+    {
+        return Some("XCR0 components");
+    }
     None
 }
 
@@ -175,9 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn first_missing_accepts_v1_when_leaf1_edx_bits_present() {
-        // V1 demands only leaf-1 EDX bits; an entry with those set and
-        // nothing else must clear first_missing for V1.
+    fn first_missing_accepts_v1_with_its_required_features() {
         let edx = (1 << 0) | (1 << 8) | (1 << 15) | (1 << 23) | (1 << 24) | (1 << 25) | (1 << 26);
         let entries = [kvm_cpuid_entry2 {
             function: 0x0000_0001,
@@ -189,7 +196,17 @@ mod tests {
             edx,
             padding: [0; 3],
         }];
-        let supported = CpuId::from_entries(&entries).expect("leaf1 CpuId");
+        let supported = CpuId::from_entries(&entries).unwrap();
+        assert_eq!(first_missing(X86Level::V1, &supported), Some("syscall"));
+        let supported = CpuId::from_entries(&[
+            entries[0],
+            kvm_cpuid_entry2 {
+                function: 0x8000_0001,
+                edx: 1 << 11,
+                ..Default::default()
+            },
+        ])
+        .unwrap();
         assert_eq!(first_missing(X86Level::V1, &supported), None);
     }
 }
