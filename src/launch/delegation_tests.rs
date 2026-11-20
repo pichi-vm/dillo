@@ -200,6 +200,44 @@ fn launch(
 }
 
 #[test]
+fn section_loads_clear_zero_pages_and_padded_tails() {
+    let arch = HostArchitecture::X86_64;
+    let mut bytes = image(
+        arch,
+        BaseChannel::Bundled,
+        &base(arch, false, false),
+        Some(4096),
+    );
+    let mut manifest: serde_json::Value = ciborium::from_reader(&bytes[0x1000..0x2000]).unwrap();
+    manifest["actions"].as_array_mut().unwrap().push(json!({
+        "type": "load", "section": ".dtb", "gpa": 0x20_2000
+    }));
+    let mut cbor = Vec::new();
+    ciborium::ser::into_writer(&manifest, &mut cbor).unwrap();
+    bytes[0x1000..0x1000 + cbor.len()].copy_from_slice(&cbor);
+    bytes[0x198..0x19c].copy_from_slice(&(cbor.len() as u32).to_le_bytes());
+    let code_virtual_size = 0x188 + 2 * 40 + 8;
+    bytes[code_virtual_size..code_virtual_size + 4].copy_from_slice(&0x1f_ffffu32.to_le_bytes());
+    bytes[0x20_0000..0x20_1000].fill(0x66);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.pmi");
+    std::fs::write(&path, bytes).unwrap();
+    let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 4, 1, None, None).unwrap();
+    let mut ram = vec![0xcc; 0x20_4000];
+    crate::runner::apply_load_sections(&plan.guest_writes, plan.pmi.bytes(), |gpa, data| {
+        let gpa = gpa as usize;
+        ram[gpa..gpa + data.len()].copy_from_slice(data);
+        Ok(())
+    })
+    .unwrap();
+    assert!(ram[..0x1000].iter().all(|&byte| byte == 0x66));
+    assert!(ram[0x1000..0x20_0000].iter().all(|&byte| byte == 0));
+    assert!(ram[0x20_2000..0x20_3000].iter().all(|&byte| byte == 0));
+    assert_eq!(ram[0x20_3000], 0xcc);
+}
+
+#[test]
 fn load_validation_uses_guest_capacity_not_platform_minimum() {
     for arch in ARCHES {
         let mut bytes = image(

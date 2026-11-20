@@ -199,11 +199,7 @@ fn main() {
         parsed,
         platform,
         memory_plan,
-        guest_writes.into_iter().map(|w| runner::RunWrite {
-            section: w.section,
-            gpa: w.gpa,
-            data: w.data,
-        }),
+        guest_writes,
         placements,
         pmi_image,
     );
@@ -1599,13 +1595,15 @@ mod launch {
         }
     }
 
-    /// Source of a launch-time write's bytes: either bytes derived by dillo
-    /// (DTB overlay, cmdline, cpu bootstate), or a byte range of the PMI image
-    /// (raw `load` sections — copied directly from [`Pmi`], never staged).
+    /// Bytes synthesized by Dillo or a section loaded directly from the PMI.
     #[derive(Debug, Clone)]
     pub(crate) enum WriteSrc {
         Owned(Vec<u8>),
-        Image { offset: usize, len: usize },
+        Image {
+            offset: usize,
+            len: usize,
+            zero_tail: u64,
+        },
     }
 
     /// Target-neutral launch facts derived before backend construction.
@@ -1902,9 +1900,10 @@ mod launch {
                 }
                 PmiAction::Load { section } => {
                     let s = &parsed.sections[section];
-                    if s.file_size == 0 {
-                        continue;
-                    }
+                    // Parsing validated the raw size and the enclosing backing extent.
+                    let size = s
+                        .virtual_size
+                        .next_multiple_of(dillo_launch::pmi_parse::caps::SMALL_PAGE);
                     // Bounds-check the section against the image (as the old copy
                     // path did), but record the byte range instead of copying it:
                     // apply_load_sections copies it straight from the PMI image
@@ -1917,6 +1916,7 @@ mod launch {
                         data: WriteSrc::Image {
                             offset: s.file_offset as usize,
                             len: s.file_size as usize,
+                            zero_tail: size - s.file_size,
                         },
                     });
                 }
@@ -2188,17 +2188,10 @@ mod machine_select {
         use dillo_pci::PciRoot;
         use dillo_pci_virtio::VirtioPciAdapter;
 
+        use crate::launch::GuestWrite;
         use crate::placement::MemoryPlan;
 
         pub(crate) use self::error::RunError;
-
-        /// One launch-time write into guest RAM, already derived by `dillo`.
-        #[derive(Debug)]
-        pub(crate) struct RunWrite {
-            pub(crate) section: String,
-            pub(crate) gpa: u64,
-            pub(crate) data: crate::launch::WriteSrc,
-        }
 
         /// One device with its allocated bus + slot, ready to attach. Built by
         /// `build_placements` (console + each virtio-blk/gpt device).
@@ -2228,7 +2221,7 @@ mod machine_select {
             parsed: dillo_launch::pmi_parse::ParsedPmi,
             platform: PlatformMachine,
             memory: MemoryPlan,
-            guest_writes: Vec<RunWrite>,
+            guest_writes: Vec<GuestWrite>,
             placements: Vec<DevicePlacement>,
             pmi: crate::launch::Pmi,
         }
@@ -2238,7 +2231,7 @@ mod machine_select {
                 parsed: dillo_launch::pmi_parse::ParsedPmi,
                 platform: PlatformMachine,
                 memory: MemoryPlan,
-                guest_writes: impl IntoIterator<Item = RunWrite>,
+                guest_writes: Vec<GuestWrite>,
                 placements: Vec<DevicePlacement>,
                 pmi: crate::launch::Pmi,
             ) -> Self {
@@ -2246,7 +2239,7 @@ mod machine_select {
                     parsed,
                     platform,
                     memory,
-                    guest_writes: guest_writes.into_iter().collect(),
+                    guest_writes,
                     placements,
                     pmi,
                 }
@@ -2258,7 +2251,7 @@ mod machine_select {
                 dillo_launch::pmi_parse::ParsedPmi,
                 PlatformMachine,
                 MemoryPlan,
-                Vec<RunWrite>,
+                Vec<GuestWrite>,
                 Vec<DevicePlacement>,
                 crate::launch::Pmi,
             ) {
@@ -2526,33 +2519,48 @@ mod machine_select {
             Ok(())
         }
 
-        fn apply_load_sections<M: Machine>(
-            vm: &mut M,
-            guest_writes: &[RunWrite],
+        pub(crate) fn apply_load_sections(
+            guest_writes: &[GuestWrite],
             pmi_bytes: &[u8],
+            mut write_guest: impl FnMut(u64, &[u8]) -> Result<(), RunError>,
         ) -> Result<(), RunError> {
             use crate::launch::WriteSrc;
+            static ZEROES: [u8; 64 * 1024] = [0; 64 * 1024];
             for write in guest_writes {
-                // Raw `load` sections are copied straight from the PMI image;
-                // derived writes (DTB overlay, cmdline, cpu state) carry owned bytes.
-                let data: &[u8] = match &write.data {
-                    WriteSrc::Owned(v) => v,
-                    WriteSrc::Image { offset, len } => pmi_bytes
-                        .get(*offset..offset.saturating_add(*len))
-                        .ok_or_else(|| {
-                            RunError::Machine(format!(
-                                "launch section `{}` range {:#x}+{:#x} out of PMI bounds",
-                                write.section, offset, len
-                            ))
-                        })?,
+                let (data, mut zero_tail) = match &write.data {
+                    WriteSrc::Owned(v) => (v.as_slice(), 0),
+                    WriteSrc::Image {
+                        offset,
+                        len,
+                        zero_tail,
+                    } => (
+                        pmi_bytes
+                            .get(*offset..offset.saturating_add(*len))
+                            .ok_or_else(|| {
+                                RunError::Machine(format!(
+                                    "launch section `{}` range {:#x}+{:#x} out of PMI bounds",
+                                    write.section, offset, len
+                                ))
+                            })?,
+                        *zero_tail,
+                    ),
                 };
                 log::debug!(
                     "writing launch section `{}` to GPA {:#x} ({} bytes)",
                     write.section,
                     write.gpa,
-                    data.len()
+                    data.len() as u64 + zero_tail
                 );
-                vm.write_guest(write.gpa, data).map_err(RunError::machine)?;
+                if !data.is_empty() {
+                    write_guest(write.gpa, data)?;
+                }
+                let mut gpa = write.gpa + data.len() as u64;
+                while zero_tail > 0 {
+                    let len = zero_tail.min(ZEROES.len() as u64) as usize;
+                    write_guest(gpa, &ZEROES[..len])?;
+                    gpa += len as u64;
+                    zero_tail -= len as u64;
+                }
             }
             Ok(())
         }
@@ -2707,7 +2715,9 @@ mod machine_select {
             })
             .map_err(RunError::machine)?;
             crate::boot_trace::mark("machine_ready");
-            apply_load_sections(&mut vm, &guest_writes, pmi.bytes())?;
+            apply_load_sections(&guest_writes, pmi.bytes(), |gpa, data| {
+                vm.write_guest(gpa, data).map_err(RunError::machine)
+            })?;
             // Sections are now in guest RAM; drop the PMI backing so it does not
             // stay resident for the VM's lifetime. A guest reboot re-maps it.
             pmi.release();
@@ -2736,7 +2746,9 @@ mod machine_select {
                 // Re-map the PMI just to replay the raw section loads, then drop
                 // it again — it is not held resident between boots.
                 pmi.remap().map_err(RunError::machine)?;
-                apply_load_sections(&mut vm, &guest_writes, pmi.bytes())?;
+                apply_load_sections(&guest_writes, pmi.bytes(), |gpa, data| {
+                    vm.write_guest(gpa, data).map_err(RunError::machine)
+                })?;
                 pmi.release();
                 let control = Arc::new(SupervisorControl {
                     supervisor_shutdown,

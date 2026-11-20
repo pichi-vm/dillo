@@ -261,9 +261,8 @@ impl Vm {
         self.inner
             .memory()
             .ready()?
-            .write(data, GuestAddress(gpa))
-            .map_err(|source| Error::WriteGuest { gpa, source })?;
-        Ok(())
+            .write_slice(data, GuestAddress(gpa))
+            .map_err(|source| Error::WriteGuest { gpa, source })
     }
 
     pub(crate) fn guest_memory(&self) -> Result<GuestMemoryMmap, Error> {
