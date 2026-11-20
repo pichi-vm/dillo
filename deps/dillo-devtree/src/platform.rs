@@ -553,6 +553,7 @@ impl Topology {
 pub struct Machine {
     dtb: Vec<u8>,
     arch: Arch,
+    psci: Option<Psci>,
     pcie: Pcie,
     has_pcie: bool,
     plan: ResourcePlan,
@@ -577,19 +578,20 @@ impl Machine {
         let mut reboot = None;
 
         // arch-specific substrate (specific → general within the arch).
-        match arch {
+        let psci = match arch {
             Arch::Aarch64 => {
                 GicConfig::from_tree(&mut t, &mut plan, &mut topology)?;
                 Timer::from_tree(&mut t, &mut plan, &topology)?;
-                Psci::from_tree(&mut t, &mut plan)?;
+                Some(Psci::from_tree(&mut t)?)
             }
             Arch::X86_64 => {
                 X86Intc::from_tree(&mut t, &mut plan, &mut topology)?;
                 let (po, rb) = X86Syscon::from_tree(&mut t, &mut plan)?;
                 poweroff = Some(po);
                 reboot = rb;
+                None
             }
-        }
+        };
 
         // Shared devices, then the general device last. The serial is the same
         // MMIO `ns16550a` on both arches (present only under `--serial`).
@@ -612,6 +614,7 @@ impl Machine {
         Ok(Self {
             dtb,
             arch,
+            psci,
             pcie,
             has_pcie,
             plan,
@@ -629,6 +632,10 @@ impl Machine {
 
     pub fn arch(&self) -> Arch {
         self.arch
+    }
+
+    pub fn psci(&self) -> Option<Psci> {
+        self.psci
     }
 
     /// The declared PCIe host bridge. When [`Self::has_pcie`] is false,
@@ -854,7 +861,7 @@ impl Timer {
 impl Psci {
     /// Claim the root-level `/psci` node (`arm,psci.yaml`); there is no
     /// `/firmware` wrapper in the device model.
-    fn from_tree(t: &mut OwnedTree, _plan: &mut ResourcePlan) -> Result<Psci, SurveyError> {
+    fn from_tree(t: &mut OwnedTree) -> Result<Psci, SurveyError> {
         let mut psci = t
             .root_mut()
             .remove_child("psci")
@@ -863,7 +870,7 @@ impl Psci {
         let compat = psci.require("compatible", "/psci")?;
         let has_psci = compat
             .as_strs()
-            .is_some_and(|mut it| it.any(|s| s.starts_with("arm,psci-")));
+            .is_some_and(|mut it| it.any(|s| matches!(s, "arm,psci-0.2" | "arm,psci-1.0")));
         if !has_psci {
             return Err(SurveyError::Unsupported {
                 node: "/psci",
@@ -1632,6 +1639,32 @@ mod tests {
 
     fn dtb(root: OwnedNode) -> Vec<u8> {
         OwnedTree::new(root).encode().expect("encode base")
+    }
+
+    #[test]
+    fn survey_retains_only_supported_psci_declarations() {
+        for (method, expected) in [("hvc", PsciMethod::Hvc), ("smc", PsciMethod::Smc)] {
+            let mut root = base_root();
+            root.child_mut("psci")
+                .unwrap()
+                .set_property(OwnedProperty::new("method").with_str(method));
+            let platform = Machine::survey(dtb(root), Arch::Aarch64).unwrap();
+            assert_eq!(platform.psci().unwrap().method, expected);
+        }
+        let mut root = base_root();
+        root.child_mut("psci")
+            .unwrap()
+            .set_property(OwnedProperty::new("compatible").with_str("arm,psci-unknown"));
+        assert!(matches!(
+            Machine::survey(dtb(root), Arch::Aarch64),
+            Err(SurveyError::Unsupported {
+                node: "/psci",
+                prop: "compatible",
+                ..
+            })
+        ));
+        let x86 = Machine::survey(dtb(x86_base_root()), Arch::X86_64).unwrap();
+        assert!(x86.psci().is_none());
     }
 
     #[test]
