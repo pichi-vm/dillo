@@ -1908,8 +1908,10 @@ mod launch {
                     // path did), but record the byte range instead of copying it:
                     // apply_load_sections copies it straight from the PMI image
                     // into guest RAM (one copy, not two).
-                    read_section(bytes, s.file_offset, s.file_size)
-                        .ok_or_else(|| LaunchError::MalformedLoadSection(section.clone()))?;
+                    if s.file_size != 0 {
+                        read_section(bytes, s.file_offset, s.file_size)
+                            .ok_or_else(|| LaunchError::MalformedLoadSection(section.clone()))?;
+                    }
                     writes.push(GuestWrite {
                         section: section.clone(),
                         gpa: s.gpa,
@@ -2512,6 +2514,9 @@ mod machine_select {
             for write in guest_writes {
                 let (data, mut zero_tail) = match &write.data {
                     WriteSrc::Owned(v) => (v.as_slice(), 0),
+                    WriteSrc::Image {
+                        len: 0, zero_tail, ..
+                    } => (&[][..], *zero_tail),
                     WriteSrc::Image {
                         offset,
                         len,
