@@ -11,58 +11,26 @@
 //! Microarchitecture levels per the System V x86-64 psABI. Each level
 //! is a strict superset of the one below.
 //!
-//! This module owns profile parsing and the mandatory guest feature table.
-//! Backends query the capabilities they actually expose to guest CPUs.
+//! This module defines the requirements checked against each native vCPU.
 
-/// Microarchitecture level parsed from a `cpu:profile` string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum X86Level {
-    V1,
-    V2,
-    V3,
-    V4,
+use pmi::x86_64::Profile;
+
+/// Mandatory CPUID features at and below the requested level.
+pub fn cumulative_features(profile: Profile) -> &'static [CpuidFeature] {
+    match profile {
+        Profile::V1 => V1_FEATURES,
+        Profile::V2 => V1_V2_FEATURES,
+        Profile::V3 => V1_V2_V3_FEATURES,
+        Profile::V4 => V1_V2_V3_V4_FEATURES,
+    }
 }
 
-impl X86Level {
-    /// Parse `x86-64-vN` (N ∈ {1,2,3,4}). Returns `None` for any
-    /// other string; caller produces a "profile not recognized"
-    /// error so the message names the bad input.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "x86-64-v1" => Some(Self::V1),
-            "x86-64-v2" => Some(Self::V2),
-            "x86-64-v3" => Some(Self::V3),
-            "x86-64-v4" => Some(Self::V4),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::V1 => "x86-64-v1",
-            Self::V2 => "x86-64-v2",
-            Self::V3 => "x86-64-v3",
-            Self::V4 => "x86-64-v4",
-        }
-    }
-
-    /// XCR0 components the guest must be able to enable.
-    pub fn required_xcr0(self) -> u32 {
-        match self {
-            Self::V1 | Self::V2 => 0,
-            Self::V3 => 0x07, // x87, SSE, AVX
-            Self::V4 => 0xe7, // also opmask and ZMM state
-        }
-    }
-
-    /// Mandatory features at and below this level (cumulative).
-    pub fn cumulative_features(self) -> &'static [CpuidFeature] {
-        match self {
-            Self::V1 => V1_FEATURES,
-            Self::V2 => V1_V2_FEATURES,
-            Self::V3 => V1_V2_V3_FEATURES,
-            Self::V4 => V1_V2_V3_V4_FEATURES,
-        }
+/// XCR0 components the guest must be able to enable.
+pub fn required_xcr0(profile: Profile) -> u32 {
+    match profile {
+        Profile::V1 | Profile::V2 => 0,
+        Profile::V3 => 0x07, // x87, SSE, AVX
+        Profile::V4 => 0xe7, // also opmask and ZMM state
     }
 }
 
@@ -192,34 +160,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_levels() {
-        assert_eq!(X86Level::parse("x86-64-v1"), Some(X86Level::V1));
-        assert_eq!(X86Level::parse("x86-64-v2"), Some(X86Level::V2));
-        assert_eq!(X86Level::parse("x86-64-v3"), Some(X86Level::V3));
-        assert_eq!(X86Level::parse("x86-64-v4"), Some(X86Level::V4));
-        assert_eq!(X86Level::parse("x86-64-v5"), None);
-        assert_eq!(X86Level::parse("armv8.2-a"), None);
-    }
-
-    #[test]
     fn levels_are_supersets() {
-        let v1: std::collections::HashSet<_> = X86Level::V1
-            .cumulative_features()
+        let v1: std::collections::HashSet<_> = cumulative_features(Profile::V1)
             .iter()
             .map(|f| f.name)
             .collect();
-        let v2: std::collections::HashSet<_> = X86Level::V2
-            .cumulative_features()
+        let v2: std::collections::HashSet<_> = cumulative_features(Profile::V2)
             .iter()
             .map(|f| f.name)
             .collect();
-        let v3: std::collections::HashSet<_> = X86Level::V3
-            .cumulative_features()
+        let v3: std::collections::HashSet<_> = cumulative_features(Profile::V3)
             .iter()
             .map(|f| f.name)
             .collect();
-        let v4: std::collections::HashSet<_> = X86Level::V4
-            .cumulative_features()
+        let v4: std::collections::HashSet<_> = cumulative_features(Profile::V4)
             .iter()
             .map(|f| f.name)
             .collect();

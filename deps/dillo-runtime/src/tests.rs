@@ -28,9 +28,6 @@ enum Scenario {
     RunPanic,
 }
 
-struct Boot;
-impl BootVcpuState for Boot {}
-
 #[derive(Default)]
 struct State {
     prepared: Mutex<Vec<(u32, ThreadId)>>,
@@ -65,8 +62,7 @@ impl Machine for TestMachine {
     fn cpu_preparation(
         &mut self,
         index: u32,
-        _: &str,
-        _: &dyn BootVcpuState,
+        _: CpuProfile,
     ) -> Result<TestPreparation, Self::Error> {
         if index == 1 && self.0 == Scenario::BindError {
             return Err(io::Error::other("bind fixture"));
@@ -205,7 +201,12 @@ impl CpuRunner for TestRunner {
 
 fn run(scenario: Scenario, state: &Arc<State>) -> Result<VcpuStop, CpuError> {
     let mut machine = TestMachine(scenario, Arc::clone(state));
-    run_cpus(&mut machine, 2, "fixture", &Boot, &state.shutdown)
+    run_cpus(
+        &mut machine,
+        2,
+        CpuProfile::X86_64(pmi::x86_64::Profile::V1),
+        &state.shutdown,
+    )
 }
 
 fn assert_owners_released(state: &State, count: usize) {
