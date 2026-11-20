@@ -218,6 +218,8 @@ fn section_loads_clear_zero_pages_and_padded_tails() {
     bytes[0x198..0x19c].copy_from_slice(&(cbor.len() as u32).to_le_bytes());
     let code_virtual_size = 0x188 + 2 * 40 + 8;
     bytes[code_virtual_size..code_virtual_size + 4].copy_from_slice(&0x1f_ffffu32.to_le_bytes());
+    let zero_file_offset = 0x188 + 3 * 40 + 20;
+    bytes[zero_file_offset..zero_file_offset + 4].copy_from_slice(&0x40_0000u32.to_le_bytes());
     bytes[0x20_0000..0x20_1000].fill(0x66);
 
     let dir = tempfile::tempdir().unwrap();
