@@ -1151,10 +1151,15 @@ mod imp {
             let not_returned = 0xa5a5_a5a5_a5a5_a5a5;
             for (name, declared) in [("hvc", PsciMethod::Hvc), ("smc", PsciMethod::Smc)] {
                 let platform = psci_platform(name);
-                for (instruction, actual) in [
-                    (0xd400_0002, PsciMethod::Hvc),
-                    (0xd400_0003, PsciMethod::Smc),
+                for (instruction, actual, nonzero_immediate) in [
+                    (0xd400_0002, PsciMethod::Hvc, false),
+                    (0xd400_0003, PsciMethod::Smc, false),
+                    (0xd400_0022, PsciMethod::Hvc, true),
+                    (0xd400_0023, PsciMethod::Smc, true),
                 ] {
+                    if nonzero_immediate && declared != actual {
+                        continue;
+                    }
                     let mut vm = Vm::from_launch_config(LaunchConfig {
                         platform: &platform,
                         vcpus: 1,
@@ -1164,11 +1169,17 @@ mod imp {
                         }],
                     })
                     .unwrap();
+                    // Try SYSTEM_OFF directly for nonzero immediates.
+                    let first_function = if nonzero_immediate {
+                        0x5280_0100u32
+                    } else {
+                        0x5280_0000u32
+                    };
                     let code = [
-                        0x5280_0000u32,
+                        first_function,
                         0x72b0_8000,
                         instruction,
-                        0xf900_0020, // PSCI_VERSION
+                        0xf900_0020, // First call's result
                         0x5280_3200,
                         0x72b8_8000,
                         instruction,
@@ -1199,7 +1210,16 @@ mod imp {
                             .read_obj::<u64>(GuestAddress(boot.x1 + offset))
                             .unwrap()
                     };
-                    if declared == actual {
+                    if nonzero_immediate {
+                        let trap = match actual {
+                            PsciMethod::Hvc => "hvf exception EC=0x16 ",
+                            PsciMethod::Smc => "hvf exception EC=0x17 ",
+                        };
+                        assert!(
+                            matches!(&result, Err(Error::Hv(reason)) if reason.starts_with(trap)),
+                            "{result:?}"
+                        );
+                    } else if declared == actual {
                         assert_eq!(result.unwrap(), VcpuStop::GuestPoweroff);
                         assert_eq!(read(0), 0x0001_0001, "PSCI_VERSION");
                         assert_eq!(read(8), u64::MAX, "RSI_ABI_VERSION");
@@ -1212,6 +1232,8 @@ mod imp {
                             ),
                             "{result:?}"
                         );
+                    }
+                    if nonzero_immediate || declared != actual {
                         assert_eq!([read(0), read(8)], [not_returned; 2]);
                     }
                     assert_eq!(read(16), not_returned, "SYSTEM_OFF returned");

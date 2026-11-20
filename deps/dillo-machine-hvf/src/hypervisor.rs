@@ -502,9 +502,10 @@ impl Vcpu {
         }
         let esr = exit.exception.syndrome;
         let ec = esr >> 26;
+        let immediate = esr & 0xffff;
         match ec {
-            // HVC (0x16) and SMC (0x17) from EL1.
-            0x16 | 0x17 => {
+            // SMCCC uses HVC #0 or SMC #0. ISS[15:0] holds the immediate.
+            0x16 | 0x17 if immediate == 0 => {
                 let method = if ec == 0x16 {
                     PsciMethod::Hvc
                 } else {
