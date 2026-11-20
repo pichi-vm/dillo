@@ -1708,7 +1708,6 @@ mod launch {
                     memory_mib,
                 },
             )?;
-            validate_cpu_profile(parsed.cpu_profile.as_str(), pmi_arch)?;
             if bootconfig_path.is_some()
                 && !parsed.actions.iter().any(|action| {
                     matches!(
@@ -1880,9 +1879,6 @@ mod launch {
         #[error("memory placement: {0}")]
         Placement(#[from] placement::PlanError),
 
-        #[error("unrecognized cpu:profile {0:?} for {1:?}")]
-        UnknownCpuProfile(String, HostArch),
-
         #[error("synthesize host DTBO: {0}")]
         DtboSynth(#[source] anyhow::Error),
 
@@ -1906,7 +1902,6 @@ mod launch {
                 | Self::DtboSynth(_)
                 | Self::Bootconfig(_) => 11,
                 Self::Placement(_) | Self::AddressSpace { .. } | Self::AddressSpaceProbe(_) => 13,
-                Self::UnknownCpuProfile(_, _) => 12,
             }
         }
     }
@@ -2043,50 +2038,9 @@ mod launch {
         bytes.get(start..end)
     }
 
-    /// Validate the `cpu:profile` name against the PMI machine architecture.
-    pub(crate) fn validate_cpu_profile(profile: &str, arch: HostArch) -> Result<(), LaunchError> {
-        let recognized = match arch {
-            HostArch::Aarch64 => parse_armv_profile(profile).is_some(),
-            HostArch::X86_64 => matches!(
-                profile,
-                "x86-64-v1" | "x86-64-v2" | "x86-64-v3" | "x86-64-v4"
-            ),
-        };
-        if recognized {
-            Ok(())
-        } else {
-            Err(LaunchError::UnknownCpuProfile(profile.to_string(), arch))
-        }
-    }
-
-    fn parse_armv_profile(s: &str) -> Option<(u32, u32)> {
-        let body = s.strip_prefix("armv")?.strip_suffix("-a")?;
-        let (major, minor) = body.split_once('.')?;
-        Some((major.parse().ok()?, minor.parse().ok()?))
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
-
-        #[test]
-        fn cpu_profile_validation_accepts_known_x86_levels() {
-            for profile in ["x86-64-v1", "x86-64-v2", "x86-64-v3", "x86-64-v4"] {
-                validate_cpu_profile(profile, HostArch::X86_64).expect(profile);
-            }
-        }
-
-        #[test]
-        fn cpu_profile_validation_accepts_armv_profiles() {
-            validate_cpu_profile("armv8.0-a", HostArch::Aarch64).expect("armv8.0-a");
-            validate_cpu_profile("armv9.2-a", HostArch::Aarch64).expect("armv9.2-a");
-        }
-
-        #[test]
-        fn cpu_profile_validation_rejects_arch_mismatch() {
-            assert!(validate_cpu_profile("armv8.0-a", HostArch::X86_64).is_err());
-            assert!(validate_cpu_profile("x86-64-v2", HostArch::Aarch64).is_err());
-        }
 
         #[test]
         fn read_section_checks_bounds() {
@@ -2604,16 +2558,11 @@ mod machine_select {
             attach_devices(&mut vm, &platform, placements)?;
             drop(platform);
 
-            let cpu_profile = parsed.cpu_profile.as_str();
+            let cpu_profile = parsed.cpu_profile;
             crate::boot_trace::mark("guest_loaded");
-            let mut outcome = dillo_runtime::run_cpus(
-                &mut vm,
-                vcpus,
-                cpu_profile,
-                &parsed.vcpu,
-                supervisor_shutdown,
-            )
-            .map_err(RunError::machine)?;
+            let mut outcome =
+                dillo_runtime::run_cpus(&mut vm, vcpus, cpu_profile, supervisor_shutdown)
+                    .map_err(RunError::machine)?;
             while matches!(outcome, VcpuStop::GuestReset) {
                 log::info!("guest requested reboot - replaying launch writes");
                 vm.reset_for_reboot().map_err(RunError::machine)?;
@@ -2626,14 +2575,8 @@ mod machine_select {
                     })?;
                 }
                 pmi.release();
-                outcome = dillo_runtime::run_cpus(
-                    &mut vm,
-                    vcpus,
-                    cpu_profile,
-                    &parsed.vcpu,
-                    supervisor_shutdown,
-                )
-                .map_err(RunError::machine)?;
+                outcome = dillo_runtime::run_cpus(&mut vm, vcpus, cpu_profile, supervisor_shutdown)
+                    .map_err(RunError::machine)?;
             }
 
             if matches!(outcome, VcpuStop::GuestPoweroff) {

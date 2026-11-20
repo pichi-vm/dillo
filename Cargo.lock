@@ -133,11 +133,12 @@ dependencies = [
 [[package]]
 name = "arma"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
+source = "git+https://github.com/pichi-vm/arma?branch=main#484b29bbcd302e2f2c9649b44ca7bbcba22ed200"
 dependencies = [
  "anyhow",
  "ciborium",
  "clap",
+ "cpio",
  "devtree",
  "flate2",
  "goblin",
@@ -145,6 +146,7 @@ dependencies = [
  "pmi",
  "regex",
  "ruzstd",
+ "serde",
  "tatu",
  "thiserror 2.0.18",
  "vm-fdt",
@@ -329,6 +331,12 @@ name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
+name = "cpio"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd609f59ec3371b104ae6b123ff63e89736dc50bae0bb6650295993487197f48"
 
 [[package]]
 name = "cpufeatures"
@@ -659,6 +667,7 @@ version = "0.1.0"
 dependencies = [
  "dillo-machine",
  "log",
+ "pmi",
 ]
 
 [[package]]
@@ -783,7 +792,7 @@ checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
 [[package]]
 name = "dtb2acpi"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
+source = "git+https://github.com/pichi-vm/arma?branch=main#484b29bbcd302e2f2c9649b44ca7bbcba22ed200"
 dependencies = [
  "devtree",
  "zerocopy",
@@ -792,7 +801,7 @@ dependencies = [
 [[package]]
 name = "dtb2e820"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
+source = "git+https://github.com/pichi-vm/arma?branch=main#484b29bbcd302e2f2c9649b44ca7bbcba22ed200"
 dependencies = [
  "devtree",
 ]
@@ -847,6 +856,15 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[package]]
+name = "flagset"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "flate2"
@@ -1547,8 +1565,9 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "pmi"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/pmi?branch=main#5d6fe93b87d5af20d7387491f97aa89f31361ef9"
+source = "git+https://github.com/pichi-vm/pmi?branch=main#7a5028f15087652bc055f5b139efa48b8511c887"
 dependencies = [
+ "flagset",
  "serde",
 ]
 
@@ -2015,7 +2034,7 @@ dependencies = [
 [[package]]
 name = "tatu"
 version = "0.1.0"
-source = "git+https://github.com/pichi-vm/arma?branch=main#f8b8fb829d9489b5a3104562730a973c86f4c995"
+source = "git+https://github.com/pichi-vm/arma?branch=main#484b29bbcd302e2f2c9649b44ca7bbcba22ed200"
 dependencies = [
  "arrayvec",
  "devtree",

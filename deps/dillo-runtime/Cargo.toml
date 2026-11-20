@@ -10,5 +10,8 @@ description = "CPU owner supervision for Dillo."
 dillo-machine.workspace = true
 log.workspace = true
 
+[dev-dependencies]
+pmi.workspace = true
+
 [lints]
 workspace = true
