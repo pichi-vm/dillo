@@ -264,6 +264,202 @@ mod tests {
         }
     }
 
+    const ARM_MINIMUM: ArmV8Evidence = ArmV8Evidence {
+        pfr0: 0x00ff_0011,
+        isar0: 0,
+        isar5: None,
+        mmfr0: 0,
+        dfr0: 0,
+        ctr: 3 << 14,
+    };
+
+    #[test]
+    fn arm_baseline_accepts_optional_and_monotonic_encodings() {
+        ARM_MINIMUM.validate(0).unwrap();
+        ArmV8Evidence {
+            pfr0: 0x0022_0033,
+            isar5: Some(0),
+            ctr: 2 << 14,
+            ..ARM_MINIMUM
+        }
+        .validate(0)
+        .unwrap();
+        ArmV8Evidence {
+            pfr0: 0x00ff_2222,
+            isar5: Some(0),
+            mmfr0: 1 << 12,
+            ..ARM_MINIMUM
+        }
+        .validate(0)
+        .unwrap();
+        ArmV8Evidence {
+            isar0: (2 << 4) | (1 << 8) | (1 << 12),
+            ..ARM_MINIMUM
+        }
+        .validate(0)
+        .unwrap();
+        for mmfr0 in [2 << 8, 2 << 16] {
+            ArmV8Evidence {
+                mmfr0,
+                ..ARM_MINIMUM
+            }
+            .validate(1 << 25)
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn arm_baseline_checks_dual_state_crypto() {
+        let aarch64_crypto = (2 << 4) | (1 << 8) | (2 << 12);
+        let aarch32_crypto = (2 << 4) | (1 << 8) | (1 << 12);
+        let evidence = ArmV8Evidence {
+            pfr0: 0x12,
+            isar0: aarch64_crypto,
+            isar5: Some(aarch32_crypto),
+            ..ARM_MINIMUM
+        };
+        evidence.validate(0).unwrap();
+        assert!(
+            ArmV8Evidence {
+                isar5: None,
+                ..evidence
+            }
+            .validate(0)
+            .unwrap_err()
+            .contains("ID_ISAR5_EL1")
+        );
+        for isar5 in [
+            aarch32_crypto & !(15 << 4),  // No AES or PMULL.
+            aarch32_crypto - (1 << 4),    // AES without PMULL.
+            aarch32_crypto & !(15 << 8),  // No SHA1.
+            aarch32_crypto & !(15 << 12), // No SHA256.
+        ] {
+            assert!(
+                ArmV8Evidence {
+                    isar5: Some(isar5),
+                    ..evidence
+                }
+                .validate(0)
+                .unwrap_err()
+                .contains("across AArch32 and AArch64")
+            );
+        }
+    }
+
+    #[test]
+    fn arm_baseline_checks_each_direct_condition() {
+        for (evidence, sctlr, reason) in [
+            (
+                ArmV8Evidence {
+                    pfr0: 0x00ff_0010,
+                    ..ARM_MINIMUM
+                },
+                0,
+                "FEAT_EL0",
+            ),
+            (
+                ArmV8Evidence {
+                    pfr0: 0x00ff_0001,
+                    ..ARM_MINIMUM
+                },
+                0,
+                "FEAT_EL1",
+            ),
+            (
+                ArmV8Evidence {
+                    pfr0: 0x00ff_0021,
+                    ..ARM_MINIMUM
+                },
+                0,
+                "AArch32",
+            ),
+            (
+                ArmV8Evidence {
+                    pfr0: 0x00ff_0211,
+                    ..ARM_MINIMUM
+                },
+                0,
+                "AArch32",
+            ),
+            (
+                ArmV8Evidence {
+                    pfr0: 0x00ff_2011,
+                    ..ARM_MINIMUM
+                },
+                0,
+                "AArch32",
+            ),
+            (
+                ArmV8Evidence {
+                    pfr0: 0x00ff_1011,
+                    ..ARM_MINIMUM
+                },
+                0,
+                "EL3",
+            ),
+            (
+                ArmV8Evidence {
+                    pfr0: 0x00f0_0011,
+                    ..ARM_MINIMUM
+                },
+                0,
+                "AdvSIMD",
+            ),
+            (
+                ArmV8Evidence {
+                    ctr: 0,
+                    ..ARM_MINIMUM
+                },
+                0,
+                "FEAT_IVIPT",
+            ),
+            (
+                ArmV8Evidence {
+                    ctr: 1 << 14,
+                    ..ARM_MINIMUM
+                },
+                0,
+                "FEAT_IVIPT",
+            ),
+            (
+                ArmV8Evidence {
+                    isar0: 1 << 8,
+                    ..ARM_MINIMUM
+                },
+                0,
+                "SHA1 and SHA2",
+            ),
+            (
+                ArmV8Evidence {
+                    isar0: 1 << 12,
+                    ..ARM_MINIMUM
+                },
+                0,
+                "SHA1 and SHA2",
+            ),
+            (
+                ArmV8Evidence {
+                    mmfr0: (1 << 8) | (1 << 16),
+                    ..ARM_MINIMUM
+                },
+                0,
+                "BigEndEL0",
+            ),
+            (ARM_MINIMUM, 1 << 25, "endianness"),
+            (
+                ArmV8Evidence {
+                    dfr0: 1 << 4,
+                    ..ARM_MINIMUM
+                },
+                0,
+                "FEAT_TRC_SR",
+            ),
+        ] {
+            let error = evidence.validate(sctlr).unwrap_err();
+            assert!(error.contains(reason), "{error:?} must mention {reason}");
+        }
+    }
+
     #[derive(Debug)]
     struct TestError;
 
