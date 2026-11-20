@@ -52,6 +52,9 @@ IDs identify requirements; a conformance claim must also identify the document
 revision and the implementation scope examined. Review procedures belong in
 [CONTRIBUTING.md](CONTRIBUTING.md), and implementation findings belong in issues.
 
+[INTERFACES.md](INTERFACES.md) specifies the major implementation contracts
+under the crate responsibilities below.
+
 The two parts express different security obligations. Host protection must
 withstand malicious guest behavior and compromised device workers. Guest
 protection against a malicious host requires confidential computing and

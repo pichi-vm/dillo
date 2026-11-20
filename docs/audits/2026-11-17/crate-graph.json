@@ -1,0 +1,622 @@
+{
+  "revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+  "actual": {
+    "dillo": {
+      "manifest": "Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-storage",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-machine",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-mmio-uart",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-mmio-virtio",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-pci",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-pci-virtio",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-virtio",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-virtio-blk",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-virtio-console",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-virtio-fs",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-virtio-gpt",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-virtio-net",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-config",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-devtree",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-machine-kvm",
+          "condition": "cfg(target_os = \"linux\")"
+        },
+        {
+          "crate": "dillo-machine-hvf",
+          "condition": "cfg(target_os = \"macos\")"
+        },
+        {
+          "crate": "dillo-machine-whp",
+          "condition": "cfg(target_os = \"windows\")"
+        },
+        {
+          "crate": "dillo-virtio-vsock",
+          "condition": "cfg(unix)"
+        }
+      ]
+    },
+    "dillo-config": {
+      "manifest": "deps/dillo-config/Cargo.toml",
+      "production_edges": []
+    },
+    "dillo-storage": {
+      "manifest": "deps/dillo-storage/Cargo.toml",
+      "production_edges": []
+    },
+    "dillo-devtree": {
+      "manifest": "deps/dillo-devtree/Cargo.toml",
+      "production_edges": []
+    },
+    "dillo-machine": {
+      "manifest": "deps/dillo-machine/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        }
+      ]
+    },
+    "dillo-machine-hvf": {
+      "manifest": "deps/dillo-machine-hvf/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-machine",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-devtree",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        }
+      ]
+    },
+    "dillo-machine-kvm": {
+      "manifest": "deps/dillo-machine-kvm/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-devtree",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-machine",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        }
+      ]
+    },
+    "dillo-machine-whp": {
+      "manifest": "deps/dillo-machine-whp/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-devtree",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-machine",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        }
+      ]
+    },
+    "dillo-mmio": {
+      "manifest": "deps/dillo-mmio/Cargo.toml",
+      "production_edges": []
+    },
+    "dillo-mmio-uart": {
+      "manifest": "deps/dillo-mmio-uart/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        }
+      ]
+    },
+    "dillo-mmio-virtio": {
+      "manifest": "deps/dillo-mmio-virtio/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-virtio",
+          "condition": "common"
+        }
+      ]
+    },
+    "dillo-pci": {
+      "manifest": "deps/dillo-pci/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        }
+      ]
+    },
+    "dillo-pci-virtio": {
+      "manifest": "deps/dillo-pci-virtio/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-pci",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-virtio",
+          "condition": "common"
+        }
+      ]
+    },
+    "dillo-virtio": {
+      "manifest": "deps/dillo-virtio/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        }
+      ]
+    },
+    "dillo-virtio-blk": {
+      "manifest": "deps/dillo-virtio-blk/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-storage",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-virtio",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        }
+      ]
+    },
+    "dillo-virtio-console": {
+      "manifest": "deps/dillo-virtio-console/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-config",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-virtio",
+          "condition": "common"
+        }
+      ]
+    },
+    "dillo-virtio-fs": {
+      "manifest": "deps/dillo-virtio-fs/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-virtio",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        }
+      ]
+    },
+    "dillo-virtio-gpt": {
+      "manifest": "deps/dillo-virtio-gpt/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-virtio-blk",
+          "condition": "common"
+        }
+      ]
+    },
+    "dillo-virtio-net": {
+      "manifest": "deps/dillo-virtio-net/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-virtio",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        }
+      ]
+    },
+    "dillo-virtio-vsock": {
+      "manifest": "deps/dillo-virtio-vsock/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo-virtio",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-mmio",
+          "condition": "common"
+        }
+      ]
+    },
+    "snuffler": {
+      "manifest": "deps/snuffler/Cargo.toml",
+      "production_edges": []
+    },
+    "dillo-fuzz": {
+      "manifest": "fuzz/Cargo.toml",
+      "production_edges": [
+        {
+          "crate": "dillo",
+          "condition": "common"
+        },
+        {
+          "crate": "dillo-virtio-net",
+          "condition": "common"
+        }
+      ]
+    }
+  },
+  "adopted": {
+    "dillo-machine": [],
+    "dillo-config": [],
+    "dillo-devtree": [],
+    "dillo-storage": [],
+    "dillo-storage-gpt": [
+      "dillo-storage"
+    ],
+    "dillo-launch": [
+      "dillo-machine",
+      "dillo-devtree"
+    ],
+    "dillo-runtime": [
+      "dillo-machine",
+      "dillo-launch"
+    ],
+    "dillo-ipc": [
+      "dillo-machine"
+    ],
+    "dillo-worker": [
+      "dillo-machine",
+      "dillo-ipc",
+      "dillo-mmio",
+      "dillo-pci"
+    ],
+    "dillo-mmio": [
+      "dillo-machine"
+    ],
+    "dillo-pci": [
+      "dillo-machine",
+      "dillo-mmio"
+    ],
+    "dillo-virtio": [
+      "dillo-machine"
+    ],
+    "dillo-mmio-uart": [
+      "dillo-machine",
+      "dillo-mmio"
+    ],
+    "dillo-mmio-virtio": [
+      "dillo-machine",
+      "dillo-mmio",
+      "dillo-virtio"
+    ],
+    "dillo-pci-virtio": [
+      "dillo-machine",
+      "dillo-pci",
+      "dillo-virtio"
+    ],
+    "dillo-virtio-blk": [
+      "dillo-machine",
+      "dillo-virtio",
+      "dillo-storage"
+    ],
+    "dillo-virtio-console": [
+      "dillo-machine",
+      "dillo-virtio"
+    ],
+    "dillo-virtio-fs": [
+      "dillo-machine",
+      "dillo-virtio"
+    ],
+    "dillo-virtio-net": [
+      "dillo-machine",
+      "dillo-virtio"
+    ],
+    "dillo-virtio-vsock": [
+      "dillo-machine",
+      "dillo-virtio"
+    ],
+    "dillo-machine-kvm": [
+      "dillo-machine",
+      "dillo-devtree",
+      "dillo-mmio"
+    ],
+    "dillo-machine-hvf": [
+      "dillo-machine",
+      "dillo-devtree",
+      "dillo-mmio"
+    ],
+    "dillo-machine-whp": [
+      "dillo-machine",
+      "dillo-devtree",
+      "dillo-mmio"
+    ],
+    "snuffler": [],
+    "dillo": [
+      "dillo-config",
+      "dillo-machine",
+      "dillo-launch",
+      "dillo-runtime",
+      "dillo-worker",
+      "dillo-machine-kvm",
+      "dillo-machine-hvf",
+      "dillo-machine-whp",
+      "dillo-mmio",
+      "dillo-pci",
+      "dillo-virtio",
+      "dillo-mmio-uart",
+      "dillo-mmio-virtio",
+      "dillo-pci-virtio",
+      "dillo-storage",
+      "dillo-storage-gpt",
+      "dillo-virtio-blk",
+      "dillo-virtio-console",
+      "dillo-virtio-fs",
+      "dillo-virtio-net",
+      "dillo-virtio-vsock"
+    ],
+    "dillo-fuzz": [
+      "dillo-launch",
+      "dillo-virtio-net"
+    ]
+  },
+  "differences": {
+    "dillo": {
+      "exists": true,
+      "expected": true,
+      "missing": [
+        "dillo-launch",
+        "dillo-runtime",
+        "dillo-storage-gpt",
+        "dillo-worker"
+      ],
+      "extra": [
+        "dillo-devtree",
+        "dillo-virtio-gpt"
+      ]
+    },
+    "dillo-fuzz": {
+      "exists": true,
+      "expected": true,
+      "missing": [
+        "dillo-launch"
+      ],
+      "extra": [
+        "dillo"
+      ]
+    },
+    "dillo-ipc": {
+      "exists": false,
+      "expected": true,
+      "missing": [
+        "dillo-machine"
+      ],
+      "extra": []
+    },
+    "dillo-launch": {
+      "exists": false,
+      "expected": true,
+      "missing": [
+        "dillo-devtree",
+        "dillo-machine"
+      ],
+      "extra": []
+    },
+    "dillo-machine": {
+      "exists": true,
+      "expected": true,
+      "missing": [],
+      "extra": [
+        "dillo-mmio"
+      ]
+    },
+    "dillo-mmio": {
+      "exists": true,
+      "expected": true,
+      "missing": [
+        "dillo-machine"
+      ],
+      "extra": []
+    },
+    "dillo-mmio-uart": {
+      "exists": true,
+      "expected": true,
+      "missing": [
+        "dillo-machine"
+      ],
+      "extra": []
+    },
+    "dillo-mmio-virtio": {
+      "exists": true,
+      "expected": true,
+      "missing": [
+        "dillo-machine"
+      ],
+      "extra": []
+    },
+    "dillo-pci": {
+      "exists": true,
+      "expected": true,
+      "missing": [
+        "dillo-machine"
+      ],
+      "extra": []
+    },
+    "dillo-pci-virtio": {
+      "exists": true,
+      "expected": true,
+      "missing": [
+        "dillo-machine"
+      ],
+      "extra": [
+        "dillo-mmio"
+      ]
+    },
+    "dillo-runtime": {
+      "exists": false,
+      "expected": true,
+      "missing": [
+        "dillo-launch",
+        "dillo-machine"
+      ],
+      "extra": []
+    },
+    "dillo-storage-gpt": {
+      "exists": false,
+      "expected": true,
+      "missing": [
+        "dillo-storage"
+      ],
+      "extra": []
+    },
+    "dillo-virtio": {
+      "exists": true,
+      "expected": true,
+      "missing": [
+        "dillo-machine"
+      ],
+      "extra": [
+        "dillo-mmio"
+      ]
+    },
+    "dillo-virtio-blk": {
+      "exists": true,
+      "expected": true,
+      "missing": [
+        "dillo-machine"
+      ],
+      "extra": [
+        "dillo-mmio"
+      ]
+    },
+    "dillo-virtio-console": {
+      "exists": true,
+      "expected": true,
+      "missing": [
+        "dillo-machine"
+      ],
+      "extra": [
+        "dillo-config",
+        "dillo-mmio"
+      ]
+    },
+    "dillo-virtio-fs": {
+      "exists": true,
+      "expected": true,
+      "missing": [
+        "dillo-machine"
+      ],
+      "extra": [
+        "dillo-mmio"
+      ]
+    },
+    "dillo-virtio-gpt": {
+      "exists": true,
+      "expected": false,
+      "missing": [],
+      "extra": [
+        "dillo-virtio-blk"
+      ]
+    },
+    "dillo-virtio-net": {
+      "exists": true,
+      "expected": true,
+      "missing": [
+        "dillo-machine"
+      ],
+      "extra": [
+        "dillo-mmio"
+      ]
+    },
+    "dillo-virtio-vsock": {
+      "exists": true,
+      "expected": true,
+      "missing": [
+        "dillo-machine"
+      ],
+      "extra": [
+        "dillo-mmio"
+      ]
+    },
+    "dillo-worker": {
+      "exists": false,
+      "expected": true,
+      "missing": [
+        "dillo-ipc",
+        "dillo-machine",
+        "dillo-mmio",
+        "dillo-pci"
+      ],
+      "extra": []
+    }
+  }
+}
