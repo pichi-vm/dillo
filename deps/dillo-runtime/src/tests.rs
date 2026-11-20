@@ -233,10 +233,30 @@ fn preparation_and_finalization_failures_prevent_entry() {
             2,
         ),
     ] {
-        let state = Arc::new(State::default());
-        assert_eq!(run(scenario, &state).unwrap_err().to_string(), error);
-        assert!(!state.entered.load(Ordering::Acquire));
-        assert_owners_released(&state, count);
+        for retirement_error in [None, Some(0)] {
+            let state = Arc::new(State {
+                retirement_error,
+                ..Default::default()
+            });
+            let supervisor_state = Arc::clone(&state);
+            let (send, receive) = mpsc::channel();
+            let supervisor = thread::spawn(move || {
+                let result = run(scenario, &supervisor_state);
+                assert!(!supervisor_state.entered.load(Ordering::Acquire));
+                assert_owners_released(&supervisor_state, count);
+                send.send(result).unwrap();
+            });
+            let result = receive
+                .recv_timeout(Duration::from_secs(3))
+                .expect("owner retirement did not complete");
+            supervisor.join().unwrap();
+            let expected = if retirement_error.is_some() {
+                format!("{error}. retire vCPU 0: retirement fixture")
+            } else {
+                error.into()
+            };
+            assert_eq!(result.unwrap_err().to_string(), expected);
+        }
     }
 }
 

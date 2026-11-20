@@ -17,6 +17,17 @@ const WAKE_INTERVAL: Duration = Duration::from_millis(10);
 #[derive(Debug)]
 pub struct CpuError(String);
 
+impl CpuError {
+    fn record(failure: &mut Option<Self>, error: Self) {
+        if let Some(primary) = failure {
+            primary.0.push_str(". ");
+            primary.0.push_str(&error.0);
+        } else {
+            *failure = Some(error);
+        }
+    }
+}
+
 impl fmt::Display for CpuError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -124,10 +135,7 @@ impl<'scope, C: CpuControl> Owners<'scope, C> {
         let gate = self.gate;
         let mut permitted = gate.0.lock().expect("initial execution gate");
         let (complete, results) = mpsc::channel();
-        for index in 0..count {
-            if shutdown.load(Ordering::Acquire) {
-                break;
-            }
+        let prepare_owner = |index| -> Result<(), CpuError> {
             let preparation = machine
                 .cpu_preparation(index, profile, boot_state)
                 .map_err(|error| CpuError(format!("bind vCPU {index}: {error}")))?;
@@ -137,11 +145,17 @@ impl<'scope, C: CpuControl> Owners<'scope, C> {
                 .name(format!("dillo-vcpu-{index}"))
                 .spawn_scoped(scope, move || {
                     let result = catch_unwind(AssertUnwindSafe(|| {
-                        let (mut runner, control) = match preparation.prepare() {
+                        let prepared = catch_unwind(AssertUnwindSafe(|| preparation.prepare()))
+                            .map_err(|_| owner_panic(index))
+                            .and_then(|result| {
+                                result.map_err(|error| {
+                                    CpuError(format!("prepare vCPU {index}: {error}"))
+                                })
+                            });
+                        let (mut runner, control) = match prepared {
                             Ok(prepared) => prepared,
                             Err(error) => {
-                                let _ = ready
-                                    .send(Err(CpuError(format!("prepare vCPU {index}: {error}"))));
+                                let _ = ready.send(Err(error));
                                 return Ok(VcpuStop::Stopped);
                             }
                         };
@@ -172,22 +186,31 @@ impl<'scope, C: CpuControl> Owners<'scope, C> {
                 })
                 .map_err(|error| CpuError(format!("spawn vCPU {index}: {error}")))?;
             self.threads.push(owner);
-            self.controls
-                .push(prepared.recv().map_err(|_| owner_panic(index))??);
-        }
+            let control = prepared.recv().map_err(|_| {
+                CpuError(format!(
+                    "vCPU {index} owner exited without reporting readiness"
+                ))
+            })??;
+            self.controls.push(control);
+            Ok(())
+        };
+        let mut failure = (0..count)
+            .take_while(|_| !shutdown.load(Ordering::Acquire))
+            .try_for_each(prepare_owner)
+            .err();
         drop(complete);
         let mut remaining = self.threads.len();
-        if remaining == count as usize && !shutdown.load(Ordering::Acquire) {
-            machine
+        if failure.is_none() && remaining == count as usize && !shutdown.load(Ordering::Acquire) {
+            failure = machine
                 .prepare_vcpu_run()
-                .map_err(|error| CpuError(format!("finalize vCPUs: {error}")))?;
-            *permitted = !shutdown.load(Ordering::Acquire);
+                .map_err(|error| CpuError(format!("finalize vCPUs: {error}")))
+                .err();
+            *permitted = failure.is_none() && !shutdown.load(Ordering::Acquire);
         }
         drop(permitted);
 
         // Even without entry permission, retiring a prepared owner can fail.
         let mut outcome = VcpuStop::Stopped;
-        let mut failure = None;
         while remaining > 0 {
             if !gate.admits(shutdown) {
                 self.stop();
@@ -201,20 +224,15 @@ impl<'scope, C: CpuControl> Owners<'scope, C> {
                             outcome = VcpuStop::GuestReset;
                         }
                         Ok(_) => {}
-                        Err(error) => {
-                            if failure.is_some() {
-                                log::error!("{error}");
-                            } else {
-                                failure = Some(error);
-                            }
-                        }
+                        Err(error) => CpuError::record(&mut failure, error),
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    failure.get_or_insert_with(|| {
-                        CpuError("vCPU owner exited without reporting its result".into())
-                    });
+                    CpuError::record(
+                        &mut failure,
+                        CpuError("vCPU owner exited without reporting its result".into()),
+                    );
                     break;
                 }
             }
