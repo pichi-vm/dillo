@@ -323,6 +323,37 @@ fn load_validation_checks_raw_size_and_backing_end() {
     );
 }
 
+#[test]
+fn zero_load_requires_positive_size_and_aligned_pointer() {
+    use dillo_launch::pmi_parse::{Error, parse};
+    let arch = HostArchitecture::X86_64;
+    let mut bytes = image(
+        arch,
+        BaseChannel::Bundled,
+        &base(arch, false, false),
+        Some(4096),
+    );
+    let opts = ParseOptions {
+        host_arch: pmi_arch(arch),
+        memory_mib: 4,
+    };
+    let code_header = 0x188 + 2 * 40;
+    bytes[code_header + 16..code_header + 20].fill(0);
+    bytes[code_header + 8..code_header + 12].fill(0);
+    assert!(
+        matches!(parse(&bytes, &opts), Err(Error::InvalidLoadSize(section)) if section == ".code")
+    );
+    for size in [0x10_0000u32, 0x20_0000] {
+        bytes[code_header + 8..code_header + 12].copy_from_slice(&size.to_le_bytes());
+        bytes[code_header + 20..code_header + 24].copy_from_slice(&1u32.to_le_bytes());
+        assert!(
+            matches!(parse(&bytes, &opts), Err(Error::AlignmentViolation { name, .. }) if name == ".code")
+        );
+        bytes[code_header + 20..code_header + 24].fill(0);
+        parse(&bytes, &opts).expect("aligned Zero load");
+    }
+}
+
 // Use a non-arma section name and a 4 KiB capacity. Action GPAs remain the
 // authority even though the PE section's VirtualAddress is deliberately zero.
 fn with_bootconfig(mut bytes: Vec<u8>, gpas: &[u64], capacity: u32, raw_size: u32) -> Vec<u8> {

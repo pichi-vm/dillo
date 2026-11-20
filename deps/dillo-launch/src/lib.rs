@@ -114,7 +114,7 @@ pub mod pmi_parse {
             file_size: u64,
         },
 
-        #[error("load section `{0}` has SizeOfRawData greater than VirtualSize")]
+        #[error("load section `{0}` requires 0 < VirtualSize and SizeOfRawData <= VirtualSize")]
         InvalidLoadSize(String),
 
         #[error("section `{name}`: guest backing range overflows u64")]
@@ -438,7 +438,7 @@ pub mod pmi_parse {
         for action in &actions {
             if let Action::Load { section } = action {
                 let s = &raw_sections[section];
-                if s.raw_size > s.virtual_size {
+                if s.virtual_size == 0 || s.raw_size > s.virtual_size {
                     return Err(Error::InvalidLoadSize(section.clone()));
                 }
                 total_loaded += s.virtual_size;
@@ -568,11 +568,10 @@ pub mod pmi_parse {
             }
             let gpa = section.address();
             let virtual_size = section.size();
-            let (file_offset, file_size_field) = section.file_range().unwrap_or((0, 0));
-            let raw_size = section
-                .pe_section()
-                .size_of_raw_data
-                .get(object::LittleEndian);
+            let file_size_field = section.file_range().map_or(0, |(_, size)| size);
+            let header = section.pe_section();
+            let file_offset = u64::from(header.pointer_to_raw_data.get(object::LittleEndian));
+            let raw_size = header.size_of_raw_data.get(object::LittleEndian);
 
             // §5.4 PE bytes-on-disk fit in file.
             if file_size_field > 0 {
@@ -809,7 +808,7 @@ pub mod pmi_parse {
                     rule: "large section: gpa must be 2 MiB-aligned",
                 });
             }
-            if s.file_size > 0 && !s.file_offset.is_multiple_of(caps::HUGE_PAGE) {
+            if !s.file_offset.is_multiple_of(caps::HUGE_PAGE) {
                 return Err(Error::AlignmentViolation {
                     name: name.to_string(),
                     virtual_size: s.virtual_size,
@@ -824,7 +823,7 @@ pub mod pmi_parse {
                     rule: "small section: gpa must be 4 KiB-aligned",
                 });
             }
-            if s.file_size > 0 && !s.file_offset.is_multiple_of(caps::SMALL_PAGE) {
+            if !s.file_offset.is_multiple_of(caps::SMALL_PAGE) {
                 return Err(Error::AlignmentViolation {
                     name: name.to_string(),
                     virtual_size: s.virtual_size,
