@@ -1146,6 +1146,48 @@ mod imp {
             Vm::from_dtb(platform.dtb())
         }
 
+        #[test]
+        fn native_ap_creation_failure_prevents_bsp_entry() {
+            use dillo_machine::{CpuPreparation as _, CpuRunner as _, Machine as _};
+            use vm_memory::{Bytes, GuestAddress};
+
+            let mut vm = vm_from(LAPIC_STD, 0x1000, IOAPIC_FIXED_BASE, 0x1000).unwrap();
+            let ranges = [(0, 0x10000), (0xffff_0000, 0x10000)];
+            let memory = Arc::new(memory::MappedMemory::test_backing(&ranges).unwrap());
+            vm.attach_mapped_memory(Arc::clone(&memory)).unwrap();
+            // Entry would store 0x5a at 0x1000, then fault.
+            vm.write_guest(0xffff_fff0, &[0xc6, 0x05, 0, 0x10, 0, 0, 0x5a, 0x0f, 0x0b])
+                .unwrap();
+
+            let profile = CpuProfile::X86_64(pmi::x86_64::Profile::V1);
+            let ap = vm.cpu_preparation(1, profile).unwrap();
+            std::thread::scope(|scope| {
+                let (ready, retained) = std::sync::mpsc::sync_channel(1);
+                let (release, released) = std::sync::mpsc::sync_channel::<()>(0);
+                let existing = scope.spawn(move || {
+                    let (owner, _control) = ap.prepare().unwrap();
+                    ready.send(()).unwrap();
+                    let _ = released.recv();
+                    owner.retire().unwrap();
+                });
+                retained
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .unwrap();
+                let result = dillo_runtime::run_cpus(&mut vm, 2, profile, &AtomicBool::new(false));
+                drop(release);
+                existing.join().unwrap();
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("prepare vCPU 1: create vCPU 1"), "{error}");
+            });
+            assert_eq!(
+                memory
+                    .guest_memory()
+                    .read_obj::<u8>(GuestAddress(0x1000))
+                    .unwrap(),
+                0
+            );
+        }
+
         /// The base a freshly created vCPU's LAPIC actually decodes at.
         fn realized_lapic_base(vm: &Vm, idx: u32) -> u64 {
             vm.inner
