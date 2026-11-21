@@ -357,37 +357,82 @@ fn repeated_actions_write_in_manifest_order() {
 }
 
 #[test]
-fn load_validation_uses_guest_capacity_not_platform_minimum() {
+fn repeated_actions_use_guest_capacity_not_platform_minimum() {
+    let high = 1u64 << 40;
     for arch in ARCHES {
-        let mut bytes = image(
-            arch,
-            BaseChannel::Bundled,
-            &base(arch, false, false),
-            Some(0x1000),
-        );
-        let mut manifest: serde_json::Value =
-            ciborium::from_reader(&bytes[0x1000..0x2000]).unwrap();
-        manifest["actions"][0]["gpa"] = json!(1u64 << 40);
-        let mut encoded = Vec::new();
-        ciborium::ser::into_writer(&manifest, &mut encoded).unwrap();
-        bytes[0x1000..0x2000].fill(0);
-        bytes[0x1000..0x1000 + encoded.len()].copy_from_slice(&encoded);
-        bytes[0x198..0x19c].copy_from_slice(&(encoded.len() as u32).to_le_bytes());
+        let mut base = base(arch, false, false);
+        base.resize(0x1000, 0);
+        let image = image(arch, BaseChannel::Bundled, &base, Some(0x1000));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("high.pmi");
-        std::fs::write(&path, &bytes).unwrap();
-        let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 4, 1, None, None).unwrap();
-        assert!(plan.memory.ranges().iter().any(|r| r.gpa == 1u64 << 40));
-        assert!(matches!(
-            LaunchPlan::read(&path, arch, None, || Ok(40), 4, 1, None, None),
-            Err(LaunchError::DtbCrossValidate(
-                SurveyError::LoadAddressOverflow { .. }
-            ))
-        ));
-        assert!(matches!(
-            LaunchPlan::read(&path, arch, None, || Ok(24), 4, 1, None, None),
-            Err(LaunchError::AddressSpace { .. })
-        ));
+        let launch = |bits| LaunchPlan::read(&path, arch, None, || Ok(bits), 6, 1, None, None);
+        for (index, section) in [(0, ".code"), (2, ".dtbo")] {
+            let mut bytes = image.clone();
+            repeat_action(&mut bytes, index, high);
+            std::fs::write(&path, bytes).unwrap();
+            let plan = launch(48).unwrap();
+            assert!(plan.memory.ranges().iter().any(|r| r.gpa == high));
+            assert!(matches!(
+                launch(40),
+                Err(LaunchError::DtbCrossValidate(SurveyError::LoadAddressOverflow {
+                    section: name, start, ..
+                })) if name == section && start == high
+            ));
+        }
+        assert!(matches!(launch(24), Err(LaunchError::AddressSpace { .. })));
+    }
+}
+
+fn repeat_action(bytes: &mut [u8], index: usize, gpa: u64) {
+    edit_manifest(bytes, |manifest| {
+        let actions = manifest["actions"].as_array_mut().unwrap();
+        let mut action = actions[index].clone();
+        action["gpa"] = json!(gpa);
+        actions.insert(index, action);
+    });
+}
+
+#[test]
+fn repeated_actions_validate_each_destination() {
+    use dillo_launch::pmi_parse::{Error, parse};
+
+    let arch = HostArchitecture::X86_64;
+    let mut base = base(arch, false, false);
+    base.resize(0x1000, 0);
+    let image = image(arch, BaseChannel::Bundled, &base, Some(0x2000));
+    let opts = ParseOptions {
+        host_arch: pmi_arch(arch),
+        memory_mib: 6,
+    };
+    let invalid = |index, gpa| {
+        let mut bytes = image.clone();
+        repeat_action(&mut bytes, index, gpa);
+        parse(&bytes, &opts).unwrap_err()
+    };
+    for (index, gpa, section, granularity) in [
+        (0, 0x40_1000, ".code", "2 MiB"),
+        (2, 0x40_0001, ".dtbo", "4 KiB"),
+    ] {
+        let error = invalid(index, gpa);
+        assert!(
+            matches!(&error, Error::AlignmentViolation { name, rule, .. }
+                if name == section && rule.contains(granularity)),
+            "{error}"
+        );
+    }
+    for gpa in [u64::MAX - 0x1fff, u64::MAX - 0x2fff] {
+        let error = invalid(2, gpa);
+        assert!(
+            matches!(&error, Error::VirtualAddressOverflow { name } if name == ".dtbo"),
+            "{error}"
+        );
+    }
+    for (gpa, section) in [(0x20_0000, ".base"), (0x20_2000, ".dtbo")] {
+        let error = invalid(2, gpa);
+        assert!(
+            matches!(&error, Error::SectionsOverlap { a, b } if a == section && b == ".dtbo"),
+            "{error}"
+        );
     }
 }
 
