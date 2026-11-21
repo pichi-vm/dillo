@@ -146,6 +146,9 @@ pub mod pmi_parse {
         #[error("invalid lbc:bootconfig fill: {0}")]
         BootconfigFill(&'static str),
 
+        #[error("fill section `{0}` requires 0 < VirtualSize and SizeOfRawData = 0")]
+        InvalidFillShape(String),
+
         #[error("CBOR decode failed: {0}")]
         CborDecode(String),
 
@@ -762,15 +765,8 @@ pub mod pmi_parse {
                 ),
                 ManifestActionOwned::Fill { section, kind, .. } => {
                     let translated = translate_fill_kind(*kind);
-                    if translated == FillKind::LbcBootconfig {
-                        if fills.contains(&translated) {
-                            return Err(Error::BootconfigFill("duplicate fill"));
-                        }
-                        if let Some(s) = sections.get(section)
-                            && (s.file_size != 0 || s.virtual_size == 0 || s.is_discardable)
-                        {
-                            return Err(Error::BootconfigFill("requires a Zero section"));
-                        }
+                    if translated == FillKind::LbcBootconfig && fills.contains(&translated) {
+                        return Err(Error::BootconfigFill("duplicate fill"));
                     }
                     fills.push(translated);
                     (
@@ -782,8 +778,16 @@ pub mod pmi_parse {
                     )
                 }
             };
-            if !sections.contains_key(&name) {
-                return Err(Error::ManifestReferencesMissingSection { section: name });
+            let section =
+                sections
+                    .get(&name)
+                    .ok_or_else(|| Error::ManifestReferencesMissingSection {
+                        section: name.clone(),
+                    })?;
+            if matches!(action, Action::Fill { .. })
+                && (section.raw_size != 0 || section.virtual_size == 0)
+            {
+                return Err(Error::InvalidFillShape(name));
             }
             names.push(name);
             actions.push(action);

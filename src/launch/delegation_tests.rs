@@ -450,6 +450,44 @@ fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
 }
 
 #[test]
+fn all_fill_kinds_require_nonempty_zero_sections() {
+    use dillo_launch::pmi_parse::{Error, parse};
+
+    let arch = HostArchitecture::X86_64;
+    let image = with_bootconfig(
+        image(
+            arch,
+            BaseChannel::Optional,
+            &base(arch, false, false),
+            Some(4096),
+        ),
+        &[0x20_2000],
+        4096,
+        0,
+    );
+    let opts = ParseOptions {
+        host_arch: pmi_arch(arch),
+        memory_mib: 4,
+    };
+    for (index, section) in [(3, ".dtb"), (4, ".dtbo"), (5, ".config")] {
+        let mut bytes = image.clone();
+        let header = 0x188 + index * 40;
+        bytes[header + 36..header + 40].copy_from_slice(&0x0200_0080u32.to_le_bytes());
+        parse(&bytes, &opts).expect("discardable Zero reservation");
+        for (size, raw_size) in [(4096u32, 4096u32), (4096, 4), (0, 0), (0, 4)] {
+            bytes[header + 8..header + 12].copy_from_slice(&size.to_le_bytes());
+            bytes[header + 16..header + 20].copy_from_slice(&raw_size.to_le_bytes());
+            bytes[header + 20..header + 24].copy_from_slice(&0x2000u32.to_le_bytes());
+            let result = parse(&bytes, &opts);
+            assert!(
+                matches!(&result, Err(Error::InvalidFillShape(name)) if name == section),
+                "{section} ({size}, {raw_size}): {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn bootconfig_invalid_reservations_fail_preflight() {
     use dillo_launch::pmi_parse::Error;
     for arch in ARCHES {
@@ -463,17 +501,11 @@ fn bootconfig_invalid_reservations_fail_preflight() {
             host_arch: pmi_arch(arch),
             memory_mib: 4,
         };
-        for (gpas, capacity, raw_size) in [
-            (vec![0x20_2000, 0x20_2000], 4096, 0),
-            (vec![0x20_2000], 4096, 4),
-            (vec![0x20_2000], 0, 0),
-        ] {
-            let bytes = with_bootconfig(base.clone(), &gpas, capacity, raw_size);
-            assert!(matches!(
-                dillo_launch::pmi_parse::parse(&bytes, &opts),
-                Err(Error::BootconfigFill(_))
-            ));
-        }
+        let bytes = with_bootconfig(base.clone(), &[0x20_2000, 0x20_3000], 4096, 0);
+        assert!(matches!(
+            dillo_launch::pmi_parse::parse(&bytes, &opts),
+            Err(Error::BootconfigFill("duplicate fill"))
+        ));
         let bytes = with_bootconfig(base.clone(), &[0x20_2001], 4096, 0);
         assert!(matches!(
             dillo_launch::pmi_parse::parse(&bytes, &opts),
