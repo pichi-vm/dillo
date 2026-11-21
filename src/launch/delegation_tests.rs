@@ -173,6 +173,17 @@ fn image(
     bytes
 }
 
+fn edit_manifest(bytes: &mut [u8], edit: impl FnOnce(&mut serde_json::Value)) {
+    let mut manifest = ciborium::from_reader(&bytes[0x1000..0x2000]).unwrap();
+    edit(&mut manifest);
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&manifest, &mut encoded).unwrap();
+    bytes[0x1000..0x2000].fill(0);
+    bytes[0x1000..0x1000 + encoded.len()].copy_from_slice(&encoded);
+    bytes[0x190..0x194].copy_from_slice(&(encoded.len() as u32).to_le_bytes());
+    bytes[0x198..0x19c].copy_from_slice(&0x1000u32.to_le_bytes());
+}
+
 fn launch(
     arch: HostArchitecture,
     channel: BaseChannel,
@@ -245,6 +256,104 @@ fn section_loads_clear_zero_pages_and_padded_tails() {
     assert!(ram[0x1000..0x20_0000].iter().all(|&byte| byte == 0));
     assert!(ram[0x20_2000..0x20_3000].iter().all(|&byte| byte == 0));
     assert_eq!(ram[0x20_3000], 0xcc);
+}
+
+#[test]
+fn repeated_actions_write_in_manifest_order() {
+    let recipe = [
+        (".code", 0x40_0000, None, 0x1f_ffff),
+        (".dtbo", 0x80_1000, Some("dt:dtbo"), 0x1000),
+        (".base", 0x20_1000, None, 0x1000),
+        (".dtb", 0x80_2000, Some("dt:dtb"), 0x1000),
+        (".dtb", 0x80_3000, None, 0x1000),
+        (".code", 0, None, 0x1f_ffff),
+        (".base", 0x20_3000, None, 0x1000),
+        (".dtbo", 0x80_5000, Some("dt:dtbo"), 0x1000),
+        (".dtb", 0x80_6000, Some("dt:dtb"), 0x1000),
+        (".dtb", 0x80_7000, None, 0x1000),
+    ];
+    for arch in ARCHES {
+        let mut base = base(arch, false, false);
+        base.resize(0x1000, 0);
+        let mut bytes = image(arch, BaseChannel::Optional, &base, Some(4096));
+        edit_manifest(&mut bytes, |manifest| {
+            manifest["actions"] = json!(recipe.map(|(section, gpa, fill, _)| match fill {
+                Some(kind) => json!({"type": "fill", "section": section, "gpa": gpa, "kind": kind}),
+                None => json!({"type": "load", "section": section, "gpa": gpa}),
+            }));
+        });
+        // Give the PE a compact layout with addresses distinct from the actions.
+        bytes[0xb0..0xb8].copy_from_slice(&0x1000_0000u64.to_le_bytes());
+        bytes[0xd0..0xd4].copy_from_slice(&0x20_5000u32.to_le_bytes()); // SizeOfImage
+        bytes[0xd4..0xd8].copy_from_slice(&0x1000u32.to_le_bytes()); // SizeOfHeaders
+        for (i, rva) in [0x1000u32, 0x2000, 0x3000, 0x20_3000, 0x20_4000]
+            .into_iter()
+            .enumerate()
+        {
+            let field = 0x188 + i * 40 + 12;
+            bytes[field..field + 4].copy_from_slice(&rva.to_le_bytes());
+        }
+        let code_virtual_size = 0x188 + 2 * 40 + 8;
+        bytes[code_virtual_size..code_virtual_size + 4]
+            .copy_from_slice(&0x1f_ffffu32.to_le_bytes());
+        bytes[0x20_0000..0x20_1000].fill(0x66);
+        bytes.resize(0x20_2000, 0xee); // Poison bytes after .code's raw data.
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image.pmi");
+        std::fs::write(&path, bytes).unwrap();
+        let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 8, 1, None, None).unwrap();
+        let ranges: Vec<_> = plan
+            .memory
+            .ranges()
+            .iter()
+            .map(|r| (r.gpa, r.size))
+            .collect();
+        assert_eq!(ranges, [(0, 0x60_0000), (0x80_0000, 0x20_0000)]);
+        assert_eq!(plan.parsed.actions.len(), recipe.len());
+        assert_eq!(plan.guest_writes.len(), recipe.len());
+        let mut ram = vec![0xcc; 0x80_9000];
+        for ((section, gpa, _, size), (action, write)) in recipe
+            .into_iter()
+            .zip(plan.parsed.actions.iter().zip(&plan.guest_writes))
+        {
+            assert_eq!(
+                (&*action.section, action.gpa, action.source.virtual_size),
+                (section, gpa, size)
+            );
+            let mut first = None;
+            write
+                .apply(plan.pmi.bytes(), |addr, data| {
+                    first.get_or_insert(addr);
+                    let start = addr as usize;
+                    ram[start..start + data.len()].copy_from_slice(data);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(first, Some(gpa));
+        }
+        for start in [0x20_1000, 0x20_3000, 0x80_2000, 0x80_6000] {
+            assert_eq!(&ram[start..start + 0x1000], base);
+        }
+        for start in [0, 0x40_0000] {
+            assert!(ram[start..start + 0x1000].iter().all(|&b| b == 0x66));
+            let padding = &ram[start + 0x1000..start + 0x20_0000];
+            assert!(padding.iter().all(|&b| b == 0));
+        }
+        for start in [0x80_3000, 0x80_7000] {
+            assert!(ram[start..start + 0x1000].iter().all(|&b| b == 0));
+        }
+        let overlay = &ram[0x80_1000..0x80_2000];
+        assert_eq!(overlay, &ram[0x80_5000..0x80_6000]);
+        let tree: Tree<'_> = Tree::parse(overlay).unwrap();
+        tree.find_path("/fragment@1/__overlay__/memory@800000")
+            .expect("overlay describes the high RAM island");
+        for neighbor in [
+            0x20_0000, 0x20_2000, 0x20_4000, 0x60_0000, 0x80_0fff, 0x80_4000, 0x80_8000,
+        ] {
+            assert_eq!(ram[neighbor], 0xcc, "{arch:?} {neighbor:#x}");
+        }
+    }
 }
 
 #[test]
