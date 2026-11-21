@@ -548,6 +548,7 @@ fn with_bootconfig(mut bytes: Vec<u8>, gpas: &[u64], capacity: u32, raw_size: u3
 
 #[test]
 fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
+    const CAPACITY: usize = 0x1004;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("image.pmi");
     let input = dir.path().join("input.bconf");
@@ -556,7 +557,7 @@ fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
         let bytes = with_bootconfig(
             image(arch, BaseChannel::Bundled, &base, Some(4096)),
             &[0x20_2000],
-            4096,
+            CAPACITY as u32,
             0,
         );
         std::fs::write(&path, &bytes).unwrap();
@@ -572,7 +573,7 @@ fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
             let WriteSrc::Owned(data) = &write.data else {
                 panic!("bootconfig must be retained for reboot")
             };
-            assert_eq!(data.len(), 4096);
+            assert_eq!(data.len(), CAPACITY);
             if text.is_none_or(<[u8]>::is_empty) {
                 assert!(data.iter().all(|b| *b == 0));
             } else {
@@ -582,6 +583,17 @@ fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
                 );
                 assert!(data.ends_with(b"#BOOTCONFIG\n"));
             }
+            let mut ram = [0xcc; 0x2002];
+            write
+                .apply(plan.pmi.bytes(), |gpa, bytes| {
+                    let start = (gpa - 0x20_2000) as usize + 1;
+                    ram[start..start + bytes.len()].copy_from_slice(bytes);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(&ram[1..=CAPACITY], data);
+            assert!(ram[1 + CAPACITY..=0x2000].iter().all(|&b| b == 0));
+            assert_eq!((ram[0], ram[0x2001]), (0xcc, 0xcc));
             let snapshot = data.clone();
             std::fs::write(&input, b"changed after preflight").unwrap();
             std::fs::remove_file(&input).unwrap();
