@@ -595,7 +595,7 @@ impl Vcpu {
             .fd
             .get_sregs()
             .map_err(|e| Error::SetSregs(self.idx, io(e)))?;
-        sregs.cr0 = 0x21;
+        sregs.cr0 = 0x31; // PE | ET | NE. ET must read as one in the guest.
         sregs.cr3 = 0;
         sregs.cr4 = 0x40;
         sregs.efer = 0x901;
@@ -1177,7 +1177,7 @@ mod memory_registration_tests {
         let memory =
             Arc::new(MappedMemory::test_backing(&[(0, 0x10000), (0xffff_0000, 0x10000)]).unwrap());
         vm.attach_memory(Arc::clone(&memory)).unwrap();
-        // Reset vector jumps to 32-bit code. Store MXCSR, then send the AP INIT and SIPI.
+        // Reset vector jumps to 32-bit code. Store CR0 and MXCSR before AP startup.
         memory
             .write(0xffff_fff0, &[0xe9, 0x0b, 0xf0, 0xff, 0xff])
             .unwrap();
@@ -1185,6 +1185,8 @@ mod memory_registration_tests {
             .write(
                 0xffff_f000,
                 &[
+                    0x0f, 0x20, 0xc0, // mov eax, cr0
+                    0xa3, 0x04, 0x10, 0x00, 0x00, // mov [0x1004], eax
                     0x0f, 0x20, 0xe0, 0x0d, 0x00, 0x02, 0x00, 0x00, 0x0f, 0x22, 0xe0, 0x0f, 0xae,
                     0x1d, 0x00, 0x10, 0x00, 0x00, // stmxcsr [0x1000]
                     0xc7, 0x05, 0xf0, 0x00, 0xe0, 0xfe, 0xff, 0x01, 0x00,
@@ -1223,7 +1225,6 @@ mod memory_registration_tests {
         assert_eq!(regs.rflags, 2);
         assert_eq!(regs.rax, 0x5a);
         let s = bsp.fd.get_sregs().unwrap();
-        assert_eq!(s.cr0 & !0x10, 0x21); // ET is architectural read-as-one.
         assert_eq!((s.cr3, s.cr4, s.efer), (0, 0x40, 0x901));
         for (segment, kind) in [
             (s.cs, 0xb),
@@ -1312,6 +1313,14 @@ mod memory_registration_tests {
                 .read_obj::<u32>(GuestAddress(0x1000))
                 .unwrap(),
             0x1f80
+        );
+        assert_eq!(
+            memory
+                .guest_memory()
+                .read_obj::<u32>(GuestAddress(0x1004))
+                .unwrap(),
+            0x31,
+            "initial guest CR0"
         );
         let exit = ap.run(|_, _| 0, |_, _| false).unwrap();
         assert!(

@@ -661,7 +661,7 @@ impl Vcpu {
         let mut registers = Vec::new();
         push_reg64(&mut registers, WHvX64RegisterRip, 0xffff_fff0);
         push_reg64(&mut registers, WHvX64RegisterRflags, 2);
-        push_reg64(&mut registers, WHvX64RegisterCr0, 0x21);
+        push_reg64(&mut registers, WHvX64RegisterCr0, 0x31); // PE | ET | NE
         push_reg64(&mut registers, WHvX64RegisterCr3, 0);
         push_reg64(&mut registers, WHvX64RegisterCr4, 0x40);
         push_reg64(&mut registers, WHvX64RegisterEfer, 0x901);
@@ -2206,6 +2206,8 @@ mod tests {
         vm.write_guest(
             0xffff_f000,
             &[
+                0x0f, 0x20, 0xc0, // mov eax, cr0
+                0xa3, 0x04, 0x10, 0x00, 0x00, // mov [0x1004], eax
                 0xc7, 0x05, 0xf0, 0x00, 0xe0, 0xfe, 0xff, 0x01, 0x00, 0x00, // enable LAPIC
                 0xc7, 0x05, 0x10, 0x03, 0xe0, 0xfe, 0x00, 0x00, 0x00, 0x01, // APIC ID 1
                 0xba, 0x00, 0x03, 0xe0, 0xfe, // mov edx, ICR low
@@ -2257,7 +2259,6 @@ mod tests {
         for (name, expected) in [
             (WHvX64RegisterRip, 0xffff_fff0),
             (WHvX64RegisterRflags, 2),
-            (WHvX64RegisterCr0, 0x21),
             (WHvX64RegisterCr3, 0),
             (WHvX64RegisterCr4, 0x40),
             (WHvX64RegisterEfer, 0x901),
@@ -2268,15 +2269,7 @@ mod tests {
         ] {
             let words = read(name);
             let actual = u64::from(words[0]) | (u64::from(words[1]) << 32);
-            if name == WHvX64RegisterCr0 {
-                assert_eq!(
-                    actual & !0x10,
-                    expected,
-                    "CR0 allows architectural ET normalization"
-                );
-            } else {
-                assert_eq!(actual, expected, "register {name:#x}");
-            }
+            assert_eq!(actual, expected, "register {name:#x}");
         }
         for (name, attributes, limit) in [
             (WHvX64RegisterCs, 0xc09b_u32, u32::MAX),
@@ -2316,6 +2309,14 @@ mod tests {
                 assert!(startup_suspend(&ap));
             }
         }
+        assert_eq!(
+            vm.guest_memory()
+                .unwrap()
+                .read_obj::<u32>(GuestAddress(0x1004))
+                .unwrap(),
+            0x31,
+            "initial guest CR0"
+        );
         let exit = ap.run(|_, _| 0, |_, _| false).unwrap();
         assert!(
             matches!(exit, VmExit::PioWrite { port: 0x42, size: 1, data } if data[0] == 0xa7),
