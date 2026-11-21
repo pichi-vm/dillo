@@ -1600,11 +1600,7 @@ mod launch {
     #[derive(Debug)]
     enum WriteSrc {
         Owned(Vec<u8>),
-        Image {
-            offset: usize,
-            len: usize,
-            zero_tail: u64,
-        },
+        Image { offset: usize, len: usize },
     }
 
     /// Target-neutral launch facts derived before backend construction.
@@ -1623,6 +1619,7 @@ mod launch {
         section: String,
         gpa: u64,
         data: WriteSrc,
+        zero_tail: u64,
     }
 
     impl GuestWrite {
@@ -1632,27 +1629,19 @@ mod launch {
             mut write_guest: impl FnMut(u64, &[u8]) -> Result<(), RunError>,
         ) -> Result<(), RunError> {
             static ZEROES: [u8; 64 * 1024] = [0; 64 * 1024];
-            let (data, mut zero_tail) = match &self.data {
-                WriteSrc::Owned(v) => (v.as_slice(), 0),
-                WriteSrc::Image {
-                    len: 0, zero_tail, ..
-                } => (&[][..], *zero_tail),
-                WriteSrc::Image {
-                    offset,
-                    len,
-                    zero_tail,
-                } => (
-                    pmi_bytes
-                        .get(*offset..offset.saturating_add(*len))
-                        .ok_or_else(|| {
-                            RunError::Machine(format!(
-                                "launch section `{}` range {:#x}+{:#x} out of PMI bounds",
-                                self.section, offset, len
-                            ))
-                        })?,
-                    *zero_tail,
-                ),
+            let data = match &self.data {
+                WriteSrc::Owned(v) => v.as_slice(),
+                WriteSrc::Image { len: 0, .. } => &[],
+                WriteSrc::Image { offset, len } => pmi_bytes
+                    .get(*offset..offset.saturating_add(*len))
+                    .ok_or_else(|| {
+                        RunError::Machine(format!(
+                            "launch section `{}` range {:#x}+{:#x} out of PMI bounds",
+                            self.section, offset, len
+                        ))
+                    })?,
             };
+            let mut zero_tail = self.zero_tail;
             log::debug!(
                 "writing launch section `{}` to GPA {:#x} ({} bytes)",
                 self.section,
@@ -1919,23 +1908,26 @@ mod launch {
         let mut writes = Vec::with_capacity(parsed.actions.len());
         for action in &parsed.actions {
             let source = &action.source;
-            let data = match action.kind {
+            // Parsing validated the enclosing backing extent.
+            let size = source
+                .virtual_size
+                .next_multiple_of(dillo_launch::pmi_parse::caps::SMALL_PAGE);
+            let (data, zero_tail) = match action.kind {
                 ActionKind::Fill(FillKind::LbcBootconfig) => {
                     let reservation =
                         bootconfig::Reservation::read(source.virtual_size, inputs.bootconfig)?;
-                    WriteSrc::Owned(reservation.bytes)
+                    (
+                        WriteSrc::Owned(reservation.bytes),
+                        size - source.virtual_size,
+                    )
                 }
-                ActionKind::Load => {
-                    // Parsing validated the raw size and the enclosing backing extent.
-                    let size = source
-                        .virtual_size
-                        .next_multiple_of(dillo_launch::pmi_parse::caps::SMALL_PAGE);
+                ActionKind::Load => (
                     WriteSrc::Image {
                         offset: source.file_offset as usize,
                         len: source.file_size as usize,
-                        zero_tail: size - source.file_size,
-                    }
-                }
+                    },
+                    size - source.file_size,
+                ),
                 ActionKind::Fill(FillKind::DtDtbo) => {
                     let data = crate::overlay::synthesize_dtbo(
                         memory.ranges(),
@@ -1945,7 +1937,7 @@ mod launch {
                         source.virtual_size,
                     )
                     .map_err(LaunchError::DtboSynth)?;
-                    WriteSrc::Owned(data)
+                    (WriteSrc::Owned(data), 0)
                 }
                 ActionKind::Fill(FillKind::DtDtb) => {
                     // Deliver the resolved measured base into its reserved Zero
@@ -1957,13 +1949,14 @@ mod launch {
                             cap: source.virtual_size,
                         });
                     }
-                    WriteSrc::Owned(base_dtb.to_vec())
+                    (WriteSrc::Owned(base_dtb.to_vec()), 0)
                 }
             };
             writes.push(GuestWrite {
                 section: action.section.clone(),
                 gpa: action.gpa,
                 data,
+                zero_tail,
             });
         }
         Ok(writes)
