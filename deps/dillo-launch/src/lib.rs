@@ -210,26 +210,32 @@ pub mod pmi_parse {
     }
 
     /// Information about a PE section reachable from the active target.
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Copy)]
     pub struct SectionInfo {
         /// On-disk offset (`PointerToRawData`).
         pub file_offset: u64,
         /// On-disk byte count (`SizeOfRawData`). Zero for Zero-shape sections.
         pub file_size: u64,
-        /// Guest physical address — the explicit `gpa` from the load/fill
-        /// action (pmi spec f6be1eb), not the PE `VirtualAddress`.
-        pub gpa: u64,
         /// In-guest byte count (`VirtualSize`).
         pub virtual_size: u64,
     }
 
     /// One step in the launch recipe.
     #[derive(Debug, Clone)]
-    pub enum Action {
-        /// `load` a PE section's bytes at its GPA.
-        Load { section: String },
-        /// `fill` a Zero-shape section at its GPA with kind-specific content.
-        Fill { section: String, kind: FillKind },
+    pub struct Action {
+        /// Name of the referenced PE section.
+        pub section: String,
+        /// Absolute guest physical address declared by this action.
+        pub gpa: u64,
+        /// File metadata and extent of the referenced PE section.
+        pub source: SectionInfo,
+        pub kind: ActionKind,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ActionKind {
+        Load,
+        Fill(FillKind),
     }
 
     /// Fill kinds dillo recognizes (the PMI `dt` and `lbc` extensions).
@@ -253,10 +259,6 @@ pub mod pmi_parse {
         /// Effective ISA baseline, including the architecture default.
         pub cpu_profile: CpuProfile,
         pub actions: Vec<Action>,
-        /// Every section placed in guest memory (named by a load or fill
-        /// action). The bundled base named by `dt:dtb` is excluded — see
-        /// `dt_dtb_source`.
-        pub sections: BTreeMap<String, SectionInfo>,
         /// The bundled base DTB named by the `dt:dtb` target attribute, as a
         /// read-only source. `Some` in bundled and optional modes (the image
         /// carries a base or fallback); `None` in detached mode, where the base
@@ -287,7 +289,7 @@ pub mod pmi_parse {
         }
 
         // Enumerate sections once into a typed table.
-        let mut raw_sections = collect_sections(&pe, file_size, bytes)?;
+        let raw_sections = collect_sections(&pe, file_size, bytes)?;
 
         // Locate `.pmi.vm` (MVP — only `vm` target is supported).
         let target_section_name = Spec::<x86_64::Profile>::SECTION;
@@ -308,96 +310,45 @@ pub mod pmi_parse {
         }
 
         // Strict CBOR decode (depth-limited) into the architecture-specific profile.
-        let (cpu_profile, actions_raw, merged_dtb) =
+        let (cpu_profile, actions_raw, dt_dtb_attr) =
             decode_manifest_bytes(&target_section.body, opts.host_arch)?;
+        let actions = resolve_actions(actions_raw, &raw_sections)?;
 
-        // pmi spec f6be1eb: each load/fill action carries an explicit `gpa`;
-        // the VMM places bytes there verbatim and MUST NOT consult the PE
-        // `VirtualAddress`. Stamp the action GPA over the provisional
-        // PE-derived value so all downstream placement, overlap, and bounds
-        // checks operate on the authoritative address. (Sections not named by
-        // any action — e.g. `.pmi.vm` — keep their PE address and are unused.)
-        for a in &actions_raw {
-            let (name, gpa) = match a {
-                ManifestActionOwned::Load { gpa, section }
-                | ManifestActionOwned::Fill { gpa, section, .. } => (section, *gpa),
-            };
-            if let Some(s) = raw_sections.get_mut(name) {
-                s.gpa = gpa;
-            }
-        }
-
-        // Resolve actions against the section table.
-        let (actions, active_section_names, fill_kinds) =
-            resolve_actions(&actions_raw, &raw_sections)?;
-
-        // dt extension channel resolution (pmi/spec/dt.md, VMM selection
-        // table). A base DTB must be available through either the `dt:dtb`
-        // attribute (bundled / optional fallback) or a `dt:dtb` fill (detached /
-        // optional); with neither, no base exists and the VMM MUST refuse.
-        // Whether delegated CPUs or memory require a `dt:dtbo` fill is checked
-        // during launch preflight, after resolving and surveying the base.
-        let has_dt_dtb_fill = fill_kinds.iter().any(|k| matches!(k, FillKind::DtDtb));
-        let dt_dtb_attr = merged_dtb;
-        if dt_dtb_attr.is_none() && !has_dt_dtb_fill {
+        if dt_dtb_attr.is_none()
+            && !actions
+                .iter()
+                .any(|a| a.kind == ActionKind::Fill(FillKind::DtDtb))
+        {
             return Err(Error::NoBaseDtb);
         }
-        // A named bundled base must actually be present in the image.
-        if let Some(section) = &dt_dtb_attr
-            && !raw_sections.contains_key(section)
-        {
-            return Err(Error::DtDtbSectionMissing {
-                section: section.clone(),
-            });
-        }
+        let dt_dtb_source = dt_dtb_attr
+            .map(|section| {
+                raw_sections
+                    .get(&section)
+                    .map(|s| s.info)
+                    .ok_or(Error::DtDtbSectionMissing { section })
+            })
+            .transpose()?;
 
-        // Sections placed in guest memory are exactly those named by a load or
-        // fill action. The `dt:dtb` attribute names a bundled base the VMM only
-        // reads (in bundled mode it is separately loaded; in optional mode it is
-        // an unplaced fallback), so it is NOT part of this set — including it
-        // would false-overlap with the section it reserves.
-        let all_active: Vec<String> = active_section_names.clone();
-
-        // Validate every active-target section: alignment, GPA bounds.
-        for name in &all_active {
-            let s = &raw_sections[name];
-            validate_section(name, s)?;
-        }
-
-        // No overlap among active-target sections.
-        let mut overlap_pool: Vec<(String, &RawSection)> = all_active
-            .iter()
-            .map(|n| (n.clone(), &raw_sections[n]))
-            .collect();
-        overlap_pool.sort_by_key(|(_, s)| s.gpa);
-        for w in overlap_pool.windows(2) {
-            let (a_name, a) = &w[0];
-            let (b_name, b) = &w[1];
-            let a_end =
-                a.gpa
-                    .checked_add(a.virtual_size)
-                    .ok_or_else(|| Error::VirtualAddressOverflow {
-                        name: a_name.clone(),
-                    })?;
-            if a_end > b.gpa {
+        // Sort a view of the validated ranges, keeping actions in recipe order.
+        let mut placements: Vec<_> = actions.iter().collect();
+        placements.sort_by_key(|a| a.gpa);
+        for pair in placements.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if a.gpa + a.source.virtual_size > b.gpa {
                 return Err(Error::SectionsOverlap {
-                    a: a_name.clone(),
-                    b: b_name.clone(),
+                    a: a.section.clone(),
+                    b: b.section.clone(),
                 });
             }
         }
 
         // §5.5 sum-of-loaded cap.
-        let mut total_loaded = 0;
-        for action in &actions {
-            if let Action::Load { section } = action {
-                let s = &raw_sections[section];
-                if s.virtual_size == 0 || s.raw_size > s.virtual_size {
-                    return Err(Error::InvalidLoadSize(section.clone()));
-                }
-                total_loaded += s.virtual_size;
-            }
-        }
+        let total_loaded = actions
+            .iter()
+            .filter(|a| a.kind == ActionKind::Load)
+            .map(|a| a.source.virtual_size)
+            .sum();
         let memory_cap = effective_memory_cap(opts.memory_mib);
         if total_loaded > memory_cap {
             return Err(Error::LoadedBytesExceedMemory {
@@ -408,67 +359,16 @@ pub mod pmi_parse {
 
         // §5.5 pathological-spread refusal (against all must-cover ranges,
         // not just loads — fills must be backed too).
-        let must_cover: Vec<(u64, u64)> = all_active
+        let must_cover: Vec<_> = actions
             .iter()
-            .map(|n| {
-                let s = &raw_sections[n];
-                (s.gpa, s.virtual_size)
-            })
+            .map(|a| (a.gpa, a.source.virtual_size))
             .collect();
         spread_check(&must_cover, total_loaded, memory_cap)?;
-
-        // .dtbo size in [4 KiB, 64 KiB].
-        for name in actions.iter().filter_map(|a| match a {
-            Action::Fill {
-                section,
-                kind: FillKind::DtDtbo,
-            } => Some(section),
-            _ => None,
-        }) {
-            let s = &raw_sections[name];
-            if s.virtual_size < caps::DTBO_MIN_SIZE || s.virtual_size > caps::DTBO_MAX_SIZE {
-                return Err(Error::DtboSizeOutOfRange {
-                    actual: s.virtual_size,
-                    min: caps::DTBO_MIN_SIZE,
-                    max: caps::DTBO_MAX_SIZE,
-                });
-            }
-        }
-
-        // Build the public SectionInfo table.
-        let mut sections = BTreeMap::new();
-        for name in &all_active {
-            let s = &raw_sections[name];
-            sections.insert(
-                name.clone(),
-                SectionInfo {
-                    file_offset: s.file_offset,
-                    file_size: s.file_size,
-                    gpa: s.gpa,
-                    virtual_size: s.virtual_size,
-                },
-            );
-        }
-
-        // The bundled base the `dt:dtb` attribute names, as a read-only source
-        // (file bytes). It is deliberately kept out of `sections` so it never
-        // enters placement, overlap, or coverage — the VMM only reads it, to
-        // load (bundled) or to fill the reserved base section (optional).
-        let dt_dtb_source = dt_dtb_attr.as_ref().map(|name| {
-            let s = &raw_sections[name];
-            SectionInfo {
-                file_offset: s.file_offset,
-                file_size: s.file_size,
-                gpa: s.gpa,
-                virtual_size: s.virtual_size,
-            }
-        });
 
         Ok(ParsedPmi {
             arch: opts.host_arch,
             cpu_profile,
             actions,
-            sections,
             dt_dtb_source,
         })
     }
@@ -476,11 +376,8 @@ pub mod pmi_parse {
     // ─── internals ──────────────────────────────────────────────────
 
     struct RawSection {
-        file_offset: u64,
-        file_size: u64,
+        info: SectionInfo,
         raw_size: u64,
-        gpa: u64,
-        virtual_size: u64,
         is_discardable: bool,
         /// The on-disk bytes for non-loaded sections (e.g., the CBOR
         /// manifest). Empty for loaded sections — those are read by the
@@ -555,7 +452,6 @@ pub mod pmi_parse {
                     name,
                 });
             }
-            let gpa = section.address();
             let virtual_size = section.size();
             let file_size_field = section.file_range().map_or(0, |(_, size)| size);
             let header = section.pe_section();
@@ -606,11 +502,12 @@ pub mod pmi_parse {
             out.insert(
                 name,
                 RawSection {
-                    file_offset,
-                    file_size: file_size_field,
+                    info: SectionInfo {
+                        file_offset,
+                        file_size: file_size_field,
+                        virtual_size,
+                    },
                     raw_size: u64::from(raw_size),
-                    gpa,
-                    virtual_size,
                     is_discardable,
                     body,
                 },
@@ -623,7 +520,7 @@ pub mod pmi_parse {
     fn decode_manifest_bytes(
         bytes: &[u8],
         arch: HostArch,
-    ) -> Result<(CpuProfile, Vec<ManifestActionOwned>, Option<String>), Error> {
+    ) -> Result<(CpuProfile, Vec<ManifestAction>, Option<String>), Error> {
         let cursor = Cursor::new(bytes);
         match arch {
             HostArch::X86_64 => {
@@ -631,24 +528,22 @@ pub mod pmi_parse {
                     ciborium::de::from_reader_with_recursion_limit(cursor, caps::CBOR_MAX_DEPTH)
                         .map_err(|e| Error::CborDecode(e.to_string()))?;
                 check_actions_len(&spec.actions)?;
-                let actions = spec
-                    .actions
-                    .into_iter()
-                    .map(ManifestActionOwned::from)
-                    .collect();
-                Ok((CpuProfile::X86_64(spec.cpu_profile), actions, spec.dt_dtb))
+                Ok((
+                    CpuProfile::X86_64(spec.cpu_profile),
+                    spec.actions,
+                    spec.dt_dtb,
+                ))
             }
             HostArch::Aarch64 => {
                 let spec: Spec<aarch64::Profile> =
                     ciborium::de::from_reader_with_recursion_limit(cursor, caps::CBOR_MAX_DEPTH)
                         .map_err(|e| Error::CborDecode(e.to_string()))?;
                 check_actions_len(&spec.actions)?;
-                let actions = spec
-                    .actions
-                    .into_iter()
-                    .map(ManifestActionOwned::from)
-                    .collect();
-                Ok((CpuProfile::Aarch64(spec.cpu_profile), actions, spec.dt_dtb))
+                Ok((
+                    CpuProfile::Aarch64(spec.cpu_profile),
+                    spec.actions,
+                    spec.dt_dtb,
+                ))
             }
         }
     }
@@ -715,84 +610,63 @@ pub mod pmi_parse {
         Ok(())
     }
 
-    #[derive(Debug, Clone)]
-    enum ManifestActionOwned {
-        Load {
-            gpa: u64,
-            section: String,
-        },
-        Fill {
-            gpa: u64,
-            section: String,
-            kind: PmiFillKind,
-        },
-    }
-
-    impl From<ManifestAction> for ManifestActionOwned {
-        fn from(a: ManifestAction) -> Self {
-            match a {
-                ManifestAction::Load(l) => Self::Load {
-                    gpa: l.gpa,
-                    section: l.section,
-                },
-                ManifestAction::Fill(f) => Self::Fill {
-                    gpa: f.gpa,
-                    section: f.section,
-                    kind: f.kind,
-                },
-            }
-        }
-    }
-
     fn resolve_actions(
-        raw: &[ManifestActionOwned],
+        raw: Vec<ManifestAction>,
         sections: &BTreeMap<String, RawSection>,
-    ) -> Result<(Vec<Action>, Vec<String>, Vec<FillKind>), Error> {
+    ) -> Result<Vec<Action>, Error> {
         let mut actions = Vec::with_capacity(raw.len());
-        let mut names = Vec::with_capacity(raw.len());
-        let mut fills = Vec::new();
-
+        let mut has_bootconfig_fill = false;
         for a in raw {
-            // The action GPA was already stamped into the section table by the
-            // caller; here we only need the section name + fill kind. Placement
-            // flows through `SectionInfo.gpa`.
-            let (name, action) = match a {
-                ManifestActionOwned::Load { section, .. } => (
-                    section.clone(),
-                    Action::Load {
-                        section: section.clone(),
-                    },
+            let (section, gpa, kind) = match a {
+                ManifestAction::Load(load) => (load.section, load.gpa, ActionKind::Load),
+                ManifestAction::Fill(fill) => (
+                    fill.section,
+                    fill.gpa,
+                    ActionKind::Fill(translate_fill_kind(fill.kind)),
                 ),
-                ManifestActionOwned::Fill { section, kind, .. } => {
-                    let translated = translate_fill_kind(*kind);
-                    if translated == FillKind::LbcBootconfig && fills.contains(&translated) {
-                        return Err(Error::BootconfigFill("duplicate fill"));
-                    }
-                    fills.push(translated);
-                    (
-                        section.clone(),
-                        Action::Fill {
-                            section: section.clone(),
-                            kind: translated,
-                        },
-                    )
-                }
             };
-            let section =
-                sections
-                    .get(&name)
-                    .ok_or_else(|| Error::ManifestReferencesMissingSection {
-                        section: name.clone(),
-                    })?;
-            if matches!(action, Action::Fill { .. })
-                && (section.raw_size != 0 || section.virtual_size == 0)
-            {
-                return Err(Error::InvalidFillShape(name));
+            let Some(raw_section) = sections.get(&section) else {
+                return Err(Error::ManifestReferencesMissingSection { section });
+            };
+            let source = raw_section.info;
+            match kind {
+                ActionKind::Load => {
+                    if source.virtual_size == 0 || raw_section.raw_size > source.virtual_size {
+                        return Err(Error::InvalidLoadSize(section));
+                    }
+                }
+                ActionKind::Fill(fill) => {
+                    if raw_section.raw_size != 0 || source.virtual_size == 0 {
+                        return Err(Error::InvalidFillShape(section));
+                    }
+                    match fill {
+                        FillKind::LbcBootconfig if has_bootconfig_fill => {
+                            return Err(Error::BootconfigFill("duplicate fill"));
+                        }
+                        FillKind::LbcBootconfig => has_bootconfig_fill = true,
+                        FillKind::DtDtbo
+                            if !(caps::DTBO_MIN_SIZE..=caps::DTBO_MAX_SIZE)
+                                .contains(&source.virtual_size) =>
+                        {
+                            return Err(Error::DtboSizeOutOfRange {
+                                actual: source.virtual_size,
+                                min: caps::DTBO_MIN_SIZE,
+                                max: caps::DTBO_MAX_SIZE,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
             }
-            names.push(name);
-            actions.push(action);
+            validate_destination(&section, gpa, &source)?;
+            actions.push(Action {
+                section,
+                gpa,
+                source,
+                kind,
+            });
         }
-        Ok((actions, names, fills))
+        Ok(actions)
     }
 
     fn translate_fill_kind(k: PmiFillKind) -> FillKind {
@@ -803,13 +677,10 @@ pub mod pmi_parse {
         }
     }
 
-    fn validate_section(name: &str, s: &RawSection) -> Result<(), Error> {
+    fn validate_destination(name: &str, gpa: u64, s: &SectionInfo) -> Result<(), Error> {
         // The section and the backing extent used by the spread check must fit.
-        s.gpa
-            .checked_add(s.virtual_size)
-            .filter(|end| {
-                s.virtual_size == 0 || end.checked_next_multiple_of(caps::HUGE_PAGE).is_some()
-            })
+        gpa.checked_add(s.virtual_size)
+            .and_then(|end| end.checked_next_multiple_of(caps::HUGE_PAGE))
             .ok_or_else(|| Error::VirtualAddressOverflow {
                 name: name.to_string(),
             })?;
@@ -824,7 +695,7 @@ pub mod pmi_parse {
         // and `PointerToRawData`. `SizeOfRawData` follows PE `FileAlignment`
         // and carries no alignment requirement.
         if s.virtual_size >= caps::HUGE_PAGE {
-            if !s.gpa.is_multiple_of(caps::HUGE_PAGE) {
+            if !gpa.is_multiple_of(caps::HUGE_PAGE) {
                 return Err(Error::AlignmentViolation {
                     name: name.to_string(),
                     virtual_size: s.virtual_size,
@@ -838,8 +709,8 @@ pub mod pmi_parse {
                     rule: "large section: PointerToRawData must be 2 MiB-aligned",
                 });
             }
-        } else if s.virtual_size > 0 {
-            if !s.gpa.is_multiple_of(caps::SMALL_PAGE) {
+        } else {
+            if !gpa.is_multiple_of(caps::SMALL_PAGE) {
                 return Err(Error::AlignmentViolation {
                     name: name.to_string(),
                     virtual_size: s.virtual_size,

@@ -1483,7 +1483,7 @@ mod launch {
 
     use crate::placement::{self, MemoryPlan};
     use crate::runner::RunError;
-    use dillo_launch::pmi_parse::{Action as PmiAction, FillKind, HostArch, ParseOptions};
+    use dillo_launch::pmi_parse::{ActionKind, FillKind, HostArch, ParseOptions};
 
     /// The PMI byte source. Raw section loads are copied straight from it into
     /// guest RAM (one copy) instead of being staged into owned `Vec`s (two
@@ -1709,15 +1709,10 @@ mod launch {
                 },
             )?;
             if bootconfig_path.is_some()
-                && !parsed.actions.iter().any(|action| {
-                    matches!(
-                        action,
-                        PmiAction::Fill {
-                            kind: FillKind::LbcBootconfig,
-                            ..
-                        }
-                    )
-                })
+                && !parsed
+                    .actions
+                    .iter()
+                    .any(|action| action.kind == ActionKind::Fill(FillKind::LbcBootconfig))
             {
                 return Err(bootconfig::Error::Undeclared.into());
             }
@@ -1740,24 +1735,26 @@ mod launch {
             // The survey supports delegated CPUs and memory only: fixed CPU
             // declarations are rejected, and fixed memory is unclaimed. Require
             // the channel that delivers their allocation before planning RAM.
-            if !parsed.actions.iter().any(|action| {
-                matches!(
-                    action,
-                    PmiAction::Fill {
-                        kind: FillKind::DtDtbo,
-                        ..
-                    }
-                )
-            }) {
+            if !parsed
+                .actions
+                .iter()
+                .any(|action| action.kind == ActionKind::Fill(FillKind::DtDtbo))
+            {
                 return Err(LaunchError::DelegatedAllocationRequiresDtbo);
             }
 
             // Invalid images must still fail without requiring a hypervisor.
             let address_bits = address_bits().map_err(LaunchError::AddressSpaceProbe)?;
-            let load_ranges: Vec<(String, u64, u64)> = parsed
-                .sections
+            let action_ranges: Vec<_> = parsed
+                .actions
                 .iter()
-                .map(|(name, section)| (name.clone(), section.gpa, section.virtual_size))
+                .map(|action| {
+                    (
+                        action.section.clone(),
+                        action.gpa,
+                        action.source.virtual_size,
+                    )
+                })
                 .collect();
             let required_bits = platform.min_addr_space_bits();
             if required_bits > address_bits {
@@ -1768,13 +1765,12 @@ mod launch {
             }
             platform
                 .plan()
-                .cross_validate_loads(&load_ranges, address_bits)
+                .cross_validate_loads(&action_ranges, address_bits)
                 .map_err(LaunchError::DtbCrossValidate)?;
 
-            let must_cover: Vec<(u64, u64)> = parsed
-                .sections
-                .values()
-                .map(|section| (section.gpa, section.virtual_size))
+            let must_cover: Vec<_> = action_ranges
+                .iter()
+                .map(|&(_, gpa, size)| (gpa, size))
                 .collect();
             let memory = placement::plan_around_regions(
                 address_bits,
@@ -1920,78 +1916,55 @@ mod launch {
         inputs: FillInputs<'_>,
     ) -> Result<Vec<GuestWrite>, LaunchError> {
         let base_dtb = inputs.base_dtb;
-        let mut writes = Vec::new();
+        let mut writes = Vec::with_capacity(parsed.actions.len());
         for action in &parsed.actions {
-            match action {
-                PmiAction::Fill {
-                    section,
-                    kind: FillKind::LbcBootconfig,
-                } => {
-                    let target = &parsed.sections[section];
+            let source = &action.source;
+            let data = match action.kind {
+                ActionKind::Fill(FillKind::LbcBootconfig) => {
                     let reservation =
-                        bootconfig::Reservation::read(target.virtual_size, inputs.bootconfig)?;
-                    writes.push(GuestWrite {
-                        section: section.clone(),
-                        gpa: target.gpa,
-                        data: WriteSrc::Owned(reservation.bytes),
-                    });
+                        bootconfig::Reservation::read(source.virtual_size, inputs.bootconfig)?;
+                    WriteSrc::Owned(reservation.bytes)
                 }
-                PmiAction::Load { section } => {
-                    let s = &parsed.sections[section];
+                ActionKind::Load => {
                     // Parsing validated the raw size and the enclosing backing extent.
-                    let size = s
+                    let size = source
                         .virtual_size
                         .next_multiple_of(dillo_launch::pmi_parse::caps::SMALL_PAGE);
-                    writes.push(GuestWrite {
-                        section: section.clone(),
-                        gpa: s.gpa,
-                        data: WriteSrc::Image {
-                            offset: s.file_offset as usize,
-                            len: s.file_size as usize,
-                            zero_tail: size - s.file_size,
-                        },
-                    });
+                    WriteSrc::Image {
+                        offset: source.file_offset as usize,
+                        len: source.file_size as usize,
+                        zero_tail: size - source.file_size,
+                    }
                 }
-                PmiAction::Fill {
-                    section,
-                    kind: FillKind::DtDtbo,
-                } => {
-                    let s = &parsed.sections[section];
+                ActionKind::Fill(FillKind::DtDtbo) => {
                     let data = crate::overlay::synthesize_dtbo(
                         memory.ranges(),
                         vcpus,
                         arch.cpu_enable_method(),
                         cpu_compatible,
-                        s.virtual_size,
+                        source.virtual_size,
                     )
                     .map_err(LaunchError::DtboSynth)?;
-                    writes.push(GuestWrite {
-                        section: section.clone(),
-                        gpa: s.gpa,
-                        data: WriteSrc::Owned(data),
-                    });
+                    WriteSrc::Owned(data)
                 }
-                PmiAction::Fill {
-                    section,
-                    kind: FillKind::DtDtb,
-                } => {
+                ActionKind::Fill(FillKind::DtDtb) => {
                     // Deliver the resolved measured base into its reserved Zero
                     // section (detached/optional). The base was resolved once in
                     // `read` (out-of-band `--dtb`, or the bundled fallback).
-                    let target = &parsed.sections[section];
-                    if base_dtb.len() as u64 > target.virtual_size {
+                    if base_dtb.len() as u64 > source.virtual_size {
                         return Err(LaunchError::BaseDtbTooLarge {
                             actual: base_dtb.len() as u64,
-                            cap: target.virtual_size,
+                            cap: source.virtual_size,
                         });
                     }
-                    writes.push(GuestWrite {
-                        section: section.clone(),
-                        gpa: target.gpa,
-                        data: WriteSrc::Owned(base_dtb.to_vec()),
-                    });
+                    WriteSrc::Owned(base_dtb.to_vec())
                 }
-            }
+            };
+            writes.push(GuestWrite {
+                section: action.section.clone(),
+                gpa: action.gpa,
+                data,
+            });
         }
         Ok(writes)
     }
@@ -2007,15 +1980,10 @@ mod launch {
         parsed: &dillo_launch::pmi_parse::ParsedPmi,
         oob: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, LaunchError> {
-        let has_fill = parsed.actions.iter().any(|a| {
-            matches!(
-                a,
-                PmiAction::Fill {
-                    kind: FillKind::DtDtb,
-                    ..
-                }
-            )
-        });
+        let has_fill = parsed
+            .actions
+            .iter()
+            .any(|a| a.kind == ActionKind::Fill(FillKind::DtDtb));
         match oob {
             Some(_) if !has_fill => Err(LaunchError::UnexpectedBaseOverride),
             Some(base) => Ok(base),
