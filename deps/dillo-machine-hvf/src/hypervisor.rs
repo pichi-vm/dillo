@@ -577,11 +577,10 @@ impl Vcpu {
     }
 
     fn translate(&self, exit: &VcpuExit) -> Result<VmExit, Error> {
-        if exit.reason != ExitReason::EXCEPTION {
-            return Ok(VmExit::Unknown(format!(
-                "hvf exit reason {:?}",
-                exit.reason
-            )));
+        match exit.reason {
+            ExitReason::CANCELED => return Ok(VmExit::Interrupted),
+            ExitReason::EXCEPTION => {}
+            reason => return Err(Error::Hv(format!("hvf exit reason {reason:?}"))),
         }
         let esr = exit.exception.syndrome;
         let ec = esr >> 26;
@@ -607,7 +606,7 @@ impl Vcpu {
                 self.advance_pc()?;
                 Ok(VmExit::Halted)
             }
-            _ => Ok(VmExit::Unknown(format!(
+            _ => Err(Error::Hv(format!(
                 "hvf exception EC={ec:#x} ESR={esr:#x} FAR={:#x} IPA={:#x}",
                 exit.exception.virtual_address, exit.exception.physical_address
             ))),
@@ -619,7 +618,7 @@ impl Vcpu {
         //   SAS [23:22] size, SRT [20:16] reg, WnR [6] write.
         let isv = (esr >> 24) & 1;
         if isv == 0 {
-            return Ok(VmExit::Unknown(format!(
+            return Err(Error::Hv(format!(
                 "hvf data abort without valid syndrome (ESR={esr:#x}, IPA={ipa:#x})"
             )));
         }
@@ -687,6 +686,8 @@ fn gpr(n: u8) -> Reg {
 
 #[cfg(test)]
 mod tests {
+    use applevisor::prelude::VcpuExitException;
+
     use super::*;
 
     static NATIVE_TESTS: Mutex<()> = Mutex::new(());
@@ -773,6 +774,29 @@ mod tests {
         let exported = vm.guest_memory().unwrap();
         let vcpu = vm.create_vcpu_current_thread().expect("create_vcpu");
         drop(vm);
+
+        // Only a host cancellation may become a successful stop.
+        for ec in [0x16, 0x17] {
+            let mut exit = VcpuExit {
+                reason: ExitReason::EXCEPTION,
+                exception: VcpuExitException {
+                    syndrome: (ec << 26) | (1 << 25) | 1,
+                    virtual_address: 0,
+                    physical_address: 0,
+                },
+            };
+            assert!(matches!(
+                vcpu.translate(&exit),
+                Err(Error::Hv(reason)) if reason.starts_with(&format!("hvf exception EC={ec:#x} "))
+            ));
+            exit.reason = ExitReason::CANCELED;
+            assert!(matches!(vcpu.translate(&exit), Ok(VmExit::Interrupted)));
+            exit.reason = ExitReason::UNKNOWN;
+            assert!(matches!(
+                vcpu.translate(&exit),
+                Err(Error::Hv(reason)) if reason == "hvf exit reason UNKNOWN"
+            ));
+        }
 
         for n in 0..=30 {
             vcpu.set_gpr(n, u64::from(n) + 1).unwrap();

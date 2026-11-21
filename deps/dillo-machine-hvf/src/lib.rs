@@ -15,9 +15,9 @@ enum VmExit {
     MmioWrite { addr: u64, data: [u8; 8], size: u8 },
     Smccc { method: PsciMethod, args: [u64; 8] },
     Halted,
+    Interrupted,
     GuestPoweroff,
     GuestReset,
-    Unknown(String),
 }
 
 mod imp {
@@ -844,11 +844,7 @@ mod imp {
                             vcpu.set_gpr(0, value)?;
                         }
                     },
-                    VmExit::Unknown(reason) if self.shutdown.load(Ordering::SeqCst) => {
-                        let _ = reason;
-                        return Ok(VcpuStop::Stopped);
-                    }
-                    VmExit::Unknown(reason) => return Err(Error::Hv(reason)),
+                    VmExit::Interrupted => return Ok(VcpuStop::Stopped),
                     other @ VmExit::Halted => {
                         let (esr, elr, far) = vcpu.el1_exception_state();
                         log::warn!(
