@@ -252,7 +252,16 @@ fn replay_uses_direct_slices_from_the_held_pmi() {
 fn optional_base_fill_uses_the_selected_source() {
     let arch = HostArchitecture::X86_64;
     let bundled = base(arch, false, false);
-    let (dir, fallback) = launch(arch, BaseChannel::Optional, &bundled, Some(4096), 1).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let image_path = dir.path().join("image.pmi");
+    let mut bytes = image(arch, BaseChannel::Optional, &bundled, Some(4096));
+    edit_manifest(&mut bytes, |manifest| {
+        manifest["actions"].as_array_mut().unwrap().push(json!({
+            "type": "fill", "section": ".dtb", "gpa": 0x20_2000, "kind": "dt:dtb"
+        }));
+    });
+    std::fs::write(&image_path, bytes).unwrap();
+    let fallback = LaunchPlan::read(&image_path, arch, None, || Ok(48), 4, 1, None, None).unwrap();
     let fallback_bytes = &fallback.pmi.bytes()[0x2000..0x2000 + bundled.len()];
     fallback.guest_writes[1]
         .apply(fallback.pmi.bytes(), |gpa, data| {
@@ -267,7 +276,7 @@ fn optional_base_fill_uses_the_selected_source() {
     external.push(0);
     std::fs::write(&override_path, &external).unwrap();
     let overridden = LaunchPlan::read(
-        &dir.path().join("image.pmi"),
+        &image_path,
         arch,
         None,
         || Ok(48),
@@ -277,13 +286,17 @@ fn optional_base_fill_uses_the_selected_source() {
         None,
     )
     .unwrap();
-    overridden.guest_writes[1]
-        .apply(overridden.pmi.bytes(), |gpa, data| {
-            assert_eq!(gpa, 0x20_0000);
-            assert_eq!(data, external);
-            Ok(())
-        })
-        .unwrap();
+    let surveyed = overridden.platform.dtb();
+    assert_eq!(surveyed, external);
+    for (index, expected_gpa) in [(1, 0x20_0000), (3, 0x20_2000)] {
+        overridden.guest_writes[index]
+            .apply(overridden.pmi.bytes(), |gpa, data| {
+                assert_eq!(gpa, expected_gpa);
+                assert!(std::ptr::eq(data, surveyed));
+                Ok(())
+            })
+            .unwrap();
+    }
 }
 
 #[test]
@@ -452,6 +465,11 @@ fn repeated_actions_write_in_manifest_order() {
         }
         let overlay = &ram[0x80_1000..0x80_2000];
         assert_eq!(overlay, &ram[0x80_5000..0x80_6000]);
+        let [first, second] = [1, 7].map(|index| &plan.guest_writes[index].data);
+        let (WriteSrc::Shared(first), WriteSrc::Shared(second)) = (first, second) else {
+            panic!("overlays must share their synthesized payload")
+        };
+        assert!(Arc::ptr_eq(first, second));
         let tree: Tree<'_> = Tree::parse(overlay).unwrap();
         tree.find_path("/fragment@1/__overlay__/memory@800000")
             .expect("overlay describes the high RAM island");
@@ -829,7 +847,7 @@ fn delegated_allocation_is_delivered_in_reserved_overlay() {
                     .find(|write| write.section == ".dtbo")
                     .unwrap();
                 assert_eq!(write.gpa, 0x20_1000);
-                let WriteSrc::Owned(data) = &write.data else {
+                let WriteSrc::Shared(data) = &write.data else {
                     panic!("overlay must be synthesized")
                 };
                 assert!(data.len() <= size as usize);
@@ -914,6 +932,32 @@ fn overlay_reservation_bounds_are_enforced() {
     .unwrap_err();
     assert!(matches!(err, LaunchError::DtboSynth(_)), "{err}");
     assert_eq!(err.exit_code(), 11);
+}
+
+#[test]
+fn repeated_overlay_checks_the_later_reservation() {
+    let arch = HostArchitecture::X86_64;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.pmi");
+    let mut bytes = image(
+        arch,
+        BaseChannel::Bundled,
+        &base(arch, false, false),
+        Some(0x1_0000),
+    );
+    std::fs::write(&path, &bytes).unwrap();
+    let read = || LaunchPlan::read(&path, arch, None, || Ok(48), 4, 128, None, None);
+    read().expect("the first overlay reservation fits");
+
+    edit_manifest(&mut bytes, |manifest| {
+        manifest["actions"].as_array_mut().unwrap().push(json!({
+            "type": "fill", "section": ".dtb", "gpa": 0x21_1000, "kind": "dt:dtbo"
+        }));
+    });
+    std::fs::write(&path, bytes).unwrap();
+    let err = read().unwrap_err();
+    assert!(matches!(err, LaunchError::DtboSynth(_)), "{err}");
+    assert!(err.to_string().contains("section size (4096 bytes)"));
 }
 
 #[test]

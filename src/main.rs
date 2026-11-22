@@ -1300,7 +1300,6 @@ mod placement {
 
 mod overlay {
 
-    use anyhow::{Result, anyhow};
     use dillo_machine::RamRange;
 
     use crate::fdt_writer::FdtBuilder;
@@ -1310,8 +1309,7 @@ mod overlay {
         vcpus: u32,
         enable_method: Option<&str>,
         cpu_compatible: Option<&str>,
-        reserved_size: u64,
-    ) -> Result<Vec<u8>> {
+    ) -> Vec<u8> {
         let mut fdt = FdtBuilder::new();
 
         // root
@@ -1370,15 +1368,7 @@ mod overlay {
 
         fdt.end_node(); // root
 
-        let bytes = fdt.finish();
-        if bytes.len() as u64 > reserved_size {
-            return Err(anyhow!(
-                "synthesized DTBO ({} bytes) exceeds reserved .dtbo section size ({} bytes)",
-                bytes.len(),
-                reserved_size
-            ));
-        }
-        Ok(bytes)
+        fdt.finish()
     }
 
     #[cfg(test)]
@@ -1388,7 +1378,7 @@ mod overlay {
         use super::*;
 
         fn synth(vcpus: u32, enable_method: Option<&str>, compatible: Option<&str>) -> Vec<u8> {
-            synthesize_dtbo(&[], vcpus, enable_method, compatible, 1 << 20).expect("synth")
+            synthesize_dtbo(&[], vcpus, enable_method, compatible)
         }
 
         fn pstr<N: NodeView>(node: &N, name: &str) -> Option<String> {
@@ -1471,6 +1461,7 @@ mod launch {
 
     use std::fs::File;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     use dillo_devtree::platform::{Arch, Machine as PlatformMachine, SurveyError};
     use dillo_machine::{CpuProfile, HostArchitecture};
@@ -1544,6 +1535,7 @@ mod launch {
     #[derive(Debug)]
     enum WriteSrc {
         Owned(Vec<u8>),
+        Shared(Arc<Vec<u8>>),
         Image { offset: usize, len: usize },
     }
 
@@ -1584,6 +1576,7 @@ mod launch {
         ) -> Result<(), RunError> {
             let data = match &self.data {
                 WriteSrc::Owned(v) => v.as_slice(),
+                WriteSrc::Shared(v) => v.as_slice(),
                 WriteSrc::Image { len: 0, .. } => &[],
                 WriteSrc::Image { offset, len } => pmi_bytes
                     .get(*offset..offset.saturating_add(*len))
@@ -1729,11 +1722,10 @@ mod launch {
             let guest_writes = guest_writes(
                 parsed.actions,
                 &memory,
-                platform.arch(),
                 cpu_compatible,
                 vcpus,
                 FillInputs {
-                    base_dtb: platform.dtb(),
+                    platform: &platform,
                     bundled_base,
                     bootconfig: bootconfig_path,
                 },
@@ -1852,7 +1844,7 @@ mod launch {
     }
 
     struct FillInputs<'a> {
-        base_dtb: &'a [u8],
+        platform: &'a PlatformMachine,
         bundled_base: Option<SectionInfo>,
         bootconfig: Option<&'a Path>,
     }
@@ -1860,12 +1852,16 @@ mod launch {
     fn guest_writes(
         actions: Vec<Action>,
         memory: &MemoryPlan,
-        arch: Arch,
         cpu_compatible: Option<&str>,
         vcpus: u32,
         inputs: FillInputs<'_>,
     ) -> Result<Vec<GuestWrite>, LaunchError> {
-        let base_dtb = inputs.base_dtb;
+        let base_size = inputs
+            .bundled_base
+            .map_or(inputs.platform.dtb().len() as u64, |section| {
+                section.file_size
+            });
+        let mut dtbo = None;
         let mut writes = Vec::with_capacity(actions.len());
         for action in actions {
             let source = action.source;
@@ -1885,29 +1881,36 @@ mod launch {
                 }
                 ActionKind::Load => (WriteSrc::image(source), 0, size - source.file_size),
                 ActionKind::Fill(FillKind::DtDtbo) => {
-                    let data = crate::overlay::synthesize_dtbo(
-                        memory.ranges(),
-                        vcpus,
-                        arch.cpu_enable_method(),
-                        cpu_compatible,
-                        source.virtual_size,
-                    )
-                    .map_err(LaunchError::DtboSynth)?;
-                    (WriteSrc::Owned(data), 0, 0)
+                    let data = dtbo.get_or_insert_with(|| {
+                        Arc::new(crate::overlay::synthesize_dtbo(
+                            memory.ranges(),
+                            vcpus,
+                            inputs.platform.arch().cpu_enable_method(),
+                            cpu_compatible,
+                        ))
+                    });
+                    if data.len() as u64 > source.virtual_size {
+                        return Err(LaunchError::DtboSynth(anyhow::anyhow!(
+                            "synthesized DTBO ({} bytes) exceeds reserved .dtbo section size ({} bytes)",
+                            data.len(),
+                            source.virtual_size
+                        )));
+                    }
+                    (WriteSrc::Shared(Arc::clone(data)), 0, 0)
                 }
                 ActionKind::Fill(FillKind::DtDtb) => {
                     // Deliver the resolved measured base into its reserved Zero
                     // section (detached/optional). The base was resolved once in
                     // `read` (out-of-band `--dtb`, or the bundled fallback).
-                    if base_dtb.len() as u64 > source.virtual_size {
+                    if base_size > source.virtual_size {
                         return Err(LaunchError::BaseDtbTooLarge {
-                            actual: base_dtb.len() as u64,
+                            actual: base_size,
                             cap: source.virtual_size,
                         });
                     }
                     let data = match inputs.bundled_base {
                         Some(source) => WriteSrc::image(source),
-                        None => WriteSrc::Owned(base_dtb.to_vec()),
+                        None => WriteSrc::Shared(inputs.platform.shared_dtb()),
                     };
                     (data, 0, 0)
                 }
