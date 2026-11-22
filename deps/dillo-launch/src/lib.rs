@@ -78,12 +78,8 @@ pub mod pmi_parse {
         #[error("PE has {actual} sections; cap is {cap}")]
         TooManySections { actual: usize, cap: usize },
 
-        #[error("PE section name `{name}` ({len} bytes) exceeds cap of {cap} bytes")]
-        SectionNameTooLong {
-            name: String,
-            len: usize,
-            cap: usize,
-        },
+        #[error("PE section name length {len} bytes exceeds cap of {cap} bytes")]
+        SectionNameTooLong { len: usize, cap: usize },
 
         #[error(
             "sum of loaded VirtualSize ({actual} bytes) exceeds cap of {cap} bytes \
@@ -455,7 +451,6 @@ pub mod pmi_parse {
                 return Err(Error::SectionNameTooLong {
                     len: name.len(),
                     cap: caps::MAX_SECTION_NAME_LEN,
-                    name: name.to_owned(),
                 });
             }
             let virtual_size = section.size();

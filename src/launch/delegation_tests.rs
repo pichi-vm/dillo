@@ -321,6 +321,44 @@ fn bundled_base_fill_checks_the_mapped_section_size() {
 }
 
 #[test]
+fn coff_section_name_obeys_the_length_cap() {
+    use dillo_launch::pmi_parse::{Error, caps::MAX_SECTION_NAME_LEN, parse};
+
+    let arch = HostArchitecture::X86_64;
+    let mut bytes = image(
+        arch,
+        BaseChannel::Bundled,
+        &base(arch, false, false),
+        Some(4096),
+    );
+    let table = bytes.len();
+    bytes[0x8c..0x90].copy_from_slice(&(table as u32).to_le_bytes());
+    // The unused .dtb section refers to the first COFF string at offset 4.
+    let section = 0x188 + 3 * 40;
+    bytes[section..section + 8].copy_from_slice(b"/4\0\0\0\0\0\0");
+    let opts = ParseOptions {
+        host_arch: pmi_arch(arch),
+        memory_mib: 4,
+    };
+    for len in [MAX_SECTION_NAME_LEN, MAX_SECTION_NAME_LEN + 1] {
+        bytes.truncate(table);
+        bytes.extend_from_slice(&((4 + len + 1) as u32).to_le_bytes());
+        bytes.resize(table + 4 + len, b'x');
+        bytes.push(0);
+        let result = parse(&bytes, &opts);
+        if len == MAX_SECTION_NAME_LEN {
+            result.expect("section name at cap");
+        } else {
+            assert!(matches!(
+                result,
+                Err(Error::SectionNameTooLong { len: actual, cap })
+                    if actual == len && cap == MAX_SECTION_NAME_LEN
+            ));
+        }
+    }
+}
+
+#[test]
 fn oversized_manifest_is_refused_before_decode() {
     use dillo_launch::pmi_parse::{Error, caps::MAX_MANIFEST_SIZE, parse};
 
