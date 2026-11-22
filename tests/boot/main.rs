@@ -1454,7 +1454,7 @@ fn boots_with_named_console_ports() {
 
     // Read the guest → host side while dillo runs, so a full pipe can never
     // wedge the boot.
-    let tx_reader = std::thread::spawn(move || {
+    let mut tx_reader = Some(std::thread::spawn(move || {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 256];
         let deadline = std::time::Instant::now() + Duration::from_secs(120);
@@ -1466,19 +1466,37 @@ fn boots_with_named_console_ports() {
             }
         }
         buf
-    });
+    }));
 
-    if child
+    let status = child
         .wait_timeout(Duration::from_secs(120))
-        .expect("wait dillo")
-        .is_none()
-    {
+        .expect("wait dillo");
+    if status.is_none() {
         let _ = child.kill();
         let _ = child.wait();
-        panic!("dillo boot timed out");
     }
     // Drop the write end so the reader thread sees EOF rather than blocking.
     drop(host_tx);
+
+    let mut read_named_tx = || tx_reader.take().unwrap().join().expect("tx reader thread");
+    let captured_tx = std::env::var_os("DILLO_NAMED_CONSOLE_EVIDENCE").map(|dir| {
+        use sha2::{Digest, Sha256};
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::copy(&out_path, dir.join("console.out")).expect("retain guest console bytes");
+        std::fs::copy(&err_path, dir.join("console.err")).expect("retain Dillo diagnostics");
+        std::fs::write(dir.join("vm-status.txt"), format!("{status:?}\n"))
+            .expect("retain VM status");
+        let named_tx = read_named_tx();
+        std::fs::write(dir.join("named-tx.raw"), &named_tx).expect("retain named pipe bytes");
+        let pmi = std::fs::read(&pmi).expect("read PMI for evidence hash");
+        std::fs::write(
+            dir.join("pmi-sha256.txt"),
+            format!("{:x}\n", Sha256::digest(pmi)),
+        )
+        .expect("retain PMI hash");
+        named_tx
+    });
+    assert!(status.is_some(), "dillo boot timed out");
 
     let mut output = std::fs::read_to_string(&out_path).unwrap_or_default();
     output.push_str(&std::fs::read_to_string(&err_path).unwrap_or_default());
@@ -1527,7 +1545,7 @@ fn boots_with_named_console_ports() {
         probe.wrote,
         "guest write to the named port failed: {probe:?}"
     );
-    let from_guest = tx_reader.join().expect("tx reader thread");
+    let from_guest = captured_tx.unwrap_or_else(read_named_tx);
     assert_eq!(
         String::from_utf8_lossy(&from_guest),
         FROM_GUEST,
