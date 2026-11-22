@@ -1300,7 +1300,6 @@ mod placement {
 
 mod overlay {
 
-    use anyhow::{Result, anyhow};
     use dillo_machine::RamRange;
 
     use crate::fdt_writer::FdtBuilder;
@@ -1310,8 +1309,7 @@ mod overlay {
         vcpus: u32,
         enable_method: Option<&str>,
         cpu_compatible: Option<&str>,
-        reserved_size: u64,
-    ) -> Result<Vec<u8>> {
+    ) -> Vec<u8> {
         let mut fdt = FdtBuilder::new();
 
         // root
@@ -1370,15 +1368,7 @@ mod overlay {
 
         fdt.end_node(); // root
 
-        let bytes = fdt.finish();
-        if bytes.len() as u64 > reserved_size {
-            return Err(anyhow!(
-                "synthesized DTBO ({} bytes) exceeds reserved .dtbo section size ({} bytes)",
-                bytes.len(),
-                reserved_size
-            ));
-        }
-        Ok(bytes)
+        fdt.finish()
     }
 
     #[cfg(test)]
@@ -1388,7 +1378,7 @@ mod overlay {
         use super::*;
 
         fn synth(vcpus: u32, enable_method: Option<&str>, compatible: Option<&str>) -> Vec<u8> {
-            synthesize_dtbo(&[], vcpus, enable_method, compatible, 1 << 20).expect("synth")
+            synthesize_dtbo(&[], vcpus, enable_method, compatible)
         }
 
         fn pstr<N: NodeView>(node: &N, name: &str) -> Option<String> {
@@ -1871,6 +1861,7 @@ mod launch {
             .map_or(inputs.platform.dtb().len() as u64, |section| {
                 section.file_size
             });
+        let mut dtbo = None;
         let mut writes = Vec::with_capacity(actions.len());
         for action in actions {
             let source = action.source;
@@ -1890,15 +1881,22 @@ mod launch {
                 }
                 ActionKind::Load => (WriteSrc::image(source), 0, size - source.file_size),
                 ActionKind::Fill(FillKind::DtDtbo) => {
-                    let data = crate::overlay::synthesize_dtbo(
-                        memory.ranges(),
-                        vcpus,
-                        inputs.platform.arch().cpu_enable_method(),
-                        cpu_compatible,
-                        source.virtual_size,
-                    )
-                    .map_err(LaunchError::DtboSynth)?;
-                    (WriteSrc::Owned(data), 0, 0)
+                    let data = dtbo.get_or_insert_with(|| {
+                        Arc::new(crate::overlay::synthesize_dtbo(
+                            memory.ranges(),
+                            vcpus,
+                            inputs.platform.arch().cpu_enable_method(),
+                            cpu_compatible,
+                        ))
+                    });
+                    if data.len() as u64 > source.virtual_size {
+                        return Err(LaunchError::DtboSynth(anyhow::anyhow!(
+                            "synthesized DTBO ({} bytes) exceeds reserved .dtbo section size ({} bytes)",
+                            data.len(),
+                            source.virtual_size
+                        )));
+                    }
+                    (WriteSrc::Shared(Arc::clone(data)), 0, 0)
                 }
                 ActionKind::Fill(FillKind::DtDtb) => {
                     // Deliver the resolved measured base into its reserved Zero
