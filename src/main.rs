@@ -176,7 +176,7 @@ fn main() {
         }
     };
     let launch::LaunchPlan {
-        parsed,
+        cpu_profile,
         platform,
         memory: memory_plan,
         guest_writes,
@@ -196,7 +196,7 @@ fn main() {
     };
 
     let preflight = runner::Preflight::new(
-        parsed,
+        cpu_profile,
         platform,
         memory_plan,
         guest_writes,
@@ -1473,13 +1473,15 @@ mod launch {
     use std::path::{Path, PathBuf};
 
     use dillo_devtree::platform::{Arch, Machine as PlatformMachine, SurveyError};
-    use dillo_machine::HostArchitecture;
+    use dillo_machine::{CpuProfile, HostArchitecture};
     use memmap2::{Mmap, MmapOptions};
     use thiserror::Error;
 
     use crate::placement::{self, MemoryPlan};
     use crate::runner::RunError;
-    use dillo_launch::pmi_parse::{ActionKind, FillKind, HostArch, ParseOptions, check_file_size};
+    use dillo_launch::pmi_parse::{
+        Action, ActionKind, FillKind, HostArch, ParseOptions, check_file_size,
+    };
 
     /// The opened PMI file used for launch and reboot replay.
     #[derive(Debug)]
@@ -1548,7 +1550,7 @@ mod launch {
     /// Target-neutral launch facts derived before backend construction.
     #[derive(Debug)]
     pub(crate) struct LaunchPlan {
-        pub(crate) parsed: dillo_launch::pmi_parse::ParsedPmi,
+        pub(crate) cpu_profile: CpuProfile,
         pub(crate) platform: PlatformMachine,
         pub(crate) memory: MemoryPlan,
         pub(crate) guest_writes: Vec<GuestWrite>,
@@ -1700,8 +1702,14 @@ mod launch {
                 memory_mib,
                 platform.placement_regions(),
             )?;
+            log::debug!(
+                "PMI parsed: arch={:?}, {} actions, dt:dtb source={:?}",
+                parsed.arch,
+                parsed.actions.len(),
+                parsed.dt_dtb_source.is_some()
+            );
             let guest_writes = guest_writes(
-                &parsed,
+                parsed.actions,
                 &memory,
                 platform.arch(),
                 cpu_compatible,
@@ -1717,7 +1725,7 @@ mod launch {
             // into the plan: raw section loads reference it by offset and are
             // copied straight from it into guest RAM at apply time (single copy).
             Ok(Self {
-                parsed,
+                cpu_profile: parsed.cpu_profile,
                 platform,
                 memory,
                 guest_writes,
@@ -1830,7 +1838,7 @@ mod launch {
     }
 
     fn guest_writes(
-        parsed: &dillo_launch::pmi_parse::ParsedPmi,
+        actions: Vec<Action>,
         memory: &MemoryPlan,
         arch: Arch,
         cpu_compatible: Option<&str>,
@@ -1838,8 +1846,8 @@ mod launch {
         inputs: FillInputs<'_>,
     ) -> Result<Vec<GuestWrite>, LaunchError> {
         let base_dtb = inputs.base_dtb;
-        let mut writes = Vec::with_capacity(parsed.actions.len());
-        for action in &parsed.actions {
+        let mut writes = Vec::with_capacity(actions.len());
+        for action in actions {
             let source = &action.source;
             // Parsing validated the enclosing backing extent.
             let size = source
@@ -1886,7 +1894,7 @@ mod launch {
                 }
             };
             writes.push(GuestWrite {
-                section: action.section.clone(),
+                section: action.section,
                 gpa: action.gpa,
                 data,
                 zero_tail,
@@ -2096,7 +2104,7 @@ mod machine_select {
         use super::machine as selected_machine;
         use dillo_devtree::platform::Machine as PlatformMachine;
         use dillo_devtree::platform::{MsiParentage, WiredInterrupt};
-        use dillo_machine::{LaunchConfig, Machine, VcpuStop};
+        use dillo_machine::{CpuProfile, LaunchConfig, Machine, VcpuStop};
         use dillo_mmio::syscon;
         use dillo_mmio::{
             Attach, InterruptSource, MessageInterruptSource, MmioAttachment,
@@ -2135,7 +2143,7 @@ mod machine_select {
         /// Target-neutral launch facts already derived by `dillo`.
         #[derive(Debug)]
         pub(crate) struct Preflight {
-            parsed: dillo_launch::pmi_parse::ParsedPmi,
+            cpu_profile: CpuProfile,
             platform: PlatformMachine,
             memory: MemoryPlan,
             guest_writes: Vec<GuestWrite>,
@@ -2145,7 +2153,7 @@ mod machine_select {
 
         impl Preflight {
             pub(crate) fn new(
-                parsed: dillo_launch::pmi_parse::ParsedPmi,
+                cpu_profile: CpuProfile,
                 platform: PlatformMachine,
                 memory: MemoryPlan,
                 guest_writes: Vec<GuestWrite>,
@@ -2153,7 +2161,7 @@ mod machine_select {
                 pmi: crate::launch::Pmi,
             ) -> Self {
                 Self {
-                    parsed,
+                    cpu_profile,
                     platform,
                     memory,
                     guest_writes,
@@ -2165,7 +2173,7 @@ mod machine_select {
             fn into_parts(
                 self,
             ) -> (
-                dillo_launch::pmi_parse::ParsedPmi,
+                CpuProfile,
                 PlatformMachine,
                 MemoryPlan,
                 Vec<GuestWrite>,
@@ -2173,7 +2181,7 @@ mod machine_select {
                 crate::launch::Pmi,
             ) {
                 (
-                    self.parsed,
+                    self.cpu_profile,
                     self.platform,
                     self.memory,
                     self.guest_writes,
@@ -2441,13 +2449,8 @@ mod machine_select {
             M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn MmioAttachment>>,
             M: Attach<Arc<syscon::SysconDevice>, Error = E>,
         {
-            let (parsed, platform, plan, guest_writes, placements, pmi) = preflight.into_parts();
-            log::debug!(
-                "PMI parsed: arch={:?}, {} actions, dt:dtb source={:?}",
-                parsed.arch,
-                parsed.actions.len(),
-                parsed.dt_dtb_source.is_some()
-            );
+            let (cpu_profile, platform, plan, guest_writes, placements, pmi) =
+                preflight.into_parts();
             log::debug!(
                 "coverage: base DTB fully claimed - {} declared region(s), pcie={}",
                 platform.plan().regions().len(),
@@ -2485,7 +2488,6 @@ mod machine_select {
             attach_devices(&mut vm, &platform, placements)?;
             drop(platform);
 
-            let cpu_profile = parsed.cpu_profile;
             crate::boot_trace::mark("guest_loaded");
             let mut outcome =
                 dillo_runtime::run_cpus(&mut vm, vcpus, cpu_profile, supervisor_shutdown)

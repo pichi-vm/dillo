@@ -371,12 +371,20 @@ fn repeated_actions_write_in_manifest_order() {
             .map(|r| (r.gpa, r.size))
             .collect();
         assert_eq!(ranges, [(0, 0x60_0000), (0x80_0000, 0x20_0000)]);
-        assert_eq!(plan.parsed.actions.len(), recipe.len());
+        let parsed = dillo_launch::pmi_parse::parse(
+            plan.pmi.bytes(),
+            &ParseOptions {
+                host_arch: pmi_arch(arch),
+                memory_mib: 8,
+            },
+        )
+        .unwrap();
+        assert_eq!(parsed.actions.len(), recipe.len());
         assert_eq!(plan.guest_writes.len(), recipe.len());
         let mut ram = vec![0xcc; 0x80_9000];
         for ((section, gpa, _, size), (action, write)) in recipe
             .into_iter()
-            .zip(plan.parsed.actions.iter().zip(&plan.guest_writes))
+            .zip(parsed.actions.iter().zip(&plan.guest_writes))
         {
             assert_eq!(
                 (&*action.section, action.gpa, action.source.virtual_size),
