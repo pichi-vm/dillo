@@ -1471,6 +1471,7 @@ mod launch {
 
     use std::fs::File;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     use dillo_devtree::platform::{Arch, Machine as PlatformMachine, SurveyError};
     use dillo_machine::{CpuProfile, HostArchitecture};
@@ -1544,6 +1545,7 @@ mod launch {
     #[derive(Debug)]
     enum WriteSrc {
         Owned(Vec<u8>),
+        Shared(Arc<Vec<u8>>),
         Image { offset: usize, len: usize },
     }
 
@@ -1584,6 +1586,7 @@ mod launch {
         ) -> Result<(), RunError> {
             let data = match &self.data {
                 WriteSrc::Owned(v) => v.as_slice(),
+                WriteSrc::Shared(v) => v.as_slice(),
                 WriteSrc::Image { len: 0, .. } => &[],
                 WriteSrc::Image { offset, len } => pmi_bytes
                     .get(*offset..offset.saturating_add(*len))
@@ -1729,11 +1732,10 @@ mod launch {
             let guest_writes = guest_writes(
                 parsed.actions,
                 &memory,
-                platform.arch(),
                 cpu_compatible,
                 vcpus,
                 FillInputs {
-                    base_dtb: platform.dtb(),
+                    platform: &platform,
                     bundled_base,
                     bootconfig: bootconfig_path,
                 },
@@ -1852,7 +1854,7 @@ mod launch {
     }
 
     struct FillInputs<'a> {
-        base_dtb: &'a [u8],
+        platform: &'a PlatformMachine,
         bundled_base: Option<SectionInfo>,
         bootconfig: Option<&'a Path>,
     }
@@ -1860,12 +1862,15 @@ mod launch {
     fn guest_writes(
         actions: Vec<Action>,
         memory: &MemoryPlan,
-        arch: Arch,
         cpu_compatible: Option<&str>,
         vcpus: u32,
         inputs: FillInputs<'_>,
     ) -> Result<Vec<GuestWrite>, LaunchError> {
-        let base_dtb = inputs.base_dtb;
+        let base_size = inputs
+            .bundled_base
+            .map_or(inputs.platform.dtb().len() as u64, |section| {
+                section.file_size
+            });
         let mut writes = Vec::with_capacity(actions.len());
         for action in actions {
             let source = action.source;
@@ -1888,7 +1893,7 @@ mod launch {
                     let data = crate::overlay::synthesize_dtbo(
                         memory.ranges(),
                         vcpus,
-                        arch.cpu_enable_method(),
+                        inputs.platform.arch().cpu_enable_method(),
                         cpu_compatible,
                         source.virtual_size,
                     )
@@ -1899,15 +1904,15 @@ mod launch {
                     // Deliver the resolved measured base into its reserved Zero
                     // section (detached/optional). The base was resolved once in
                     // `read` (out-of-band `--dtb`, or the bundled fallback).
-                    if base_dtb.len() as u64 > source.virtual_size {
+                    if base_size > source.virtual_size {
                         return Err(LaunchError::BaseDtbTooLarge {
-                            actual: base_dtb.len() as u64,
+                            actual: base_size,
                             cap: source.virtual_size,
                         });
                     }
                     let data = match inputs.bundled_base {
                         Some(source) => WriteSrc::image(source),
-                        None => WriteSrc::Owned(base_dtb.to_vec()),
+                        None => WriteSrc::Shared(inputs.platform.shared_dtb()),
                     };
                     (data, 0, 0)
                 }

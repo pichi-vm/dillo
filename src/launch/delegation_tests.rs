@@ -252,7 +252,16 @@ fn replay_uses_direct_slices_from_the_held_pmi() {
 fn optional_base_fill_uses_the_selected_source() {
     let arch = HostArchitecture::X86_64;
     let bundled = base(arch, false, false);
-    let (dir, fallback) = launch(arch, BaseChannel::Optional, &bundled, Some(4096), 1).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let image_path = dir.path().join("image.pmi");
+    let mut bytes = image(arch, BaseChannel::Optional, &bundled, Some(4096));
+    edit_manifest(&mut bytes, |manifest| {
+        manifest["actions"].as_array_mut().unwrap().push(json!({
+            "type": "fill", "section": ".dtb", "gpa": 0x20_2000, "kind": "dt:dtb"
+        }));
+    });
+    std::fs::write(&image_path, bytes).unwrap();
+    let fallback = LaunchPlan::read(&image_path, arch, None, || Ok(48), 4, 1, None, None).unwrap();
     let fallback_bytes = &fallback.pmi.bytes()[0x2000..0x2000 + bundled.len()];
     fallback.guest_writes[1]
         .apply(fallback.pmi.bytes(), |gpa, data| {
@@ -267,7 +276,7 @@ fn optional_base_fill_uses_the_selected_source() {
     external.push(0);
     std::fs::write(&override_path, &external).unwrap();
     let overridden = LaunchPlan::read(
-        &dir.path().join("image.pmi"),
+        &image_path,
         arch,
         None,
         || Ok(48),
@@ -277,13 +286,17 @@ fn optional_base_fill_uses_the_selected_source() {
         None,
     )
     .unwrap();
-    overridden.guest_writes[1]
-        .apply(overridden.pmi.bytes(), |gpa, data| {
-            assert_eq!(gpa, 0x20_0000);
-            assert_eq!(data, external);
-            Ok(())
-        })
-        .unwrap();
+    let surveyed = overridden.platform.dtb();
+    assert_eq!(surveyed, external);
+    for (index, expected_gpa) in [(1, 0x20_0000), (3, 0x20_2000)] {
+        overridden.guest_writes[index]
+            .apply(overridden.pmi.bytes(), |gpa, data| {
+                assert_eq!(gpa, expected_gpa);
+                assert!(std::ptr::eq(data, surveyed));
+                Ok(())
+            })
+            .unwrap();
+    }
 }
 
 #[test]

@@ -14,6 +14,8 @@
 //! claimed property ([`ResourcePlan::declare_from`]), so no constant can reach
 //! the resource plan.
 
+use std::sync::Arc;
+
 use devtree::{NodeView, OwnedNode, OwnedProperty, OwnedTree, PropertyView, Tree};
 use thiserror::Error;
 
@@ -551,7 +553,7 @@ impl Topology {
 /// read the same base bytes to configure their substrate.
 #[derive(Debug)]
 pub struct Machine {
-    dtb: Vec<u8>,
+    dtb: Arc<Vec<u8>>,
     arch: Arch,
     psci: Option<Psci>,
     pcie: Pcie,
@@ -612,7 +614,7 @@ impl Machine {
         plan.check_disjoint()?;
 
         Ok(Self {
-            dtb,
+            dtb: Arc::new(dtb),
             arch,
             psci,
             pcie,
@@ -628,6 +630,11 @@ impl Machine {
     /// The exact base DTB bytes supplied to [`Self::survey`].
     pub fn dtb(&self) -> &[u8] {
         &self.dtb
+    }
+
+    /// Share the surveyed base bytes without copying their allocation.
+    pub fn shared_dtb(&self) -> Arc<Vec<u8>> {
+        Arc::clone(&self.dtb)
     }
 
     pub fn arch(&self) -> Arch {
