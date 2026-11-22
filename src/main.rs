@@ -1469,131 +1469,72 @@ mod launch {
     #[cfg(test)]
     mod delegation_tests;
 
-    // The PMI File (fd) is held for the VM lifetime so the mapping — and any
-    // reboot re-map — is pinned to that inode, not re-resolved by path. Read/Seek
-    // are only used by the non-Linux read_to_end fallback (Linux mmaps the fd).
     use std::fs::File;
-    #[cfg(not(target_os = "linux"))]
-    use std::io::{Read, Seek};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use dillo_devtree::platform::{Arch, Machine as PlatformMachine, SurveyError};
     use dillo_machine::HostArchitecture;
+    use memmap2::{Mmap, MmapOptions};
     use thiserror::Error;
 
     use crate::placement::{self, MemoryPlan};
     use crate::runner::RunError;
     use dillo_launch::pmi_parse::{ActionKind, FillKind, HostArch, ParseOptions, check_file_size};
 
-    /// The PMI byte source. Raw section loads are copied straight from it into
-    /// guest RAM (one copy) instead of being staged into owned `Vec`s (two
-    /// copies). On Linux the backing is an mmap; elsewhere a `read_to_end`
-    /// buffer. The backing is resident only while sections are being copied:
-    /// after the initial load the caller [`release`](Pmi::release)s it so
-    /// the mapping does not stay resident for the VM's lifetime, and the rare
-    /// guest-reboot replay [`remap`](Pmi::remap)s it from `path`.
-    pub(crate) struct Pmi {
-        /// Held open for the VM lifetime: the mapping and any reboot re-map are
-        /// pinned to this fd's inode, so a replay is always the exact bytes that
-        /// were loaded and measured — never whatever the path resolves to later.
+    /// The opened PMI file used for launch and reboot replay.
+    #[derive(Debug)]
+    pub(crate) struct PmiFile {
         file: File,
-        /// Retained for error messages only; never used to re-open the file.
-        path: std::path::PathBuf,
-        backing: Option<PmiBacking>,
+        /// Path used in diagnostics.
+        path: PathBuf,
     }
 
-    enum PmiBacking {
-        #[cfg(target_os = "linux")]
-        Mapped(mmarinus::Map<mmarinus::perms::Read>),
-        #[cfg(not(target_os = "linux"))]
-        Owned(Vec<u8>),
+    impl PmiFile {
+        #[allow(unsafe_code)]
+        pub(crate) fn map(&self) -> Result<Mmap, LaunchError> {
+            let read_error = |source| LaunchError::ReadPmi {
+                path: self.path.display().to_string(),
+                source,
+            };
+            let len = self.file.metadata().map_err(read_error)?.len();
+            check_file_size(len)?;
+            let len =
+                usize::try_from(len).map_err(|error| read_error(std::io::Error::other(error)))?;
+            // SAFETY: The CLI input contract requires the caller to keep this
+            // file unchanged throughout the VM lifecycle. Dillo opens it
+            // read-only and uses the mapping only for launch and replay.
+            unsafe { MmapOptions::new().len(len).map(&self.file) }.map_err(read_error)
+        }
+    }
+
+    /// The initial read-only view, held until the launch writes complete.
+    #[derive(Debug)]
+    pub(crate) struct Pmi {
+        source: PmiFile,
+        view: Mmap,
     }
 
     impl Pmi {
-        /// Open the PMI at `path`, hold the fd, and map (Linux) / read (other) it
-        /// resident.
         pub(crate) fn open(path: &Path) -> Result<Self, LaunchError> {
             let file = File::open(path).map_err(|source| LaunchError::ReadPmi {
                 path: path.display().to_string(),
                 source,
             })?;
-            let mut img = Pmi {
+            let source = PmiFile {
                 file,
                 path: path.to_path_buf(),
-                backing: None,
             };
-            img.remap()?;
-            Ok(img)
+            let view = source.map()?;
+            Ok(Self { source, view })
         }
 
-        /// (Re-)acquire the backing store from the held fd. Used for the initial
-        /// load and to replay launch writes on guest reboot after a [`release`].
-        pub(crate) fn remap(&mut self) -> Result<(), LaunchError> {
-            // Owned label up front so the error path doesn't borrow `self` while
-            // we mutably borrow `self.file` for the mapping.
-            let path = self.path.display().to_string();
-            let len = self
-                .file
-                .metadata()
-                .map_err(|source| LaunchError::ReadPmi {
-                    path: path.clone(),
-                    source,
-                })?
-                .len();
-            check_file_size(len)?;
-            #[cfg(target_os = "linux")]
-            {
-                let m = mmarinus::Map::bytes(len as usize)
-                    .anywhere()
-                    .from(&mut self.file, 0)
-                    .with(mmarinus::perms::Read)
-                    .map_err(|e| LaunchError::ReadPmi {
-                        path: path.clone(),
-                        source: std::io::Error::other(format!("mmap: {e:?}")),
-                    })?;
-                self.backing = Some(PmiBacking::Mapped(m));
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                self.file.rewind().map_err(|source| LaunchError::ReadPmi {
-                    path: path.clone(),
-                    source,
-                })?;
-                let mut b = Vec::new();
-                self.file
-                    .read_to_end(&mut b)
-                    .map_err(|source| LaunchError::ReadPmi {
-                        path: path.clone(),
-                        source,
-                    })?;
-                self.backing = Some(PmiBacking::Owned(b));
-            }
-            Ok(())
-        }
-
-        /// Drop the backing store (munmap on Linux), freeing its resident pages
-        /// while keeping the fd open for a possible reboot re-map. Safe to call
-        /// once sections have been copied into guest RAM.
-        pub(crate) fn release(&mut self) {
-            self.backing = None;
+        pub(crate) fn release(self) -> PmiFile {
+            drop(self.view);
+            self.source
         }
 
         pub(crate) fn bytes(&self) -> &[u8] {
-            match self.backing.as_ref().expect("PMI backing released") {
-                #[cfg(target_os = "linux")]
-                PmiBacking::Mapped(m) => &m[..],
-                #[cfg(not(target_os = "linux"))]
-                PmiBacking::Owned(v) => v,
-            }
-        }
-    }
-
-    impl std::fmt::Debug for Pmi {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match &self.backing {
-                Some(_) => write!(f, "Pmi({} bytes, resident)", self.bytes().len()),
-                None => write!(f, "Pmi(released)"),
-            }
+            &self.view
         }
     }
 
@@ -1664,7 +1605,7 @@ mod launch {
     }
 
     impl LaunchPlan {
-        /// Read a PMI file, validate target-neutral launch facts, and compute RAM
+        /// Map a PMI file, validate target-neutral launch facts, and compute RAM
         /// placement from the DTB-declared platform.
         #[allow(clippy::too_many_arguments)]
         pub(crate) fn read(
@@ -1677,15 +1618,6 @@ mod launch {
             base_dtb_path: Option<&Path>,
             bootconfig_path: Option<&Path>,
         ) -> Result<Self, LaunchError> {
-            // Map the PMI read-only rather than reading it whole. The PMI
-            // granularity spec places sections at aligned offsets precisely so a
-            // VMM can map the file and touch only the section bytes; a 70MB PMI is
-            // mostly 2M zero padding that read_to_end would copy needlessly. On
-            // Linux we mmap via mmarinus (safe wrapper — no caller unsafe, so the
-            // workspace unsafe_code=deny lint still holds); other hosts fall back
-            // to read_to_end. `bytes` borrows the backing store, which lives for
-            // the rest of this function (its data is copied into owned buffers by
-            // parse/guest_writes before we return), so nothing escapes the map.
             let pmi = Pmi::open(pmi_path)?;
             let bytes: &[u8] = pmi.bytes();
 
@@ -2016,6 +1948,27 @@ mod launch {
                 Pmi::open(file.path()),
                 Err(LaunchError::PmiParse(Error::FileTooLarge { actual, cap }))
                     if actual == size && cap == MAX_FILE_SIZE
+            ));
+        }
+
+        #[test]
+        fn empty_pmi_is_refused_before_backend_probe() {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let result = LaunchPlan::read(
+                file.path(),
+                HostArchitecture::X86_64,
+                None,
+                || panic!("empty PMI must fail before probing a backend"),
+                4,
+                1,
+                None,
+                None,
+            );
+            assert!(matches!(
+                result,
+                Err(LaunchError::PmiParse(
+                    dillo_launch::pmi_parse::Error::PeParse(_)
+                ))
             ));
         }
 
@@ -2488,8 +2441,7 @@ mod machine_select {
             M: Attach<Arc<dillo_mmio_uart::Ns16550>, Error = E, Output = Arc<dyn MmioAttachment>>,
             M: Attach<Arc<syscon::SysconDevice>, Error = E>,
         {
-            let (parsed, platform, plan, guest_writes, placements, mut pmi) =
-                preflight.into_parts();
+            let (parsed, platform, plan, guest_writes, placements, pmi) = preflight.into_parts();
             log::debug!(
                 "PMI parsed: arch={:?}, {} actions, dt:dtb source={:?}",
                 parsed.arch,
@@ -2525,9 +2477,7 @@ mod machine_select {
                     vm.write_guest(gpa, data).map_err(RunError::machine)
                 })?;
             }
-            // Sections are now in guest RAM; drop the PMI backing so it does not
-            // stay resident for the VM's lifetime. A guest reboot re-maps it.
-            pmi.release();
+            let pmi = pmi.release();
             crate::boot_trace::mark("sections_loaded");
 
             attach_uart(&mut vm, &platform)?;
@@ -2543,15 +2493,13 @@ mod machine_select {
             while matches!(outcome, VcpuStop::GuestReset) {
                 log::info!("guest requested reboot - replaying launch writes");
                 vm.reset_for_reboot().map_err(RunError::machine)?;
-                // Re-map the PMI just to replay the raw section loads, then drop
-                // it again — it is not held resident between boots.
-                pmi.remap().map_err(RunError::machine)?;
+                let view = pmi.map().map_err(RunError::machine)?;
                 for write in &guest_writes {
-                    write.apply(pmi.bytes(), |gpa, data| {
+                    write.apply(&view, |gpa, data| {
                         vm.write_guest(gpa, data).map_err(RunError::machine)
                     })?;
                 }
-                pmi.release();
+                drop(view);
                 outcome = dillo_runtime::run_cpus(&mut vm, vcpus, cpu_profile, supervisor_shutdown)
                     .map_err(RunError::machine)?;
             }
