@@ -210,6 +210,45 @@ fn launch(
 }
 
 #[test]
+fn replay_uses_direct_slices_from_the_held_pmi() {
+    let arch = HostArchitecture::X86_64;
+    let (dir, plan) = launch(
+        arch,
+        BaseChannel::Bundled,
+        &base(arch, false, false),
+        Some(4096),
+        1,
+    )
+    .unwrap();
+    let check_section = |bytes: &[u8]| {
+        let expected = &bytes[0x20_0000..0x20_1000];
+        let mut data_writes = 0;
+        plan.guest_writes[0]
+            .apply(bytes, |gpa, data| {
+                if gpa < 0x1000 {
+                    assert_eq!(gpa, 0);
+                    assert!(std::ptr::eq(data, expected));
+                    data_writes += 1;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(data_writes, 1);
+    };
+
+    check_section(plan.pmi.bytes());
+    let file = plan.pmi.release();
+
+    // Renaming the stable image must keep replay tied to the opened file.
+    let path = dir.path().join("image.pmi");
+    std::fs::rename(&path, dir.path().join("original.pmi")).unwrap();
+    std::fs::write(&path, b"replacement pathname").unwrap();
+    let replay = file.map().unwrap();
+    assert_eq!(&replay[..2], b"MZ");
+    check_section(&replay);
+}
+
+#[test]
 fn section_loads_clear_zero_pages_and_padded_tails() {
     let arch = HostArchitecture::X86_64;
     let mut bytes = image(
