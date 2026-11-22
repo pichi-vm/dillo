@@ -29,57 +29,57 @@ pub(crate) enum Error {
 
 pub(super) struct Reservation {
     pub(super) bytes: Vec<u8>,
+    pub(super) zero_prefix: u64,
 }
 
 impl Reservation {
-    /// Snapshot the input once, after PMI memory bounds have been validated.
-    /// The complete buffer is retained as a launch write for reboot replay.
+    /// Read the input once and retain its framed bytes for reboot replay.
     pub(super) fn read(capacity: u64, path: Option<&Path>) -> Result<Self, Error> {
         let capacity = usize::try_from(capacity).map_err(|_| Error::Bounds)?;
-        // One extra byte detects oversized input without reading an unbounded
-        // file. Use the reservation itself as the read buffer, then move the
-        // text to its final position without a second allocation.
+        // One extra byte detects oversized input while bounding the read.
         let limit = capacity.checked_add(1).ok_or(Error::Bounds)?;
         let mut bytes = Vec::new();
-        bytes.try_reserve_exact(limit)?;
-        bytes.resize(limit, 0);
-        let len = if let Some(path) = path {
+        if let Some(path) = path {
             let read_error = |source| Error::Read {
                 path: path.to_path_buf(),
                 source,
             };
-            let mut file = File::open(path).map_err(read_error)?.take(limit as u64);
-            std::io::copy(&mut file, &mut bytes.as_mut_slice()).map_err(read_error)? as usize
+            File::open(path)
+                .map_err(read_error)?
+                .take(limit as u64)
+                .read_to_end(&mut bytes)
+                .map_err(read_error)?;
+        }
+        let zero_prefix = if bytes.is_empty() {
+            capacity
         } else {
-            0
+            Self::frame(&mut bytes, capacity)?
         };
-        bytes.truncate(capacity);
-        Self::frame(&mut bytes, len)?;
-        Ok(Self { bytes })
+        Ok(Self {
+            bytes,
+            zero_prefix: zero_prefix as u64,
+        })
     }
 
-    fn frame(bytes: &mut [u8], len: usize) -> Result<(), Error> {
-        if len == 0 {
-            return Ok(());
-        }
+    fn frame(bytes: &mut Vec<u8>, capacity: usize) -> Result<usize, Error> {
         // Include the terminating NUL and pad to Linux's four-byte alignment.
         // Only wire-field and reservation bounds apply here, not parser limits.
-        let size = len.checked_add(4).ok_or(Error::Bounds)? & !3;
+        let size = bytes.len().checked_add(4).ok_or(Error::Bounds)? & !3;
         let wire_size = u32::try_from(size).map_err(|_| Error::Bounds)?;
-        let footer = bytes.len().checked_sub(FOOTER_SIZE).ok_or(Error::Bounds)?;
-        let start = footer.checked_sub(size).ok_or(Error::Bounds)?;
-        if !bytes.len().is_multiple_of(4) {
+        let frame_size = size.checked_add(FOOTER_SIZE).ok_or(Error::Bounds)?;
+        let zero_prefix = capacity.checked_sub(frame_size).ok_or(Error::Bounds)?;
+        if !capacity.is_multiple_of(4) {
             return Err(Error::Bounds);
         }
-        let checksum = bytes[..len]
+        let checksum = bytes
             .iter()
             .fold(0u32, |sum, byte| sum.wrapping_add(u32::from(*byte)));
-        bytes.copy_within(..len, start);
-        bytes[..start].fill(0);
-        bytes[footer..footer + 4].copy_from_slice(&wire_size.to_le_bytes());
-        bytes[footer + 4..footer + 8].copy_from_slice(&checksum.to_le_bytes());
-        bytes[footer + 8..].copy_from_slice(MAGIC);
-        Ok(())
+        bytes.try_reserve_exact(frame_size - bytes.len())?;
+        bytes.resize(size, 0);
+        bytes.extend_from_slice(&wire_size.to_le_bytes());
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+        bytes.extend_from_slice(MAGIC);
+        Ok(zero_prefix)
     }
 }
 
@@ -102,17 +102,19 @@ mod tests {
             b"a=x;",
             b"invalid } syntax\0hidden",
         ] {
-            let bytes = read(text, 4096).unwrap().bytes;
+            let reservation = read(text, 4096).unwrap();
+            let bytes = reservation.bytes;
             assert_eq!(bytes, read(text, 4096).unwrap().bytes);
-            assert_eq!(&bytes[4084..], MAGIC);
-            let size = u32::from_le_bytes(bytes[4076..4080].try_into().unwrap()) as usize;
+            assert_eq!(reservation.zero_prefix + bytes.len() as u64, 4096);
+            let footer = bytes.len() - FOOTER_SIZE;
+            assert_eq!(&bytes[footer + 8..], MAGIC);
+            let size = u32::from_le_bytes(bytes[footer..footer + 4].try_into().unwrap()) as usize;
             assert_eq!(size, (text.len() + 4) & !3);
-            let start = 4076 - size;
-            assert_eq!(&bytes[start..start + text.len()], text);
-            assert!(bytes[..start].iter().all(|b| *b == 0));
-            assert!(bytes[start + text.len()..4076].iter().all(|b| *b == 0));
+            assert_eq!(size, footer);
+            assert_eq!(&bytes[..text.len()], text);
+            assert!(bytes[text.len()..footer].iter().all(|b| *b == 0));
             assert_eq!(
-                u32::from_le_bytes(bytes[4080..4084].try_into().unwrap()),
+                u32::from_le_bytes(bytes[footer + 4..footer + 8].try_into().unwrap()),
                 text.iter().map(|b| u32::from(*b)).sum::<u32>()
             );
         }
@@ -121,10 +123,13 @@ mod tests {
     #[test]
     fn empty_is_zero_and_explicit_unreadable_input_is_an_error() {
         for capacity in [1, 23, 4096, 4 * 1024 * 1024] {
-            let absent = Reservation::read(capacity, None).unwrap().bytes;
-            assert_eq!(absent.len() as u64, capacity);
-            assert!(absent.iter().all(|b| *b == 0));
-            assert_eq!(absent, read(b"", capacity).unwrap().bytes);
+            for reservation in [
+                Reservation::read(capacity, None).unwrap(),
+                read(b"", capacity).unwrap(),
+            ] {
+                assert_eq!(reservation.zero_prefix, capacity);
+                assert!(reservation.bytes.is_empty());
+            }
         }
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(
@@ -144,10 +149,6 @@ mod tests {
         let text = vec![b'x'; 65536];
         assert!(read(&text, 128 * 1024).is_ok());
         assert!(read(&text, 4 * 1024 * 1024).is_ok());
-        assert!(matches!(
-            Reservation::frame(&mut [0; 24], usize::MAX),
-            Err(Error::Bounds)
-        ));
     }
 
     #[test]
@@ -155,7 +156,8 @@ mod tests {
         let text = vec![255; (u32::MAX as u64 / 255 + 2) as usize];
         let capacity = (text.len() + 4 + FOOTER_SIZE + 3) & !3;
         let bytes = read(&text, capacity as u64).unwrap().bytes;
-        let checksum = u32::from_le_bytes(bytes[capacity - 16..capacity - 12].try_into().unwrap());
+        let end = bytes.len();
+        let checksum = u32::from_le_bytes(bytes[end - 16..end - 12].try_into().unwrap());
         assert_eq!(checksum, 509);
     }
 }

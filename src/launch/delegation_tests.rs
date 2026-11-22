@@ -655,7 +655,9 @@ fn with_bootconfig(mut bytes: Vec<u8>, gpas: &[u64], capacity: u32, raw_size: u3
 
 #[test]
 fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
-    const CAPACITY: usize = 0x1004;
+    const GPA: u64 = 0x40_0000;
+    const CAPACITY: usize = 0x20_0004;
+    const ALIGNED_SIZE: usize = 0x20_1000;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("image.pmi");
     let input = dir.path().join("input.bconf");
@@ -663,7 +665,7 @@ fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
         let base = base(arch, false, false);
         let bytes = with_bootconfig(
             image(arch, BaseChannel::Bundled, &base, Some(4096)),
-            &[0x20_2000],
+            &[GPA],
             CAPACITY as u32,
             0,
         );
@@ -673,41 +675,44 @@ fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
                 std::fs::write(&input, text).unwrap();
                 input.as_path()
             });
-            let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 4, 1, None, file).unwrap();
+            let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 8, 1, None, file).unwrap();
             let write = plan.guest_writes.last().unwrap();
             assert_eq!(write.section, ".config");
-            assert_eq!(write.gpa, 0x20_2000);
+            assert_eq!(write.gpa, GPA);
             let WriteSrc::Owned(data) = &write.data else {
                 panic!("bootconfig must be retained for reboot")
             };
-            assert_eq!(data.len(), CAPACITY);
-            if text.is_none_or(<[u8]>::is_empty) {
-                assert!(data.iter().all(|b| *b == 0));
+            assert!(data.capacity() < 4096);
+            let text = text.unwrap_or_default();
+            if text.is_empty() {
+                assert!(data.is_empty());
             } else {
-                assert!(
-                    data.windows(text.unwrap().len())
-                        .any(|window| Some(window) == text)
-                );
+                assert_eq!(data.len(), ((text.len() + 4) & !3) + 20);
+                assert!(data.starts_with(text));
                 assert!(data.ends_with(b"#BOOTCONFIG\n"));
             }
-            let mut ram = [0xcc; 0x2002];
-            write
-                .apply(plan.pmi.bytes(), |gpa, bytes| {
-                    let start = (gpa - 0x20_2000) as usize + 1;
-                    ram[start..start + bytes.len()].copy_from_slice(bytes);
-                    Ok(())
-                })
-                .unwrap();
-            assert_eq!(&ram[1..=CAPACITY], data);
-            assert!(ram[1 + CAPACITY..=0x2000].iter().all(|&b| b == 0));
-            assert_eq!((ram[0], ram[0x2001]), (0xcc, 0xcc));
-            let snapshot = data.clone();
+            let apply = |ram: &mut [u8]| {
+                write
+                    .apply(plan.pmi.bytes(), |gpa, bytes| {
+                        let start = (gpa - GPA) as usize + 1;
+                        ram[start..start + bytes.len()].copy_from_slice(bytes);
+                        Ok(())
+                    })
+                    .unwrap();
+            };
+            let mut ram = vec![0xcc; ALIGNED_SIZE + 2];
+            apply(&mut ram);
+            let reservation = &ram[1..=CAPACITY];
+            let payload_start = CAPACITY - data.len();
+            assert!(reservation[..payload_start].iter().all(|&b| b == 0));
+            assert_eq!(&reservation[payload_start..], data);
+            assert!(ram[1 + CAPACITY..=ALIGNED_SIZE].iter().all(|&b| b == 0));
+            assert_eq!((ram[0], ram[ALIGNED_SIZE + 1]), (0xcc, 0xcc));
             std::fs::write(&input, b"changed after preflight").unwrap();
             std::fs::remove_file(&input).unwrap();
-            assert_eq!(
-                data, &snapshot,
-                "reboot uses owned launch bytes, not the file"
-            );
+            let mut replay = vec![0xcc; ALIGNED_SIZE + 2];
+            apply(&mut replay);
+            assert_eq!(replay, ram);
             assert_eq!(plan.platform.dtb(), base);
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
         }
