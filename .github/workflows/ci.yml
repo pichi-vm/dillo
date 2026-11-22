@@ -28,7 +28,9 @@ jobs:
         run: |
           set -euo pipefail
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rust-src
-          rustup target add x86_64-unknown-none aarch64-unknown-none aarch64-unknown-linux-musl
+          rustup target add aarch64-unknown-none-softfloat aarch64-unknown-linux-musl
+          rustup show active-toolchain
+          rustup target list --installed
 
       - name: Compare five native boots per revision
         shell: bash
