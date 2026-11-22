@@ -249,6 +249,28 @@ fn replay_uses_direct_slices_from_the_held_pmi() {
 }
 
 #[test]
+fn oversized_manifest_is_refused_before_decode() {
+    use dillo_launch::pmi_parse::{Error, caps::MAX_MANIFEST_SIZE, parse};
+
+    let arch = HostArchitecture::X86_64;
+    let mut bytes = image(arch, BaseChannel::Bundled, &base(arch, false, false), None);
+    let size = (MAX_MANIFEST_SIZE + 1) as u32;
+    for range in [0x190..0x194, 0x198..0x19c] {
+        bytes[range].copy_from_slice(&size.to_le_bytes());
+    }
+    bytes[0x1000] = 0xff;
+    let opts = ParseOptions {
+        host_arch: pmi_arch(arch),
+        memory_mib: 4,
+    };
+    assert!(matches!(
+        parse(&bytes, &opts),
+        Err(Error::ManifestTooLarge { actual, cap, .. })
+            if actual == size as usize && cap == MAX_MANIFEST_SIZE
+    ));
+}
+
+#[test]
 fn section_loads_clear_zero_pages_and_padded_tails() {
     let arch = HostArchitecture::X86_64;
     let mut bytes = image(
