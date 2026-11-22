@@ -13,7 +13,7 @@ pub mod pmi_parse {
 
     pub mod caps {
 
-        /// Maximum PMI file size: 4 GiB. Refused before any read.
+        /// Maximum PMI file size: 4 GiB.
         pub const MAX_FILE_SIZE: u64 = 4 << 30;
 
         /// Maximum `.pmi.<target>` manifest size: 4 KiB.
@@ -78,12 +78,8 @@ pub mod pmi_parse {
         #[error("PE has {actual} sections; cap is {cap}")]
         TooManySections { actual: usize, cap: usize },
 
-        #[error("PE section name `{name}` ({len} bytes) exceeds cap of {cap} bytes")]
-        SectionNameTooLong {
-            name: String,
-            len: usize,
-            cap: usize,
-        },
+        #[error("PE section name length {len} bytes exceeds cap of {cap} bytes")]
+        SectionNameTooLong { len: usize, cap: usize },
 
         #[error(
             "sum of loaded VirtualSize ({actual} bytes) exceeds cap of {cap} bytes \
@@ -266,18 +262,23 @@ pub mod pmi_parse {
         pub dt_dtb_source: Option<SectionInfo>,
     }
 
-    /// Parse and validate a PMI file's bytes.
-    ///
-    /// See `dillo/ARCHITECTURE.md` §5.
-    pub fn parse(bytes: &[u8], opts: &ParseOptions) -> Result<ParsedPmi, Error> {
-        // §5.2 file-size cap.
-        let file_size = bytes.len() as u64;
+    /// Refuse oversized input before acquiring or parsing its bytes.
+    pub fn check_file_size(file_size: u64) -> Result<(), Error> {
         if file_size > caps::MAX_FILE_SIZE {
             return Err(Error::FileTooLarge {
                 actual: file_size,
                 cap: caps::MAX_FILE_SIZE,
             });
         }
+        Ok(())
+    }
+
+    /// Parse and validate a PMI file's bytes.
+    ///
+    /// See `dillo/ARCHITECTURE.md` §5.
+    pub fn parse(bytes: &[u8], opts: &ParseOptions) -> Result<ParsedPmi, Error> {
+        let file_size = bytes.len() as u64;
+        check_file_size(file_size)?;
 
         // PE parse via `object`.
         let pe = PeFile64::parse(bytes).map_err(|e| Error::PeParse(e.to_string()))?;
@@ -289,7 +290,7 @@ pub mod pmi_parse {
         }
 
         // Enumerate sections once into a typed table.
-        let raw_sections = collect_sections(&pe, file_size, bytes)?;
+        let raw_sections = collect_sections(&pe, file_size)?;
 
         // Locate `.pmi.vm` (MVP — only `vm` target is supported).
         let target_section_name = Spec::<x86_64::Profile>::SECTION;
@@ -301,17 +302,24 @@ pub mod pmi_parse {
             })?;
 
         // §5.2 manifest-size cap.
-        if target_section.body.len() > caps::MAX_MANIFEST_SIZE {
+        let manifest_size = target_section.info.file_size as usize;
+        if manifest_size > caps::MAX_MANIFEST_SIZE {
             return Err(Error::ManifestTooLarge {
                 section: target_section_name.to_string(),
-                actual: target_section.body.len(),
+                actual: manifest_size,
                 cap: caps::MAX_MANIFEST_SIZE,
             });
         }
 
+        let manifest = if manifest_size == 0 {
+            &[]
+        } else {
+            let start = target_section.info.file_offset as usize;
+            &bytes[start..start + manifest_size]
+        };
         // Strict CBOR decode (depth-limited) into the architecture-specific profile.
         let (cpu_profile, actions_raw, dt_dtb_attr) =
-            decode_manifest_bytes(&target_section.body, opts.host_arch)?;
+            decode_manifest_bytes(manifest, opts.host_arch)?;
         let actions = resolve_actions(actions_raw, &raw_sections)?;
 
         if dt_dtb_attr.is_none()
@@ -324,7 +332,7 @@ pub mod pmi_parse {
         let dt_dtb_source = dt_dtb_attr
             .map(|section| {
                 raw_sections
-                    .get(&section)
+                    .get(section.as_str())
                     .map(|s| s.info)
                     .ok_or(Error::DtDtbSectionMissing { section })
             })
@@ -379,10 +387,6 @@ pub mod pmi_parse {
         info: SectionInfo,
         raw_size: u64,
         is_discardable: bool,
-        /// The on-disk bytes for non-loaded sections (e.g., the CBOR
-        /// manifest). Empty for loaded sections — those are read by the
-        /// caller via `file_offset` + `file_size`.
-        body: Vec<u8>,
     }
 
     fn machine_value(pe: &PeFile64<'_>) -> u16 {
@@ -426,30 +430,27 @@ pub mod pmi_parse {
         ));
     }
 
-    fn collect_sections(
-        pe: &PeFile64<'_>,
+    fn collect_sections<'data>(
+        pe: &PeFile64<'data>,
         file_size: u64,
-        bytes: &[u8],
-    ) -> Result<BTreeMap<String, RawSection>, Error> {
-        let sections: Vec<_> = pe.sections().collect();
-        if sections.len() > caps::MAX_SECTION_COUNT {
+    ) -> Result<BTreeMap<&'data str, RawSection>, Error> {
+        let count = pe.section_table().len();
+        if count > caps::MAX_SECTION_COUNT {
             return Err(Error::TooManySections {
-                actual: sections.len(),
+                actual: count,
                 cap: caps::MAX_SECTION_COUNT,
             });
         }
 
-        let mut out: BTreeMap<String, RawSection> = BTreeMap::new();
-        for section in sections {
+        let mut out = BTreeMap::new();
+        for section in pe.sections() {
             let name = section
                 .name()
-                .map_err(|e| Error::PeParse(format!("section name decode: {e}")))?
-                .to_string();
+                .map_err(|e| Error::PeParse(format!("section name decode: {e}")))?;
             if name.len() > caps::MAX_SECTION_NAME_LEN {
                 return Err(Error::SectionNameTooLong {
                     len: name.len(),
                     cap: caps::MAX_SECTION_NAME_LEN,
-                    name,
                 });
             }
             let virtual_size = section.size();
@@ -462,7 +463,7 @@ pub mod pmi_parse {
             if file_size_field > 0 {
                 let end = file_offset.checked_add(file_size_field).ok_or_else(|| {
                     Error::SectionDataPastEof {
-                        name: name.clone(),
+                        name: name.to_owned(),
                         offset: file_offset,
                         end: u64::MAX,
                         file_size,
@@ -470,7 +471,7 @@ pub mod pmi_parse {
                 })?;
                 if end > file_size {
                     return Err(Error::SectionDataPastEof {
-                        name: name.clone(),
+                        name: name.to_owned(),
                         offset: file_offset,
                         end,
                         file_size,
@@ -484,19 +485,10 @@ pub mod pmi_parse {
             };
             let is_discardable = (characteristics & object::pe::IMAGE_SCN_MEM_DISCARDABLE) != 0;
 
-            // Capture body bytes only for non-loaded sections (small, currently
-            // just the manifest). Loaded-section bytes stay in `bytes` and the
-            // caller reads them via offset+size to avoid copies.
-            let body = if is_discardable && file_size_field > 0 {
-                let start = file_offset as usize;
-                let end = start + file_size_field as usize;
-                bytes[start..end].to_vec()
-            } else {
-                Vec::new()
-            };
-
-            if out.contains_key(&name) && name.starts_with(".pmi.") {
-                return Err(Error::DuplicatePmiTargetSection { section: name });
+            if out.contains_key(name) && name.starts_with(".pmi.") {
+                return Err(Error::DuplicatePmiTargetSection {
+                    section: name.to_owned(),
+                });
             }
 
             out.insert(
@@ -509,7 +501,6 @@ pub mod pmi_parse {
                     },
                     raw_size: u64::from(raw_size),
                     is_discardable,
-                    body,
                 },
             );
         }
@@ -612,7 +603,7 @@ pub mod pmi_parse {
 
     fn resolve_actions(
         raw: Vec<ManifestAction>,
-        sections: &BTreeMap<String, RawSection>,
+        sections: &BTreeMap<&str, RawSection>,
     ) -> Result<Vec<Action>, Error> {
         let mut actions = Vec::with_capacity(raw.len());
         let mut has_bootconfig_fill = false;
@@ -625,7 +616,7 @@ pub mod pmi_parse {
                     ActionKind::Fill(translate_fill_kind(fill.kind)),
                 ),
             };
-            let Some(raw_section) = sections.get(&section) else {
+            let Some(raw_section) = sections.get(section.as_str()) else {
                 return Err(Error::ManifestReferencesMissingSection { section });
             };
             let source = raw_section.info;

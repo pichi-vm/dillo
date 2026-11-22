@@ -210,6 +210,177 @@ fn launch(
 }
 
 #[test]
+fn replay_uses_direct_slices_from_the_held_pmi() {
+    let arch = HostArchitecture::X86_64;
+    let (dir, plan) = launch(
+        arch,
+        BaseChannel::Bundled,
+        &base(arch, false, false),
+        Some(4096),
+        1,
+    )
+    .unwrap();
+    let check_section = |bytes: &[u8]| {
+        let expected = &bytes[0x20_0000..0x20_1000];
+        let mut data_writes = 0;
+        plan.guest_writes[0]
+            .apply(bytes, |gpa, data| {
+                if gpa < 0x1000 {
+                    assert_eq!(gpa, 0);
+                    assert!(std::ptr::eq(data, expected));
+                    data_writes += 1;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(data_writes, 1);
+    };
+
+    check_section(plan.pmi.bytes());
+    let file = plan.pmi.release();
+
+    // Renaming the stable image must keep replay tied to the opened file.
+    let path = dir.path().join("image.pmi");
+    std::fs::rename(&path, dir.path().join("original.pmi")).unwrap();
+    std::fs::write(&path, b"replacement pathname").unwrap();
+    let replay = file.map().unwrap();
+    assert_eq!(&replay[..2], b"MZ");
+    check_section(&replay);
+}
+
+#[test]
+fn optional_base_fill_uses_the_selected_source() {
+    let arch = HostArchitecture::X86_64;
+    let bundled = base(arch, false, false);
+    let dir = tempfile::tempdir().unwrap();
+    let image_path = dir.path().join("image.pmi");
+    let mut bytes = image(arch, BaseChannel::Optional, &bundled, Some(4096));
+    edit_manifest(&mut bytes, |manifest| {
+        manifest["actions"].as_array_mut().unwrap().push(json!({
+            "type": "fill", "section": ".dtb", "gpa": 0x20_2000, "kind": "dt:dtb"
+        }));
+    });
+    std::fs::write(&image_path, bytes).unwrap();
+    let fallback = LaunchPlan::read(&image_path, arch, None, || Ok(48), 4, 1, None, None).unwrap();
+    let fallback_bytes = &fallback.pmi.bytes()[0x2000..0x2000 + bundled.len()];
+    fallback.guest_writes[1]
+        .apply(fallback.pmi.bytes(), |gpa, data| {
+            assert_eq!(gpa, 0x20_0000);
+            assert!(std::ptr::eq(data, fallback_bytes));
+            Ok(())
+        })
+        .unwrap();
+
+    let override_path = dir.path().join("override.dtb");
+    let mut external = bundled;
+    external.push(0);
+    std::fs::write(&override_path, &external).unwrap();
+    let overridden = LaunchPlan::read(
+        &image_path,
+        arch,
+        None,
+        || Ok(48),
+        4,
+        1,
+        Some(&override_path),
+        None,
+    )
+    .unwrap();
+    let surveyed = overridden.platform.dtb();
+    assert_eq!(surveyed, external);
+    for (index, expected_gpa) in [(1, 0x20_0000), (3, 0x20_2000)] {
+        overridden.guest_writes[index]
+            .apply(overridden.pmi.bytes(), |gpa, data| {
+                assert_eq!(gpa, expected_gpa);
+                assert!(std::ptr::eq(data, surveyed));
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn bundled_base_fill_checks_the_mapped_section_size() {
+    let arch = HostArchitecture::X86_64;
+    let mut base = base(arch, false, false);
+    base.resize(0x1100, 0xee);
+    let mut bytes = image(arch, BaseChannel::Optional, &base, Some(4096));
+    let base_virtual_size = 0x188 + 40 + 8;
+    bytes[base_virtual_size..base_virtual_size + 4].copy_from_slice(&0x1100u32.to_le_bytes());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.pmi");
+    std::fs::write(&path, bytes).unwrap();
+    let result = LaunchPlan::read(&path, arch, None, || Ok(48), 4, 1, None, None);
+    assert!(matches!(
+        result,
+        Err(LaunchError::BaseDtbTooLarge {
+            actual: 0x1100,
+            cap: 0x1000,
+        })
+    ));
+}
+
+#[test]
+fn coff_section_name_obeys_the_length_cap() {
+    use dillo_launch::pmi_parse::{Error, caps::MAX_SECTION_NAME_LEN, parse};
+
+    let arch = HostArchitecture::X86_64;
+    let mut bytes = image(
+        arch,
+        BaseChannel::Bundled,
+        &base(arch, false, false),
+        Some(4096),
+    );
+    let table = bytes.len();
+    bytes[0x8c..0x90].copy_from_slice(&(table as u32).to_le_bytes());
+    // The unused .dtb section refers to the first COFF string at offset 4.
+    let section = 0x188 + 3 * 40;
+    bytes[section..section + 8].copy_from_slice(b"/4\0\0\0\0\0\0");
+    let opts = ParseOptions {
+        host_arch: pmi_arch(arch),
+        memory_mib: 4,
+    };
+    for len in [MAX_SECTION_NAME_LEN, MAX_SECTION_NAME_LEN + 1] {
+        bytes.truncate(table);
+        bytes.extend_from_slice(&((4 + len + 1) as u32).to_le_bytes());
+        bytes.resize(table + 4 + len, b'x');
+        bytes.push(0);
+        let result = parse(&bytes, &opts);
+        if len == MAX_SECTION_NAME_LEN {
+            result.expect("section name at cap");
+        } else {
+            assert!(matches!(
+                result,
+                Err(Error::SectionNameTooLong { len: actual, cap })
+                    if actual == len && cap == MAX_SECTION_NAME_LEN
+            ));
+        }
+    }
+}
+
+#[test]
+fn oversized_manifest_is_refused_before_decode() {
+    use dillo_launch::pmi_parse::{Error, caps::MAX_MANIFEST_SIZE, parse};
+
+    let arch = HostArchitecture::X86_64;
+    let mut bytes = image(arch, BaseChannel::Bundled, &base(arch, false, false), None);
+    let size = (MAX_MANIFEST_SIZE + 1) as u32;
+    for range in [0x190..0x194, 0x198..0x19c] {
+        bytes[range].copy_from_slice(&size.to_le_bytes());
+    }
+    bytes[0x1000] = 0xff;
+    let opts = ParseOptions {
+        host_arch: pmi_arch(arch),
+        memory_mib: 4,
+    };
+    assert!(matches!(
+        parse(&bytes, &opts),
+        Err(Error::ManifestTooLarge { actual, cap, .. })
+            if actual == size as usize && cap == MAX_MANIFEST_SIZE
+    ));
+}
+
+#[test]
 fn section_loads_clear_zero_pages_and_padded_tails() {
     let arch = HostArchitecture::X86_64;
     let mut bytes = image(
@@ -274,7 +445,8 @@ fn repeated_actions_write_in_manifest_order() {
     ];
     for arch in ARCHES {
         let mut base = base(arch, false, false);
-        base.resize(0x1000, 0);
+        let fdt_size = base.len();
+        base.resize(0x1000, 0xee);
         let mut bytes = image(arch, BaseChannel::Optional, &base, Some(4096));
         edit_manifest(&mut bytes, |manifest| {
             manifest["actions"] = json!(recipe.map(|(section, gpa, fill, _)| match fill {
@@ -303,6 +475,7 @@ fn repeated_actions_write_in_manifest_order() {
         let path = dir.path().join("image.pmi");
         std::fs::write(&path, bytes).unwrap();
         let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 8, 1, None, None).unwrap();
+        assert_eq!(plan.platform.dtb(), &base[..fdt_size]);
         let ranges: Vec<_> = plan
             .memory
             .ranges()
@@ -310,12 +483,20 @@ fn repeated_actions_write_in_manifest_order() {
             .map(|r| (r.gpa, r.size))
             .collect();
         assert_eq!(ranges, [(0, 0x60_0000), (0x80_0000, 0x20_0000)]);
-        assert_eq!(plan.parsed.actions.len(), recipe.len());
+        let parsed = dillo_launch::pmi_parse::parse(
+            plan.pmi.bytes(),
+            &ParseOptions {
+                host_arch: pmi_arch(arch),
+                memory_mib: 8,
+            },
+        )
+        .unwrap();
+        assert_eq!(parsed.actions.len(), recipe.len());
         assert_eq!(plan.guest_writes.len(), recipe.len());
         let mut ram = vec![0xcc; 0x80_9000];
         for ((section, gpa, _, size), (action, write)) in recipe
             .into_iter()
-            .zip(plan.parsed.actions.iter().zip(&plan.guest_writes))
+            .zip(parsed.actions.iter().zip(&plan.guest_writes))
         {
             assert_eq!(
                 (&*action.section, action.gpa, action.source.virtual_size),
@@ -345,6 +526,11 @@ fn repeated_actions_write_in_manifest_order() {
         }
         let overlay = &ram[0x80_1000..0x80_2000];
         assert_eq!(overlay, &ram[0x80_5000..0x80_6000]);
+        let [first, second] = [1, 7].map(|index| &plan.guest_writes[index].data);
+        let (WriteSrc::Shared(first), WriteSrc::Shared(second)) = (first, second) else {
+            panic!("overlays must share their synthesized payload")
+        };
+        assert!(Arc::ptr_eq(first, second));
         let tree: Tree<'_> = Tree::parse(overlay).unwrap();
         tree.find_path("/fragment@1/__overlay__/memory@800000")
             .expect("overlay describes the high RAM island");
@@ -548,7 +734,9 @@ fn with_bootconfig(mut bytes: Vec<u8>, gpas: &[u64], capacity: u32, raw_size: u3
 
 #[test]
 fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
-    const CAPACITY: usize = 0x1004;
+    const GPA: u64 = 0x40_0000;
+    const CAPACITY: usize = 0x20_0004;
+    const ALIGNED_SIZE: usize = 0x20_1000;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("image.pmi");
     let input = dir.path().join("input.bconf");
@@ -556,7 +744,7 @@ fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
         let base = base(arch, false, false);
         let bytes = with_bootconfig(
             image(arch, BaseChannel::Bundled, &base, Some(4096)),
-            &[0x20_2000],
+            &[GPA],
             CAPACITY as u32,
             0,
         );
@@ -566,41 +754,44 @@ fn bootconfig_launch_uses_declared_reservation_and_snapshots_input() {
                 std::fs::write(&input, text).unwrap();
                 input.as_path()
             });
-            let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 4, 1, None, file).unwrap();
+            let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 8, 1, None, file).unwrap();
             let write = plan.guest_writes.last().unwrap();
             assert_eq!(write.section, ".config");
-            assert_eq!(write.gpa, 0x20_2000);
+            assert_eq!(write.gpa, GPA);
             let WriteSrc::Owned(data) = &write.data else {
                 panic!("bootconfig must be retained for reboot")
             };
-            assert_eq!(data.len(), CAPACITY);
-            if text.is_none_or(<[u8]>::is_empty) {
-                assert!(data.iter().all(|b| *b == 0));
+            assert!(data.capacity() < 4096);
+            let text = text.unwrap_or_default();
+            if text.is_empty() {
+                assert!(data.is_empty());
             } else {
-                assert!(
-                    data.windows(text.unwrap().len())
-                        .any(|window| Some(window) == text)
-                );
+                assert_eq!(data.len(), ((text.len() + 4) & !3) + 20);
+                assert!(data.starts_with(text));
                 assert!(data.ends_with(b"#BOOTCONFIG\n"));
             }
-            let mut ram = [0xcc; 0x2002];
-            write
-                .apply(plan.pmi.bytes(), |gpa, bytes| {
-                    let start = (gpa - 0x20_2000) as usize + 1;
-                    ram[start..start + bytes.len()].copy_from_slice(bytes);
-                    Ok(())
-                })
-                .unwrap();
-            assert_eq!(&ram[1..=CAPACITY], data);
-            assert!(ram[1 + CAPACITY..=0x2000].iter().all(|&b| b == 0));
-            assert_eq!((ram[0], ram[0x2001]), (0xcc, 0xcc));
-            let snapshot = data.clone();
+            let apply = |ram: &mut [u8]| {
+                write
+                    .apply(plan.pmi.bytes(), |gpa, bytes| {
+                        let start = (gpa - GPA) as usize + 1;
+                        ram[start..start + bytes.len()].copy_from_slice(bytes);
+                        Ok(())
+                    })
+                    .unwrap();
+            };
+            let mut ram = vec![0xcc; ALIGNED_SIZE + 2];
+            apply(&mut ram);
+            let reservation = &ram[1..=CAPACITY];
+            let payload_start = CAPACITY - data.len();
+            assert!(reservation[..payload_start].iter().all(|&b| b == 0));
+            assert_eq!(&reservation[payload_start..], data);
+            assert!(ram[1 + CAPACITY..=ALIGNED_SIZE].iter().all(|&b| b == 0));
+            assert_eq!((ram[0], ram[ALIGNED_SIZE + 1]), (0xcc, 0xcc));
             std::fs::write(&input, b"changed after preflight").unwrap();
             std::fs::remove_file(&input).unwrap();
-            assert_eq!(
-                data, &snapshot,
-                "reboot uses owned launch bytes, not the file"
-            );
+            let mut replay = vec![0xcc; ALIGNED_SIZE + 2];
+            apply(&mut replay);
+            assert_eq!(replay, ram);
             assert_eq!(plan.platform.dtb(), base);
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
         }
@@ -717,7 +908,7 @@ fn delegated_allocation_is_delivered_in_reserved_overlay() {
                     .find(|write| write.section == ".dtbo")
                     .unwrap();
                 assert_eq!(write.gpa, 0x20_1000);
-                let WriteSrc::Owned(data) = &write.data else {
+                let WriteSrc::Shared(data) = &write.data else {
                     panic!("overlay must be synthesized")
                 };
                 assert!(data.len() <= size as usize);
@@ -802,6 +993,32 @@ fn overlay_reservation_bounds_are_enforced() {
     .unwrap_err();
     assert!(matches!(err, LaunchError::DtboSynth(_)), "{err}");
     assert_eq!(err.exit_code(), 11);
+}
+
+#[test]
+fn repeated_overlay_checks_the_later_reservation() {
+    let arch = HostArchitecture::X86_64;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.pmi");
+    let mut bytes = image(
+        arch,
+        BaseChannel::Bundled,
+        &base(arch, false, false),
+        Some(0x1_0000),
+    );
+    std::fs::write(&path, &bytes).unwrap();
+    let read = || LaunchPlan::read(&path, arch, None, || Ok(48), 4, 128, None, None);
+    read().expect("the first overlay reservation fits");
+
+    edit_manifest(&mut bytes, |manifest| {
+        manifest["actions"].as_array_mut().unwrap().push(json!({
+            "type": "fill", "section": ".dtb", "gpa": 0x21_1000, "kind": "dt:dtbo"
+        }));
+    });
+    std::fs::write(&path, bytes).unwrap();
+    let err = read().unwrap_err();
+    assert!(matches!(err, LaunchError::DtboSynth(_)), "{err}");
+    assert!(err.to_string().contains("section size (4096 bytes)"));
 }
 
 #[test]

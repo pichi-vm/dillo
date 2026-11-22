@@ -14,6 +14,9 @@
 //! claimed property ([`ResourcePlan::declare_from`]), so no constant can reach
 //! the resource plan.
 
+use std::borrow::Cow;
+use std::sync::Arc;
+
 use devtree::{NodeView, OwnedNode, OwnedProperty, OwnedTree, PropertyView, Tree};
 use thiserror::Error;
 
@@ -551,7 +554,7 @@ impl Topology {
 /// read the same base bytes to configure their substrate.
 #[derive(Debug)]
 pub struct Machine {
-    dtb: Vec<u8>,
+    dtb: Arc<Vec<u8>>,
     arch: Arch,
     psci: Option<Psci>,
     pcie: Pcie,
@@ -566,7 +569,17 @@ pub struct Machine {
 impl Machine {
     /// Survey and retain the supplied base DTB.
     pub fn survey(dtb: Vec<u8>, arch: Arch) -> Result<Self, SurveyError> {
+        Self::survey_base(Cow::Owned(dtb), arch)
+    }
+
+    /// Survey a base in a larger input and retain its validated FDT bytes.
+    pub fn survey_borrowed(dtb: &[u8], arch: Arch) -> Result<Self, SurveyError> {
+        Self::survey_base(Cow::Borrowed(dtb), arch)
+    }
+
+    fn survey_base(dtb: Cow<'_, [u8]>, arch: Arch) -> Result<Self, SurveyError> {
         let tree: Tree<'_> = Tree::parse(&dtb).map_err(SurveyError::Parse)?;
+        let fdt_size = tree.as_ref().len();
         let mut t = OwnedTree::materialize(&tree);
         if t.root().child("cpus").is_some() {
             return Err(SurveyError::BaseHasCpus);
@@ -611,8 +624,12 @@ impl Machine {
         // (b) declared regions are disjoint.
         plan.check_disjoint()?;
 
+        let dtb = match dtb {
+            Cow::Owned(dtb) => dtb,
+            Cow::Borrowed(dtb) => dtb[..fdt_size].to_vec(),
+        };
         Ok(Self {
-            dtb,
+            dtb: Arc::new(dtb),
             arch,
             psci,
             pcie,
@@ -625,9 +642,14 @@ impl Machine {
         })
     }
 
-    /// The exact base DTB bytes supplied to [`Self::survey`].
+    /// The retained bytes of the surveyed base DTB.
     pub fn dtb(&self) -> &[u8] {
         &self.dtb
+    }
+
+    /// Share the surveyed base bytes without copying their allocation.
+    pub fn shared_dtb(&self) -> Arc<Vec<u8>> {
+        Arc::clone(&self.dtb)
     }
 
     pub fn arch(&self) -> Arch {
