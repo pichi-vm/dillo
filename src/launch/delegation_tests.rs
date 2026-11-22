@@ -300,6 +300,27 @@ fn optional_base_fill_uses_the_selected_source() {
 }
 
 #[test]
+fn bundled_base_fill_checks_the_mapped_section_size() {
+    let arch = HostArchitecture::X86_64;
+    let mut base = base(arch, false, false);
+    base.resize(0x1100, 0xee);
+    let mut bytes = image(arch, BaseChannel::Optional, &base, Some(4096));
+    let base_virtual_size = 0x188 + 40 + 8;
+    bytes[base_virtual_size..base_virtual_size + 4].copy_from_slice(&0x1100u32.to_le_bytes());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.pmi");
+    std::fs::write(&path, bytes).unwrap();
+    let result = LaunchPlan::read(&path, arch, None, || Ok(48), 4, 1, None, None);
+    assert!(matches!(
+        result,
+        Err(LaunchError::BaseDtbTooLarge {
+            actual: 0x1100,
+            cap: 0x1000,
+        })
+    ));
+}
+
+#[test]
 fn oversized_manifest_is_refused_before_decode() {
     use dillo_launch::pmi_parse::{Error, caps::MAX_MANIFEST_SIZE, parse};
 
@@ -386,7 +407,8 @@ fn repeated_actions_write_in_manifest_order() {
     ];
     for arch in ARCHES {
         let mut base = base(arch, false, false);
-        base.resize(0x1000, 0);
+        let fdt_size = base.len();
+        base.resize(0x1000, 0xee);
         let mut bytes = image(arch, BaseChannel::Optional, &base, Some(4096));
         edit_manifest(&mut bytes, |manifest| {
             manifest["actions"] = json!(recipe.map(|(section, gpa, fill, _)| match fill {
@@ -415,6 +437,7 @@ fn repeated_actions_write_in_manifest_order() {
         let path = dir.path().join("image.pmi");
         std::fs::write(&path, bytes).unwrap();
         let plan = LaunchPlan::read(&path, arch, None, || Ok(48), 8, 1, None, None).unwrap();
+        assert_eq!(plan.platform.dtb(), &base[..fdt_size]);
         let ranges: Vec<_> = plan
             .memory
             .ranges()

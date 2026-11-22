@@ -1459,6 +1459,7 @@ mod launch {
     #[cfg(test)]
     mod delegation_tests;
 
+    use std::borrow::Cow;
     use std::fs::File;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -1664,8 +1665,12 @@ mod launch {
                 None => None,
             };
             let (dtb, bundled_base) = resolve_base(bytes, &parsed, oob_base)?;
-            let platform = PlatformMachine::survey(dtb, platform_arch(host_arch))
-                .map_err(LaunchError::Coverage)?;
+            let arch = platform_arch(host_arch);
+            let platform = match dtb {
+                Cow::Owned(dtb) => PlatformMachine::survey(dtb, arch),
+                Cow::Borrowed(dtb) => PlatformMachine::survey_borrowed(dtb, arch),
+            }
+            .map_err(LaunchError::Coverage)?;
 
             // The survey supports delegated CPUs and memory only: fixed CPU
             // declarations are rejected, and fixed memory is unclaimed. Require
@@ -1932,24 +1937,24 @@ mod launch {
     /// attribute is used (bundled load source, or optional fallback). A detached
     /// image with no `--dtb` cannot launch; an out-of-band base is rejected for
     /// a bundled image, whose base is loaded and measured.
-    fn resolve_base(
-        bytes: &[u8],
+    fn resolve_base<'a>(
+        bytes: &'a [u8],
         parsed: &dillo_launch::pmi_parse::ParsedPmi,
         oob: Option<Vec<u8>>,
-    ) -> Result<(Vec<u8>, Option<SectionInfo>), LaunchError> {
+    ) -> Result<(Cow<'a, [u8]>, Option<SectionInfo>), LaunchError> {
         let has_fill = parsed
             .actions
             .iter()
             .any(|a| a.kind == ActionKind::Fill(FillKind::DtDtb));
         match oob {
             Some(_) if !has_fill => Err(LaunchError::UnexpectedBaseOverride),
-            Some(base) => Ok((base, None)),
+            Some(base) => Ok((Cow::Owned(base), None)),
             None => {
                 let src = parsed
                     .dt_dtb_source
                     .ok_or(LaunchError::DetachedBaseRequiresDtb)?;
                 read_section(bytes, src.file_offset, src.file_size)
-                    .map(|base| (base.to_vec(), Some(src)))
+                    .map(|base| (Cow::Borrowed(base), Some(src)))
                     .ok_or(LaunchError::MalformedMergedDtb)
             }
         }
