@@ -249,6 +249,44 @@ fn replay_uses_direct_slices_from_the_held_pmi() {
 }
 
 #[test]
+fn optional_base_fill_uses_the_selected_source() {
+    let arch = HostArchitecture::X86_64;
+    let bundled = base(arch, false, false);
+    let (dir, fallback) = launch(arch, BaseChannel::Optional, &bundled, Some(4096), 1).unwrap();
+    let fallback_bytes = &fallback.pmi.bytes()[0x2000..0x2000 + bundled.len()];
+    fallback.guest_writes[1]
+        .apply(fallback.pmi.bytes(), |gpa, data| {
+            assert_eq!(gpa, 0x20_0000);
+            assert!(std::ptr::eq(data, fallback_bytes));
+            Ok(())
+        })
+        .unwrap();
+
+    let override_path = dir.path().join("override.dtb");
+    let mut external = bundled;
+    external.push(0);
+    std::fs::write(&override_path, &external).unwrap();
+    let overridden = LaunchPlan::read(
+        &dir.path().join("image.pmi"),
+        arch,
+        None,
+        || Ok(48),
+        4,
+        1,
+        Some(&override_path),
+        None,
+    )
+    .unwrap();
+    overridden.guest_writes[1]
+        .apply(overridden.pmi.bytes(), |gpa, data| {
+            assert_eq!(gpa, 0x20_0000);
+            assert_eq!(data, external);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn oversized_manifest_is_refused_before_decode() {
     use dillo_launch::pmi_parse::{Error, caps::MAX_MANIFEST_SIZE, parse};
 

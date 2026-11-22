@@ -1480,7 +1480,7 @@ mod launch {
     use crate::placement::{self, MemoryPlan};
     use crate::runner::RunError;
     use dillo_launch::pmi_parse::{
-        Action, ActionKind, FillKind, HostArch, ParseOptions, check_file_size,
+        Action, ActionKind, FillKind, HostArch, ParseOptions, SectionInfo, check_file_size,
     };
 
     /// The opened PMI file used for launch and reboot replay.
@@ -1545,6 +1545,15 @@ mod launch {
     enum WriteSrc {
         Owned(Vec<u8>),
         Image { offset: usize, len: usize },
+    }
+
+    impl WriteSrc {
+        fn image(source: SectionInfo) -> Self {
+            Self::Image {
+                offset: source.file_offset as usize,
+                len: source.file_size as usize,
+            }
+        }
     }
 
     /// Target-neutral launch facts derived before backend construction.
@@ -1652,7 +1661,7 @@ mod launch {
                 })?),
                 None => None,
             };
-            let dtb = resolve_base(bytes, &parsed, oob_base)?;
+            let (dtb, bundled_base) = resolve_base(bytes, &parsed, oob_base)?;
             let platform = PlatformMachine::survey(dtb, platform_arch(host_arch))
                 .map_err(LaunchError::Coverage)?;
 
@@ -1716,6 +1725,7 @@ mod launch {
                 vcpus,
                 FillInputs {
                     base_dtb: platform.dtb(),
+                    bundled_base,
                     bootconfig: bootconfig_path,
                 },
             )?;
@@ -1834,6 +1844,7 @@ mod launch {
 
     struct FillInputs<'a> {
         base_dtb: &'a [u8],
+        bundled_base: Option<SectionInfo>,
         bootconfig: Option<&'a Path>,
     }
 
@@ -1848,7 +1859,7 @@ mod launch {
         let base_dtb = inputs.base_dtb;
         let mut writes = Vec::with_capacity(actions.len());
         for action in actions {
-            let source = &action.source;
+            let source = action.source;
             // Parsing validated the enclosing backing extent.
             let size = source
                 .virtual_size
@@ -1862,13 +1873,7 @@ mod launch {
                         size - source.virtual_size,
                     )
                 }
-                ActionKind::Load => (
-                    WriteSrc::Image {
-                        offset: source.file_offset as usize,
-                        len: source.file_size as usize,
-                    },
-                    size - source.file_size,
-                ),
+                ActionKind::Load => (WriteSrc::image(source), size - source.file_size),
                 ActionKind::Fill(FillKind::DtDtbo) => {
                     let data = crate::overlay::synthesize_dtbo(
                         memory.ranges(),
@@ -1890,7 +1895,11 @@ mod launch {
                             cap: source.virtual_size,
                         });
                     }
-                    (WriteSrc::Owned(base_dtb.to_vec()), 0)
+                    let data = match inputs.bundled_base {
+                        Some(source) => WriteSrc::image(source),
+                        None => WriteSrc::Owned(base_dtb.to_vec()),
+                    };
+                    (data, 0)
                 }
             };
             writes.push(GuestWrite {
@@ -1913,21 +1922,20 @@ mod launch {
         bytes: &[u8],
         parsed: &dillo_launch::pmi_parse::ParsedPmi,
         oob: Option<Vec<u8>>,
-    ) -> Result<Vec<u8>, LaunchError> {
+    ) -> Result<(Vec<u8>, Option<SectionInfo>), LaunchError> {
         let has_fill = parsed
             .actions
             .iter()
             .any(|a| a.kind == ActionKind::Fill(FillKind::DtDtb));
         match oob {
             Some(_) if !has_fill => Err(LaunchError::UnexpectedBaseOverride),
-            Some(base) => Ok(base),
+            Some(base) => Ok((base, None)),
             None => {
                 let src = parsed
                     .dt_dtb_source
-                    .as_ref()
                     .ok_or(LaunchError::DetachedBaseRequiresDtb)?;
                 read_section(bytes, src.file_offset, src.file_size)
-                    .map(<[u8]>::to_vec)
+                    .map(|base| (base.to_vec(), Some(src)))
                     .ok_or(LaunchError::MalformedMergedDtb)
             }
         }
