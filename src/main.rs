@@ -1572,6 +1572,7 @@ mod launch {
         section: String,
         gpa: u64,
         data: WriteSrc,
+        zero_prefix: u64,
         zero_tail: u64,
     }
 
@@ -1581,7 +1582,6 @@ mod launch {
             pmi_bytes: &[u8],
             mut write_guest: impl FnMut(u64, &[u8]) -> Result<(), RunError>,
         ) -> Result<(), RunError> {
-            static ZEROES: [u8; 64 * 1024] = [0; 64 * 1024];
             let data = match &self.data {
                 WriteSrc::Owned(v) => v.as_slice(),
                 WriteSrc::Image { len: 0, .. } => &[],
@@ -1594,22 +1594,31 @@ mod launch {
                         ))
                     })?,
             };
-            let mut zero_tail = self.zero_tail;
             log::debug!(
                 "writing launch section `{}` to GPA {:#x} ({} bytes)",
                 self.section,
                 self.gpa,
-                data.len() as u64 + zero_tail
+                self.zero_prefix + data.len() as u64 + self.zero_tail
             );
+            Self::write_zeroes(self.gpa, self.zero_prefix, &mut write_guest)?;
+            let gpa = self.gpa + self.zero_prefix;
             if !data.is_empty() {
-                write_guest(self.gpa, data)?;
+                write_guest(gpa, data)?;
             }
-            let mut gpa = self.gpa + data.len() as u64;
-            while zero_tail > 0 {
-                let len = zero_tail.min(ZEROES.len() as u64) as usize;
+            Self::write_zeroes(gpa + data.len() as u64, self.zero_tail, write_guest)
+        }
+
+        fn write_zeroes(
+            mut gpa: u64,
+            mut count: u64,
+            mut write_guest: impl FnMut(u64, &[u8]) -> Result<(), RunError>,
+        ) -> Result<(), RunError> {
+            static ZEROES: [u8; 64 * 1024] = [0; 64 * 1024];
+            while count > 0 {
+                let len = count.min(ZEROES.len() as u64) as usize;
                 write_guest(gpa, &ZEROES[..len])?;
                 gpa += len as u64;
-                zero_tail -= len as u64;
+                count -= len as u64;
             }
             Ok(())
         }
@@ -1864,16 +1873,17 @@ mod launch {
             let size = source
                 .virtual_size
                 .next_multiple_of(dillo_launch::pmi_parse::caps::SMALL_PAGE);
-            let (data, zero_tail) = match action.kind {
+            let (data, zero_prefix, zero_tail) = match action.kind {
                 ActionKind::Fill(FillKind::LbcBootconfig) => {
                     let reservation =
                         bootconfig::Reservation::read(source.virtual_size, inputs.bootconfig)?;
                     (
                         WriteSrc::Owned(reservation.bytes),
+                        reservation.zero_prefix,
                         size - source.virtual_size,
                     )
                 }
-                ActionKind::Load => (WriteSrc::image(source), size - source.file_size),
+                ActionKind::Load => (WriteSrc::image(source), 0, size - source.file_size),
                 ActionKind::Fill(FillKind::DtDtbo) => {
                     let data = crate::overlay::synthesize_dtbo(
                         memory.ranges(),
@@ -1883,7 +1893,7 @@ mod launch {
                         source.virtual_size,
                     )
                     .map_err(LaunchError::DtboSynth)?;
-                    (WriteSrc::Owned(data), 0)
+                    (WriteSrc::Owned(data), 0, 0)
                 }
                 ActionKind::Fill(FillKind::DtDtb) => {
                     // Deliver the resolved measured base into its reserved Zero
@@ -1899,13 +1909,14 @@ mod launch {
                         Some(source) => WriteSrc::image(source),
                         None => WriteSrc::Owned(base_dtb.to_vec()),
                     };
-                    (data, 0)
+                    (data, 0, 0)
                 }
             };
             writes.push(GuestWrite {
                 section: action.section,
                 gpa: action.gpa,
                 data,
+                zero_prefix,
                 zero_tail,
             });
         }
