@@ -13,7 +13,7 @@ pub mod pmi_parse {
 
     pub mod caps {
 
-        /// Maximum PMI file size: 4 GiB. Refused before any read.
+        /// Maximum PMI file size: 4 GiB.
         pub const MAX_FILE_SIZE: u64 = 4 << 30;
 
         /// Maximum `.pmi.<target>` manifest size: 4 KiB.
@@ -266,18 +266,23 @@ pub mod pmi_parse {
         pub dt_dtb_source: Option<SectionInfo>,
     }
 
-    /// Parse and validate a PMI file's bytes.
-    ///
-    /// See `dillo/ARCHITECTURE.md` §5.
-    pub fn parse(bytes: &[u8], opts: &ParseOptions) -> Result<ParsedPmi, Error> {
-        // §5.2 file-size cap.
-        let file_size = bytes.len() as u64;
+    /// Refuse oversized input before acquiring or parsing its bytes.
+    pub fn check_file_size(file_size: u64) -> Result<(), Error> {
         if file_size > caps::MAX_FILE_SIZE {
             return Err(Error::FileTooLarge {
                 actual: file_size,
                 cap: caps::MAX_FILE_SIZE,
             });
         }
+        Ok(())
+    }
+
+    /// Parse and validate a PMI file's bytes.
+    ///
+    /// See `dillo/ARCHITECTURE.md` §5.
+    pub fn parse(bytes: &[u8], opts: &ParseOptions) -> Result<ParsedPmi, Error> {
+        let file_size = bytes.len() as u64;
+        check_file_size(file_size)?;
 
         // PE parse via `object`.
         let pe = PeFile64::parse(bytes).map_err(|e| Error::PeParse(e.to_string()))?;

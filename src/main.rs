@@ -1483,7 +1483,7 @@ mod launch {
 
     use crate::placement::{self, MemoryPlan};
     use crate::runner::RunError;
-    use dillo_launch::pmi_parse::{ActionKind, FillKind, HostArch, ParseOptions};
+    use dillo_launch::pmi_parse::{ActionKind, FillKind, HostArch, ParseOptions, check_file_size};
 
     /// The PMI byte source. Raw section loads are copied straight from it into
     /// guest RAM (one copy) instead of being staged into owned `Vec`s (two
@@ -1532,17 +1532,18 @@ mod launch {
             // Owned label up front so the error path doesn't borrow `self` while
             // we mutably borrow `self.file` for the mapping.
             let path = self.path.display().to_string();
+            let len = self
+                .file
+                .metadata()
+                .map_err(|source| LaunchError::ReadPmi {
+                    path: path.clone(),
+                    source,
+                })?
+                .len();
+            check_file_size(len)?;
             #[cfg(target_os = "linux")]
             {
-                let len = self
-                    .file
-                    .metadata()
-                    .map_err(|source| LaunchError::ReadPmi {
-                        path: path.clone(),
-                        source,
-                    })?
-                    .len() as usize;
-                let m = mmarinus::Map::bytes(len)
+                let m = mmarinus::Map::bytes(len as usize)
                     .anywhere()
                     .from(&mut self.file, 0)
                     .with(mmarinus::perms::Read)
@@ -2002,6 +2003,21 @@ mod launch {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[cfg(unix)]
+        #[test]
+        fn oversized_pmi_is_refused_at_open() {
+            use dillo_launch::pmi_parse::{Error, caps::MAX_FILE_SIZE};
+
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let size = MAX_FILE_SIZE + 1;
+            file.as_file().set_len(size).unwrap();
+            assert!(matches!(
+                Pmi::open(file.path()),
+                Err(LaunchError::PmiParse(Error::FileTooLarge { actual, cap }))
+                    if actual == size && cap == MAX_FILE_SIZE
+            ));
+        }
 
         #[test]
         fn read_section_checks_bounds() {
