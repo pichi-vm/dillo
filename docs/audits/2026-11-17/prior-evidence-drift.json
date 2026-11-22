@@ -1,0 +1,859 @@
+{
+  "old_revision": "0f09b45f6f479f19be285305f16e941309dd3e92",
+  "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+  "checks": [
+    {
+      "evidence": "launch",
+      "path": "src/lib.rs",
+      "sha256": "7b7f570c0605f62950eef161fa6caebf33cd7fc621b0636aa46753f5c553e39f",
+      "unchanged": true
+    },
+    {
+      "evidence": "launch",
+      "path": "src/lib.rs",
+      "sha256": "7b7f570c0605f62950eef161fa6caebf33cd7fc621b0636aa46753f5c553e39f",
+      "unchanged": true
+    },
+    {
+      "evidence": "launch",
+      "path": "Cargo.lock",
+      "sha256": "28a3f598a9d7cc45c1cac54829534287a8d95e64855d139e173d41d0c2c1a8b3",
+      "unchanged": true
+    },
+    {
+      "evidence": "actions",
+      "path": "src/lib.rs",
+      "sha256": "7b7f570c0605f62950eef161fa6caebf33cd7fc621b0636aa46753f5c553e39f",
+      "unchanged": true
+    },
+    {
+      "evidence": "actions",
+      "path": "src/lib.rs",
+      "sha256": "7b7f570c0605f62950eef161fa6caebf33cd7fc621b0636aa46753f5c553e39f",
+      "unchanged": true
+    },
+    {
+      "evidence": "actions",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "actions",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "launch-validation",
+      "path": "src/lib.rs",
+      "sha256": "7b7f570c0605f62950eef161fa6caebf33cd7fc621b0636aa46753f5c553e39f",
+      "unchanged": true
+    },
+    {
+      "evidence": "launch-validation",
+      "path": "src/lib.rs",
+      "sha256": "7b7f570c0605f62950eef161fa6caebf33cd7fc621b0636aa46753f5c553e39f",
+      "unchanged": true
+    },
+    {
+      "evidence": "launch-validation",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "launch-validation",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "launch-validation",
+      "path": "src/launch/bootconfig.rs",
+      "sha256": "ee282ef195cbfa3b7973dfb240ce32d2e1584e8f52e869b0fdd61ab6aeb3b435",
+      "unchanged": true
+    },
+    {
+      "evidence": "launch-validation",
+      "path": "src/launch/delegation_tests.rs",
+      "sha256": "b0d1c5bc40f29a156ab4a358e653c47f2b8587738837caeba7fb2e803d6cbfd2",
+      "unchanged": true
+    },
+    {
+      "evidence": "selection",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "selection",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "selection",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "selection",
+      "path": "deps/dillo-machine/src/lib.rs",
+      "sha256": "eeaf84e072e0e96b6e26666a0155347dd38d5c2c3ca1c822baa245d45aedaedf",
+      "unchanged": true
+    },
+    {
+      "evidence": "cpu",
+      "path": "deps/dillo-machine/src/cpuid_x86.rs",
+      "sha256": "be34b21d8a0b715f4e1f671baa62f75b8944695b66e7218736f71748e5f1afc3",
+      "unchanged": true
+    },
+    {
+      "evidence": "cpu",
+      "path": "deps/dillo-machine-kvm/src/cpuid_x86.rs",
+      "sha256": "e9d5488118b1d6e004ce8dfa3910192ed26897acd4f075d9c7163147e5e54cc2",
+      "unchanged": true
+    },
+    {
+      "evidence": "cpu",
+      "path": "deps/dillo-machine-kvm/src/lib.rs",
+      "sha256": "2cdf27f2021b0435981a75de1c9c626e52c07813459915be71456128804ce03f",
+      "unchanged": true
+    },
+    {
+      "evidence": "cpu",
+      "path": "deps/dillo-machine-hvf/src/lib.rs",
+      "sha256": "079d13f3ae51b39e2656c1a8a3d4639ac4b00327dd8d7216ce90ae22f89f8ac6",
+      "unchanged": true
+    },
+    {
+      "evidence": "cpu",
+      "path": "deps/dillo-machine-whp/src/lib.rs",
+      "sha256": "c181fc5a87ece1de5e220c9abceb3f10ccecd72358ccbc59105260a372fd6188",
+      "unchanged": true
+    },
+    {
+      "evidence": "interfaces",
+      "path": "deps/dillo-machine/src/lib.rs",
+      "sha256": "eeaf84e072e0e96b6e26666a0155347dd38d5c2c3ca1c822baa245d45aedaedf",
+      "unchanged": true
+    },
+    {
+      "evidence": "interfaces",
+      "path": "deps/dillo-mmio/src/lib.rs",
+      "sha256": "b15f846f72d73b1e6bd58c9c695fbc12982b74cd4b29e2194b9b08c3fd31040f",
+      "unchanged": true
+    },
+    {
+      "evidence": "interfaces",
+      "path": "deps/dillo-mmio/src/lib.rs",
+      "sha256": "b15f846f72d73b1e6bd58c9c695fbc12982b74cd4b29e2194b9b08c3fd31040f",
+      "unchanged": true
+    },
+    {
+      "evidence": "interfaces",
+      "path": "deps/dillo-virtio/src/device.rs",
+      "sha256": "39d3c7b9cc5c229e525bf21a6283d27e203ffdc8bb5986e92bab416dde538905",
+      "unchanged": true
+    },
+    {
+      "evidence": "interfaces",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "interfaces",
+      "path": "deps/dillo-virtio-fs/src/backend.rs",
+      "sha256": "42049aebe8dce7b5f08b17bc6fc068429d7569ba2a08e58df54d51ac8099edbd",
+      "unchanged": true
+    },
+    {
+      "evidence": "interfaces",
+      "path": "deps/dillo-virtio-blk/src/lib.rs",
+      "sha256": "e5132fed54e6c420f525b3877b27bf5a4ed2240832f45955855d9803015e9532",
+      "unchanged": true
+    },
+    {
+      "evidence": "interfaces",
+      "path": "deps/dillo-virtio-vsock/src/uds.rs",
+      "sha256": "753980891d7a02980ce1f4a18dd221117740c1f381bbac0283ce9d26ed982d46",
+      "unchanged": true
+    },
+    {
+      "evidence": "admission",
+      "path": "deps/dillo-machine-kvm/src/lib.rs",
+      "sha256": "2cdf27f2021b0435981a75de1c9c626e52c07813459915be71456128804ce03f",
+      "unchanged": true
+    },
+    {
+      "evidence": "admission",
+      "path": "deps/dillo-machine-hvf/src/lib.rs",
+      "sha256": "079d13f3ae51b39e2656c1a8a3d4639ac4b00327dd8d7216ce90ae22f89f8ac6",
+      "unchanged": true
+    },
+    {
+      "evidence": "admission",
+      "path": "deps/dillo-machine-whp/src/lib.rs",
+      "sha256": "c181fc5a87ece1de5e220c9abceb3f10ccecd72358ccbc59105260a372fd6188",
+      "unchanged": true
+    },
+    {
+      "evidence": "admission",
+      "path": "deps/dillo-mmio-virtio/src/lib.rs",
+      "sha256": "9a0edfb75a85a114a8331b9b452a3408fba4ee42436de6e05c3accfffceb5da8",
+      "unchanged": true
+    },
+    {
+      "evidence": "admission",
+      "path": "deps/dillo-pci/src/lib.rs",
+      "sha256": "d055c7c07bcc302f70e4a00d6bbca881225603523877fdd146eea51dc73d43b7",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-drain",
+      "path": "deps/dillo-devtree/src/platform.rs",
+      "sha256": "015c02dc10b6f99d2597680387e1f18794ca6c5e633d74cb6e12c626b86957c9",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-drain",
+      "path": "deps/dillo-devtree/src/platform.rs",
+      "sha256": "015c02dc10b6f99d2597680387e1f18794ca6c5e633d74cb6e12c626b86957c9",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-drain",
+      "path": "deps/dillo-devtree/src/platform.rs",
+      "sha256": "015c02dc10b6f99d2597680387e1f18794ca6c5e633d74cb6e12c626b86957c9",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-drain",
+      "path": "deps/dillo-devtree/src/platform.rs",
+      "sha256": "015c02dc10b6f99d2597680387e1f18794ca6c5e633d74cb6e12c626b86957c9",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-plan",
+      "path": "deps/dillo-devtree/src/platform.rs",
+      "sha256": "015c02dc10b6f99d2597680387e1f18794ca6c5e633d74cb6e12c626b86957c9",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-plan",
+      "path": "deps/dillo-devtree/src/platform.rs",
+      "sha256": "015c02dc10b6f99d2597680387e1f18794ca6c5e633d74cb6e12c626b86957c9",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-plan",
+      "path": "deps/dillo-devtree/src/platform.rs",
+      "sha256": "015c02dc10b6f99d2597680387e1f18794ca6c5e633d74cb6e12c626b86957c9",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-plan",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-plan",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-plan",
+      "path": "src/launch/delegation_tests.rs",
+      "sha256": "b0d1c5bc40f29a156ab4a358e653c47f2b8587738837caeba7fb2e803d6cbfd2",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-backend",
+      "path": "deps/dillo-machine-kvm/src/hypervisor.rs",
+      "sha256": "7920da3c3b62845b17a5e6be1ecf1186554f8312e5cbcb4e7de1f49dc55ca7d0",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-backend",
+      "path": "deps/dillo-machine-kvm/src/lib.rs",
+      "sha256": "2cdf27f2021b0435981a75de1c9c626e52c07813459915be71456128804ce03f",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-backend",
+      "path": "deps/dillo-machine-hvf/src/hypervisor.rs",
+      "sha256": "813add633dff594498603139334d8f6457f512c775f35cd01b058187518a7552",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-backend",
+      "path": "deps/dillo-devtree/src/platform.rs",
+      "sha256": "015c02dc10b6f99d2597680387e1f18794ca6c5e633d74cb6e12c626b86957c9",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-backend",
+      "path": "deps/dillo-devtree/src/platform.rs",
+      "sha256": "015c02dc10b6f99d2597680387e1f18794ca6c5e633d74cb6e12c626b86957c9",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-backend",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "dt-backend",
+      "path": "deps/dillo-pci-virtio/src/transport.rs",
+      "sha256": "7531db99d94e9048209b437b4677c1e91197d7a839a230208ddb0f77198a402d",
+      "unchanged": true
+    },
+    {
+      "evidence": "placement",
+      "path": "deps/dillo-config/src/lib.rs",
+      "sha256": "88bf4e87cf18ea8195dabe24a36486ea93246cd64038bd389917a4f4ce1ae6c6",
+      "unchanged": true
+    },
+    {
+      "evidence": "placement",
+      "path": "deps/dillo-config/src/lib.rs",
+      "sha256": "88bf4e87cf18ea8195dabe24a36486ea93246cd64038bd389917a4f4ce1ae6c6",
+      "unchanged": true
+    },
+    {
+      "evidence": "placement",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "composition",
+      "path": "deps/dillo-virtio/src/device.rs",
+      "sha256": "39d3c7b9cc5c229e525bf21a6283d27e203ffdc8bb5986e92bab416dde538905",
+      "unchanged": true
+    },
+    {
+      "evidence": "composition",
+      "path": "deps/dillo-mmio-virtio/src/lib.rs",
+      "sha256": "9a0edfb75a85a114a8331b9b452a3408fba4ee42436de6e05c3accfffceb5da8",
+      "unchanged": true
+    },
+    {
+      "evidence": "composition",
+      "path": "deps/dillo-pci-virtio/src/lib.rs",
+      "sha256": "b848614b40650826427525f8d842df479887cace4977ec3b755f2f58a5e8df0f",
+      "unchanged": true
+    },
+    {
+      "evidence": "composition",
+      "path": "deps/dillo-pci/src/lib.rs",
+      "sha256": "d055c7c07bcc302f70e4a00d6bbca881225603523877fdd146eea51dc73d43b7",
+      "unchanged": true
+    },
+    {
+      "evidence": "composition",
+      "path": "deps/dillo-storage/src/lib.rs",
+      "sha256": "9b6fbfd9703d04715f9e6f747a847dc18879314e65b1c1c2f01c73b56896a448",
+      "unchanged": true
+    },
+    {
+      "evidence": "composition",
+      "path": "deps/dillo-virtio-net/src/backend.rs",
+      "sha256": "81e530a4770f89dc706fcde414ea54160047ceb40061af9defb89e3f583fd0c1",
+      "unchanged": true
+    },
+    {
+      "evidence": "memory",
+      "path": "deps/dillo-machine-kvm/src/lib.rs",
+      "sha256": "2cdf27f2021b0435981a75de1c9c626e52c07813459915be71456128804ce03f",
+      "unchanged": true
+    },
+    {
+      "evidence": "memory",
+      "path": "deps/dillo-machine-hvf/src/lib.rs",
+      "sha256": "079d13f3ae51b39e2656c1a8a3d4639ac4b00327dd8d7216ce90ae22f89f8ac6",
+      "unchanged": true
+    },
+    {
+      "evidence": "memory",
+      "path": "deps/dillo-machine-whp/src/lib.rs",
+      "sha256": "c181fc5a87ece1de5e220c9abceb3f10ccecd72358ccbc59105260a372fd6188",
+      "unchanged": true
+    },
+    {
+      "evidence": "memory",
+      "path": "deps/dillo-mmio/src/lib.rs",
+      "sha256": "b15f846f72d73b1e6bd58c9c695fbc12982b74cd4b29e2194b9b08c3fd31040f",
+      "unchanged": true
+    },
+    {
+      "evidence": "memory",
+      "path": "deps/dillo-mmio/src/lib.rs",
+      "sha256": "b15f846f72d73b1e6bd58c9c695fbc12982b74cd4b29e2194b9b08c3fd31040f",
+      "unchanged": true
+    },
+    {
+      "evidence": "memory",
+      "path": "deps/dillo-virtio/src/memory.rs",
+      "sha256": "67a004c5dbfefe8bcb0c446ab5911de37a5356c7c7412bb44ebf3fbb62f37252",
+      "unchanged": true
+    },
+    {
+      "evidence": "revocation",
+      "path": "deps/dillo-mmio/src/lib.rs",
+      "sha256": "b15f846f72d73b1e6bd58c9c695fbc12982b74cd4b29e2194b9b08c3fd31040f",
+      "unchanged": true
+    },
+    {
+      "evidence": "revocation",
+      "path": "deps/dillo-mmio/src/lib.rs",
+      "sha256": "b15f846f72d73b1e6bd58c9c695fbc12982b74cd4b29e2194b9b08c3fd31040f",
+      "unchanged": true
+    },
+    {
+      "evidence": "revocation",
+      "path": "deps/dillo-mmio/src/lib.rs",
+      "sha256": "b15f846f72d73b1e6bd58c9c695fbc12982b74cd4b29e2194b9b08c3fd31040f",
+      "unchanged": true
+    },
+    {
+      "evidence": "queues",
+      "path": "deps/dillo-virtio/src/queue.rs",
+      "sha256": "d961778ee70e76a9f4e7e328da05808e82c4bd114d589126c37005a55cd08003",
+      "unchanged": true
+    },
+    {
+      "evidence": "queues",
+      "path": "deps/dillo-virtio/src/queue.rs",
+      "sha256": "d961778ee70e76a9f4e7e328da05808e82c4bd114d589126c37005a55cd08003",
+      "unchanged": true
+    },
+    {
+      "evidence": "queues",
+      "path": "deps/dillo-mmio-virtio/src/lib.rs",
+      "sha256": "9a0edfb75a85a114a8331b9b452a3408fba4ee42436de6e05c3accfffceb5da8",
+      "unchanged": true
+    },
+    {
+      "evidence": "queues",
+      "path": "deps/dillo-pci-virtio/src/transport.rs",
+      "sha256": "7531db99d94e9048209b437b4677c1e91197d7a839a230208ddb0f77198a402d",
+      "unchanged": true
+    },
+    {
+      "evidence": "process",
+      "path": "deps/dillo-machine-kvm/src/lib.rs",
+      "sha256": "2cdf27f2021b0435981a75de1c9c626e52c07813459915be71456128804ce03f",
+      "unchanged": true
+    },
+    {
+      "evidence": "process",
+      "path": "deps/dillo-machine-hvf/src/lib.rs",
+      "sha256": "079d13f3ae51b39e2656c1a8a3d4639ac4b00327dd8d7216ce90ae22f89f8ac6",
+      "unchanged": true
+    },
+    {
+      "evidence": "process",
+      "path": "deps/dillo-machine-whp/src/lib.rs",
+      "sha256": "c181fc5a87ece1de5e220c9abceb3f10ccecd72358ccbc59105260a372fd6188",
+      "unchanged": true
+    },
+    {
+      "evidence": "process",
+      "path": "deps/dillo-virtio/src/device.rs",
+      "sha256": "39d3c7b9cc5c229e525bf21a6283d27e203ffdc8bb5986e92bab416dde538905",
+      "unchanged": true
+    },
+    {
+      "evidence": "process",
+      "path": "deps/dillo-virtio-net/src/user/dns.rs",
+      "sha256": "695a7ff58c1801efb58659f4a08d7e9a96760527e5aa35aa35918003a070e074",
+      "unchanged": true
+    },
+    {
+      "evidence": "lifecycle",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "lifecycle",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "lifecycle",
+      "path": "deps/dillo-machine/src/lib.rs",
+      "sha256": "eeaf84e072e0e96b6e26666a0155347dd38d5c2c3ca1c822baa245d45aedaedf",
+      "unchanged": true
+    },
+    {
+      "evidence": "lifecycle",
+      "path": "deps/dillo-mmio-virtio/src/lib.rs",
+      "sha256": "9a0edfb75a85a114a8331b9b452a3408fba4ee42436de6e05c3accfffceb5da8",
+      "unchanged": true
+    },
+    {
+      "evidence": "lifecycle",
+      "path": "deps/dillo-pci-virtio/src/transport.rs",
+      "sha256": "7531db99d94e9048209b437b4677c1e91197d7a839a230208ddb0f77198a402d",
+      "unchanged": true
+    },
+    {
+      "evidence": "lifecycle",
+      "path": "deps/dillo-virtio/src/device.rs",
+      "sha256": "39d3c7b9cc5c229e525bf21a6283d27e203ffdc8bb5986e92bab416dde538905",
+      "unchanged": true
+    },
+    {
+      "evidence": "lifecycle",
+      "path": "deps/dillo-virtio-console/src/lib.rs",
+      "sha256": "8d397b3d75394c38f3f8ad49b2b00a2e4606cb48c08fbc495d47f525e8d21fc0",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-config",
+      "path": "deps/dillo-config/src/lib.rs",
+      "sha256": "88bf4e87cf18ea8195dabe24a36486ea93246cd64038bd389917a4f4ce1ae6c6",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-config",
+      "path": "deps/dillo-config/src/lib.rs",
+      "sha256": "88bf4e87cf18ea8195dabe24a36486ea93246cd64038bd389917a4f4ce1ae6c6",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-config",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-shape",
+      "path": "deps/dillo-virtio-console/src/lib.rs",
+      "sha256": "8d397b3d75394c38f3f8ad49b2b00a2e4606cb48c08fbc495d47f525e8d21fc0",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-shape",
+      "path": "deps/dillo-virtio-console/src/lib.rs",
+      "sha256": "8d397b3d75394c38f3f8ad49b2b00a2e4606cb48c08fbc495d47f525e8d21fc0",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-shape",
+      "path": "deps/dillo-virtio-console/src/lib.rs",
+      "sha256": "8d397b3d75394c38f3f8ad49b2b00a2e4606cb48c08fbc495d47f525e8d21fc0",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-shape",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-pipes",
+      "path": "deps/dillo-virtio-console/src/pipe.rs",
+      "sha256": "9ee2028bc438cf55d5ee8b96627137fd4e70fdfcec75565abd78d196aea2cce6",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-pipes",
+      "path": "deps/dillo-virtio-console/src/pipe.rs",
+      "sha256": "9ee2028bc438cf55d5ee8b96627137fd4e70fdfcec75565abd78d196aea2cce6",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-pipes",
+      "path": "deps/dillo-virtio-console/src/pipe.rs",
+      "sha256": "9ee2028bc438cf55d5ee8b96627137fd4e70fdfcec75565abd78d196aea2cce6",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-pipes",
+      "path": "deps/dillo-virtio-console/src/lib.rs",
+      "sha256": "8d397b3d75394c38f3f8ad49b2b00a2e4606cb48c08fbc495d47f525e8d21fc0",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-control",
+      "path": "deps/dillo-virtio-console/src/control.rs",
+      "sha256": "ab92b61879ec2b8418eaf4fdf0a9f036d0b8e2bae0c4c18076bde168d1d4e4b6",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-control",
+      "path": "deps/dillo-virtio-console/src/control.rs",
+      "sha256": "ab92b61879ec2b8418eaf4fdf0a9f036d0b8e2bae0c4c18076bde168d1d4e4b6",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-control",
+      "path": "deps/dillo-virtio-console/src/control.rs",
+      "sha256": "ab92b61879ec2b8418eaf4fdf0a9f036d0b8e2bae0c4c18076bde168d1d4e4b6",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-resize",
+      "path": "deps/dillo-virtio-console/src/resize.rs",
+      "sha256": "8d5250d0bf299ed347e090a183626b7fb8edc1b70f57b2a2c951e2c6a8ca8ba2",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-resize",
+      "path": "deps/dillo-config/src/console_size.rs",
+      "sha256": "ce02bbf7d56295e9eebfdcdb854df5fe6a5dfa49ffd7221848d4c6844e49ce2e",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-resize",
+      "path": "tests/boot/console_resize.rs",
+      "sha256": "db6abb8ba6d017f130c00d23c0e6c4b6938c2b27dc40e5fe04419d34628a22b4",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-output",
+      "path": "deps/dillo-virtio-console/src/lib.rs",
+      "sha256": "8d397b3d75394c38f3f8ad49b2b00a2e4606cb48c08fbc495d47f525e8d21fc0",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-output",
+      "path": "deps/dillo-virtio-console/src/lib.rs",
+      "sha256": "8d397b3d75394c38f3f8ad49b2b00a2e4606cb48c08fbc495d47f525e8d21fc0",
+      "unchanged": true
+    },
+    {
+      "evidence": "console-output",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "net-config",
+      "path": "deps/dillo-config/src/lib.rs",
+      "sha256": "88bf4e87cf18ea8195dabe24a36486ea93246cd64038bd389917a4f4ce1ae6c6",
+      "unchanged": true
+    },
+    {
+      "evidence": "net-config",
+      "path": "deps/dillo-config/src/lib.rs",
+      "sha256": "88bf4e87cf18ea8195dabe24a36486ea93246cd64038bd389917a4f4ce1ae6c6",
+      "unchanged": true
+    },
+    {
+      "evidence": "net-config",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "net-config",
+      "path": "deps/dillo-virtio-net/src/user/forward.rs",
+      "sha256": "cee6bff36e19e6fc0a08da532b16587e3a29d2da11cec77f629ba13d4338ca91",
+      "unchanged": true
+    },
+    {
+      "evidence": "net-protocol",
+      "path": "deps/dillo-virtio-net/src/backend.rs",
+      "sha256": "81e530a4770f89dc706fcde414ea54160047ceb40061af9defb89e3f583fd0c1",
+      "unchanged": true
+    },
+    {
+      "evidence": "net-protocol",
+      "path": "deps/dillo-virtio-net/src/lib.rs",
+      "sha256": "454c7e1c564527a7f9f55d11cc3db316137bb0aca389af191170fb58df17ffc6",
+      "unchanged": true
+    },
+    {
+      "evidence": "net-protocol",
+      "path": "deps/dillo-virtio-net/src/user/stack.rs",
+      "sha256": "b0b14e862023fbcf03647a0481ea2f6425908726ef729040b733124ea2471128",
+      "unchanged": true
+    },
+    {
+      "evidence": "net-protocol",
+      "path": "deps/dillo-virtio-net/src/user/tests.rs",
+      "sha256": "613ad231b43b4121f60029e35b3e84b39630d3f9ee99a0ae271678ea8581c2db",
+      "unchanged": true
+    },
+    {
+      "evidence": "net-protocol",
+      "path": "deps/dillo-virtio-net/README.md",
+      "sha256": "03ca3d8309d1689f50c5f528da8af5c8731733f2570361175a7833fc5e35e0cc",
+      "unchanged": true
+    },
+    {
+      "evidence": "net-resources",
+      "path": "deps/dillo-virtio-net/src/user/mod.rs",
+      "sha256": "adf827165749fca6a0596c321752e71eb52bd4070edeb5e1797ae5d7ad312e68",
+      "unchanged": true
+    },
+    {
+      "evidence": "net-resources",
+      "path": "deps/dillo-virtio-net/src/user/mod.rs",
+      "sha256": "adf827165749fca6a0596c321752e71eb52bd4070edeb5e1797ae5d7ad312e68",
+      "unchanged": true
+    },
+    {
+      "evidence": "net-resources",
+      "path": "deps/dillo-virtio-net/src/user/dns.rs",
+      "sha256": "695a7ff58c1801efb58659f4a08d7e9a96760527e5aa35aa35918003a070e074",
+      "unchanged": true
+    },
+    {
+      "evidence": "net-resources",
+      "path": "deps/dillo-virtio-net/src/user/stack.rs",
+      "sha256": "b0b14e862023fbcf03647a0481ea2f6425908726ef729040b733124ea2471128",
+      "unchanged": true
+    },
+    {
+      "evidence": "net-resources",
+      "path": "deps/dillo-virtio-net/src/user/udp.rs",
+      "sha256": "896d4e2afef9075a7e6bf352bc73ad86d25cab701686f591c3e9eee132ea89ce",
+      "unchanged": true
+    },
+    {
+      "evidence": "io-boundary",
+      "path": "deps/dillo-storage/src/lib.rs",
+      "sha256": "9b6fbfd9703d04715f9e6f747a847dc18879314e65b1c1c2f01c73b56896a448",
+      "unchanged": true
+    },
+    {
+      "evidence": "io-boundary",
+      "path": "deps/dillo-virtio-blk/src/lib.rs",
+      "sha256": "e5132fed54e6c420f525b3877b27bf5a4ed2240832f45955855d9803015e9532",
+      "unchanged": true
+    },
+    {
+      "evidence": "io-boundary",
+      "path": "deps/dillo-virtio-gpt/src/lib.rs",
+      "sha256": "44658eeb895d2959f31d4000c4d2bc652626565dfdfd6ebba31eabb719488bb8",
+      "unchanged": true
+    },
+    {
+      "evidence": "io-boundary",
+      "path": "deps/dillo-virtio-fs/src/backend.rs",
+      "sha256": "42049aebe8dce7b5f08b17bc6fc068429d7569ba2a08e58df54d51ac8099edbd",
+      "unchanged": true
+    },
+    {
+      "evidence": "io-boundary",
+      "path": "deps/dillo-virtio-fs/src/lib.rs",
+      "sha256": "77230bb40b020f7ec69eddba41d24d1140e53e6fc4ee88b58646575558b4cf0b",
+      "unchanged": true
+    },
+    {
+      "evidence": "io-boundary",
+      "path": "deps/dillo-virtio-fs/src/fuse.rs",
+      "sha256": "059168e86d7c60e767c2aa0b557898982146a33cdce611fdde819f3a02234075",
+      "unchanged": true
+    },
+    {
+      "evidence": "io-boundary",
+      "path": "deps/dillo-virtio-vsock/src/uds.rs",
+      "sha256": "753980891d7a02980ce1f4a18dd221117740c1f381bbac0283ce9d26ed982d46",
+      "unchanged": true
+    },
+    {
+      "evidence": "ci",
+      "path": ".github/workflows/ci.yml",
+      "sha256": "1d49916dd489ed5eee9465d091286a7d0e5c54db1dbdf4af23c416d18b13a8ab",
+      "unchanged": true
+    },
+    {
+      "evidence": "ci",
+      "path": "tests/boot/main.rs",
+      "sha256": "0434ef2438fa805a54d0495db9b288a3b718009e34d1adf4ac4cd51807be8d48",
+      "unchanged": true
+    },
+    {
+      "evidence": "ci",
+      "path": "tests/boot/console_resize.rs",
+      "sha256": "db6abb8ba6d017f130c00d23c0e6c4b6938c2b27dc40e5fe04419d34628a22b4",
+      "unchanged": true
+    },
+    {
+      "evidence": "test-gaps",
+      "path": "tests/pmi_adversarial.rs",
+      "sha256": "c7aef455134cf35032f798244c72c60543dda0e62cfb35038d807701189d7cb2",
+      "unchanged": true
+    },
+    {
+      "evidence": "test-gaps",
+      "path": "deps/dillo-devtree/tests/platform_adversarial.rs",
+      "sha256": "70b37af4f66968d098ff169aa8f21bd332a7064c5fe2a29cf139e12e1d542f71",
+      "unchanged": true
+    },
+    {
+      "evidence": "test-gaps",
+      "path": "tests/architecture_cfg.rs",
+      "sha256": "852926d3edb1d34d0f02733af9d0ada07f3482ed8beb970e6bf6a48764ff9655",
+      "unchanged": true
+    },
+    {
+      "evidence": "test-gaps",
+      "path": "tests/architecture_cfg.rs",
+      "sha256": "852926d3edb1d34d0f02733af9d0ada07f3482ed8beb970e6bf6a48764ff9655",
+      "unchanged": true
+    },
+    {
+      "evidence": "cc",
+      "path": "src/lib.rs",
+      "sha256": "7b7f570c0605f62950eef161fa6caebf33cd7fc621b0636aa46753f5c553e39f",
+      "unchanged": true
+    },
+    {
+      "evidence": "cc",
+      "path": "deps/dillo-machine/src/lib.rs",
+      "sha256": "eeaf84e072e0e96b6e26666a0155347dd38d5c2c3ca1c822baa245d45aedaedf",
+      "unchanged": true
+    },
+    {
+      "evidence": "ownership",
+      "path": "src/main.rs",
+      "sha256": "4faee1b5c3c66fa1750c4d045b5d4a44796b607075c5af679eeeee42be45058c",
+      "unchanged": true
+    },
+    {
+      "evidence": "endpoint-validation",
+      "path": "deps/dillo-virtio-console/src/pipe.rs",
+      "sha256": "9ee2028bc438cf55d5ee8b96627137fd4e70fdfcec75565abd78d196aea2cce6",
+      "unchanged": true
+    },
+    {
+      "evidence": "endpoint-validation",
+      "path": "deps/dillo-virtio-console/src/pipe.rs",
+      "sha256": "9ee2028bc438cf55d5ee8b96627137fd4e70fdfcec75565abd78d196aea2cce6",
+      "unchanged": true
+    },
+    {
+      "evidence": "endpoint-validation",
+      "path": "deps/dillo-virtio-console/src/pipe.rs",
+      "sha256": "9ee2028bc438cf55d5ee8b96627137fd4e70fdfcec75565abd78d196aea2cce6",
+      "unchanged": true
+    },
+    {
+      "evidence": "parser-budget",
+      "path": "src/lib.rs",
+      "sha256": "7b7f570c0605f62950eef161fa6caebf33cd7fc621b0636aa46753f5c553e39f",
+      "unchanged": true
+    },
+    {
+      "evidence": "parser-budget",
+      "path": "src/lib.rs",
+      "sha256": "7b7f570c0605f62950eef161fa6caebf33cd7fc621b0636aa46753f5c553e39f",
+      "unchanged": true
+    }
+  ],
+  "note": "Byte identity preserves old scoped observations, not obsolete requirements or unverified native claims."
+}

@@ -1,0 +1,2126 @@
+{
+  "baseline": "c808d800e0e020df275548bb64c3061ce8e3379a",
+  "files": [
+    {
+      "path": ".cargo/config.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": ".copr/Makefile",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": ".copr/cargo-config.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": ".copr/dillo.spec",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": ".github/workflows/ppa.yml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": ".gitignore",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": ".gitlint",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "kind": "document or model fixture",
+      "unit": "contract-and-fixtures",
+      "rationale": "Normative design consumed into register; other documentation/fixtures provide context, not independent conformance evidence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "DESIGN.md",
+      "kind": "document or model fixture",
+      "unit": "contract-and-fixtures",
+      "rationale": "Normative design consumed into register; other documentation/fixtures provide context, not independent conformance evidence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": false
+    },
+    {
+      "path": "LICENSE",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "NOTICE",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "debian/README.source",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "debian/changelog",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "debian/control",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "debian/copyright",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "debian/rules",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "debian/source/format",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deny.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-config/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-config/src/console_size.rs",
+      "kind": "production",
+      "unit": "config",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-config/src/lib.rs",
+      "kind": "production",
+      "unit": "config",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-devtree/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-devtree/src/lib.rs",
+      "kind": "production",
+      "unit": "devtree",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-devtree/src/platform.rs",
+      "kind": "production",
+      "unit": "devtree",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-devtree/tests/platform_adversarial.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-hvf/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-hvf/src/hypervisor.rs",
+      "kind": "production",
+      "unit": "hvf",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-hvf/src/lib.rs",
+      "kind": "production",
+      "unit": "hvf",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-kvm/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-kvm/src/amd_tsc/mod.rs",
+      "kind": "production",
+      "unit": "kvm",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-kvm/src/cpuid_x86.rs",
+      "kind": "production",
+      "unit": "kvm",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-kvm/src/hypervisor.rs",
+      "kind": "production",
+      "unit": "kvm",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-kvm/src/intc_x86.rs",
+      "kind": "production",
+      "unit": "kvm",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-kvm/src/irq.rs",
+      "kind": "production",
+      "unit": "kvm",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-kvm/src/lib.rs",
+      "kind": "production",
+      "unit": "kvm",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-kvm/src/memory.rs",
+      "kind": "production",
+      "unit": "kvm",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-kvm/src/msi.rs",
+      "kind": "production",
+      "unit": "kvm",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-kvm/src/notification.rs",
+      "kind": "production",
+      "unit": "kvm",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-whp/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-whp/src/cpuid_x86.rs",
+      "kind": "production",
+      "unit": "whp",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-whp/src/hypervisor.rs",
+      "kind": "production",
+      "unit": "whp",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-whp/src/ioapic.rs",
+      "kind": "production",
+      "unit": "whp",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine-whp/src/lib.rs",
+      "kind": "production",
+      "unit": "whp",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine/src/cpuid_x86.rs",
+      "kind": "production",
+      "unit": "machine-contract",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-machine/src/lib.rs",
+      "kind": "production",
+      "unit": "machine-contract",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-mmio-uart/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-mmio-uart/src/lib.rs",
+      "kind": "production",
+      "unit": "uart",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-mmio-virtio/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-mmio-virtio/src/lib.rs",
+      "kind": "production",
+      "unit": "mmio-transport",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-mmio/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-mmio/src/lib.rs",
+      "kind": "production",
+      "unit": "mmio-services",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-mmio/src/syscon.rs",
+      "kind": "production",
+      "unit": "mmio-services",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-pci-virtio/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-pci-virtio/src/capabilities.rs",
+      "kind": "production",
+      "unit": "pci-transport",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-pci-virtio/src/lib.rs",
+      "kind": "production",
+      "unit": "pci-transport",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-pci-virtio/src/transport.rs",
+      "kind": "production",
+      "unit": "pci-transport",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-pci-virtio/tests/msix_bounds.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-pci/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-pci/src/address.rs",
+      "kind": "production",
+      "unit": "pci-bus",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-pci/src/bar.rs",
+      "kind": "production",
+      "unit": "pci-bus",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-pci/src/bdf.rs",
+      "kind": "production",
+      "unit": "pci-bus",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-pci/src/capability.rs",
+      "kind": "production",
+      "unit": "pci-bus",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-pci/src/configuration.rs",
+      "kind": "production",
+      "unit": "pci-bus",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-pci/src/lib.rs",
+      "kind": "production",
+      "unit": "pci-bus",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-pci/src/msix.rs",
+      "kind": "production",
+      "unit": "pci-bus",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-pci/src/msix_tests.rs",
+      "kind": "production",
+      "unit": "pci-bus",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-storage/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-storage/README.md",
+      "kind": "document or model fixture",
+      "unit": "contract-and-fixtures",
+      "rationale": "Normative design consumed into register; other documentation/fixtures provide context, not independent conformance evidence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-storage/src/lib.rs",
+      "kind": "production",
+      "unit": "storage",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-blk/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-blk/src/lib.rs",
+      "kind": "production",
+      "unit": "block",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-console/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+      "kind": "document or model fixture",
+      "unit": "contract-and-fixtures",
+      "rationale": "Normative design consumed into register; other documentation/fixtures provide context, not independent conformance evidence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-console/src/control.rs",
+      "kind": "production",
+      "unit": "console",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-console/src/input.rs",
+      "kind": "production",
+      "unit": "console",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-console/src/lib.rs",
+      "kind": "production",
+      "unit": "console",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-console/src/liveness.rs",
+      "kind": "production",
+      "unit": "console",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-console/src/pipe.rs",
+      "kind": "production",
+      "unit": "console",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-console/src/resize.rs",
+      "kind": "production",
+      "unit": "console",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-fs/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-fs/src/backend.rs",
+      "kind": "production",
+      "unit": "fs",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-fs/src/fuse.rs",
+      "kind": "production",
+      "unit": "fs",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-fs/src/lib.rs",
+      "kind": "production",
+      "unit": "fs",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-gpt/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-gpt/src/lib.rs",
+      "kind": "production",
+      "unit": "gpt",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-gpt/src/synth_gpt.rs",
+      "kind": "production",
+      "unit": "gpt",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-gpt/src/vgpt_backing.rs",
+      "kind": "production",
+      "unit": "gpt",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/DESIGN.md",
+      "kind": "document or model fixture",
+      "unit": "contract-and-fixtures",
+      "rationale": "Normative design consumed into register; other documentation/fixtures provide context, not independent conformance evidence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/README.md",
+      "kind": "document or model fixture",
+      "unit": "contract-and-fixtures",
+      "rationale": "Normative design consumed into register; other documentation/fixtures provide context, not independent conformance evidence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/backend.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/bridge/linux.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/bridge/macos.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/bridge/mod.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/lib.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/linux_fd.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/macvtap.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/user/device.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/user/dhcp.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/user/dns.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/user/forward.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/user/mod.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/user/ndp.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/user/stack.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/user/tcp.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/user/tests.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-net/src/user/udp.rs",
+      "kind": "production",
+      "unit": "net",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-vsock/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-vsock/src/csm.rs",
+      "kind": "production",
+      "unit": "vsock",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-vsock/src/lib.rs",
+      "kind": "production",
+      "unit": "vsock",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-vsock/src/packet.rs",
+      "kind": "production",
+      "unit": "vsock",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio-vsock/src/uds.rs",
+      "kind": "production",
+      "unit": "vsock",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio/Cargo.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio/src/device.rs",
+      "kind": "production",
+      "unit": "virtio-core",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio/src/features.rs",
+      "kind": "production",
+      "unit": "virtio-core",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio/src/kick.rs",
+      "kind": "production",
+      "unit": "virtio-core",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio/src/lib.rs",
+      "kind": "production",
+      "unit": "virtio-core",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio/src/memory.rs",
+      "kind": "production",
+      "unit": "virtio-core",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/dillo-virtio/src/queue.rs",
+      "kind": "production",
+      "unit": "virtio-core",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/snuffler/Cargo.toml",
+      "kind": "validation guest",
+      "unit": "test-support",
+      "rationale": "Guest test/benchmark workload, not host VMM authority; used as evidence only.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/snuffler/src/bench.rs",
+      "kind": "validation guest",
+      "unit": "test-support",
+      "rationale": "Guest test/benchmark workload, not host VMM authority; used as evidence only.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/snuffler/src/lib.rs",
+      "kind": "validation guest",
+      "unit": "test-support",
+      "rationale": "Guest test/benchmark workload, not host VMM authority; used as evidence only.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/snuffler/src/main.rs",
+      "kind": "validation guest",
+      "unit": "test-support",
+      "rationale": "Guest test/benchmark workload, not host VMM authority; used as evidence only.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/snuffler/src/memory.rs",
+      "kind": "validation guest",
+      "unit": "test-support",
+      "rationale": "Guest test/benchmark workload, not host VMM authority; used as evidence only.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "deps/snuffler/src/virtiofs.rs",
+      "kind": "validation guest",
+      "unit": "test-support",
+      "rationale": "Guest test/benchmark workload, not host VMM authority; used as evidence only.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "fuzz/.gitignore",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "fuzz/Cargo.lock",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "fuzz/Cargo.toml",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "fuzz/fuzz_targets/dhcp_parse.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "fuzz/fuzz_targets/dns_query.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "fuzz/fuzz_targets/ndp_parse.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "fuzz/fuzz_targets/net_demux.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "fuzz/fuzz_targets/pmi_parse.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "licenserc.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "kind": "build/packaging/repository data",
+      "unit": "build-support",
+      "rationale": "Dependency pins, supported CI lanes and build scope reviewed; no claim of exhaustive packaging or supply-chain certification.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "src/launch/bootconfig.rs",
+      "kind": "production",
+      "unit": "launch",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "src/launch/delegation_tests.rs",
+      "kind": "production",
+      "unit": "launch",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "src/lib.rs",
+      "kind": "production",
+      "unit": "launch",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "src/main.rs",
+      "kind": "production",
+      "unit": "launch",
+      "rationale": "Covered by reverse review unit; this classification does not assert every line is defect-free.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "tests/VIRTIOFS.md",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "tests/architecture_cfg.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "tests/boot/bootconfig.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "tests/boot/console_input.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "tests/boot/console_lifetime.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "tests/boot/console_resize.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "tests/boot/main.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "tests/boot/virtiofs-aarch64.config",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "tests/boot/virtiofs-x86_64.config",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "tests/boot/virtiofs.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    },
+    {
+      "path": "tests/pmi_adversarial.rs",
+      "kind": "validation",
+      "unit": "test-support",
+      "rationale": "Tests/fuzz seeds are evidence with conditional-execution limitations, not runtime proof by file presence.",
+      "current_revision": "c808d800e0e020df275548bb64c3061ce8e3379a",
+      "source_unchanged": true
+    }
+  ],
+  "units": [
+    {
+      "id": "launch",
+      "prefix": "src/",
+      "path_and_authority": "PE bytes -> target/actions -> DT/host preflight -> machine construction -> writes -> vCPU run -> reset replay/poweroff. Public library parser and CLI paths both included.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/131",
+        "https://github.com/pichi-vm/dillo/issues/133",
+        "https://github.com/pichi-vm/dillo/issues/134",
+        "https://github.com/pichi-vm/dillo/issues/142",
+        "https://github.com/pichi-vm/dillo/issues/145",
+        "https://github.com/pichi-vm/dillo/issues/154",
+        "https://github.com/pichi-vm/dillo/issues/18",
+        "https://github.com/pichi-vm/dillo/issues/19",
+        "https://github.com/pichi-vm/dillo/issues/141"
+      ],
+      "production_files": [
+        "src/launch/bootconfig.rs",
+        "src/launch/delegation_tests.rs",
+        "src/lib.rs",
+        "src/main.rs"
+      ],
+      "rules": [
+        "PMI-001",
+        "PMI-002",
+        "PMI-003",
+        "PMI-004",
+        "LIFECYCLE-001",
+        "LAYOUT-001"
+      ],
+      "prior_evidence": [
+        "launch",
+        "actions",
+        "launch-validation",
+        "selection",
+        "lifecycle",
+        "parser-budget"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "config",
+      "prefix": "deps/dillo-config/",
+      "path_and_authority": "CLI and JSON -> explicit device bus/slot/endpoint/backend choices -> fixed-first allocation. Inputs are requests, not admission authority.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/10",
+        "https://github.com/pichi-vm/dillo/issues/153"
+      ],
+      "production_files": [
+        "deps/dillo-config/src/console_size.rs",
+        "deps/dillo-config/src/lib.rs"
+      ],
+      "rules": [
+        "DT-004",
+        "CONSOLE",
+        "NET",
+        "LAYOUT-001"
+      ],
+      "prior_evidence": [
+        "console-config",
+        "placement",
+        "net-config"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "devtree",
+      "prefix": "deps/dillo-devtree/",
+      "path_and_authority": "Base and overlay -> drain/survey -> typed platform/resource plan -> backend consumers. Structural, informational, duplicate and unhandled entries considered separately from hardware realization.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/138",
+        "https://github.com/pichi-vm/dillo/issues/143",
+        "https://github.com/pichi-vm/dillo/issues/144",
+        "https://github.com/pichi-vm/dillo/issues/149",
+        "https://github.com/pichi-vm/dillo/issues/137",
+        "https://github.com/pichi-vm/dillo/issues/151"
+      ],
+      "production_files": [
+        "deps/dillo-devtree/src/lib.rs",
+        "deps/dillo-devtree/src/platform.rs"
+      ],
+      "rules": [
+        "DT-001",
+        "DT-002",
+        "DT-003",
+        "DT-004",
+        "DT-005",
+        "DT-006",
+        "DT-007"
+      ],
+      "prior_evidence": [
+        "dt-drain",
+        "dt-plan",
+        "dt-backend",
+        "test-gaps"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "machine-contract",
+      "prefix": "deps/dillo-machine/",
+      "path_and_authority": "Machine family/CPU/Memory/worker interface -> concrete VM. Includes CPU profiles, associated services, run/reset/error results.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/10",
+        "https://github.com/pichi-vm/dillo/issues/17",
+        "https://github.com/pichi-vm/dillo/issues/140",
+        "https://github.com/pichi-vm/dillo/issues/141"
+      ],
+      "production_files": [
+        "deps/dillo-machine/src/cpuid_x86.rs",
+        "deps/dillo-machine/src/lib.rs"
+      ],
+      "rules": [
+        "MODEL-001",
+        "MODEL-002",
+        "MODEL-003",
+        "MODEL-004",
+        "CPU-001",
+        "CPU-002",
+        "CPU-003",
+        "LAYOUT-001"
+      ],
+      "prior_evidence": [
+        "interfaces",
+        "cpu",
+        "selection",
+        "lifecycle"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "kvm",
+      "prefix": "deps/dillo-machine-kvm/",
+      "path_and_authority": "Linux x86/Arm VM creation, memory, CPUID/register state, irqchip/GIC, IRQ/MSI/ioeventfd, MMIO attachment and thread execution. Direct/generic attachment and backend implicit effects included.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/3",
+        "https://github.com/pichi-vm/dillo/issues/4",
+        "https://github.com/pichi-vm/dillo/issues/8",
+        "https://github.com/pichi-vm/dillo/issues/9",
+        "https://github.com/pichi-vm/dillo/issues/10",
+        "https://github.com/pichi-vm/dillo/issues/15",
+        "https://github.com/pichi-vm/dillo/issues/16",
+        "https://github.com/pichi-vm/dillo/issues/140",
+        "https://github.com/pichi-vm/dillo/issues/141",
+        "https://github.com/pichi-vm/dillo/issues/151"
+      ],
+      "production_files": [
+        "deps/dillo-machine-kvm/src/amd_tsc/mod.rs",
+        "deps/dillo-machine-kvm/src/cpuid_x86.rs",
+        "deps/dillo-machine-kvm/src/hypervisor.rs",
+        "deps/dillo-machine-kvm/src/intc_x86.rs",
+        "deps/dillo-machine-kvm/src/irq.rs",
+        "deps/dillo-machine-kvm/src/lib.rs",
+        "deps/dillo-machine-kvm/src/memory.rs",
+        "deps/dillo-machine-kvm/src/msi.rs",
+        "deps/dillo-machine-kvm/src/notification.rs"
+      ],
+      "rules": [
+        "DT-002",
+        "DT-003",
+        "MEMORY-001",
+        "PROCESS-001",
+        "PROCESS-004",
+        "NOTIFY-001",
+        "NOTIFY-002",
+        "CPU-001",
+        "PMI-003"
+      ],
+      "prior_evidence": [
+        "cpu",
+        "admission",
+        "dt-backend",
+        "memory",
+        "process",
+        "lifecycle",
+        "ci"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "hvf",
+      "prefix": "deps/dillo-machine-hvf/",
+      "path_and_authority": "macOS Arm VM, RAM and vCPU state, GIC and MMIO/interrupt services, generic attachment and thread execution. Native nondefault GIC extents remain a verification gap.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/10",
+        "https://github.com/pichi-vm/dillo/issues/17",
+        "https://github.com/pichi-vm/dillo/issues/140",
+        "https://github.com/pichi-vm/dillo/issues/150",
+        "https://github.com/pichi-vm/dillo/issues/151",
+        "https://github.com/pichi-vm/dillo/issues/141"
+      ],
+      "production_files": [
+        "deps/dillo-machine-hvf/src/hypervisor.rs",
+        "deps/dillo-machine-hvf/src/lib.rs"
+      ],
+      "rules": [
+        "DT-002",
+        "MEMORY-001",
+        "PROCESS-001",
+        "PROCESS-004",
+        "NOTIFY-001",
+        "CPU-001",
+        "PMI-003"
+      ],
+      "prior_evidence": [
+        "cpu",
+        "admission",
+        "dt-backend",
+        "memory",
+        "process",
+        "lifecycle",
+        "ci"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "whp",
+      "prefix": "deps/dillo-machine-whp/",
+      "path_and_authority": "Windows x86 partition/RAM/vCPU, emulated IOAPIC and MSI, generic attachment and thread execution. Native negative/resource-isolation cases remain a verification gap.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/10",
+        "https://github.com/pichi-vm/dillo/issues/17",
+        "https://github.com/pichi-vm/dillo/issues/140",
+        "https://github.com/pichi-vm/dillo/issues/150",
+        "https://github.com/pichi-vm/dillo/issues/151",
+        "https://github.com/pichi-vm/dillo/issues/141"
+      ],
+      "production_files": [
+        "deps/dillo-machine-whp/src/cpuid_x86.rs",
+        "deps/dillo-machine-whp/src/hypervisor.rs",
+        "deps/dillo-machine-whp/src/ioapic.rs",
+        "deps/dillo-machine-whp/src/lib.rs"
+      ],
+      "rules": [
+        "DT-002",
+        "MEMORY-001",
+        "PROCESS-001",
+        "PROCESS-004",
+        "NOTIFY-001",
+        "CPU-001",
+        "PMI-003"
+      ],
+      "prior_evidence": [
+        "cpu",
+        "admission",
+        "memory",
+        "process",
+        "lifecycle",
+        "ci"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "mmio-services",
+      "prefix": "deps/dillo-mmio/",
+      "path_and_authority": "MMIO windows/interrupts/notifications/execution and shared-memory capability objects; syscon declared extent/value -> structured power/reset result. Borrow creation, forwarding and privacy transition inspected.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/10",
+        "https://github.com/pichi-vm/dillo/issues/140",
+        "https://github.com/pichi-vm/dillo/issues/18",
+        "https://github.com/pichi-vm/dillo/issues/141"
+      ],
+      "production_files": [
+        "deps/dillo-mmio/src/lib.rs",
+        "deps/dillo-mmio/src/syscon.rs"
+      ],
+      "rules": [
+        "COMPOSE-003",
+        "COMPOSE-004",
+        "MEMORY-001",
+        "MEMORY-003",
+        "PROCESS-003",
+        "LAYOUT-001"
+      ],
+      "prior_evidence": [
+        "interfaces",
+        "memory",
+        "revocation",
+        "admission",
+        "lifecycle"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "uart",
+      "prefix": "deps/dillo-mmio-uart/",
+      "path_and_authority": "DT window/reg-shift/interrupt -> shared ns16550 -> attached interrupt and host writer. Alternate constructor/set_interrupt path lacks instance admission. Output shares host-service boundary obligations.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/10",
+        "https://github.com/pichi-vm/dillo/issues/17",
+        "https://github.com/pichi-vm/dillo/issues/151"
+      ],
+      "production_files": [
+        "deps/dillo-mmio-uart/src/lib.rs"
+      ],
+      "rules": [
+        "DT-002",
+        "COMPOSE-003",
+        "MODEL-004",
+        "PROCESS-001"
+      ],
+      "prior_evidence": [
+        "composition",
+        "admission",
+        "interfaces",
+        "dt-drain"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "mmio-transport",
+      "prefix": "deps/dillo-mmio-virtio/",
+      "path_and_authority": "MMIO registers -> guest feature/queue configuration -> activation -> memory/notifier/interrupt and worker services -> reset. Public attachment setters included.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/10",
+        "https://github.com/pichi-vm/dillo/issues/54",
+        "https://github.com/pichi-vm/dillo/issues/18",
+        "https://github.com/pichi-vm/dillo/issues/19",
+        "https://github.com/pichi-vm/dillo/issues/140"
+      ],
+      "production_files": [
+        "deps/dillo-mmio-virtio/src/lib.rs"
+      ],
+      "rules": [
+        "COMPOSE-001",
+        "PROCESS-003",
+        "MEMORY-002",
+        "NOTIFY-001",
+        "LIFECYCLE-002"
+      ],
+      "prior_evidence": [
+        "composition",
+        "admission",
+        "queues",
+        "lifecycle"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "pci-bus",
+      "prefix": "deps/dillo-pci/",
+      "path_and_authority": "BDF/ECAM/config/BAR/MSI-X -> nested component routing and interrupt delivery. BAR mutation, child translation and parent attachment included.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/10",
+        "https://github.com/pichi-vm/dillo/issues/13",
+        "https://github.com/pichi-vm/dillo/issues/14",
+        "https://github.com/pichi-vm/dillo/issues/135",
+        "https://github.com/pichi-vm/dillo/issues/136"
+      ],
+      "production_files": [
+        "deps/dillo-pci/src/address.rs",
+        "deps/dillo-pci/src/bar.rs",
+        "deps/dillo-pci/src/bdf.rs",
+        "deps/dillo-pci/src/capability.rs",
+        "deps/dillo-pci/src/configuration.rs",
+        "deps/dillo-pci/src/lib.rs",
+        "deps/dillo-pci/src/msix.rs",
+        "deps/dillo-pci/src/msix_tests.rs"
+      ],
+      "rules": [
+        "DT-004",
+        "COMPOSE-003",
+        "PROCESS-003",
+        "NOTIFY-002"
+      ],
+      "prior_evidence": [
+        "composition",
+        "dt-backend",
+        "admission"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "pci-transport",
+      "prefix": "deps/dillo-pci-virtio/",
+      "path_and_authority": "PCI virtio capabilities/common config/queue enables/MSI-X -> device activation and reset. Shares device protocols with MMIO.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/10",
+        "https://github.com/pichi-vm/dillo/issues/13",
+        "https://github.com/pichi-vm/dillo/issues/14",
+        "https://github.com/pichi-vm/dillo/issues/54",
+        "https://github.com/pichi-vm/dillo/issues/18",
+        "https://github.com/pichi-vm/dillo/issues/19"
+      ],
+      "production_files": [
+        "deps/dillo-pci-virtio/src/capabilities.rs",
+        "deps/dillo-pci-virtio/src/lib.rs",
+        "deps/dillo-pci-virtio/src/transport.rs"
+      ],
+      "rules": [
+        "COMPOSE-001",
+        "PROCESS-003",
+        "MEMORY-002",
+        "NOTIFY-001",
+        "NOTIFY-002"
+      ],
+      "prior_evidence": [
+        "composition",
+        "queues",
+        "admission",
+        "lifecycle"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "virtio-core",
+      "prefix": "deps/dillo-virtio/",
+      "path_and_authority": "Guest queue/descriptors -> shared-memory reads/writes -> protocol worker/kicks -> used ring/interrupt; malicious traversal, mutable metadata, activation and stop/join paths.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/53",
+        "https://github.com/pichi-vm/dillo/issues/54",
+        "https://github.com/pichi-vm/dillo/issues/55",
+        "https://github.com/pichi-vm/dillo/issues/140",
+        "https://github.com/pichi-vm/dillo/issues/141"
+      ],
+      "production_files": [
+        "deps/dillo-virtio/src/device.rs",
+        "deps/dillo-virtio/src/features.rs",
+        "deps/dillo-virtio/src/kick.rs",
+        "deps/dillo-virtio/src/lib.rs",
+        "deps/dillo-virtio/src/memory.rs",
+        "deps/dillo-virtio/src/queue.rs"
+      ],
+      "rules": [
+        "MEMORY-002",
+        "MEMORY-003",
+        "NOTIFY-002",
+        "DEBUG-002",
+        "LIFECYCLE-002"
+      ],
+      "prior_evidence": [
+        "queues",
+        "memory",
+        "process",
+        "lifecycle"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "console",
+      "prefix": "deps/dillo-virtio-console/",
+      "path_and_authority": "Configured ports/stdio/inherited endpoints and resize listener -> data/control queues. Includes stdout thread/channel, global stdin producer, lifetime watcher, named-port RX, control pending replies, EOF, stop/reset and flush.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/17",
+        "https://github.com/pichi-vm/dillo/issues/140",
+        "https://github.com/pichi-vm/dillo/issues/141",
+        "https://github.com/pichi-vm/dillo/issues/146",
+        "https://github.com/pichi-vm/dillo/issues/147",
+        "https://github.com/pichi-vm/dillo/issues/148",
+        "https://github.com/pichi-vm/dillo/issues/153",
+        "https://github.com/pichi-vm/dillo/issues/18",
+        "https://github.com/pichi-vm/dillo/issues/19"
+      ],
+      "production_files": [
+        "deps/dillo-virtio-console/src/control.rs",
+        "deps/dillo-virtio-console/src/input.rs",
+        "deps/dillo-virtio-console/src/lib.rs",
+        "deps/dillo-virtio-console/src/liveness.rs",
+        "deps/dillo-virtio-console/src/pipe.rs",
+        "deps/dillo-virtio-console/src/resize.rs"
+      ],
+      "rules": [
+        "CONSOLE",
+        "LAYOUT-004",
+        "MEMORY-002",
+        "DEBUG-002",
+        "LIFECYCLE-001"
+      ],
+      "prior_evidence": [
+        "console-config",
+        "console-shape",
+        "console-pipes",
+        "console-control",
+        "console-resize",
+        "console-output",
+        "endpoint-validation",
+        "lifecycle"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "net",
+      "prefix": "deps/dillo-virtio-net/",
+      "path_and_authority": "Virtio frames -> user stack or explicit bridge/macvtap; user TCP/UDP/DNS/DHCP/IPv6/forwarding and resolver workers; host sockets/fds, queue budgets, idle expiry and teardown included.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/17",
+        "https://github.com/pichi-vm/dillo/issues/53",
+        "https://github.com/pichi-vm/dillo/issues/55",
+        "https://github.com/pichi-vm/dillo/issues/60",
+        "https://github.com/pichi-vm/dillo/issues/80",
+        "https://github.com/pichi-vm/dillo/issues/151",
+        "https://github.com/pichi-vm/dillo/issues/18",
+        "https://github.com/pichi-vm/dillo/issues/19"
+      ],
+      "production_files": [
+        "deps/dillo-virtio-net/src/backend.rs",
+        "deps/dillo-virtio-net/src/bridge/linux.rs",
+        "deps/dillo-virtio-net/src/bridge/macos.rs",
+        "deps/dillo-virtio-net/src/bridge/mod.rs",
+        "deps/dillo-virtio-net/src/lib.rs",
+        "deps/dillo-virtio-net/src/linux_fd.rs",
+        "deps/dillo-virtio-net/src/macvtap.rs",
+        "deps/dillo-virtio-net/src/user/device.rs",
+        "deps/dillo-virtio-net/src/user/dhcp.rs",
+        "deps/dillo-virtio-net/src/user/dns.rs",
+        "deps/dillo-virtio-net/src/user/forward.rs",
+        "deps/dillo-virtio-net/src/user/mod.rs",
+        "deps/dillo-virtio-net/src/user/ndp.rs",
+        "deps/dillo-virtio-net/src/user/stack.rs",
+        "deps/dillo-virtio-net/src/user/tcp.rs",
+        "deps/dillo-virtio-net/src/user/tests.rs",
+        "deps/dillo-virtio-net/src/user/udp.rs"
+      ],
+      "rules": [
+        "NET",
+        "LAYOUT-004",
+        "MEMORY-002",
+        "DEBUG-002",
+        "LIFECYCLE-001"
+      ],
+      "prior_evidence": [
+        "net-config",
+        "net-protocol",
+        "net-resources",
+        "queues",
+        "lifecycle"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "storage",
+      "prefix": "deps/dillo-storage/",
+      "path_and_authority": "Storage owns backing contracts and QCOW adapter; raw-file implementation remains in block. Explicit authorized backing -> bounded storage operations. Portable I/O stays in backing modules; native authority/transfer and lifetime must conform to Machine services.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/17",
+        "https://github.com/pichi-vm/dillo/issues/62",
+        "https://github.com/pichi-vm/dillo/issues/151"
+      ],
+      "production_files": [
+        "deps/dillo-storage/src/lib.rs"
+      ],
+      "rules": [
+        "LAYOUT-004",
+        "COMPOSE-002",
+        "PROCESS-004",
+        "LIFECYCLE-001"
+      ],
+      "prior_evidence": [
+        "composition",
+        "io-boundary"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md",
+        "storage-filesystem-vsock-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "block",
+      "prefix": "deps/dillo-virtio-blk/",
+      "path_and_authority": "Guest chains -> locally bounded chain count -> copied request header -> checked stream/sector/backing bounds -> host I/O -> used publication. Shared index validation, outer-drain progress, publication errors and reset remain gaps. MAX_TRANSFER and block chain count already exist.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/53",
+        "https://github.com/pichi-vm/dillo/issues/55",
+        "https://github.com/pichi-vm/dillo/issues/63",
+        "https://github.com/pichi-vm/dillo/issues/140",
+        "https://github.com/pichi-vm/dillo/issues/18",
+        "https://github.com/pichi-vm/dillo/issues/19"
+      ],
+      "production_files": [
+        "deps/dillo-virtio-blk/src/lib.rs"
+      ],
+      "rules": [
+        "MEMORY-002",
+        "MEMORY-003",
+        "LAYOUT-004",
+        "LIFECYCLE-001",
+        "DEBUG-002"
+      ],
+      "prior_evidence": [
+        "queues",
+        "io-boundary",
+        "lifecycle"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "gpt",
+      "prefix": "deps/dillo-virtio-gpt/",
+      "path_and_authority": "Configured backing resources -> synthetic GPT BlockBacking -> shared block protocol. Existing name/dependency violates adopted storage-gpt role. Portable file I/O is permitted; native authority and worker transfer/lifetime remain required.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/17",
+        "https://github.com/pichi-vm/dillo/issues/53",
+        "https://github.com/pichi-vm/dillo/issues/140",
+        "https://github.com/pichi-vm/dillo/issues/62"
+      ],
+      "production_files": [
+        "deps/dillo-virtio-gpt/src/lib.rs",
+        "deps/dillo-virtio-gpt/src/synth_gpt.rs",
+        "deps/dillo-virtio-gpt/src/vgpt_backing.rs"
+      ],
+      "rules": [
+        "LAYOUT-004",
+        "PROCESS-004",
+        "LIFECYCLE-001"
+      ],
+      "prior_evidence": [
+        "composition",
+        "io-boundary"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md",
+        "storage-filesystem-vsock-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "fs",
+      "prefix": "deps/dillo-virtio-fs/",
+      "path_and_authority": "Guest FUSE chains -> decode/dispatch -> host file/inode/handle tables -> reply. Path confinement, short/failing reads, malformed WRITE, xattr growth, bulk counts and teardown inspected.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/41",
+        "https://github.com/pichi-vm/dillo/issues/52",
+        "https://github.com/pichi-vm/dillo/issues/53",
+        "https://github.com/pichi-vm/dillo/issues/55",
+        "https://github.com/pichi-vm/dillo/issues/56",
+        "https://github.com/pichi-vm/dillo/issues/57",
+        "https://github.com/pichi-vm/dillo/issues/58",
+        "https://github.com/pichi-vm/dillo/issues/59",
+        "https://github.com/pichi-vm/dillo/issues/64",
+        "https://github.com/pichi-vm/dillo/issues/65",
+        "https://github.com/pichi-vm/dillo/issues/66",
+        "https://github.com/pichi-vm/dillo/issues/67",
+        "https://github.com/pichi-vm/dillo/issues/62",
+        "https://github.com/pichi-vm/dillo/issues/140",
+        "https://github.com/pichi-vm/dillo/issues/141"
+      ],
+      "production_files": [
+        "deps/dillo-virtio-fs/src/backend.rs",
+        "deps/dillo-virtio-fs/src/fuse.rs",
+        "deps/dillo-virtio-fs/src/lib.rs"
+      ],
+      "rules": [
+        "MEMORY-002",
+        "MEMORY-003",
+        "PROCESS-004",
+        "LIFECYCLE-001",
+        "DEBUG-002"
+      ],
+      "prior_evidence": [
+        "queues",
+        "io-boundary",
+        "memory",
+        "lifecycle"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md",
+        "storage-filesystem-vsock-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    },
+    {
+      "id": "vsock",
+      "prefix": "deps/dillo-virtio-vsock/",
+      "path_and_authority": "Guest packets -> connection state machine -> Unix socket backend; blocking connect/write and connection authority/bounds under guest control.",
+      "issues": [
+        "https://github.com/pichi-vm/dillo/issues/17",
+        "https://github.com/pichi-vm/dillo/issues/55",
+        "https://github.com/pichi-vm/dillo/issues/61",
+        "https://github.com/pichi-vm/dillo/issues/62",
+        "https://github.com/pichi-vm/dillo/issues/140",
+        "https://github.com/pichi-vm/dillo/issues/141"
+      ],
+      "production_files": [
+        "deps/dillo-virtio-vsock/src/csm.rs",
+        "deps/dillo-virtio-vsock/src/lib.rs",
+        "deps/dillo-virtio-vsock/src/packet.rs",
+        "deps/dillo-virtio-vsock/src/uds.rs"
+      ],
+      "rules": [
+        "MEMORY-002",
+        "MEMORY-003",
+        "PROCESS-004",
+        "LIFECYCLE-001",
+        "DEBUG-002"
+      ],
+      "prior_evidence": [
+        "queues",
+        "io-boundary",
+        "interfaces",
+        "lifecycle"
+      ],
+      "current_evidence": [
+        "coverage.json",
+        "crate-graph.json",
+        "launch-boundary.md",
+        "dt-resource-audit.md",
+        "lifecycle-source-audit.md",
+        "memory-device-notification-audit.md",
+        "linked-design-review.md",
+        "storage-filesystem-vsock-review.md"
+      ],
+      "review_status": "reviewed",
+      "limitations": "Source-path accounting and scoped findings, not per-line security certification. Native unknowns retain issue owners. Prior code is unchanged; old policy interpretations are superseded."
+    }
+  ],
+  "unclassified_paths": [],
+  "limits": "154 tracked paths and 20 production units accounted for with scoped source review. Native unknowns retain issue owners; this is not per-line security or implementation-conformance certification."
+}

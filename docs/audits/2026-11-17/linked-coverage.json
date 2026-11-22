@@ -1,0 +1,2216 @@
+[
+  {
+    "id": "CONSOLE.01",
+    "parent": "CONSOLE",
+    "requirement": "Use shared behavior across transports and hosts",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L60",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L253",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L327",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L445",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L300",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci/src/lib.rs#L337",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-storage/src/lib.rs#L10",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.02",
+    "parent": "CONSOLE",
+    "requirement": "Use Machine-conforming endpoint I/O notification execution and confinement services",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-machine/src/lib.rs#L115",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio/src/lib.rs#L180",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio/src/lib.rs#L646",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L227",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-fs/src/backend.rs#L309",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-blk/src/lib.rs#L29",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-vsock/src/uds.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L126",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L194",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L732"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/17"
+        ],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run.  Reinterpreted as native authority/transfer/confinement/lifecycle placement; portable std I/O alone is not a defect."
+      },
+      {
+        "verdict": "violates",
+        "scope": "Missing native service authority/transfer/confinement/supervision family",
+        "evidence": [
+          "linked-design-review.md",
+          "memory-device-notification-audit.md"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/17",
+          "https://github.com/pichi-vm/dillo/issues/158"
+        ],
+        "limits": "Portable adapter I/O may remain in device modules. Current direct construction and helper lifetime do not implement the adopted family services or worker boundary. Reinterpreted as native authority/transfer/confinement/lifecycle placement; portable std I/O alone is not a defect."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.03",
+    "parent": "CONSOLE",
+    "requirement": "Permit independent endpoint establishment and early process creation",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L60",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L253",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L327",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L445",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L300",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci/src/lib.rs#L337",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-storage/src/lib.rs#L10",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      },
+      {
+        "verdict": "unverified",
+        "scope": "Early isolated-process establishment and later instance binding",
+        "evidence": [
+          "linked-design-review.md",
+          "memory-device-notification-audit.md"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/15",
+          "https://github.com/pichi-vm/dillo/issues/150"
+        ],
+        "limits": "Independent constructors are permitted and present. The isolated worker mechanism is absent; local construction does not prove early-process bootstrap."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.04",
+    "parent": "CONSOLE",
+    "requirement": "Expose one virtio-console device ID 3",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L60",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L253",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L327",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L445",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L300",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci/src/lib.rs#L337",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-storage/src/lib.rs#L10",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.05",
+    "parent": "CONSOLE",
+    "requirement": "Always expose unnamed stdio port zero",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L60",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L253",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L327",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L445",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L300",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci/src/lib.rs#L337",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-storage/src/lib.rs#L10",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.06",
+    "parent": "CONSOLE",
+    "requirement": "Assign named ports IDs 1 through N in configuration order",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L60",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L253",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L327",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L445",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L300",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci/src/lib.rs#L337",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-storage/src/lib.rs#L10",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.07",
+    "parent": "CONSOLE",
+    "requirement": "Offer MULTIPORT for named ports or resize",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L60",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L253",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L327",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L445",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L300",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci/src/lib.rs#L337",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-storage/src/lib.rs#L10",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.08",
+    "parent": "CONSOLE",
+    "requirement": "Use two queues without MULTIPORT",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L60",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L253",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L327",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L445"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/147"
+        ],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.09",
+    "parent": "CONSOLE",
+    "requirement": "Use required per-port and control queue numbering with MULTIPORT",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Queue numbering when MULTIPORT is negotiated",
+        "verdict": "conforms",
+        "evidence": [
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L73",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L354"
+        ],
+        "issues": [],
+        "limits": "Required queue numbering is implemented. Use of configured rather than negotiated feature state is separately tracked by #147 and CONSOLE.08."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.10",
+    "parent": "CONSOLE",
+    "requirement": "Set max_nr_ports to one plus named-port count",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L60",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L253",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L327",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L445",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L300",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci/src/lib.rs#L337",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-storage/src/lib.rs#L10",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.11",
+    "parent": "CONSOLE",
+    "requirement": "Provide interrupt capacity for queues and configuration",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L60",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L253",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L327",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L445",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L300",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci-virtio/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci/src/lib.rs#L337",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-storage/src/lib.rs#L10",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      },
+      {
+        "verdict": "violates",
+        "scope": "PCI end-to-end completion/pending integration despite adequate declared vector capacity",
+        "evidence": [
+          "linked-design-review.md",
+          "memory-device-notification-audit.md"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/166"
+        ],
+        "limits": "Capacity sizing itself conforms; this supplementary finding prevents reading capacity evidence as successful interrupt delivery."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.12",
+    "parent": "CONSOLE",
+    "requirement": "Use singular Layout.console with nested ports",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L634",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L1418",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L454"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.13",
+    "parent": "CONSOLE",
+    "requirement": "Give CLI and JSON equivalent schemas",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L634",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L1418",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L454"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.14",
+    "parent": "CONSOLE",
+    "requirement": "Require explicit stdio endpoint for named ports and default it otherwise",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L634",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L1418",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L454"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.15",
+    "parent": "CONSOLE",
+    "requirement": "Require explicit bus and honor optional exact slot",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L634",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L1418",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L454"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.16",
+    "parent": "CONSOLE",
+    "requirement": "Limit named ports to 31",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L634",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L1418",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L454"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.17",
+    "parent": "CONSOLE",
+    "requirement": "Require unique nonempty names of at most 255 bytes without NUL; reserve no consumer-specific names",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L634",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L1418",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L454"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.18",
+    "parent": "CONSOLE",
+    "requirement": "Require at least one rx or tx direction",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L634",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L1418",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L454"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.19",
+    "parent": "CONSOLE",
+    "requirement": "Keep omitted directions closed without stdio fallback",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L634",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L1418",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L454"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.20",
+    "parent": "CONSOLE",
+    "requirement": "Reject duplicate inherited pipe numbers across named ports and directions",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L634",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L1418",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L454"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.21",
+    "parent": "CONSOLE",
+    "requirement": "Reserve inherited pipe numbers zero through two for stdio",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L634",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L1418",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L454"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.22",
+    "parent": "CONSOLE",
+    "requirement": "Adopt inherited anonymous pipes with u64 representation and host-limit checks",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L126",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L194",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L126",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L194",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L732"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/153"
+        ],
+        "reason": "Linux adoption accepts invalid endpoint type/direction; Windows negative cases require native verification. Numeric representability and diagnostics alone are insufficient.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Linux adoption accepts invalid endpoint type/direction; Windows negative cases require native verification. Numeric representability and diagnostics alone are insufficient."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.23",
+    "parent": "CONSOLE",
+    "requirement": "Use two pipes for bidirectional ports",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L126",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L194",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L732",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L634",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L1418",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L454"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.24",
+    "parent": "CONSOLE",
+    "requirement": "Keep inheritance and resource ownership in machine services",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-machine/src/lib.rs#L115",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio/src/lib.rs#L180",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio/src/lib.rs#L646",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L227",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-fs/src/backend.rs#L309",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-blk/src/lib.rs#L29",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-vsock/src/uds.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L126",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L194",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L732"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/17"
+        ],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run.  Reinterpreted as native authority/transfer/confinement/lifecycle placement; portable std I/O alone is not a defect."
+      },
+      {
+        "verdict": "violates",
+        "scope": "Missing native service authority/transfer/confinement/supervision family",
+        "evidence": [
+          "linked-design-review.md",
+          "memory-device-notification-audit.md"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/17",
+          "https://github.com/pichi-vm/dillo/issues/158"
+        ],
+        "limits": "Portable adapter I/O may remain in device modules. Current direct construction and helper lifetime do not implement the adopted family services or worker boundary. Reinterpreted as native authority/transfer/confinement/lifecycle placement; portable std I/O alone is not a defect."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.25",
+    "parent": "CONSOLE",
+    "requirement": "Report endpoint validation errors with port and direction before guest execution",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L126",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L194",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L126",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L194",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L732"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/153"
+        ],
+        "reason": "Linux adoption accepts invalid endpoint type/direction; Windows negative cases require native verification. Numeric representability and diagnostics alone are insufficient.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Linux adoption accepts invalid endpoint type/direction; Windows negative cases require native verification. Numeric representability and diagnostics alone are insufficient."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.26",
+    "parent": "CONSOLE",
+    "requirement": "Close EOF or broken-pipe direction without spin VM abort or disruption of other ports",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L126",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L194",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L732"
+        ],
+        "issues": [],
+        "reason": "Named-port data-worker EOF/poll/stop behavior only; console global stdout pipeline is tracked separately.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Named-port data-worker EOF/poll/stop behavior only; console global stdout pipeline is tracked separately."
+      },
+      {
+        "verdict": "unverified",
+        "scope": "Adverse native endpoint and malformed-queue lifecycle cases",
+        "evidence": [
+          "linked-design-review.md",
+          "memory-device-notification-audit.md"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/53",
+          "https://github.com/pichi-vm/dillo/issues/55",
+          "https://github.com/pichi-vm/dillo/issues/151",
+          "https://github.com/pichi-vm/dillo/issues/153"
+        ],
+        "limits": "Narrow normal named-pipe EOF/no-input cancellation source paths conform. Wrong-type endpoints, continuously replenished/malformed queues and every native blocked-write path are not established by those positives."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.27",
+    "parent": "CONSOLE",
+    "requirement": "Bound shutdown when input has no data",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L126",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L194",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L732"
+        ],
+        "issues": [],
+        "reason": "Named-port data-worker EOF/poll/stop behavior only; console global stdout pipeline is tracked separately.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Named-port data-worker EOF/poll/stop behavior only; console global stdout pipeline is tracked separately."
+      },
+      {
+        "verdict": "unverified",
+        "scope": "Adverse native endpoint and malformed-queue lifecycle cases",
+        "evidence": [
+          "linked-design-review.md",
+          "memory-device-notification-audit.md"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/53",
+          "https://github.com/pichi-vm/dillo/issues/55",
+          "https://github.com/pichi-vm/dillo/issues/151",
+          "https://github.com/pichi-vm/dillo/issues/153"
+        ],
+        "limits": "Narrow normal named-pipe EOF/no-input cancellation source paths conform. Wrong-type endpoints, continuously replenished/malformed queues and every native blocked-write path are not established by those positives."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.28",
+    "parent": "CONSOLE",
+    "requirement": "Assign one teardown owner per owned resource",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "unverified",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L126",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L194",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L732",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L160",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L216",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L2820"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/17",
+          "https://github.com/pichi-vm/dillo/issues/146"
+        ],
+        "reason": "Normal named-end drop ownership is explicit; all constructor-failure and auxiliary-worker paths are not qualified.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Normal named-end drop ownership is explicit; all constructor-failure and auxiliary-worker paths are not qualified."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.29",
+    "parent": "CONSOLE",
+    "requirement": "Wait for DEVICE_READY before port announcements",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L70",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L168",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L253"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/148"
+        ],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.30",
+    "parent": "CONSOLE",
+    "requirement": "Announce port zero without a name and with console designation and open state",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L70",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L168",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L253"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/148"
+        ],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.31",
+    "parent": "CONSOLE",
+    "requirement": "Announce named ports in control-protocol order respecting readiness",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L70",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L168",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L253"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/148"
+        ],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.32",
+    "parent": "CONSOLE",
+    "requirement": "NUL-terminate names on the wire",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L70",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L168",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L253",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L126",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L194",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L732"
+        ],
+        "issues": [],
+        "reason": "NUL serialization and absent-direction worker omission inspected; malformed control transitions remain tracked.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. NUL serialization and absent-direction worker omission inspected; malformed control transitions remain tracked."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.33",
+    "parent": "CONSOLE",
+    "requirement": "Prevent usable data traffic on closed directions",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L70",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L168",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L253",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L126",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/pipe.rs#L194",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L732"
+        ],
+        "issues": [],
+        "reason": "NUL serialization and absent-direction worker omission inspected; malformed control transitions remain tracked.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. NUL serialization and absent-direction worker omission inspected; malformed control transitions remain tracked."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.34",
+    "parent": "CONSOLE",
+    "requirement": "Preserve behavior and lifecycle with local services and proxies",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "unverified",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-machine-kvm/src/lib.rs#L847",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-machine-hvf/src/lib.rs#L689",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-machine-whp/src/lib.rs#L694",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L227",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/dns.rs#L204"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/15",
+          "https://github.com/pichi-vm/dillo/issues/150"
+        ],
+        "reason": "No process proxy implementation to compare.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. No process proxy implementation to compare."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.35",
+    "parent": "CONSOLE",
+    "requirement": "Provide private Unix-socket or Windows named-pipe resize endpoint through machine services",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/resize.rs#L37",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/console_size.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/tests/boot/console_resize.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-machine/src/lib.rs#L115",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio/src/lib.rs#L180",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio/src/lib.rs#L646",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L227",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-fs/src/backend.rs#L309",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-blk/src/lib.rs#L29",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-vsock/src/uds.rs#L1"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/17"
+        ],
+        "reason": "Native endpoint behavior exists but is selected inside shared device code.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Native endpoint behavior exists but is selected inside shared device code. Reinterpreted as native authority/transfer/confinement/lifecycle placement; portable std I/O alone is not a defect."
+      },
+      {
+        "verdict": "violates",
+        "scope": "Missing native service authority/transfer/confinement/supervision family",
+        "evidence": [
+          "linked-design-review.md",
+          "memory-device-notification-audit.md"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/17",
+          "https://github.com/pichi-vm/dillo/issues/158"
+        ],
+        "limits": "Portable adapter I/O may remain in device modules. Current direct construction and helper lifetime do not implement the adopted family services or worker boundary. Reinterpreted as native authority/transfer/confinement/lifecycle placement; portable std I/O alone is not a defect."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.36",
+    "parent": "CONSOLE",
+    "requirement": "Accept one four-byte little-endian nonzero columns-then-rows resize update per connection",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/resize.rs#L37",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/console_size.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/tests/boot/console_resize.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L70",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L168",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L253"
+        ],
+        "issues": [],
+        "reason": "Successful negotiated path; protocol negotiation and sequencing defects assessed separately.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Successful negotiated path; protocol negotiation and sequencing defects assessed separately."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.37",
+    "parent": "CONSOLE",
+    "requirement": "Close resize connection after consumption with no reply payload or history",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/resize.rs#L37",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/console_size.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/tests/boot/console_resize.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L70",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L168",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L253"
+        ],
+        "issues": [],
+        "reason": "Successful negotiated path; protocol negotiation and sequencing defects assessed separately.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Successful negotiated path; protocol negotiation and sequencing defects assessed separately."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.38",
+    "parent": "CONSOLE",
+    "requirement": "Have sender retain connection until EOF with bounded deadline",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Pichi/Madrillo supplementary source; OS-specific runtime error paths not newly executed",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/pichi/blob/9d9b88c0d598e3ad0b82125aa7e70bc6cf17178d/src/cmd/workload/resize.rs#L59",
+          "https://github.com/pichi-vm/pichi/blob/9d9b88c0d598e3ad0b82125aa7e70bc6cf17178d/src/cmd/workload/mod.rs#L650",
+          "https://github.com/pichi-vm/madrillo/blob/cb1eea5c947fd7764bb44297549a407316148039/src/main.rs#L913"
+        ],
+        "issues": [],
+        "reason": "Source-level responsibility and sender protocol conformance at pinned supplementary revisions.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Source-level responsibility and sender protocol conformance at pinned supplementary revisions."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.39",
+    "parent": "CONSOLE",
+    "requirement": "Do not close console input when resize connection closes",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/resize.rs#L37",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/console_size.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/tests/boot/console_resize.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L70",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L168",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L253"
+        ],
+        "issues": [],
+        "reason": "Successful negotiated path; protocol negotiation and sequencing defects assessed separately.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Successful negotiated path; protocol negotiation and sequencing defects assessed separately."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.40",
+    "parent": "CONSOLE",
+    "requirement": "Keep Madrillo outside resize interpretation and relay",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Pichi/Madrillo supplementary source; OS-specific runtime error paths not newly executed",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/pichi/blob/9d9b88c0d598e3ad0b82125aa7e70bc6cf17178d/src/cmd/workload/resize.rs#L59",
+          "https://github.com/pichi-vm/pichi/blob/9d9b88c0d598e3ad0b82125aa7e70bc6cf17178d/src/cmd/workload/mod.rs#L650",
+          "https://github.com/pichi-vm/madrillo/blob/cb1eea5c947fd7764bb44297549a407316148039/src/main.rs#L913"
+        ],
+        "issues": [],
+        "reason": "Source-level responsibility and sender protocol conformance at pinned supplementary revisions.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Source-level responsibility and sender protocol conformance at pinned supplementary revisions."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.41",
+    "parent": "CONSOLE",
+    "requirement": "Offer SIZE and MULTIPORT whenever resize is configured",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Offering SIZE and MULTIPORT when resize is configured",
+        "verdict": "conforms",
+        "evidence": [
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L286",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L315"
+        ],
+        "issues": [],
+        "limits": "Corrects earlier broad violation: feature offering is present. Negotiation/activation mismatch remains #147, separately scoped."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.42",
+    "parent": "CONSOLE",
+    "requirement": "Send standard port-zero resize control messages after readiness",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/resize.rs#L37",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/console_size.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/tests/boot/console_resize.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L70",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L168",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L253"
+        ],
+        "issues": [],
+        "reason": "Successful negotiated path; protocol negotiation and sequencing defects assessed separately.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Successful negotiated path; protocol negotiation and sequencing defects assessed separately."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.43",
+    "parent": "CONSOLE",
+    "requirement": "Retain only latest unsent resize",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/resize.rs#L37",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/console_size.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/tests/boot/console_resize.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L70",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L168",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L253"
+        ],
+        "issues": [],
+        "reason": "Successful negotiated path; protocol negotiation and sequencing defects assessed separately.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Successful negotiated path; protocol negotiation and sequencing defects assessed separately."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.44",
+    "parent": "CONSOLE",
+    "requirement": "Bound partial resize client to one four-byte buffer and one second",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/resize.rs#L37",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/console_size.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/tests/boot/console_resize.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L70",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L168",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L253"
+        ],
+        "issues": [],
+        "reason": "Successful negotiated path; protocol negotiation and sequencing defects assessed separately.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Successful negotiated path; protocol negotiation and sequencing defects assessed separately."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.45",
+    "parent": "CONSOLE",
+    "requirement": "Remove resize listener at teardown",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/resize.rs#L37",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/console_size.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/tests/boot/console_resize.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L70",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L168",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L253"
+        ],
+        "issues": [],
+        "reason": "Successful negotiated path; protocol negotiation and sequencing defects assessed separately.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Successful negotiated path; protocol negotiation and sequencing defects assessed separately."
+      }
+    ]
+  },
+  {
+    "id": "CONSOLE.46",
+    "parent": "CONSOLE",
+    "requirement": "Use protocol dimensions without guest-kernel heuristics",
+    "source": "deps/dillo-virtio-console/DESIGN-named-ports.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/resize.rs#L37",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/console_size.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/tests/boot/console_resize.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L70",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L168",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/control.rs#L253"
+        ],
+        "issues": [],
+        "reason": "Successful negotiated path; protocol negotiation and sequencing defects assessed separately.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Successful negotiated path; protocol negotiation and sequencing defects assessed separately."
+      }
+    ]
+  },
+  {
+    "id": "NET.01",
+    "parent": "NET",
+    "requirement": "Share virtio-net protocol independently of transport and host connectivity",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "NET.02",
+    "parent": "NET",
+    "requirement": "Require explicit bus and honor optional slot",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "NET.03",
+    "parent": "NET",
+    "requirement": "Keep MAC configuration independent of connectivity",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "NET.04",
+    "parent": "NET",
+    "requirement": "Separate device from host connectivity with common frame interface",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "NET.05",
+    "parent": "NET",
+    "requirement": "Supply socket interface notification execution and confinement through Machine services",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/mod.rs#L179",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/mod.rs#L227",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/dns.rs#L204",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/udp.rs#L43",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-machine/src/lib.rs#L115",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio/src/lib.rs#L180",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio/src/lib.rs#L646",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L227",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-fs/src/backend.rs#L309",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-blk/src/lib.rs#L29",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-vsock/src/uds.rs#L1"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/17"
+        ],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run.  Reinterpreted as native authority/transfer/confinement/lifecycle placement; portable std I/O alone is not a defect."
+      },
+      {
+        "verdict": "violates",
+        "scope": "Missing native service authority/transfer/confinement/supervision family",
+        "evidence": [
+          "linked-design-review.md",
+          "memory-device-notification-audit.md"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/17",
+          "https://github.com/pichi-vm/dillo/issues/158"
+        ],
+        "limits": "Portable adapter I/O may remain in device modules. Current direct construction and helper lifetime do not implement the adopted family services or worker boundary. Reinterpreted as native authority/transfer/confinement/lifecycle placement; portable std I/O alone is not a defect."
+      }
+    ]
+  },
+  {
+    "id": "NET.06",
+    "parent": "NET",
+    "requirement": "Permit independent resource construction and early processes",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L2084",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L2722",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L359",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-machine/src/lib.rs#L115"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      },
+      {
+        "verdict": "unverified",
+        "scope": "Early isolated-process establishment and later instance binding",
+        "evidence": [
+          "linked-design-review.md",
+          "memory-device-notification-audit.md"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/15",
+          "https://github.com/pichi-vm/dillo/issues/150"
+        ],
+        "limits": "Independent constructors are permitted and present. The isolated worker mechanism is absent; local construction does not prove early-process bootstrap."
+      }
+    ]
+  },
+  {
+    "id": "NET.07",
+    "parent": "NET",
+    "requirement": "Apply lifecycle and authority rules to network and DNS auxiliary work",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/mod.rs#L179",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/mod.rs#L227",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/dns.rs#L204",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/udp.rs#L43",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-machine/src/lib.rs#L115",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio/src/lib.rs#L180",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio/src/lib.rs#L646",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L227",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-fs/src/backend.rs#L309",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-blk/src/lib.rs#L29",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-vsock/src/uds.rs#L1"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/17"
+        ],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run.  Reinterpreted as native authority/transfer/confinement/lifecycle placement; portable std I/O alone is not a defect."
+      },
+      {
+        "verdict": "violates",
+        "scope": "Missing native service authority/transfer/confinement/supervision family",
+        "evidence": [
+          "linked-design-review.md",
+          "memory-device-notification-audit.md"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/17",
+          "https://github.com/pichi-vm/dillo/issues/158"
+        ],
+        "limits": "Portable adapter I/O may remain in device modules. Current direct construction and helper lifetime do not implement the adopted family services or worker boundary. Reinterpreted as native authority/transfer/confinement/lifecycle placement; portable std I/O alone is not a defect."
+      }
+    ]
+  },
+  {
+    "id": "NET.08",
+    "parent": "NET",
+    "requirement": "Default to unprivileged user networking on all three hosts",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1"
+        ],
+        "issues": [],
+        "reason": "Shared/user-mode and native positive boot paths; external network cases remain #80.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Shared/user-mode and native positive boot paths; external network cases remain #80."
+      }
+    ]
+  },
+  {
+    "id": "NET.09",
+    "parent": "NET",
+    "requirement": "Provide user outbound TCP UDP gateway loopback access and explicit inbound forwarding",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1"
+        ],
+        "issues": [],
+        "reason": "Shared/user-mode and native positive boot paths; external network cases remain #80.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Shared/user-mode and native positive boot paths; external network cases remain #80."
+      }
+    ]
+  },
+  {
+    "id": "NET.10",
+    "parent": "NET",
+    "requirement": "Join the selected existing L2 network in bridge mode and require iface",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "unverified",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/80",
+          "https://github.com/pichi-vm/dillo/issues/151"
+        ],
+        "reason": "Source routes requested iface without silent mode substitution; privileged bridge/macvtap effective authority needs native qualification.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Source routes requested iface without silent mode substitution; privileged bridge/macvtap effective authority needs native qualification."
+      }
+    ]
+  },
+  {
+    "id": "NET.11",
+    "parent": "NET",
+    "requirement": "Attach only to existing Linux macvtap endpoint and require iface",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "unverified",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/80",
+          "https://github.com/pichi-vm/dillo/issues/151"
+        ],
+        "reason": "Source routes requested iface without silent mode substitution; privileged bridge/macvtap effective authority needs native qualification.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Source routes requested iface without silent mode substitution; privileged bridge/macvtap effective authority needs native qualification."
+      }
+    ]
+  },
+  {
+    "id": "NET.12",
+    "parent": "NET",
+    "requirement": "Explicitly refuse unavailable modes without mode device or transport substitution",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "NET.13",
+    "parent": "NET",
+    "requirement": "Keep host-interface management within endpoint authority",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "unverified",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/80",
+          "https://github.com/pichi-vm/dillo/issues/151"
+        ],
+        "reason": "Source routes requested iface without silent mode substitution; privileged bridge/macvtap effective authority needs native qualification.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Source routes requested iface without silent mode substitution; privileged bridge/macvtap effective authority needs native qualification."
+      }
+    ]
+  },
+  {
+    "id": "NET.14",
+    "parent": "NET",
+    "requirement": "Re-originate outbound flows through host sockets on a private network",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1"
+        ],
+        "issues": [],
+        "reason": "Component localhost TCP/UDP/IPv6/DNS tests exercise these paths; external connectivity not certified.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Component localhost TCP/UDP/IPv6/DNS tests exercise these paths; external connectivity not certified."
+      }
+    ]
+  },
+  {
+    "id": "NET.15",
+    "parent": "NET",
+    "requirement": "Require explicit forwarding for inbound initiation but permit established bidirectional traffic",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1"
+        ],
+        "issues": [],
+        "reason": "Component localhost TCP/UDP/IPv6/DNS tests exercise these paths; external connectivity not certified.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Component localhost TCP/UDP/IPv6/DNS tests exercise these paths; external connectivity not certified."
+      }
+    ]
+  },
+  {
+    "id": "NET.16",
+    "parent": "NET",
+    "requirement": "Preserve TCP closure half-close backpressure and error semantics",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1"
+        ],
+        "issues": [],
+        "reason": "Component localhost TCP/UDP/IPv6/DNS tests exercise these paths; external connectivity not certified.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Component localhost TCP/UDP/IPv6/DNS tests exercise these paths; external connectivity not certified."
+      }
+    ]
+  },
+  {
+    "id": "NET.17",
+    "parent": "NET",
+    "requirement": "Bound UDP flow lifetime",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1"
+        ],
+        "issues": [],
+        "reason": "Component localhost TCP/UDP/IPv6/DNS tests exercise these paths; external connectivity not certified.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Component localhost TCP/UDP/IPv6/DNS tests exercise these paths; external connectivity not certified."
+      }
+    ]
+  },
+  {
+    "id": "NET.18",
+    "parent": "NET",
+    "requirement": "Share DHCP DNS and IPv6 protocol behavior while using host services",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1"
+        ],
+        "issues": [],
+        "reason": "Component localhost TCP/UDP/IPv6/DNS tests exercise these paths; external connectivity not certified.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Component localhost TCP/UDP/IPv6/DNS tests exercise these paths; external connectivity not certified."
+      },
+      {
+        "verdict": "violates",
+        "scope": "Missing native service authority/transfer/confinement/supervision family",
+        "evidence": [
+          "linked-design-review.md",
+          "memory-device-notification-audit.md"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/17",
+          "https://github.com/pichi-vm/dillo/issues/158"
+        ],
+        "limits": "Portable adapter I/O may remain in device modules. Current direct construction and helper lifetime do not implement the adopted family services or worker boundary."
+      }
+    ]
+  },
+  {
+    "id": "NET.19",
+    "parent": "NET",
+    "requirement": "Document exposed addressing defaults in usage docs",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/backend.rs#L30",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/lib.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/tests.rs#L1",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/README.md#L1"
+        ],
+        "issues": [],
+        "reason": "Component localhost TCP/UDP/IPv6/DNS tests exercise these paths; external connectivity not certified.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. Component localhost TCP/UDP/IPv6/DNS tests exercise these paths; external connectivity not certified."
+      }
+    ]
+  },
+  {
+    "id": "NET.20",
+    "parent": "NET",
+    "requirement": "Give CLI and JSON a common forwarding schema",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "NET.21",
+    "parent": "NET",
+    "requirement": "Support structured and shorthand forwarding with default TCP and guest-port inheritance",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "NET.22",
+    "parent": "NET",
+    "requirement": "Default bind IP to loopback and permit structured explicit IP",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "NET.23",
+    "parent": "NET",
+    "requirement": "Keep guest destinations in configured private network",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "NET.24",
+    "parent": "NET",
+    "requirement": "Reject malformed rules non-user forwarding missing interfaces and unavailable capabilities with actionable errors",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "NET.25",
+    "parent": "NET",
+    "requirement": "Bound flows pending DNS work buffers and host resources",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/mod.rs#L179",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/mod.rs#L227",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/dns.rs#L204",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/udp.rs#L43",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/queue.rs#L23",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/queue.rs#L300",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio-virtio/src/lib.rs#L453",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci-virtio/src/transport.rs#L626"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/60",
+          "https://github.com/pichi-vm/dillo/issues/55"
+        ],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "NET.26",
+    "parent": "NET",
+    "requirement": "Validate frames before resource allocation",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/mod.rs#L179",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/mod.rs#L227",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/dns.rs#L204",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/udp.rs#L43",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/queue.rs#L23",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/queue.rs#L300",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio-virtio/src/lib.rs#L453",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci-virtio/src/transport.rs#L626"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/60",
+          "https://github.com/pichi-vm/dillo/issues/55"
+        ],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "NET.27",
+    "parent": "NET",
+    "requirement": "Report endpoint establishment failures",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "conforms",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L272",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-config/src/lib.rs#L721",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L577",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/forward.rs#L1"
+        ],
+        "issues": [],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      }
+    ]
+  },
+  {
+    "id": "NET.28",
+    "parent": "NET",
+    "requirement": "Bound networking and DNS teardown",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/mod.rs#L179",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/mod.rs#L227",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/dns.rs#L204",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/stack.rs#L78",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/udp.rs#L43"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/17",
+          "https://github.com/pichi-vm/dillo/issues/18"
+        ],
+        "reason": "DNS blocking workers are detached and can outlive stack teardown.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. DNS blocking workers are detached and can outlive stack teardown."
+      },
+      {
+        "verdict": "violates",
+        "scope": "Blocking resolver and native callback retirement",
+        "evidence": [
+          "linked-design-review.md",
+          "memory-device-notification-audit.md"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/17",
+          "https://github.com/pichi-vm/dillo/issues/60",
+          "https://github.com/pichi-vm/dillo/issues/160"
+        ],
+        "limits": "DNS join handles detach on drop; future quiescence must also account for host callbacks and I/O. Process exit and native reference completion differ from pause acknowledgement."
+      }
+    ]
+  },
+  {
+    "id": "NET.29",
+    "parent": "NET",
+    "requirement": "Keep device and transport reset-reactivation state coherent",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "violates",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L2630",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/src/main.rs#L2799",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-machine/src/lib.rs#L138",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-mmio-virtio/src/lib.rs#L373",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-pci-virtio/src/transport.rs#L595",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L265",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-console/src/lib.rs#L327"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/18",
+          "https://github.com/pichi-vm/dillo/issues/19"
+        ],
+        "reason": "",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. "
+      },
+      {
+        "verdict": "violates",
+        "scope": "Virtio reset/reactivation versus VM reconstruction",
+        "evidence": [
+          "linked-design-review.md",
+          "memory-device-notification-audit.md"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/19",
+          "https://github.com/pichi-vm/dillo/issues/18"
+        ],
+        "limits": "Device reset remains distinct from fresh whole-VM reconstruction; retained current transports do not prove either lifecycle contract."
+      }
+    ]
+  },
+  {
+    "id": "NET.30",
+    "parent": "NET",
+    "requirement": "Apply contracts to local services and process proxies",
+    "source": "deps/dillo-virtio-net/DESIGN.md",
+    "audit_status": "reviewed",
+    "assessments": [
+      {
+        "scope": "Current linked clause; Shared source used by KVM x86_64/ARM64, HVF ARM64 and WHP x86_64; runtime evidence limited to listed checks",
+        "verdict": "unverified",
+        "evidence": [
+          "linked-design-review.md",
+          "prior-evidence-drift.json",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-machine-kvm/src/lib.rs#L847",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-machine-hvf/src/lib.rs#L689",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-machine-whp/src/lib.rs#L694",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio/src/device.rs#L227",
+          "https://github.com/pichi-vm/dillo/blob/c808d800e0e020df275548bb64c3061ce8e3379a/deps/dillo-virtio-net/src/user/dns.rs#L204"
+        ],
+        "issues": [
+          "https://github.com/pichi-vm/dillo/issues/15",
+          "https://github.com/pichi-vm/dillo/issues/150"
+        ],
+        "reason": "No process proxy implementation to compare.",
+        "limits": "Clause-specific source disposition revalidated against unchanged code and current design. Historical execution only, within original scope; no new native run. No process proxy implementation to compare."
+      }
+    ]
+  }
+]

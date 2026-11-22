@@ -1,0 +1,506 @@
+[
+  {
+    "url": "https://github.com/pichi-vm/arma/issues/47",
+    "title": "Conform Arma and Tatu to the current PMI boot contract",
+    "state_at_review": "open",
+    "body_sha256": "d4049c04e5aca733d00ea477e0ceec3604446057d01123aa20cebc64dee23f3a",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/arma/issues/48",
+    "title": "Enforce base ownership when validating host DT overlays",
+    "state_at_review": "open",
+    "body_sha256": "3fcc907a0d01a032ff1a898a81e3f0bcae97b85b2bc4aad50f7b25fcff9df800",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/arma/issues/49",
+    "title": "Validate host RAM and release addresses against the measured layout",
+    "state_at_review": "open",
+    "body_sha256": "60fa25f9658d7ab8956675cd03b22f7b5b73f581986c768919ad399f0236d230",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/2",
+    "title": "Construct x86 KVM interrupt controllers from the devicetree machine contract",
+    "state_at_review": "closed",
+    "body_sha256": "fa216c80eb4909eca4b40aa9f8630511f786e885518503af468d0b4e09439735",
+    "disposition": "retained fixed-case evidence"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/3",
+    "title": "Do not create undeclared legacy PICs in the x86 KVM device model",
+    "state_at_review": "open",
+    "body_sha256": "634c1a5cbeb55ac784ffbbc91c45b8a53fdd42b3766bb0ed7c3c3181c3fb080a",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/4",
+    "title": "Remove KVM scratch-TSS support and reject restricted-guest Intel configurations",
+    "state_at_review": "open",
+    "body_sha256": "4926a338a630b71be94472d0ed6d68ab619aa581855ad6a1aafc5f466378d9b3",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/7",
+    "title": "Preserve declared syscon register extents during device construction",
+    "state_at_review": "closed",
+    "body_sha256": "e4258bd6a29f13abeef01423b628f93f894775d363597fa3f33b82ce28807492",
+    "disposition": "retained fixed-case evidence"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/8",
+    "title": "Realize the declared GICv2m frame in the Arm KVM machine model",
+    "state_at_review": "open",
+    "body_sha256": "85015c987ca5d25a7c24e1c4cbe9423055c582cc1f6a67b7755ad34416d3e3ea",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/9",
+    "title": "Validate Arm KVM GIC mappings against declared distributor and redistributor extents",
+    "state_at_review": "open",
+    "body_sha256": "862c13a8a8224d0242de5edd032d5edbde5ad3b1c7ee78ab0afef646bb63d088",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/10",
+    "title": "Enforce machine-contract authority when admitting MMIO components",
+    "state_at_review": "open",
+    "body_sha256": "943295f02cd592b1cb4788404db135e02c0684da95e2e97c418e9fcc17545a88",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/11",
+    "title": "Bound PCI function-local MSI-X vectors before translating into the shared domain",
+    "state_at_review": "closed",
+    "body_sha256": "af08cdcdf602b941d45450cbec5be7ad4fed25d26f51b5f40b9ce510c7e73d38",
+    "disposition": "retained fixed-case evidence"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/12",
+    "title": "Keep PCI MSI-X function enable and mask state independent within shared domains",
+    "state_at_review": "closed",
+    "body_sha256": "c2863d6a6969987d17db86a2f18d0f1c8ead5348038adf1cccd2db6ca4e57b54",
+    "disposition": "retained fixed-case evidence"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/13",
+    "title": "Keep guest-visible PCI BAR addresses consistent with installed MMIO routing",
+    "state_at_review": "open",
+    "body_sha256": "c008ed6f24d7600bd638f711e1072225bd47c8f4b9670faa8eef96d602b64da1",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/14",
+    "title": "Preserve PCI child-to-parent address translation when assigning and routing BARs",
+    "state_at_review": "open",
+    "body_sha256": "6b56da4ab046625a647221e50dc73cdf15d874fc318dc8b76e12b48e896a3496",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/15",
+    "title": "Implement out-of-process Linux device execution through host-backend services",
+    "state_at_review": "open",
+    "body_sha256": "28937ebc0e485bf84957796b8194a970c9439a464ad79ee1737ca2e9034cbe7f",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/16",
+    "title": "Establish strict Linux device-process confinement and seccomp filtering",
+    "state_at_review": "open",
+    "body_sha256": "d728d079658e873289084251e392ac146b1c628eda209e0a45f88a567e702f07",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/17",
+    "title": "Route host I/O and auxiliary device execution through Machine services",
+    "state_at_review": "open",
+    "body_sha256": "ca84da48a714ad4c25bda915018f7bfe50a6ee46d2e1e7619077cf8e9d3a645e",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/18",
+    "title": "Reconstruct a fresh machine on guest reboot",
+    "state_at_review": "open",
+    "body_sha256": "84688b747130f2b686642a79bfd4ff3791565b08328d775fb0e3757bfae86e26",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/19",
+    "title": "Allow virtio devices to reactivate coherently after transport reset",
+    "state_at_review": "open",
+    "body_sha256": "31358da44708b1a3d03addc51a3a512db4dce4c7adb01dd58393a39c1e012ef2",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/41",
+    "title": "virtiofs: keep open handles between lookup and use; define openat2 fallback",
+    "state_at_review": "open",
+    "body_sha256": "d8fcc931dfeb185f3761d0b8cab9a9c275d5856fdb1d1cc82ce1cf8211c02546",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/52",
+    "title": "virtiofs: guest can create files outside the share on main (fixed by #47)",
+    "state_at_review": "open",
+    "body_sha256": "809bd4dde3dd09b9dcc624eb3cc491bae9778616cadc8bcaf80db2fd8949d0d5",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/53",
+    "title": "virtio queues: cap descriptor chain length and reject loops",
+    "state_at_review": "open",
+    "body_sha256": "a14c2014cc4eff3c5e2b383fb4d973bb4da2701c2a39ac2cf8a4e6723df1303d",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/54",
+    "title": "virtio queues: validate queue size and rings before activation (size 0 crashes)",
+    "state_at_review": "open",
+    "body_sha256": "44533961320c556c64d84d2ba505dca36a04c940220e1a3d68eebe2d868d16a6",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/55",
+    "title": "virtio devices: check guest address and cap size before allocating buffers",
+    "state_at_review": "open",
+    "body_sha256": "10c9c2f7c75fcd4607e88fc3115883e1009025678ca7776609e9e45e9deed96f",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/56",
+    "title": "virtiofs: only open regular files (and directories for directory ops); add O_NOCTTY",
+    "state_at_review": "open",
+    "body_sha256": "3a5b36c3e83bcc3f861622cf94ba90cfb12505e4d125044a1ce92cfb1872c28f",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/57",
+    "title": "virtiofs: xattr buffer never grows, so values over 64 bytes loop forever",
+    "state_at_review": "open",
+    "body_sha256": "b6ede24b927212346631a94a936abe656109addbf7c82ffff40654b84fea2095",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/58",
+    "title": "virtiofs: reject short WRITE headers and out-of-range timestamps instead of panicking",
+    "state_at_review": "open",
+    "body_sha256": "b5a942c5676b9489b9684064e214e7304bda4aa80ae7a5d55eae72647918c668",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/59",
+    "title": "virtiofs: cap node, handle and open-fd tables",
+    "state_at_review": "open",
+    "body_sha256": "a9dcdc7d77e45e59a5576d2cf71c1fbc5f834290866a5f885059ff6bad4dde6d",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/60",
+    "title": "user-mode networking: limit TCP/UDP flows, reap idle listeners, bound the DNS queue",
+    "state_at_review": "open",
+    "body_sha256": "e338cabf164379fd488e29a360a7ee12a408d74ebe76f899e1282952d25a605e",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/61",
+    "title": "vsock: cap the connection map and do not block while holding its lock",
+    "state_at_review": "open",
+    "body_sha256": "b3d1ea4c05c4772754fb1c7849848d5d89423f86dd8864cdb84037b37030ade8",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/62",
+    "title": "Enforce macOS and Windows worker confinement before guest input",
+    "state_at_review": "open",
+    "body_sha256": "19f564fedcd94a46712f41febaeaaac3737b8c9dfee7ccc438155df28674afba",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/63",
+    "title": "virtio-blk: use checked sector math and reject requests past the end of the disk",
+    "state_at_review": "open",
+    "body_sha256": "9cc02ff2277bea70c55c06b92be07bb9471234c474793d9ead2438fd5d81748c",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/64",
+    "title": "virtiofs: use checked add for SETXATTR value bounds",
+    "state_at_review": "open",
+    "body_sha256": "0e48629540bc947839247e996e334b0dc2e538c996f2c422d6619aa41dcc685a",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/65",
+    "title": "virtiofs: bound BATCH_FORGET count by the request size",
+    "state_at_review": "open",
+    "body_sha256": "2ae12c46035223418ef2c7ab8f7723e528e1f9ad21c5fa376d63c3909f9ad5bc",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/66",
+    "title": "virtiofs: drop a request when reading it from guest memory fails",
+    "state_at_review": "open",
+    "body_sha256": "c26175d4c3e66989f93ff7f6eb249ac3b59739931816776b765758d520c8f6b5",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/67",
+    "title": "virtiofs (Windows): rename_noreplace turns the handle back into a path",
+    "state_at_review": "open",
+    "body_sha256": "61e8cb3bd888399245add49866ef3e9171630da2bec68127d896a75a9c0714db",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/80",
+    "title": "Run the five opt-in network tests in CI or remove them",
+    "state_at_review": "open",
+    "body_sha256": "c7d5925d4c7da65671149ee9c6d7dba9218e0a8418934c1347fced16e6815d7c",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/122",
+    "title": "Expose valid Virtio headers for empty MMIO slots",
+    "state_at_review": "closed",
+    "body_sha256": "0c01ed778c15c70dd0f227d31a2737e777d66493494d8f10c3707a2028302907",
+    "disposition": "retained fixed-case evidence"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/131",
+    "title": "Conform the vm launch boundary to current PMI",
+    "state_at_review": "open",
+    "body_sha256": "d195c3280289a67e17c3bbc0f78d32dba8479ccde5f1d2ddacbbb9cd1ee1577c",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/133",
+    "title": "Preserve a separate GPA for each PMI action",
+    "state_at_review": "open",
+    "body_sha256": "fb15567dbf920ca9ffe52994db4a7bfbd82a47bd454f94fb99ed0b743821d02a",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/134",
+    "title": "Realize Zero loads and Padded tails in every launch recipe",
+    "state_at_review": "open",
+    "body_sha256": "5a2da603d163ee0ab67feabb98fb0c2f873633e3a6e10cc1ba1285644a453e19",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/135",
+    "title": "Realize a declared PCI root even with no PCI endpoints",
+    "state_at_review": "open",
+    "body_sha256": "5992ed77026a81f81de85111add00c577dd804dcd6008bfe9a77c75e9327f6cb",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/136",
+    "title": "Validate PCI bus-range declarations before realization",
+    "state_at_review": "open",
+    "body_sha256": "dd1bc163ac21328555ca9637462431298991c5df9cc8f705ff2d3845d99b1d3d",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/137",
+    "title": "Preserve and enforce the declared PSCI conduit",
+    "state_at_review": "open",
+    "body_sha256": "3fc5cedc4cd6ed18f8410b4bcf7e0cec41a803d638d19415154afc75b942b1e4",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/138",
+    "title": "Make architecture checks cover actual host-service boundaries",
+    "state_at_review": "open",
+    "body_sha256": "5116c0257b7e367fdfeed120683913b62f71150051951db3eb9cf46d8078d106",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/139",
+    "title": "Track conformity with the Machine-centered PMI design",
+    "state_at_review": "open",
+    "body_sha256": "df05c856d8a45a19a97bb5b1798e490c6cb467dbc88e29026af08458b57950e2",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/140",
+    "title": "Bind exported guest RAM to machine lifetime and preserve concurrent-access safety",
+    "state_at_review": "open",
+    "body_sha256": "c58b6313383c6835ddcbe9c89e28658bf7f6ac560f744b6035618536ec69594f",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/141",
+    "title": "Stop the VM on unexpected device-worker failure",
+    "state_at_review": "open",
+    "body_sha256": "1da6b61becd75689171f30af9376b86c57c337ee912338253ebb8082a77d5f0a",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/142",
+    "title": "Require Zero sections for every DT fill",
+    "state_at_review": "open",
+    "body_sha256": "e849a0278060c6bd73724ba0a910d6f4526a25821b2b980713ba43baee911c7b",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/143",
+    "title": "Reject unhandled empty DT nodes during setup",
+    "state_at_review": "open",
+    "body_sha256": "ff070b20606b4bd9fe575fd40611dfc0fde0b3c31346d7a542946f5e78fc8f6e",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/144",
+    "title": "Validate DT cell widths before interpreting resources",
+    "state_at_review": "open",
+    "body_sha256": "614d3a4aca72b626cab7a28fc0f33efc26e7225618d838d7905c21acdf6ec244",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/145",
+    "title": "Make adversarial launch tests self-contained and assertion-bearing",
+    "state_at_review": "open",
+    "body_sha256": "8dfd80f63996dd252fed84214e9d1cb8f98aac3fbec86948e001af074cc6ca32",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/146",
+    "title": "Bound and supervise the console stdout pipeline",
+    "state_at_review": "open",
+    "body_sha256": "a4c6e3c069fffd2464e21f84c84b92da91245d2eb0ff4f4d4c0290b2f26f2975",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/147",
+    "title": "Honor negotiated virtio-console features during activation",
+    "state_at_review": "open",
+    "body_sha256": "9aa5274a13a5157c732e11146a90a223a72986982a92b33ddb2fe8fdb55a8b6a",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/148",
+    "title": "Enforce console control sequencing and bound pending replies",
+    "state_at_review": "open",
+    "body_sha256": "2a7829c7d30a12af0d5154280c0ec5c84f284b276f8560f3d9f9857f1dbccaff",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/149",
+    "title": "Preserve and validate declared Arm timer interrupt semantics",
+    "state_at_review": "open",
+    "body_sha256": "a963d24a8019c796b2ea8740a5d1e4d8d41a31f9c0dd50ee83d3238f2424e5a1",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/150",
+    "title": "Implement isolated device and transport workers on macOS and Windows",
+    "state_at_review": "open",
+    "body_sha256": "83f41a27e1b64a540db8992be064d3e0b99417df5acfeebe650fe6d7bd59e901",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/151",
+    "title": "Verify native declaration-to-realization and failure boundaries",
+    "state_at_review": "open",
+    "body_sha256": "913a15d2c0569c6bbc3d4c4ffff867f635475af853c0729011a04e58ed54d205",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/152",
+    "title": "Track confidential-target enforcement and attestation coverage",
+    "state_at_review": "open",
+    "body_sha256": "febdfdc054984676786cd5fbbb9a091fd4690117db56e9e75e92cd3a4cc89dd8",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/153",
+    "title": "Validate inherited console endpoint type and direction",
+    "state_at_review": "open",
+    "body_sha256": "4fdba9c32b7b813819567f36119a62678a941ab82b2a92623e6482f16b0dc72b",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/154",
+    "title": "Enforce manifest bounds before copying PE section bodies",
+    "state_at_review": "open",
+    "body_sha256": "7fa20df368dba5eef065a5c7610fe3779e0a5a968a9629f7a930a840a3cd3e12",
+    "disposition": "retained scoped finding or qualification owner"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/157",
+    "title": "Retain stable validated launch inputs across realization and reboot",
+    "state_at_review": "open",
+    "body_sha256": "1c694926e13563ed25f3d03e70d34d1d1809fb532b6dc1c7e658a58e7c83ef55",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/158",
+    "title": "Conform crate responsibilities and dependencies to the adopted design",
+    "state_at_review": "open",
+    "body_sha256": "25ede0a983f004f5bfd75fdf7dd798502ea17a4fb2ba66703e2699482fc77028",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/159",
+    "title": "Implement shared CPU supervision with owner runners and separate controls",
+    "state_at_review": "open",
+    "body_sha256": "7007a67cd91d57f005b00507493be3b6caa7a0b5adedb5fbce3efdea030e07a4",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/160",
+    "title": "Implement all-stop debugging and device/session lifecycle",
+    "state_at_review": "open",
+    "body_sha256": "105c17ba872e238b2b15d132f831d587438cea2f88a3e1e90437eaf91f878911",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/161",
+    "title": "Preserve native queue and interrupt paths across device processes",
+    "state_at_review": "open",
+    "body_sha256": "e953ee069e7f3e3cbb1137b66ffd8307e57de61bb721a88276885892c09ab304",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/162",
+    "title": "Preserve device register failures through dispatch and native completion",
+    "state_at_review": "open",
+    "body_sha256": "6a2fe090ec5d9524d370eba34ac2d8131a999df77eb7d04352bf2e9981fc8be6",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/163",
+    "title": "Honor KVM message-route state and report native programming failures",
+    "state_at_review": "open",
+    "body_sha256": "ea1fc0351783fec642faf6f859cc35740d1bf4ea0cc896eb5ef638680ff4be6b",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/164",
+    "title": "Preserve and validate WHP LAPIC declarations",
+    "state_at_review": "open",
+    "body_sha256": "1d679d1e52debe5ee7dbc55eb283de3be353b714e73d44d9d88a9c6ed4afd8be",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/165",
+    "title": "Connect drained DT claims to instance-bound realization and finalization",
+    "state_at_review": "open",
+    "body_sha256": "a90614d28206f6f61535b25d3275090fa3fd29f8cc12c0d984a640061dac9e14",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/166",
+    "title": "Connect MSI-X completions to transport masks, pending bits and vector state",
+    "state_at_review": "open",
+    "body_sha256": "2d4038f26299b5ba47cba50466e13e90e0dbe0dc211d141fef160bb24cf6d341",
+    "disposition": "published and verified"
+  },
+  {
+    "url": "https://github.com/pichi-vm/dillo/issues/167",
+    "title": "Preserve virtqueue access and publication errors",
+    "state_at_review": "open",
+    "body_sha256": "c494ac9f3192662826e909bab420e9ec5d96f3ee323a291dbd6704a4d1635c20",
+    "disposition": "published and verified"
+  }
+]
