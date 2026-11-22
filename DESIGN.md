@@ -470,8 +470,9 @@ reusing resources or releasing replacement execution. A pause acknowledgement
 alone does not establish retirement. Retain backing while access can continue,
 even after the VM is logically terminal.
 
-The launch recipe retains stable validated PMI bytes, other launch inputs,
+The launch recipe retains the opened PMI file, other required launch inputs,
 machine selection and authorized host-resource identity across reboot.
+Dillo remaps the retained file when needed to realize the launch again.
 Persistent disk effects survive; uncertain operations must not be replayed.
 Retained host endpoints require explicit ownership handoff after old use ends.
 Each device defines the disposition of consumed but undelivered stream data;
@@ -681,10 +682,13 @@ other target-defined operations exactly, including required zero contents,
 range checks, ordering and devicetree fills. Allocator defaults do not waive
 those requirements.
 
-Parsing, validation, loading and subsequent boots must consume the same
-stable launch inputs. Retaining a pathname or mutable file handle does not
-establish stable contents. Runtime guest writes and debugger changes must
-not modify the retained launch source.
+The caller must keep the PMI file unchanged throughout the VM lifecycle,
+including reboot. Dillo maps the opened file read-only for parsing,
+validation and loading. Ordinary VM launches copy section data directly
+into guest RAM and release the input mapping before guest execution.
+Confidential launches use the copy path required by the target firmware and
+release the mapping when target-specific loading completes. Runtime guest
+writes and debugger changes operate independently of the launch source.
 
 #### PMI-003 — Initialize the BSP and preserve guest control of APs
 

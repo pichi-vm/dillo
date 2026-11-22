@@ -17,8 +17,8 @@ static SUPERVISOR_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// VMM that boots PMI files (Linux/KVM today).
 #[derive(FromArgs, Debug)]
 struct Args {
-    /// path to the PMI file to boot — required in boot mode, ignored
-    /// in backend mode.
+    /// path to the PMI file to boot. Keep the file unchanged throughout the
+    /// VM lifecycle, including reboot. Required in boot mode.
     #[argh(option)]
     pmi: Option<std::path::PathBuf>,
 
