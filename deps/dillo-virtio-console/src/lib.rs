@@ -681,6 +681,7 @@ fn control_worker(
 ) {
     let rx_queue = Arc::new(Mutex::new(rx_queue));
     let tx_queue = Arc::new(Mutex::new(tx_queue));
+    let mut blocked_dispatch = None;
     while !token.is_shutdown_requested() {
         let mut progress = false;
         if let Some(receiver) = &mut resize {
@@ -701,7 +702,15 @@ fn control_worker(
         for buf in drain_tx_buffers(queue_memory, buffer_memory, &tx_queue, tx_call_interrupt) {
             progress = true;
             match control::ControlMessage::decode(&buf) {
-                Some(msg) => plane.handle(&msg),
+                Some(msg) => {
+                    log::debug!(
+                        "virtio-console: received control event {} for port {} value={}",
+                        msg.event,
+                        msg.id,
+                        msg.value
+                    );
+                    plane.handle(&msg);
+                }
                 None => log::warn!(
                     "virtio-console: control message of {} byte(s) is too short",
                     buf.len()
@@ -712,13 +721,42 @@ fn control_worker(
         // Device → guest: whatever the state machine (or a disconnecting port)
         // has queued, one message per descriptor chain.
         while let Some(msg) = plane.pop_outbound() {
-            if push_to_queue(
+            // Requeue retries the same event or restores a coalesced resize.
+            // A different event or a consumed buffer is visible at DEBUG.
+            let dispatch = (msg.event, msg.id, msg.value);
+            let attempt_level = if blocked_dispatch == Some(dispatch) {
+                log::Level::Trace
+            } else {
+                log::Level::Debug
+            };
+            log::log!(
+                attempt_level,
+                "virtio-console: dispatching control event {} for port {} value={} interrupt_present={}",
+                msg.event,
+                msg.id,
+                msg.value,
+                rx_call_interrupt.is_some()
+            );
+            let consumed_buffer = push_to_queue(
                 queue_memory,
                 buffer_memory,
                 &rx_queue,
                 &msg.encode(),
                 rx_call_interrupt,
-            ) {
+            );
+            log::log!(
+                if consumed_buffer {
+                    log::Level::Debug
+                } else {
+                    attempt_level
+                },
+                "virtio-console: control dispatch returned for event {} port {} value={} consumed_buffer={consumed_buffer}",
+                msg.event,
+                msg.id,
+                msg.value
+            );
+            blocked_dispatch = (!consumed_buffer).then_some(dispatch);
+            if consumed_buffer {
                 progress = true;
             } else {
                 // No guest buffer right now; keep the message and retry.
