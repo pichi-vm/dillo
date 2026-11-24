@@ -4,6 +4,7 @@
 #![cfg(target_os = "macos")]
 
 mod hypervisor;
+pub mod worker;
 
 use applevisor::prelude::VcpuHandle;
 use dillo_devtree::platform::PsciMethod;
@@ -492,6 +493,11 @@ mod imp {
 
         fn guest_address_bits() -> Result<u32, Self::Error> {
             crate::hypervisor::guest_address_bits()
+        }
+
+        fn worker_memory(&self) -> std::io::Result<dillo_ipc::MemoryExport> {
+            let memory = self.inner.guest_memory().map_err(std::io::Error::other)?;
+            dillo_machine_unix::export_memory(&memory)
         }
 
         fn from_launch_config(

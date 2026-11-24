@@ -383,6 +383,11 @@ impl VirtioDevice for VirtioBlk {
     fn write_config(&mut self, _offset: u64, _data: &[u8]) {
         // virtio_blk_config is read-only from the guest.
     }
+
+    fn reset(&mut self) -> Result<(), ActivateError> {
+        self.activated = false;
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -444,6 +449,7 @@ fn request_worker(
             backing.as_ref(),
             read_only,
             negotiated,
+            &token,
         );
     }
 }
@@ -451,6 +457,7 @@ fn request_worker(
 /// One descriptor in a request chain: (guest address, byte length).
 type Desc = (GuestAddress, u32);
 
+#[allow(clippy::too_many_arguments)]
 fn drain_requests(
     queue_memory: &Arc<dyn QueueMemory>,
     buffer_memory: &Arc<dyn VirtioMemory>,
@@ -459,10 +466,13 @@ fn drain_requests(
     backing: &dyn BlockBacking,
     read_only: bool,
     negotiated: u64,
+    token: &VirtioRunToken,
 ) {
     let mut q = queue.lock().expect("virtio-blk queue mutex");
     let mut signaled = false;
-    while let Some(head) = q.pop(queue_memory) {
+    while !token.is_shutdown_requested()
+        && let Some(head) = q.pop(queue_memory)
+    {
         let head_index = head.index;
 
         // Split the chain into device-readable and device-writable descriptors.
@@ -918,6 +928,7 @@ mod tests {
             &backing,
             false,
             VIRTIO_BLK_F_FLUSH,
+            &VirtioRunToken::from_fn(|| false),
         );
 
         // Guest data buffer filled with backing bytes.

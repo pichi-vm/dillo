@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![cfg(target_os = "windows")]
+#![feature(windows_process_extensions_raw_attribute)]
 
 mod hypervisor;
 mod ioapic;
+mod memory;
+pub mod worker;
 
 /// Reasons a WHP vCPU run returned to backend code.
 #[derive(Debug)]
@@ -60,6 +63,7 @@ mod imp {
         mmio_bus: Arc<Mutex<MmioBus>>,
         shared_memory: Vec<Arc<dyn SharedMemory>>,
         ioapic: Option<Arc<IoApic>>,
+        worker_memory: Option<dillo_ipc::MemoryExport>,
     }
 
     impl std::fmt::Debug for Vm {
@@ -104,6 +108,7 @@ mod imp {
                 mmio_bus,
                 shared_memory: Vec::new(),
                 ioapic,
+                worker_memory: None,
             })
         }
 
@@ -224,14 +229,30 @@ mod imp {
                     "launch requires {required} bits; backend provides {available}"
                 )));
             }
-            let memory = guest_memory_from_ranges(config.ram)?;
+            let (memory, export) = guest_memory_from_ranges(config.ram)?;
             let mut vm = Self::new_x86_64(config.vcpus, Some(substrate.ioapic))?;
             vm.attach_guest_memory(memory)?;
+            vm.worker_memory = Some(export);
             Ok(vm)
         }
 
         fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Self::Error> {
             self.inner.write_guest(gpa, data)
+        }
+
+        fn worker_memory(&self) -> std::io::Result<dillo_ipc::MemoryExport> {
+            let export = self
+                .worker_memory
+                .as_ref()
+                .ok_or(std::io::ErrorKind::NotConnected)?;
+            Ok(dillo_ipc::MemoryExport {
+                views: export.views.clone(),
+                resources: export
+                    .resources
+                    .iter()
+                    .map(|h| h.try_clone())
+                    .collect::<Result<_, _>>()?,
+            })
         }
     }
 
@@ -376,7 +397,7 @@ mod imp {
 
     fn guest_memory_from_ranges(
         ranges: impl IntoIterator<Item = RamRange>,
-    ) -> Result<GuestMemoryMmap, Error> {
+    ) -> Result<(GuestMemoryMmap, dillo_ipc::MemoryExport), Error> {
         // Hyper-V TLFS defines 4 KiB GPA pages for x64.
         const PAGE_SIZE: u64 = 0x1000;
         let ranges: Vec<_> = ranges
@@ -390,7 +411,7 @@ mod imp {
                 Ok((GuestAddress(gpa), size as usize))
             })
             .collect::<Result<_, _>>()?;
-        GuestMemoryMmap::from_ranges(&ranges).map_err(|e| Error::CreateGuestMemory(format!("{e}")))
+        crate::memory::allocate(&ranges).map_err(|e| Error::CreateGuestMemory(format!("{e}")))
     }
 
     impl<D> Attach<Arc<D>> for Vm

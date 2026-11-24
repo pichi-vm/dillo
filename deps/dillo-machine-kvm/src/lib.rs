@@ -22,6 +22,8 @@ mod irq;
 mod memory;
 mod msi;
 mod notification;
+#[cfg(target_os = "linux")]
+pub mod worker;
 
 /// Reasons a KVM vCPU run returned to backend code.
 #[derive(Debug)]
@@ -599,6 +601,11 @@ mod imp {
                 .memory()?
                 .write(gpa, data)
                 .map_err(|e| Error::UnhandledExit(e.to_string()))
+        }
+
+        fn worker_memory(&self) -> std::io::Result<dillo_ipc::MemoryExport> {
+            let memory = self.inner.memory().map_err(std::io::Error::other)?;
+            dillo_machine_unix::export_memory(&memory.guest_memory())
         }
 
         fn prepare_vcpu_run(&mut self) -> Result<(), Self::Error> {

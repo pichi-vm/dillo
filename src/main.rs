@@ -12,6 +12,8 @@ use dillo_machine::Host;
 use machine_select::machine;
 use machine_select::runner;
 
+mod block_worker;
+
 static SUPERVISOR_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 /// VMM that boots PMI files (Linux/KVM today).
@@ -131,6 +133,16 @@ mod boot_trace {
 }
 
 fn main() {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--dillo-block-worker")
+    {
+        if let Err(error) = dillo_worker::run::<machine::worker::Worker>(block_worker::device) {
+            eprintln!("dillo block worker: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     boot_trace::mark("start");
     let args: Args = argh::from_env();
@@ -347,7 +359,7 @@ fn build_placements(
     args: &Args,
     platform: &dillo_devtree::platform::Machine,
 ) -> anyhow::Result<Vec<runner::DevicePlacement>> {
-    use dillo_virtio::VirtioDevice;
+    use block_worker::Device::{Block, Local};
 
     let resolved = dillo_config::resolve(layout_from_args(args)?)?;
 
@@ -355,15 +367,15 @@ fn build_placements(
     // queues it will use; the MSI-X table gets one vector per queue plus one
     // for config-space changes.
     let mut requests: Vec<dillo_config::Placement> = Vec::with_capacity(resolved.devices.len() + 1);
-    let mut built: Vec<(&'static str, Box<dyn VirtioDevice>)> = Vec::new();
+    let mut built: Vec<(&'static str, block_worker::Device)> = Vec::new();
 
     requests.push(resolved.console.placement.clone());
     built.push((
         "virtio-console",
-        Box::new(build_console_device(
+        Local(Box::new(build_console_device(
             &resolved.console,
             args.console_resize.as_deref(),
-        )?),
+        )?)),
     ));
 
     for device in &resolved.devices {
@@ -373,7 +385,10 @@ fn build_placements(
             dillo_config::ResolvedDevice::Vsock { cid, uds, .. } => {
                 built.push((
                     "virtio-vsock",
-                    Box::new(dillo_virtio_vsock::VirtioVsock::new(*cid, uds.clone())),
+                    Local(Box::new(dillo_virtio_vsock::VirtioVsock::new(
+                        *cid,
+                        uds.clone(),
+                    ))),
                 ));
             }
             #[cfg(not(unix))]
@@ -389,7 +404,7 @@ fn build_placements(
                 use anyhow::Context as _;
                 let fs = dillo_virtio_fs::VirtioFs::passthrough(tag, source.clone(), *readonly)
                     .with_context(|| format!("sharing virtio-fs source {}", source.display()))?;
-                built.push(("virtio-fs", Box::new(fs)));
+                built.push(("virtio-fs", Local(Box::new(fs))));
             }
             dillo_config::ResolvedDevice::Net {
                 backend,
@@ -399,11 +414,11 @@ fn build_placements(
                 ..
             } => {
                 let net = build_net_device(*backend, iface.as_deref(), *mac, forwards)?;
-                built.push(("virtio-net", Box::new(net)));
+                built.push(("virtio-net", Local(Box::new(net))));
             }
             other => {
                 let (name, blk) = build_block_device(other)?;
-                built.push((name, Box::new(blk)));
+                built.push((name, Block(blk)));
             }
         }
     }
@@ -421,7 +436,7 @@ fn build_placements(
             // One MSI-X vector per virtqueue, plus one for config-space
             // changes. Taken from the constructed device, so a MULTIPORT
             // console with N named ports gets its 2N+4 queues' worth.
-            msix_vectors: msix_vectors_for(device.as_ref()),
+            msix_vectors: msix_vectors_for(device.num_queues()),
             name,
             device,
         })
@@ -429,8 +444,8 @@ fn build_placements(
 }
 
 /// MSI-X table entries for a device: one per virtqueue plus one for config.
-fn msix_vectors_for(device: &dyn dillo_virtio::VirtioDevice) -> u16 {
-    u16::try_from(device.num_queues())
+fn msix_vectors_for(queues: usize) -> u16 {
+    u16::try_from(queues)
         .unwrap_or(u16::MAX - 1)
         .saturating_add(1)
 }
@@ -466,9 +481,9 @@ fn build_console_device(
 /// Construct the `VirtioBlk` for one resolved device (opening its backing files).
 fn build_block_device(
     device: &dillo_config::ResolvedDevice,
-) -> anyhow::Result<(&'static str, dillo_virtio_blk::VirtioBlk)> {
+) -> anyhow::Result<(&'static str, dillo_worker::Prepared)> {
     use anyhow::Context as _;
-    use dillo_virtio_blk::VirtioBlk;
+    use block_worker::{Backing, Partition};
     match device {
         dillo_config::ResolvedDevice::Blk {
             path,
@@ -476,15 +491,17 @@ fn build_block_device(
             format,
             ..
         } => {
-            let blk = match format {
-                dillo_config::BlockFormat::Raw => VirtioBlk::open_raw(path, *readonly)
-                    .with_context(|| format!("opening blk image {}", path.display()))?,
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(!readonly)
+                .open(path)
+                .with_context(|| format!("opening blk image {}", path.display()))?;
+            let backing = match format {
+                dillo_config::BlockFormat::Raw => Backing::Raw {
+                    readonly: *readonly,
+                },
                 dillo_config::BlockFormat::Qcow2 => {
                     use imago::{StorageExt, StorageOpenOptions};
-                    let file = std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(!readonly)
-                        .open(path)?;
                     if !file.metadata()?.is_file() {
                         anyhow::bail!("qcow2 requires a regular file");
                     }
@@ -510,16 +527,16 @@ fn build_block_device(
                             .reclaim(0, 1024 * 1024)
                             .context("qcow2 requires host hole punching")?;
                     }
-                    let storage = imago::file::File::from_open_file(
-                        file,
-                        StorageOpenOptions::new().write(!readonly),
-                    )?;
-                    let backing = dillo_storage::Qcow2Backing::open(storage, *readonly)
-                        .with_context(|| format!("opening qcow2 image {}", path.display()))?;
-                    VirtioBlk::new(std::sync::Arc::new(backing), *readonly)
+
+                    Backing::Qcow2 {
+                        readonly: *readonly,
+                    }
                 }
             };
-            Ok(("virtio-blk", blk))
+            Ok((
+                "virtio-blk",
+                dillo_worker::Prepared::new(&backing, vec![file])?,
+            ))
         }
         dillo_config::ResolvedDevice::Gpt {
             device_id,
@@ -527,34 +544,32 @@ fn build_block_device(
             partitions,
             ..
         } => {
-            let specs = partitions
+            let files = partitions
                 .iter()
-                .map(|p| dillo_virtio_gpt::PartitionSpec {
-                    path: p.path.clone(),
-                    partuuid: p.partuuid,
-                    typeguid: p.typeguid,
+                .map(|p| std::fs::File::open(&p.path))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            let parts = partitions
+                .iter()
+                .map(|p| Partition {
+                    partuuid: *p.partuuid.as_bytes(),
+                    typeguid: *p.typeguid.as_bytes(),
                     label: p.label.clone(),
                     attrs: p.attrs,
                 })
                 .collect();
-            let backing = dillo_virtio_gpt::assemble(*device_id, *disk_guid, specs)?;
-            // Virtualized-GPT is read-only by construction (no mutation capability).
             Ok((
                 "virtio-gpt",
-                VirtioBlk::new(std::sync::Arc::new(backing), true),
+                dillo_worker::Prepared::new(
+                    &Backing::Gpt {
+                        device_id: *device_id,
+                        disk_guid: *disk_guid,
+                        partitions: parts,
+                    },
+                    files,
+                )?,
             ))
         }
-        // vsock/fs devices are dispatched in `build_placements` before reaching
-        // here.
-        dillo_config::ResolvedDevice::Vsock { .. } => {
-            anyhow::bail!("internal: build_block_device called for a vsock device")
-        }
-        dillo_config::ResolvedDevice::Fs { .. } => {
-            anyhow::bail!("internal: build_block_device called for a fs device")
-        }
-        dillo_config::ResolvedDevice::Net { .. } => {
-            anyhow::bail!("internal: build_block_device called for a net device")
-        }
+        _ => anyhow::bail!("internal: non-block device passed to block factory"),
     }
 }
 
@@ -2149,7 +2164,7 @@ mod machine_select {
             pub(crate) index: u32,
             pub(crate) msix_vectors: u16,
             pub(crate) name: &'static str,
-            pub(crate) device: Box<dyn dillo_virtio::VirtioDevice>,
+            pub(crate) device: crate::block_worker::Device,
         }
 
         impl std::fmt::Debug for DevicePlacement {
@@ -2273,6 +2288,8 @@ mod machine_select {
             vm: &mut M,
             platform: &PlatformMachine,
             placements: Vec<DevicePlacement>,
+            workers: &mut Vec<dillo_worker::Control>,
+            shutdown: &'static AtomicBool,
         ) -> Result<(), RunError>
         where
             E: std::error::Error + Send + Sync + 'static,
@@ -2315,7 +2332,12 @@ mod machine_select {
                     let bar0 = mmio_base + (stride as u64) * BAR_STRIDE;
                     let bar2 = bar0 + 0x1000;
                     let dev = dillo_pci_virtio::VirtioPciDevice::new(
-                        Arc::new(std::sync::Mutex::new(placement.device)),
+                        Arc::new(std::sync::Mutex::new(
+                            placement
+                                .device
+                                .bind(vm, workers, shutdown)
+                                .map_err(RunError::machine)?,
+                        )),
                         placement.msix_vectors,
                         bar0,
                         bar2,
@@ -2364,7 +2386,10 @@ mod machine_select {
                             base: slot.base,
                             size: slot.size,
                         },
-                        placement.device,
+                        placement
+                            .device
+                            .bind(vm, workers, shutdown)
+                            .map_err(RunError::machine)?,
                         Arc::clone(&int_status),
                         irq.clone(),
                         line_requirement(&slot.interrupt),
@@ -2516,7 +2541,14 @@ mod machine_select {
 
             attach_uart(&mut vm, &platform)?;
             attach_syscon(&mut vm, &platform)?;
-            attach_devices(&mut vm, &platform, placements)?;
+            let mut workers = Vec::new();
+            attach_devices(
+                &mut vm,
+                &platform,
+                placements,
+                &mut workers,
+                supervisor_shutdown,
+            )?;
             drop(platform);
 
             let cpu_profile = parsed.cpu_profile;
@@ -2526,6 +2558,9 @@ mod machine_select {
                     .map_err(RunError::machine)?;
             while matches!(outcome, VcpuStop::GuestReset) {
                 log::info!("guest requested reboot - replaying launch writes");
+                for worker in &workers {
+                    worker.reset().map_err(RunError::machine)?;
+                }
                 vm.reset_for_reboot().map_err(RunError::machine)?;
                 // Re-map the PMI just to replay the raw section loads, then drop
                 // it again — it is not held resident between boots.
@@ -2540,6 +2575,9 @@ mod machine_select {
                     .map_err(RunError::machine)?;
             }
 
+            for worker in &workers {
+                worker.shutdown().map_err(RunError::machine)?;
+            }
             if matches!(outcome, VcpuStop::GuestPoweroff) {
                 dillo_virtio_console::flush_output();
             }

@@ -10,7 +10,9 @@
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
+use vm_memory::{
+    Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion,
+};
 
 pub mod syscon;
 

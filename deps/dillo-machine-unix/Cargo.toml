@@ -1,0 +1,16 @@
+[package]
+name = "dillo-machine-unix"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Unix resource-transfer primitives shared by KVM and HVF."
+
+[target.'cfg(unix)'.dependencies]
+dillo-ipc.workspace = true
+nix = { workspace = true, features = ["uio"] }
+libc.workspace = true
+vm-memory.workspace = true
+
+[lints]
+workspace = true

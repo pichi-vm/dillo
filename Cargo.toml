@@ -6,6 +6,9 @@ members = [
     "deps/dillo-storage",
     "deps/dillo-devtree",
     "deps/dillo-machine",
+    "deps/dillo-ipc",
+    "deps/dillo-worker",
+    "deps/dillo-machine-unix",
     "deps/dillo-launch",
     "deps/dillo-runtime",
     "deps/dillo-machine-hvf",
@@ -77,6 +80,9 @@ dillo-storage = { path = "deps/dillo-storage" }
 dillo-config = { path = "deps/dillo-config" }
 dillo-devtree = { path = "deps/dillo-devtree" }
 dillo-machine = { path = "deps/dillo-machine" }
+dillo-ipc = { path = "deps/dillo-ipc" }
+dillo-worker = { path = "deps/dillo-worker" }
+dillo-machine-unix = { path = "deps/dillo-machine-unix" }
 dillo-runtime = { path = "deps/dillo-runtime" }
 dillo-launch = { path = "deps/dillo-launch" }
 dillo-machine-hvf = { path = "deps/dillo-machine-hvf" }
@@ -110,7 +116,7 @@ serde-keyvalue = "0.1"
 ciborium = "0.2"
 
 # Memory + KVM (Linux)
-vm-memory = { version = "0.17", default-features = false, features = ["backend-mmap", "backend-atomic"] }
+vm-memory = { git = "https://github.com/pichi-vm/vm-memory", rev = "e156118a8e41fae369d6f8cd47ce9854b70b7158", default-features = false, features = ["backend-mmap", "backend-atomic"] }
 kvm-ioctls = "0.24"
 kvm-bindings = "0.14"
 
@@ -185,6 +191,9 @@ default = []
 vm-tests = []
 
 [dependencies]
+uuid.workspace = true
+dillo-ipc.workspace = true
+dillo-worker.workspace = true
 tempfile.workspace = true
 dillo-storage.workspace = true
 imago.workspace = true

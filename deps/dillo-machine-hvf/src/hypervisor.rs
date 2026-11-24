@@ -25,7 +25,9 @@ use applevisor::prelude::{
 
 use dillo_devtree::platform::PsciMethod;
 use dillo_machine::{ArmV8Evidence, RamRange};
-use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
+use vm_memory::{
+    Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion,
+};
 
 use crate::VmExit;
 
@@ -192,7 +194,7 @@ impl NativeVm {
                 Ok((GuestAddress(range.gpa), size))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let backing = GuestMemoryMmap::from_ranges(&ranges)
+        let backing = dillo_machine_unix::allocate_memory(&ranges)
             .map_err(|error| Error::Hv(format!("allocate HVF RAM: {error}")))?;
         // Publish the owning views before any native map. Retain all attempted
         // ranges on failure, including the one whose call returned an error.

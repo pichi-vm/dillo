@@ -1,0 +1,359 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Exercise the real executable/process boundary without requiring a native VM.
+
+use std::fs::File;
+use std::io;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+use std::time::{Duration, Instant};
+
+use dillo_ipc::MemoryExport;
+#[cfg(not(target_os = "macos"))]
+use dillo_ipc::RamView;
+#[cfg(not(target_os = "macos"))]
+use dillo_machine::worker::WorkerHost;
+use dillo_mmio::Interrupt;
+use dillo_virtio::queue::Queue;
+use dillo_virtio::{
+    ActivateError, DeviceJoinError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
+    VirtioDeviceHost, VirtioRunToken,
+};
+use dillo_virtio_blk::{RawImageBacking, VirtioBlk};
+use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
+
+#[cfg(target_os = "macos")]
+use dillo_machine_hvf::worker::Worker;
+#[cfg(target_os = "linux")]
+use dillo_machine_kvm::worker::Worker;
+#[cfg(target_os = "windows")]
+use dillo_machine_whp::worker::Worker;
+
+#[derive(Debug)]
+struct Host;
+
+impl VirtioDeviceHost for Host {
+    fn spawn(
+        &self,
+        run: Box<dyn FnOnce(VirtioRunToken) -> Result<(), DeviceJoinError> + Send>,
+    ) -> Result<VirtioDeviceHandle, ActivateError> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let token = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            run(VirtioRunToken::from_fn(move || {
+                token.load(Ordering::Acquire)
+            }))
+        });
+        Ok(VirtioDeviceHandle::new(
+            move || stop.store(true, Ordering::Release),
+            move || thread.join().unwrap(),
+        ))
+    }
+}
+
+struct Backend {
+    device: VirtioBlk,
+    mode: String,
+}
+
+impl VirtioDevice for Backend {
+    fn device_type(&self) -> u32 {
+        self.device.device_type()
+    }
+    fn num_queues(&self) -> usize {
+        self.device.num_queues()
+    }
+    fn queue_max_sizes(&self) -> &[u16] {
+        self.device.queue_max_sizes()
+    }
+    fn features(&self) -> u64 {
+        self.device.features()
+    }
+    fn read_config(&self, offset: u64, data: &mut [u8]) {
+        self.device.read_config(offset, data);
+    }
+    fn write_config(&mut self, offset: u64, data: &[u8]) {
+        self.device.write_config(offset, data);
+    }
+    fn reset(&mut self) -> Result<(), ActivateError> {
+        self.device.reset()
+    }
+    fn activate(
+        &mut self,
+        activation: VirtioActivate,
+    ) -> Result<VirtioDeviceHandle, ActivateError> {
+        match self.mode.as_str() {
+            "crash" => std::process::exit(42),
+            "hang" => std::thread::sleep(Duration::from_secs(300)),
+            _ => {}
+        }
+        self.device.activate(activation)
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--dillo-block-worker")
+    {
+        return dillo_worker::run::<Worker>(|config, mut files| {
+            let forbidden = config["forbidden"].as_str().unwrap();
+            assert!(
+                File::open(forbidden).is_err(),
+                "worker opened an unrelated host file"
+            );
+            assert!(
+                std::net::TcpListener::bind("127.0.0.1:0").is_err(),
+                "worker created a network socket"
+            );
+            assert!(
+                std::process::Command::new(std::env::args_os().next().unwrap())
+                    .arg("--not-a-worker")
+                    .status()
+                    .is_err(),
+                "worker created a descendant"
+            );
+            let backing = RawImageBacking::new(files.remove(0), false)?;
+            Ok(Box::new(Backend {
+                device: VirtioBlk::new(Arc::new(backing), false),
+                mode: config["mode"].as_str().unwrap().to_owned(),
+            }))
+        })
+        .map_err(Into::into);
+    }
+    for mode in ["normal", "crash", "hang"] {
+        exercise(mode)?;
+    }
+    println!("block process: confinement, shared I/O, reset, crash and deadline passed");
+    Ok(())
+}
+
+fn memory() -> io::Result<(GuestMemoryMmap, MemoryExport)> {
+    #[cfg(target_os = "macos")]
+    {
+        let memory = dillo_machine_unix::allocate_memory(&[(GuestAddress(0), 2 << 20)])?;
+        let export = dillo_machine_unix::export_memory(&memory)?;
+        // Darwin POSIX shm fixes its size on the first ftruncate; even the
+        // owner cannot shrink it after handing out writable views.
+        let fd = export.resources[0].try_clone()?;
+        assert!(nix::unistd::ftruncate(&fd, 0).is_err());
+        return Ok((memory, export));
+    }
+    #[cfg(target_os = "linux")]
+    let resource = {
+        use nix::fcntl::{FcntlArg, SealFlag, fcntl};
+        use nix::sys::memfd::{MFdFlags, memfd_create};
+        let fd = memfd_create(
+            c"block-process-test",
+            MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING,
+        )?;
+        nix::unistd::ftruncate(&fd, 2 << 20)?;
+        fcntl(
+            &fd,
+            FcntlArg::F_ADD_SEALS(
+                SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_GROW | SealFlag::F_SEAL_SEAL,
+            ),
+        )?;
+        assert!(nix::unistd::ftruncate(&fd, 0).is_err());
+        fd
+    };
+    #[cfg(target_os = "windows")]
+    let resource = {
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::Memory::{CreateFileMappingW, PAGE_READWRITE, SEC_COMMIT},
+        };
+        // SAFETY: a fresh committed pagefile section owned only by this fixture.
+        #[allow(unsafe_code)]
+        unsafe {
+            let handle = CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                std::ptr::null(),
+                PAGE_READWRITE | SEC_COMMIT,
+                0,
+                2 << 20,
+                std::ptr::null(),
+            );
+            if handle.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            OwnedHandle::from_raw_handle(handle)
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
+    {
+        let views = vec![RamView {
+            gpa: 0,
+            len: 2 << 20,
+            offset: 0,
+            resource: 0,
+        }];
+        let memory = Worker::map_memory(MemoryExport {
+            views: views.clone(),
+            resources: vec![resource.try_clone()?],
+        })?;
+        Ok((
+            memory,
+            MemoryExport {
+                views,
+                resources: vec![resource],
+            },
+        ))
+    }
+}
+
+fn activation(interrupts: Arc<AtomicUsize>) -> (VirtioActivate, Kick) {
+    let kick = Kick::new().unwrap();
+    let mut queue = Queue::new(256);
+    queue.size = 16;
+    queue.ready = true;
+    queue.desc_table = GuestAddress(0x1000);
+    queue.avail_ring = GuestAddress(0x2000);
+    queue.used_ring = GuestAddress(0x3000);
+    let interrupt = Interrupt::from_fn(move || {
+        interrupts.fetch_add(1, Ordering::Release);
+    });
+    (
+        VirtioActivate::with_host_and_queue_interrupts(
+            vec![queue],
+            vec![kick.clone()],
+            Arc::new(Host),
+            vec![Some(interrupt)],
+        )
+        .with_negotiated_features((1 << 32) | (1 << 9)),
+        kick,
+    )
+}
+
+fn exercise(mode: &str) -> io::Result<()> {
+    let forbidden = tempfile::NamedTempFile::new()?;
+    let disk = tempfile::tempfile()?;
+    disk.set_len(4096)?;
+    let (memory, export) = memory()?;
+    let failed = Arc::new(AtomicBool::new(false));
+    let signal = Arc::clone(&failed);
+    let prepared = dillo_worker::Prepared::new(
+        &serde_json::json!({"mode":mode,"forbidden":forbidden.path()}),
+        vec![disk.try_clone()?],
+    )?;
+    let (mut proxy, control) =
+        prepared.start::<Worker>(export, move || signal.store(true, Ordering::Release))?;
+    let interrupts = Arc::new(AtomicUsize::new(0));
+    let (activate, kick) = activation(Arc::clone(&interrupts));
+    let start = Instant::now();
+    let result = proxy.activate(activate);
+    if mode != "normal" {
+        assert!(result.is_err(), "bad child activated");
+        assert!(
+            failed.load(Ordering::Acquire),
+            "failure did not wake the supervisor"
+        );
+        assert!(
+            control.shutdown().is_err(),
+            "failure was lost on retirement"
+        );
+        assert!(start.elapsed() < Duration::from_secs(15));
+        return Ok(());
+    }
+    let old_activation = result.map_err(io::Error::other)?;
+    request(&memory, 1, 1, 0x6a);
+    kick.write(1)?;
+    complete(&memory, 1)?;
+    let mut bytes = [0u8; 512];
+    read_at(&disk, &mut bytes, 512)?;
+    assert_eq!(bytes, [0x6a; 512]);
+
+    request(&memory, 2, 0, 0);
+    kick.write(1)?;
+    complete(&memory, 2)?;
+    memory.read_slice(&mut bytes, GuestAddress(0x5000)).unwrap();
+    assert_eq!(bytes, [0x6a; 512]);
+    assert!(interrupts.load(Ordering::Acquire) > 0);
+
+    control.reset()?;
+    memory.write_slice(&[0; 64], GuestAddress(0x2000)).unwrap();
+    memory.write_slice(&[0; 256], GuestAddress(0x3000)).unwrap();
+    let (activate, kick) = activation(interrupts);
+    let active = proxy.activate(activate).map_err(io::Error::other)?;
+    // An old activation's eventual Drop must not stop the replacement epoch.
+    drop(old_activation);
+    request(&memory, 1, 1, 0xa5);
+    kick.write(1)?;
+    complete(&memory, 1)?;
+    active.join().map_err(io::Error::other)?;
+    control.shutdown()?;
+    assert!(!failed.load(Ordering::Acquire));
+    read_at(&disk, &mut bytes, 512)?;
+    assert_eq!(bytes, [0xa5; 512]);
+    Ok(())
+}
+
+fn request(memory: &GuestMemoryMmap, index: u16, operation: u32, fill: u8) {
+    let descriptor = |offset, address: u64, len: u32, flags: u16, next: u16| {
+        let mut bytes = [0; 16];
+        bytes[..8].copy_from_slice(&address.to_le_bytes());
+        bytes[8..12].copy_from_slice(&len.to_le_bytes());
+        bytes[12..14].copy_from_slice(&flags.to_le_bytes());
+        bytes[14..].copy_from_slice(&next.to_le_bytes());
+        memory.write_slice(&bytes, GuestAddress(offset)).unwrap();
+    };
+    descriptor(0x1000, 0x4000, 16, 1, 1);
+    descriptor(0x1010, 0x5000, 512, if operation == 0 { 3 } else { 1 }, 2);
+    descriptor(0x1020, 0x6000, 1, 2, 0);
+    memory
+        .write_slice(&operation.to_le_bytes(), GuestAddress(0x4000))
+        .unwrap();
+    memory
+        .write_slice(&1u64.to_le_bytes(), GuestAddress(0x4008))
+        .unwrap();
+    memory
+        .write_slice(&[fill; 512], GuestAddress(0x5000))
+        .unwrap();
+    memory.write_slice(&[0xff], GuestAddress(0x6000)).unwrap();
+    memory
+        .write_slice(
+            &0u16.to_le_bytes(),
+            GuestAddress(0x2004 + 2 * u64::from(index - 1)),
+        )
+        .unwrap();
+    std::sync::atomic::fence(Ordering::Release);
+    memory
+        .write_slice(&index.to_le_bytes(), GuestAddress(0x2002))
+        .unwrap();
+}
+
+fn complete(memory: &GuestMemoryMmap, index: u16) -> io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while memory
+        .read_obj::<u16>(GuestAddress(0x3002))
+        .unwrap()
+        .to_le()
+        != index
+    {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "used ring did not advance",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    std::sync::atomic::fence(Ordering::Acquire);
+    assert_eq!(memory.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0);
+    Ok(())
+}
+
+fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> io::Result<usize> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::read_at(file, bytes, offset)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::FileExt::seek_read(file, bytes, offset)
+    }
+}

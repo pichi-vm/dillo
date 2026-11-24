@@ -9,6 +9,8 @@
 
 use std::sync::atomic::AtomicBool;
 
+pub mod worker;
+
 /// x86_64 `cpu:profile` validation policy shared by KVM and WHP backends.
 #[cfg(target_arch = "x86_64")]
 pub mod cpuid_x86;
@@ -224,6 +226,12 @@ pub trait Machine: Sized + 'static {
 
     /// Write launch data into guest RAM through backend-owned memory access.
     fn write_guest(&mut self, gpa: u64, data: &[u8]) -> Result<(), Self::Error>;
+
+    /// Export ordinary guest RAM to a worker without exporting native VM
+    /// authority. Machines with private confidential RAM must refuse this.
+    fn worker_memory(&self) -> std::io::Result<dillo_ipc::MemoryExport> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
 
     /// Prepare backend-owned run state after all vCPUs have been created.
     fn prepare_vcpu_run(&mut self) -> Result<(), Self::Error> {

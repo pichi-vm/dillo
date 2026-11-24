@@ -12,7 +12,9 @@ use nix::fcntl::{FallocateFlags, fallocate};
 use nix::sys::memfd::{MFdFlags, memfd_create};
 use nix::unistd::ftruncate;
 use vm_memory::mmap::MmapRegionBuilder;
-use vm_memory::{Bytes, FileOffset, GuestAddress, GuestMemory, GuestMemoryMmap, GuestRegionMmap};
+use vm_memory::{
+    Bytes, FileOffset, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestRegionMmap,
+};
 
 /// Whether to eagerly commit all guest RAM at creation. Default off:
 /// pages commit lazily on first touch, which is faster to boot and lets
@@ -69,7 +71,10 @@ impl MappedMemory {
         // Preserve the existing hugepage and optional eager-commit policy.
         let fd = memfd_create(
             c"dillo-guest",
-            MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_HUGETLB | MFdFlags::MFD_HUGE_2MB,
+            MFdFlags::MFD_CLOEXEC
+                | MFdFlags::MFD_HUGETLB
+                | MFdFlags::MFD_HUGE_2MB
+                | MFdFlags::MFD_ALLOW_SEALING,
         )
         .context("memfd_create (need 2 MiB huge pages; check vm.nr_hugepages)")?;
         let len = i64::try_from(total_bytes).context("memfd size > i64::MAX")?;
@@ -85,7 +90,10 @@ impl MappedMemory {
     pub(crate) fn test_backing(regions: &[(u64, u64)]) -> Result<Self> {
         // Exercise production mapping and registration before CI provisions
         // hugepages; only this test allocation uses an ordinary memfd.
-        let fd = memfd_create(c"dillo-test-guest", MFdFlags::MFD_CLOEXEC)?;
+        let fd = memfd_create(
+            c"dillo-test-guest",
+            MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING,
+        )?;
         ftruncate(
             &fd,
             i64::try_from(regions.iter().map(|(_, size)| *size).sum::<u64>())?,
@@ -94,6 +102,15 @@ impl MappedMemory {
     }
 
     fn map(requested: Vec<(u64, u64)>, file: Arc<File>) -> Result<Self> {
+        use nix::fcntl::{FcntlArg, SealFlag, fcntl};
+        // Export grants writable mappings, never authority to shrink a native
+        // VM's backing or change the seal policy. Writable mappings stay valid.
+        fcntl(
+            file.as_ref(),
+            FcntlArg::F_ADD_SEALS(
+                SealFlag::F_SEAL_GROW | SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_SEAL,
+            ),
+        )?;
         let mut views = Vec::with_capacity(requested.len());
         let mut file_offset = 0u64;
         for (gpa, size) in requested {

@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use dillo_machine::cpuid_x86::{Reg, cumulative_features, required_xcr0};
 use pmi::x86_64::Profile;
 use thiserror::Error;
-use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
+use vm_memory::{
+    Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion,
+};
 use windows_sys::Win32::System::Hypervisor::{
     WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_X64_FP_CONTROL_STATUS_REGISTER,
     WHV_X64_FP_CONTROL_STATUS_REGISTER_0, WHV_X64_SEGMENT_REGISTER, WHV_X64_SEGMENT_REGISTER_0,
@@ -1706,7 +1708,7 @@ mod tests {
     use pmi::x86_64::Profile;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
-    use vm_memory::{Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
+    use vm_memory::{Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
     use windows_sys::Win32::System::Hypervisor::*;
     use windows_sys::Win32::System::Memory::{
         MEM_COMMIT, MEM_FREE, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, VirtualQuery,

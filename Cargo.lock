@@ -483,6 +483,7 @@ dependencies = [
  "ciborium",
  "dillo-config",
  "dillo-devtree",
+ "dillo-ipc",
  "dillo-launch",
  "dillo-machine",
  "dillo-machine-hvf",
@@ -502,6 +503,7 @@ dependencies = [
  "dillo-virtio-gpt",
  "dillo-virtio-net",
  "dillo-virtio-vsock",
+ "dillo-worker",
  "env_logger",
  "hex",
  "imago",
@@ -518,6 +520,7 @@ dependencies = [
  "snuffler",
  "tempfile",
  "thiserror 2.0.18",
+ "uuid",
  "wait-timeout",
  "widestring",
  "windows-sys 0.61.2",
@@ -547,6 +550,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dillo-ipc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dillo-launch"
 version = "0.1.0"
 dependencies = [
@@ -561,7 +572,9 @@ dependencies = [
 name = "dillo-machine"
 version = "0.1.0"
 dependencies = [
+ "dillo-ipc",
  "pmi",
+ "vm-memory",
 ]
 
 [[package]]
@@ -571,13 +584,15 @@ dependencies = [
  "applevisor",
  "applevisor-sys",
  "dillo-devtree",
+ "dillo-ipc",
  "dillo-machine",
+ "dillo-machine-unix",
  "dillo-mmio",
  "libc",
  "log",
  "pmi",
  "thiserror 2.0.18",
- "vm-memory 0.17.2",
+ "vm-memory",
  "wait-timeout",
 ]
 
@@ -587,7 +602,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dillo-devtree",
+ "dillo-ipc",
  "dillo-machine",
+ "dillo-machine-unix",
  "dillo-mmio",
  "dillo-runtime",
  "dillo-virtio",
@@ -597,10 +614,21 @@ dependencies = [
  "log",
  "nix 0.30.1",
  "pmi",
+ "seccompiler",
  "thiserror 2.0.18",
- "vm-memory 0.17.2",
+ "vm-memory",
  "vmm-sys-util",
  "wait-timeout",
+]
+
+[[package]]
+name = "dillo-machine-unix"
+version = "0.1.0"
+dependencies = [
+ "dillo-ipc",
+ "libc",
+ "nix 0.30.1",
+ "vm-memory",
 ]
 
 [[package]]
@@ -608,12 +636,15 @@ name = "dillo-machine-whp"
 version = "0.1.0"
 dependencies = [
  "dillo-devtree",
+ "dillo-ipc",
  "dillo-machine",
  "dillo-mmio",
  "log",
  "pmi",
+ "tempfile",
  "thiserror 2.0.18",
- "vm-memory 0.17.2",
+ "uuid",
+ "vm-memory",
  "windows-sys 0.61.2",
 ]
 
@@ -623,7 +654,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "thiserror 2.0.18",
- "vm-memory 0.17.2",
+ "vm-memory",
 ]
 
 [[package]]
@@ -641,7 +672,7 @@ dependencies = [
  "dillo-mmio",
  "dillo-virtio",
  "log",
- "vm-memory 0.17.2",
+ "vm-memory",
 ]
 
 [[package]]
@@ -660,7 +691,7 @@ dependencies = [
  "dillo-pci",
  "dillo-virtio",
  "log",
- "vm-memory 0.17.2",
+ "vm-memory",
 ]
 
 [[package]]
@@ -686,7 +717,7 @@ dependencies = [
  "dillo-mmio",
  "log",
  "thiserror 2.0.18",
- "vm-memory 0.17.2",
+ "vm-memory",
 ]
 
 [[package]]
@@ -700,7 +731,7 @@ dependencies = [
  "log",
  "tempfile",
  "thiserror 2.0.18",
- "vm-memory 0.17.2",
+ "vm-memory",
 ]
 
 [[package]]
@@ -715,7 +746,7 @@ dependencies = [
  "nix 0.30.1",
  "tempfile",
  "thiserror 2.0.18",
- "vm-memory 0.17.2",
+ "vm-memory",
  "widestring",
  "win-custody",
  "windows-sys 0.61.2",
@@ -733,7 +764,7 @@ dependencies = [
  "rustix",
  "tempfile",
  "thiserror 2.0.18",
- "vm-memory 0.17.2",
+ "vm-memory",
  "windows-sys 0.61.2",
 ]
 
@@ -762,7 +793,7 @@ dependencies = [
  "mio",
  "nix 0.30.1",
  "smoltcp",
- "vm-memory 0.17.2",
+ "vm-memory",
 ]
 
 [[package]]
@@ -772,6 +803,28 @@ dependencies = [
  "dillo-mmio",
  "dillo-virtio",
  "log",
+]
+
+[[package]]
+name = "dillo-worker"
+version = "0.1.0"
+dependencies = [
+ "dillo-ipc",
+ "dillo-machine",
+ "dillo-machine-hvf",
+ "dillo-machine-kvm",
+ "dillo-machine-unix",
+ "dillo-machine-whp",
+ "dillo-mmio",
+ "dillo-virtio",
+ "dillo-virtio-blk",
+ "log",
+ "nix 0.30.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "vm-memory",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1856,6 +1909,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "seccompiler"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2258,18 +2320,8 @@ checksum = "7e21282841a059bb62627ce8441c491f09603622cd5a21c43bfedc85a2952f23"
 
 [[package]]
 name = "vm-memory"
-version = "0.17.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e201ed63fdaba7bdafd07176f2060ffa6949aa05559acbc3f5189824bb285428"
-dependencies = [
- "vm-memory 0.18.0",
-]
-
-[[package]]
-name = "vm-memory"
 version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b55e753c7725603745cb32b2287ef7ef3da05c03c7702cda3fa8abe25ae0465"
+source = "git+https://github.com/pichi-vm/vm-memory?rev=e156118a8e41fae369d6f8cd47ce9854b70b7158#e156118a8e41fae369d6f8cd47ce9854b70b7158"
 dependencies = [
  "arc-swap",
  "libc",
