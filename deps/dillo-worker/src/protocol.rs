@@ -74,6 +74,12 @@ pub(crate) enum Command {
     Reset {
         epoch: u64,
     },
+    Quiesce {
+        epoch: u64,
+    },
+    Resume {
+        epoch: u64,
+    },
     Shutdown,
 }
 

@@ -342,6 +342,19 @@ pub trait VirtioDevice: Send {
     /// Write device-specific configuration space.
     fn write_config(&mut self, offset: u64, data: &[u8]);
 
+    /// Stop guest-memory access and publication after admitted work completes,
+    /// preserving queue progress and negotiation for resume.
+    fn quiesce(&mut self) -> Result<(), ActivateError> {
+        Err(ActivateError::InvalidConfig(
+            "quiescence unsupported".into(),
+        ))
+    }
+
+    /// Continue a quiescent activation without resetting its queues.
+    fn resume(&mut self) -> Result<(), ActivateError> {
+        Err(ActivateError::InvalidConfig("resume unsupported".into()))
+    }
+
     /// Reset backend-local state after its activation has stopped and joined.
     /// Isolated backends must explicitly support reuse; a transport reset must
     /// never silently reactivate a backend that still considers itself running.

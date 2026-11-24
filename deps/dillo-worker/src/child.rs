@@ -187,6 +187,19 @@ pub fn run<H: WorkerHost>(
                     handle.join().map_err(io::Error::other)?;
                     device.reset().map_err(io::Error::other)?;
                 }
+                Command::Quiesce { epoch } | Command::Resume { epoch } => {
+                    if active
+                        .as_ref()
+                        .is_none_or(|(current, _, _)| *current != epoch)
+                    {
+                        return Err(io::Error::other("control for inactive queue"));
+                    }
+                    if matches!(command, Command::Quiesce { .. }) {
+                        device.quiesce().map_err(io::Error::other)?;
+                    } else {
+                        device.resume().map_err(io::Error::other)?;
+                    }
+                }
                 Command::Shutdown => {
                     if let Some((_, _, handle)) = active.take() {
                         handle.join().map_err(io::Error::other)?;

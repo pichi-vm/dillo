@@ -85,6 +85,12 @@ impl VirtioDevice for Backend {
     fn reset(&mut self) -> Result<(), ActivateError> {
         self.device.reset()
     }
+    fn quiesce(&mut self) -> Result<(), ActivateError> {
+        self.device.quiesce()
+    }
+    fn resume(&mut self) -> Result<(), ActivateError> {
+        self.device.resume()
+    }
     fn activate(
         &mut self,
         activation: VirtioActivate,
@@ -299,6 +305,23 @@ fn exercise(mode: &str) -> io::Result<()> {
     memory.read_slice(&mut bytes, GuestAddress(0x5000)).unwrap();
     assert_eq!(bytes, [0x6a; 512]);
     assert!(interrupts.load(Ordering::Acquire) > 0);
+
+    control.quiesce()?;
+    let before = interrupts.load(Ordering::Acquire);
+    request(&memory, 3, 1, 0x3c);
+    kick.write(1)?;
+    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(
+        memory
+            .read_obj::<u16>(GuestAddress(0x3002))
+            .unwrap()
+            .to_le(),
+        2
+    );
+    assert_eq!(memory.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0xff);
+    assert_eq!(interrupts.load(Ordering::Acquire), before);
+    control.resume()?;
+    complete(&memory, 3)?;
 
     control.reset()?;
     memory.write_slice(&[0; 64], GuestAddress(0x2000)).unwrap();

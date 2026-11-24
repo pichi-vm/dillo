@@ -329,6 +329,26 @@ impl Control {
         }
     }
 
+    /// Cooperative device barrier; it does not revoke a malicious child's RAM
+    /// mapping. Only process retirement establishes that stronger boundary.
+    pub fn quiesce(&self) -> io::Result<()> {
+        let epoch = self.0.shared.active.load(Ordering::Acquire);
+        if epoch == 0 {
+            Ok(())
+        } else {
+            self.0.request(Command::Quiesce { epoch })
+        }
+    }
+
+    pub fn resume(&self) -> io::Result<()> {
+        let epoch = self.0.shared.active.load(Ordering::Acquire);
+        if epoch == 0 {
+            Ok(())
+        } else {
+            self.0.request(Command::Resume { epoch })
+        }
+    }
+
     pub fn shutdown(&self) -> io::Result<()> {
         if self.0.retired.load(Ordering::Acquire) {
             return self.check();

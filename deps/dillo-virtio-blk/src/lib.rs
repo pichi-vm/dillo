@@ -14,7 +14,10 @@
 
 use std::fs::File;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Condvar, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use dillo_mmio::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
@@ -186,7 +189,60 @@ impl WritableBlockBacking for RawImageBacking {
 // VirtioBlk — the VirtioDevice
 // ---------------------------------------------------------------------------
 
-/// In-process virtio-blk device.
+// Queue progress stays in its worker while it is parked at a publication
+// boundary. The control thread remains available to resume or stop it.
+struct Quiescence {
+    requested: AtomicBool,
+    parked: Mutex<bool>,
+    changed: Condvar,
+    kick: Kick,
+}
+
+impl Quiescence {
+    fn quiesce(&self) -> std::io::Result<()> {
+        self.requested.store(true, Ordering::Release);
+        self.kick.write(1)?;
+        let (parked, _) = self
+            .changed
+            .wait_timeout_while(
+                self.parked.lock().unwrap(),
+                std::time::Duration::from_secs(5),
+                |parked| !*parked,
+            )
+            .unwrap();
+        if *parked {
+            Ok(())
+        } else {
+            Err(std::io::ErrorKind::TimedOut.into())
+        }
+    }
+
+    fn resume(&self) {
+        let _parked = self.parked.lock().unwrap();
+        self.requested.store(false, Ordering::Release);
+        self.changed.notify_all();
+    }
+
+    fn checkpoint(&self, token: &VirtioRunToken) {
+        if !self.requested.load(Ordering::Acquire) {
+            return;
+        }
+        let mut parked = self.parked.lock().unwrap();
+        *parked = true;
+        self.changed.notify_all();
+        while self.requested.load(Ordering::Acquire) && !token.is_shutdown_requested() {
+            // Shutdown also has to release a quiescent worker. Its token is
+            // owned by the host; do not require a separate resume to join it.
+            (parked, _) = self
+                .changed
+                .wait_timeout(parked, std::time::Duration::from_millis(10))
+                .unwrap();
+        }
+        *parked = false;
+    }
+}
+
+/// A virtio-blk backend with one queue worker.
 pub struct VirtioBlk {
     backing: Arc<dyn BlockBacking>,
     /// Capacity in 512-byte sectors.
@@ -195,7 +251,7 @@ pub struct VirtioBlk {
     logical_block_size: u32,
     physical_block_size: u32,
     max_segments: Option<u32>,
-    activated: bool,
+    quiescence: Option<Arc<Quiescence>>,
 }
 
 impl std::fmt::Debug for VirtioBlk {
@@ -206,7 +262,7 @@ impl std::fmt::Debug for VirtioBlk {
             .field("logical_block_size", &self.logical_block_size)
             .field("physical_block_size", &self.physical_block_size)
             .field("max_segments", &self.max_segments)
-            .field("activated", &self.activated)
+            .field("activated", &self.quiescence.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -228,7 +284,7 @@ impl VirtioBlk {
             logical_block_size,
             physical_block_size,
             max_segments,
-            activated: false,
+            quiescence: None,
         }
     }
 
@@ -329,7 +385,7 @@ impl VirtioDevice for VirtioBlk {
         &mut self,
         mut activation: VirtioActivate,
     ) -> Result<VirtioDeviceHandle, ActivateError> {
-        if self.activated {
+        if self.quiescence.is_some() {
             return Err(ActivateError::InvalidConfig(
                 "VirtioBlk::activate called twice".into(),
             ));
@@ -355,6 +411,12 @@ impl VirtioDevice for VirtioBlk {
         let read_only = self.read_only;
         let negotiated = activation.negotiated_features();
 
+        let quiescence = Arc::new(Quiescence {
+            requested: AtomicBool::new(false),
+            parked: Mutex::new(false),
+            changed: Condvar::new(),
+            kick: evt.clone(),
+        });
         let handle = spawn_request_worker(
             host,
             queue_memory,
@@ -365,9 +427,10 @@ impl VirtioDevice for VirtioBlk {
             backing,
             read_only,
             negotiated,
+            Arc::clone(&quiescence),
         )?;
 
-        self.activated = true;
+        self.quiescence = Some(quiescence);
         log::info!(
             "virtio-blk: activated (capacity={} sectors, read_only={})",
             self.capacity,
@@ -385,7 +448,21 @@ impl VirtioDevice for VirtioBlk {
     }
 
     fn reset(&mut self) -> Result<(), ActivateError> {
-        self.activated = false;
+        self.quiescence = None;
+        Ok(())
+    }
+
+    fn quiesce(&mut self) -> Result<(), ActivateError> {
+        if let Some(control) = &self.quiescence {
+            control.quiesce()?;
+        }
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), ActivateError> {
+        if let Some(control) = &self.quiescence {
+            control.resume();
+        }
         Ok(())
     }
 }
@@ -401,6 +478,7 @@ fn spawn_request_worker(
     backing: Arc<dyn BlockBacking>,
     read_only: bool,
     negotiated: u64,
+    quiescence: Arc<Quiescence>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
     let wake = kick.clone();
     host.spawn(Box::new(move |token| {
@@ -414,6 +492,7 @@ fn spawn_request_worker(
             read_only,
             negotiated,
             token,
+            quiescence,
         )
         .map_err(|e| dillo_virtio::DeviceJoinError::Worker(e.to_string()))
     }))
@@ -431,6 +510,7 @@ fn request_worker(
     read_only: bool,
     negotiated: u64,
     token: VirtioRunToken,
+    quiescence: Arc<Quiescence>,
 ) -> std::io::Result<()> {
     let queue = Arc::new(Mutex::new(queue));
     loop {
@@ -438,6 +518,7 @@ fn request_worker(
             log::error!("virtio-blk: kick read error: {e}");
             return Err(e);
         }
+        quiescence.checkpoint(&token);
         if token.is_shutdown_requested() {
             return backing.flush();
         }
@@ -450,7 +531,11 @@ fn request_worker(
             read_only,
             negotiated,
             &token,
+            &quiescence.requested,
         );
+        // All admitted requests and their completion notifications precede
+        // acknowledgement. Do not clear queue indices or negotiated features.
+        quiescence.checkpoint(&token);
     }
 }
 
@@ -467,10 +552,12 @@ fn drain_requests(
     read_only: bool,
     negotiated: u64,
     token: &VirtioRunToken,
+    quiescing: &AtomicBool,
 ) {
     let mut q = queue.lock().expect("virtio-blk queue mutex");
     let mut signaled = false;
     while !token.is_shutdown_requested()
+        && !quiescing.load(Ordering::Acquire)
         && let Some(head) = q.pop(queue_memory)
     {
         let head_index = head.index;
@@ -929,6 +1016,7 @@ mod tests {
             false,
             VIRTIO_BLK_F_FLUSH,
             &VirtioRunToken::from_fn(|| false),
+            &AtomicBool::new(false),
         );
 
         // Guest data buffer filled with backing bytes.
