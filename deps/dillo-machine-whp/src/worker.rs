@@ -466,7 +466,10 @@ fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> 
             std::ptr::null(),
             std::ptr::null(),
             1,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+            // This pipe-only worker needs no console host. A windowless
+            // console can still require a host process, which is incompatible
+            // with the job's one-process limit and child-process restriction.
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS,
             environment.as_ptr().cast(),
             directory.as_ptr(),
             &startup.StartupInfo,
