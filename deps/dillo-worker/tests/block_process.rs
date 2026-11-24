@@ -165,6 +165,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "worker created a descendant"
             );
             let mode = config["mode"].as_str().unwrap();
+            if matches!(mode, "oversized" | "forged-resource") {
+                // A compromised worker can write its pipe directly. Neither
+                // claimed length nor numeric resource count is authority.
+                let header = if mode == "oversized" {
+                    [255, 255, 255, 255, 0, 0, 0, 0]
+                } else {
+                    [0, 0, 0, 0, 1, 0, 0, 0]
+                };
+                std::io::stdout().write_all(&header)?;
+                return Err(io::Error::other("injected malformed worker reply"));
+            }
             let backing: Arc<dyn BlockBacking> = if mode == "qcow2" {
                 Arc::new(Qcow2Backing::open(storage(files.remove(0))?, false)?)
             } else if mode == "gated" {
@@ -182,9 +193,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .map_err(Into::into);
     }
-    for mode in ["normal", "qcow2", "gated", "crash", "hang"]
-        .into_iter()
-        .chain(cfg!(target_os = "linux").then_some("native"))
+    for mode in [
+        "normal",
+        "qcow2",
+        "gated",
+        "crash",
+        "hang",
+        "oversized",
+        "forged-resource",
+    ]
+    .into_iter()
+    .chain(cfg!(target_os = "linux").then_some("native"))
     {
         exercise(mode)?;
     }
@@ -337,9 +356,16 @@ fn exercise(mode: &str) -> io::Result<()> {
         &serde_json::json!({"mode":mode,"forbidden":forbidden.path()}),
         files,
     )?;
-    let (mut proxy, control) = prepared
-        .start::<Worker>(export, move || signal.store(true, Ordering::Release))
-        .map_err(|e| io::Error::new(e.kind(), format!("start block worker: {e}")))?;
+    let startup = Instant::now();
+    let result = prepared.start::<Worker>(export, move || signal.store(true, Ordering::Release));
+    if matches!(mode, "oversized" | "forged-resource") {
+        assert!(result.is_err(), "malformed worker was admitted");
+        assert!(failed.load(Ordering::Acquire));
+        assert!(startup.elapsed() < Duration::from_secs(5));
+        return Ok(());
+    }
+    let (mut proxy, control) =
+        result.map_err(|e| io::Error::new(e.kind(), format!("start block worker: {e}")))?;
     let control = Arc::new(control);
     let interrupts = Arc::new(AtomicUsize::new(0));
     if mode == "normal" {
