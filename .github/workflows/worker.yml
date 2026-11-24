@@ -1,0 +1,42 @@
+name: Worker platform probe
+
+on:
+  push:
+    branches: [milestone/isolated-block]
+  workflow_dispatch:
+    inputs:
+      runner:
+        type: choice
+        options: [windows-2025, macos-15]
+        default: windows-2025
+
+jobs:
+  worker:
+    runs-on: ${{ inputs.runner || 'windows-2025' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install toolchain
+        shell: bash
+        run: rustup toolchain install nightly-2026-07-06 --profile minimal --component rust-src
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p dillo-worker --test block_process
+      - name: Diagnose Windows loader
+        if: failure() && runner.os == 'Windows'
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          $tools = "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64"
+          $binary = Get-ChildItem target\debug\deps\block_process-*.exe | Select-Object -First 1
+          & "$tools\gflags.exe" /i dillo.exe +sls
+          try {
+            & "$tools\cdb.exe" -o -g -G -logo worker-loader.log $binary.FullName *> $null
+            Get-Content worker-loader.log -Tail 60
+          } finally {
+            & "$tools\gflags.exe" /i dillo.exe -sls
+          }
+      - uses: actions/upload-artifact@v4
+        if: failure() && runner.os == 'Windows'
+        with:
+          name: windows-worker-loader
+          path: worker-loader.log
