@@ -436,7 +436,9 @@ fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> 
         handles[0] as usize, handles[1] as usize, handles[2] as usize,
     )));
     let mut environment = Vec::new();
-    for key in ["LOCALAPPDATA", "SystemRoot"] {
+    // Windows initializes AppContainer and temporary-path state before main.
+    // Pass only its bootstrap paths, never the caller's general environment.
+    for key in ["LOCALAPPDATA", "SystemDrive", "SystemRoot", "TEMP", "TMP"] {
         let mut entry = std::ffi::OsString::from(format!("{key}="));
         entry.push(
             std::env::var_os(key)
