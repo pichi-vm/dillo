@@ -69,6 +69,14 @@ struct Notification {
 }
 
 impl WriteNotification for Notification {
+    fn export(&self) -> io::Result<Option<dillo_ipc::Resource>> {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        let event = self.event.try_clone()?;
+        // SAFETY: transfer this newly duplicated eventfd into its owning type.
+        #[allow(unsafe_code)]
+        Ok(Some(unsafe { OwnedFd::from_raw_fd(event.into_raw_fd()) }))
+    }
+
     fn read(&self) -> io::Result<u64> {
         loop {
             match self.event.read() {

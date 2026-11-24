@@ -7,6 +7,7 @@ license.workspace = true
 description = "MMIO device traits, windows, attachment helpers, and compatibility bus for dillo."
 
 [dependencies]
+dillo-machine.workspace = true
 log.workspace = true
 thiserror.workspace = true
 vm-memory.workspace = true

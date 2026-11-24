@@ -20,6 +20,16 @@ use dillo_virtio::{
 
 use crate::protocol::{CONFIG_LEN, Command, Geometry, Init, QUEUE_MAX, Request, Response};
 
+#[cfg(unix)]
+use std::os::fd::AsFd as AsResource;
+#[cfg(windows)]
+use std::os::windows::io::AsHandle as AsResource;
+
+struct Outgoing {
+    request: Request,
+    resources: Vec<Resource>,
+}
+
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Authorized files and backend parameters, before a native Machine exists.
@@ -70,35 +80,22 @@ impl Prepared {
                 .chain(memory.resources)
                 .collect::<Vec<_>>(),
         );
-        let (commands, outgoing) = mpsc::sync_channel::<Request>(1);
+        let (commands, outgoing) = mpsc::sync_channel::<Outgoing>(1);
         let init = encode(&init)?;
         let startup_resources = Arc::clone(&resources);
         let writer_shared = Arc::clone(&shared);
         let writer = std::thread::Builder::new()
             .name("block-controls".into())
             .spawn(move || {
-                #[cfg(unix)]
-                let borrowed = {
-                    use std::os::fd::AsFd;
-                    startup_resources
-                        .iter()
-                        .map(AsFd::as_fd)
-                        .collect::<Vec<_>>()
-                };
-                #[cfg(windows)]
-                let borrowed = {
-                    use std::os::windows::io::AsHandle;
-                    startup_resources
-                        .iter()
-                        .map(AsHandle::as_handle)
-                        .collect::<Vec<_>>()
-                };
+                let borrowed = borrow_resources(&startup_resources);
                 if let Err(error) = channel.send(&init, &borrowed) {
                     writer_shared.fail(error.to_string());
                     return;
                 }
-                while let Ok(request) = outgoing.recv() {
-                    if let Err(error) = encode(&request).and_then(|bytes| channel.send(&bytes, &[]))
+                while let Ok(outgoing) = outgoing.recv() {
+                    let borrowed = borrow_resources(&outgoing.resources);
+                    if let Err(error) =
+                        encode(&outgoing.request).and_then(|bytes| channel.send(&bytes, &borrowed))
                     {
                         writer_shared.fail(error.to_string());
                         break;
@@ -150,6 +147,22 @@ impl Prepared {
             control,
         ))
     }
+}
+
+fn borrow_resources(resources: &[Resource]) -> Vec<dillo_ipc::BorrowedResource<'_>> {
+    resources
+        .iter()
+        .map(|resource| {
+            #[cfg(unix)]
+            {
+                resource.as_fd()
+            }
+            #[cfg(windows)]
+            {
+                resource.as_handle()
+            }
+        })
+        .collect()
 }
 
 struct Shared {
@@ -207,7 +220,7 @@ struct Session {
     _resources: Arc<Vec<Resource>>,
     shared: Arc<Shared>,
     process: Mutex<Box<dyn Process>>,
-    commands: Mutex<Option<mpsc::SyncSender<Request>>>,
+    commands: Mutex<Option<mpsc::SyncSender<Outgoing>>>,
     replies: Mutex<mpsc::Receiver<Response>>,
     serial: Mutex<()>,
     next: AtomicU64,
@@ -225,6 +238,10 @@ impl Session {
     }
 
     fn request(&self, command: Command) -> io::Result<()> {
+        self.request_with_resources(command, Vec::new())
+    }
+
+    fn request_with_resources(&self, command: Command, resources: Vec<Resource>) -> io::Result<()> {
         let _serial = self.serial.lock().unwrap();
         if let Command::Kick { epoch } = &command
             && self.shared.active.load(Ordering::Acquire) != *epoch
@@ -241,7 +258,10 @@ impl Session {
                 .unwrap()
                 .as_ref()
                 .ok_or(io::ErrorKind::BrokenPipe)?
-                .try_send(Request { id, command })
+                .try_send(Outgoing {
+                    request: Request { id, command },
+                    resources,
+                })
                 .map_err(io::Error::other)?;
             match self.response()? {
                 Response::Reply { id: reply, error } if id == reply => {
@@ -437,17 +457,39 @@ impl VirtioDevice for Proxy {
             *self.session.shared.interrupt.lock().unwrap() = Some((epoch, interrupt));
         }
         let queue = queues.remove(0);
+        let kick = kicks.remove(0);
+        let resources = kick.export()?.into_iter().collect::<Vec<_>>();
+        let native_kick = !resources.is_empty();
         self.session.shared.active.store(epoch, Ordering::Release);
-        if let Err(error) = self.session.request(Command::Activate {
-            epoch,
-            features: activation.negotiated_features(),
-            queue: Geometry::from_queue(&queue),
-        }) {
+        if let Err(error) = self.session.request_with_resources(
+            Command::Activate {
+                epoch,
+                features: activation.negotiated_features(),
+                queue: Geometry::from_queue(&queue),
+                native_kick,
+            },
+            resources,
+        ) {
             self.session.shared.active.store(0, Ordering::Release);
             self.session.shared.interrupt.lock().unwrap().take();
             return Err(error.into());
         }
-        let kick = kicks.remove(0);
+        if native_kick {
+            let session = Arc::clone(&self.session);
+            return Ok(VirtioDeviceHandle::new(
+                move || {
+                    // The parent retains registration authority until the child
+                    // has stopped reading this activation's endpoint.
+                    if let Err(error) = session.reset(epoch) {
+                        session.shared.fail(error.to_string());
+                    }
+                },
+                move || {
+                    drop(kick);
+                    Ok(())
+                },
+            ));
+        }
         let wake = kick.clone();
         let session = Arc::clone(&self.session);
         let relay = match host.spawn(Box::new(move |token| {

@@ -652,6 +652,7 @@ dependencies = [
 name = "dillo-mmio"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "log",
  "thiserror 2.0.18",
  "vm-memory",
@@ -714,6 +715,7 @@ dependencies = [
 name = "dillo-virtio"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "dillo-mmio",
  "log",
  "thiserror 2.0.18",

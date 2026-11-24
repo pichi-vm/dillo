@@ -41,6 +41,10 @@ impl Kick {
         self.0.write(count)
     }
 
+    pub fn export(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
+        self.0.export()
+    }
+
     pub fn try_clone(&self) -> std::io::Result<Self> {
         Ok(self.clone())
     }

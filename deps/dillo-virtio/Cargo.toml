@@ -7,6 +7,7 @@ license.workspace = true
 description = "Virtio device primitives: split virtqueue, device trait, feature constants. Migrated from ~/Projects/dillo/virtio."
 
 [dependencies]
+dillo-machine.workspace = true
 dillo-mmio.workspace = true
 log.workspace = true
 thiserror.workspace = true

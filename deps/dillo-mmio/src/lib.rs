@@ -636,13 +636,7 @@ pub enum MmioJoinError {
     Host(String),
 }
 
-/// Backend-owned blocking counter for an accelerated device notification.
-/// The final owner releases the associated guest-write registration.
-pub trait WriteNotification: Send + Sync + std::fmt::Debug {
-    fn read(&self) -> std::io::Result<u64>;
-
-    fn write(&self, count: u64) -> std::io::Result<()>;
-}
+pub use dillo_machine::worker::WriteNotification;
 
 /// Backend-owned services for one successfully attached MMIO device.
 pub trait MmioAttachment: Send + Sync + std::fmt::Debug {

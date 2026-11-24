@@ -182,7 +182,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .map_err(Into::into);
     }
-    for mode in ["normal", "qcow2", "gated", "crash", "hang"] {
+    for mode in ["normal", "qcow2", "gated", "crash", "hang"]
+        .into_iter()
+        .chain(cfg!(target_os = "linux").then_some("native"))
+    {
         exercise(mode)?;
     }
     println!(
@@ -266,8 +269,23 @@ fn memory() -> io::Result<(GuestMemoryMmap, MemoryExport)> {
     }
 }
 
-fn activation(interrupts: Arc<AtomicUsize>, fail_spawn: bool) -> (VirtioActivate, Kick) {
-    let kick = Kick::new().unwrap();
+fn activation(
+    interrupts: Arc<AtomicUsize>,
+    fail_spawn: bool,
+    mode: &str,
+) -> (VirtioActivate, Kick) {
+    let kick = if mode == "native" {
+        #[cfg(target_os = "linux")]
+        {
+            use nix::sys::eventfd::{EfdFlags, EventFd};
+            let counter = EventFd::from_flags(EfdFlags::EFD_CLOEXEC).unwrap();
+            Kick::from_notification(Worker::notification(counter.into()).unwrap())
+        }
+        #[cfg(not(target_os = "linux"))]
+        unreachable!("native counter fixture is Linux-only")
+    } else {
+        Kick::new().unwrap()
+    };
     let mut queue = Queue::new(256);
     queue.size = 16;
     queue.ready = true;
@@ -325,11 +343,11 @@ fn exercise(mode: &str) -> io::Result<()> {
     let control = Arc::new(control);
     let interrupts = Arc::new(AtomicUsize::new(0));
     if mode == "normal" {
-        let (activate, _) = activation(Arc::clone(&interrupts), true);
+        let (activate, _) = activation(Arc::clone(&interrupts), true, mode);
         assert!(proxy.activate(activate).is_err());
         control.check()?;
     }
-    let (activate, kick) = activation(Arc::clone(&interrupts), false);
+    let (activate, kick) = activation(Arc::clone(&interrupts), mode == "native", mode);
     let start = Instant::now();
     let result = proxy.activate(activate);
     if matches!(mode, "crash" | "hang") {
@@ -421,7 +439,7 @@ fn exercise(mode: &str) -> io::Result<()> {
     control.reset()?;
     memory.write_slice(&[0; 64], GuestAddress(0x2000)).unwrap();
     memory.write_slice(&[0; 256], GuestAddress(0x3000)).unwrap();
-    let (activate, kick) = activation(interrupts, false);
+    let (activate, kick) = activation(interrupts, mode == "native", mode);
     let active = proxy.activate(activate).map_err(io::Error::other)?;
     // An old activation's eventual Drop must not stop the replacement epoch.
     drop(old_activation);

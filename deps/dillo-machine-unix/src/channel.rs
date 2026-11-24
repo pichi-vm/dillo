@@ -86,12 +86,12 @@ impl Channel for Connection {
         let mut controls = nix::cmsg_space!([i32; MAX_RESOURCES]);
         let (count, truncated) = if let Endpoint::Resources(socket) = &mut self.input {
             let mut slices = [IoSliceMut::new(&mut header)];
-            let received = recvmsg::<()>(
-                socket.as_raw_fd(),
-                &mut slices,
-                Some(&mut controls),
-                MsgFlags::empty(),
-            )?;
+            #[cfg(target_os = "linux")]
+            let flags = MsgFlags::MSG_CMSG_CLOEXEC;
+            #[cfg(not(target_os = "linux"))]
+            let flags = MsgFlags::empty();
+            let received =
+                recvmsg::<()>(socket.as_raw_fd(), &mut slices, Some(&mut controls), flags)?;
             // Only the trusted parent sends on this socket. The reverse
             // direction is a pipe, which cannot transfer descriptors.
             for message in received.cmsgs()? {
@@ -123,6 +123,7 @@ impl Channel for Connection {
                 "invalid worker frame",
             ));
         }
+        #[cfg(not(target_os = "linux"))]
         for resource in &resources {
             nix::fcntl::fcntl(
                 resource,

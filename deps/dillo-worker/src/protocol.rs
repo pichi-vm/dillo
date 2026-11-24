@@ -67,6 +67,7 @@ pub(crate) enum Command {
         epoch: u64,
         features: u64,
         queue: Geometry,
+        native_kick: bool,
     },
     Kick {
         epoch: u64,

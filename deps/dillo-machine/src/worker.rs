@@ -6,7 +6,20 @@
 use std::io;
 use std::path::Path;
 
+pub use dillo_ipc::Resource;
 use dillo_ipc::{Channel, MemoryExport, Process};
+
+/// A bound notification counter, without native registration authority.
+pub trait WriteNotification: Send + Sync + std::fmt::Debug {
+    fn read(&self) -> io::Result<u64>;
+    fn write(&self, count: u64) -> io::Result<()>;
+
+    /// Duplicate the endpoint for a worker in this same native family.
+    /// The caller must retain the registration owner until that worker stops.
+    fn export(&self) -> io::Result<Option<Resource>> {
+        Ok(None)
+    }
+}
 use vm_memory::GuestMemoryMmap;
 
 /// Facilities available to a device worker. This interface deliberately has no
@@ -22,6 +35,11 @@ pub trait WorkerHost {
     /// Map only RAM exported by the parent. The export retains its backing for
     /// at least as long as the returned owning views.
     fn map_memory(memory: MemoryExport) -> io::Result<GuestMemoryMmap>;
+
+    /// Adopt a counter endpoint granted by the parent from this native family.
+    fn notification(_resource: Resource) -> io::Result<std::sync::Arc<dyn WriteNotification>> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
 
     /// Permanently remove ambient filesystem, network and process authority.
     /// Must succeed before any worker reports readiness or reads a guest queue.

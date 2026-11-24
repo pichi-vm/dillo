@@ -3,8 +3,10 @@
 
 //! Linux process and confinement services, without a KVM descriptor.
 
-use std::io;
+use dillo_machine::worker::WriteNotification;
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct Worker;
@@ -24,8 +26,31 @@ impl dillo_machine::worker::WorkerHost for Worker {
         dillo_machine_unix::map_memory(memory)
     }
 
+    fn notification(resource: dillo_ipc::Resource) -> io::Result<Arc<dyn WriteNotification>> {
+        Ok(Arc::new(Counter(std::fs::File::from(resource))))
+    }
+
     fn confine(files: &[dillo_ipc::BorrowedResource<'_>]) -> io::Result<()> {
         confine(files)
+    }
+}
+
+// The parent grants an eventfd counter, not a KVM registration or VM handle.
+#[derive(Debug)]
+struct Counter(std::fs::File);
+
+impl WriteNotification for Counter {
+    fn read(&self) -> io::Result<u64> {
+        let mut bytes = [0; 8];
+        (&self.0).read_exact(&mut bytes)?;
+        Ok(u64::from_ne_bytes(bytes))
+    }
+    fn write(&self, count: u64) -> io::Result<()> {
+        (&self.0).write_all(&count.to_ne_bytes())
+    }
+    fn export(&self) -> io::Result<Option<dillo_ipc::Resource>> {
+        use std::os::fd::AsFd;
+        self.0.as_fd().try_clone_to_owned().map(Some)
     }
 }
 

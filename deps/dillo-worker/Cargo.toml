@@ -29,7 +29,7 @@ tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 dillo-machine-unix.workspace = true
-nix.workspace = true
+nix = { workspace = true, features = ["event"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 dillo-machine-kvm.workspace = true

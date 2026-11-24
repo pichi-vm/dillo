@@ -123,11 +123,18 @@ pub fn run<H: WorkerHost>(
     let mut last_epoch = 0;
     let mut last_request = 0;
     loop {
-        let message = channel.receive()?;
-        if !message.resources.is_empty() {
-            return Err(io::Error::other("resources after binding"));
-        }
+        let mut message = channel.receive()?;
         let Request { id, command } = message.decode()?;
+        let resources = usize::from(matches!(
+            command,
+            Command::Activate {
+                native_kick: true,
+                ..
+            }
+        ));
+        if message.resources.len() != resources {
+            return Err(io::Error::other("unexpected activation resources"));
+        }
         if id <= last_request {
             return Err(io::Error::other("replayed worker command"));
         }
@@ -139,6 +146,7 @@ pub fn run<H: WorkerHost>(
                     epoch,
                     features: negotiated,
                     queue,
+                    native_kick,
                 } => {
                     if active.is_some()
                         || epoch <= last_epoch
@@ -148,7 +156,11 @@ pub fn run<H: WorkerHost>(
                         return Err(io::Error::other("invalid activation"));
                     }
                     let queue = queue.into_queue(&memory)?;
-                    let kick = Kick::new()?;
+                    let kick = if native_kick {
+                        Kick::from_notification(H::notification(message.resources.remove(0))?)
+                    } else {
+                        Kick::new()?
+                    };
                     let events = Arc::clone(&output);
                     let interrupt = Interrupt::from_fn(move || {
                         if let Err(error) = events.send(&Response::Used { epoch }) {
