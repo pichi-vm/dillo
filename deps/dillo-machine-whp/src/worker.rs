@@ -8,9 +8,9 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle};
-use std::os::windows::process::{CommandExt, ProcThreadAttributeList};
+use std::os::windows::process::{ExitStatusExt, ProcThreadAttributeList};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::ExitStatus;
 use std::sync::Arc;
 
 use dillo_ipc::{
@@ -229,7 +229,7 @@ impl Drop for Container {
 }
 
 struct ChildProcess {
-    child: Child,
+    child: OwnedHandle,
     _container: Container,
     _job: OwnedHandle,
 }
@@ -242,23 +242,46 @@ impl std::fmt::Debug for ChildProcess {
     }
 }
 
+impl ChildProcess {
+    fn status(&self, timeout: u32) -> io::Result<Option<ExitStatus>> {
+        // SAFETY: the process handle remains owned across the wait and query.
+        #[allow(unsafe_code)]
+        unsafe {
+            match WaitForSingleObject(self.child.as_raw_handle(), timeout) {
+                WAIT_OBJECT_0 => {
+                    let mut code = 0;
+                    check(GetExitCodeProcess(self.child.as_raw_handle(), &mut code))?;
+                    Ok(Some(ExitStatus::from_raw(code)))
+                }
+                WAIT_TIMEOUT => Ok(None),
+                _ => Err(io::Error::last_os_error()),
+            }
+        }
+    }
+}
+
 impl Process for ChildProcess {
     fn terminate(&mut self) -> io::Result<()> {
-        self.child.kill()
+        // SAFETY: only this owner's child is terminated, never a borrowed PID.
+        #[allow(unsafe_code)]
+        unsafe {
+            check(TerminateProcess(self.child.as_raw_handle(), 1))
+        }
     }
-    fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
-        self.child.wait()
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        self.status(INFINITE)?
+            .ok_or_else(|| io::Error::other("process wait timed out"))
     }
-    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
-        self.child.try_wait()
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.status(0)
     }
 }
 
 impl Drop for ChildProcess {
     fn drop(&mut self) {
-        if !matches!(self.child.try_wait(), Ok(Some(_))) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+        if !matches!(self.try_wait(), Ok(Some(_))) {
+            let _ = self.terminate();
+            let _ = self.wait();
         }
     }
 }
@@ -404,30 +427,56 @@ fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> 
             &mitigations,
         )
         .finish()?;
-    let child = Command::new(container.executable.path().join("dillo.exe"))
-        .creation_flags(CREATE_NO_WINDOW)
-        .arg("--dillo-block-worker")
-        .args(handles.map(|handle| (handle as usize).to_string()))
-        .env_clear()
-        // AppContainer launch resolves its profile from LOCALAPPDATA, even
-        // with an explicit executable and a freshly created container SID.
-        .env(
-            "LOCALAPPDATA",
-            std::env::var_os("LOCALAPPDATA")
-                .ok_or_else(|| io::Error::other("AppContainer launch requires LOCALAPPDATA"))?,
-        )
-        .env(
-            "SystemRoot",
-            std::env::var_os("SystemRoot")
-                .ok_or_else(|| io::Error::other("Windows launch requires SystemRoot"))?,
-        )
-        .current_dir(container.executable.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn_with_attributes(&attributes)
+    let executable = wide(container.executable.path().join("dillo.exe").as_os_str());
+    let directory = wide(container.executable.path().as_os_str());
+    // lpApplicationName is explicit; argv contains only a fixed name, a fixed
+    // entry switch and decimal handle values, so no caller text is quoted.
+    let mut command = wide(std::ffi::OsStr::new(&format!(
+        "dillo.exe --dillo-block-worker {} {} {}",
+        handles[0] as usize, handles[1] as usize, handles[2] as usize,
+    )));
+    let mut environment = Vec::new();
+    for key in ["LOCALAPPDATA", "SystemRoot"] {
+        let mut entry = std::ffi::OsString::from(format!("{key}="));
+        entry.push(
+            std::env::var_os(key)
+                .ok_or_else(|| io::Error::other(format!("AppContainer launch requires {key}")))?,
+        );
+        environment.extend(wide(&entry));
+    }
+    environment.push(0);
+    // std::Command duplicates standard handles independently of the supplied
+    // HANDLE_LIST. Supply the same three handles in both structures so CRT
+    // initialization and our private bootstrap see valid inherited handles.
+    #[allow(unsafe_code)]
+    let child = unsafe {
+        let mut startup = STARTUPINFOEXW::default();
+        startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = handles[0];
+        startup.StartupInfo.hStdOutput = handles[1];
+        startup.StartupInfo.hStdError = handles[2];
+        startup.lpAttributeList = attributes.as_ptr().cast_mut().cast();
+        let mut result = PROCESS_INFORMATION::default();
+        check(CreateProcessW(
+            executable.as_ptr(),
+            command.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+            environment.as_ptr().cast(),
+            directory.as_ptr(),
+            &startup.StartupInfo,
+            &mut result,
+        ))
         .map_err(|e| io::Error::new(e.kind(), format!("launch block AppContainer: {e}")))?;
-    let peer = Arc::new(child.as_handle().try_clone_to_owned()?);
+        // Both handles are newly owned on success. The thread needs no parent
+        // operations; retaining the process is sufficient for kill and wait.
+        drop(OwnedHandle::from_raw_handle(result.hThread));
+        OwnedHandle::from_raw_handle(result.hProcess)
+    };
+    let peer = Arc::new(child.try_clone()?);
     let process = ChildProcess {
         child,
         _container: container,
@@ -486,7 +535,7 @@ fn bootstrap() -> io::Result<Box<dyn Channel>> {
             }
         }
         // Only this early entry point owns the distinct, validated inherited
-        // handles. None is used by stdio; logging is installed explicitly.
+        // handles. stdio borrows their values; these owners close them.
         Ok(Box::new(Connection {
             read: File::from(OwnedHandle::from_raw_handle(handles[0] as *mut c_void)),
             write: File::from(OwnedHandle::from_raw_handle(handles[1] as *mut c_void)),
