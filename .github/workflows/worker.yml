@@ -7,7 +7,7 @@ on:
     inputs:
       runner:
         type: choice
-        options: [windows-2025, macos-15]
+        options: [windows-2025, macos-15, macos-26]
         default: windows-2025
 
 jobs:
