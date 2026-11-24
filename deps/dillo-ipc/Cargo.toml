@@ -7,6 +7,7 @@ license.workspace = true
 description = "Bounded worker messages and transferred resource descriptions."
 
 [dependencies]
+dillo-machine.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

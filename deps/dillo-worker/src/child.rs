@@ -8,15 +8,16 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use dillo_ipc::{Channel, MemoryExport, encode};
+use dillo_ipc::encode;
 use dillo_machine::worker::WorkerHost;
+use dillo_machine::worker::{Channel, MemoryExport};
 use dillo_mmio::{Interrupt, MappedSharedMemory, SharedAccess, SharedMemory};
 use dillo_virtio::{
     ActivateError, DeviceJoinError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
     VirtioDeviceHost, VirtioRunToken,
 };
 
-use crate::protocol::{CONFIG_LEN, Command, Init, QUEUE_MAX, Request, Response};
+use dillo_ipc::block::{CONFIG_LEN, Command, Init, QUEUE_MAX, Request, Response};
 
 struct Output(Mutex<Box<dyn Channel>>);
 
@@ -77,7 +78,7 @@ pub fn run<H: WorkerHost>(
 ) -> io::Result<()> {
     let mut channel = H::bootstrap()?;
     let mut message = channel.receive()?;
-    let init: Init = message.decode()?;
+    let init: Init = dillo_ipc::decode(&message)?;
     if init.version != 1 || init.files > message.resources.len() {
         return Err(io::ErrorKind::InvalidData.into());
     }
@@ -124,7 +125,7 @@ pub fn run<H: WorkerHost>(
     let mut last_request = 0;
     loop {
         let mut message = channel.receive()?;
-        let Request { id, command } = message.decode()?;
+        let Request { id, command } = dillo_ipc::decode(&message)?;
         let resources = usize::from(matches!(
             command,
             Command::Activate {
@@ -155,7 +156,7 @@ pub fn run<H: WorkerHost>(
                     {
                         return Err(io::Error::other("invalid activation"));
                     }
-                    let queue = queue.into_queue(&memory)?;
+                    let queue = crate::queue::admit(queue, &memory)?;
                     let kick = if native_kick {
                         Kick::from_notification(H::notification(message.resources.remove(0))?)
                     } else {

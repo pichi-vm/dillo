@@ -10,7 +10,9 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use dillo_ipc::{BorrowedResource, Channel, MAX_MESSAGE, MAX_RESOURCES, Message, Process};
+use dillo_machine::worker::{
+    BorrowedResource, Channel, MAX_MESSAGE, MAX_RESOURCES, Message, Process,
+};
 use nix::sys::socket::{ControlMessage, ControlMessageOwned, MsgFlags, recvmsg, sendmsg};
 
 #[derive(Debug)]

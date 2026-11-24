@@ -13,7 +13,7 @@ use std::path::Path;
 use std::process::ExitStatus;
 use std::sync::Arc;
 
-use dillo_ipc::{
+use dillo_machine::worker::{
     BorrowedResource, Channel, MAX_MESSAGE, MAX_RESOURCES, MemoryExport, Message, Process,
 };
 use windows_sys::Win32::Foundation::*;

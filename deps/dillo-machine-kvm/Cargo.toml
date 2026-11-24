@@ -16,7 +16,6 @@ thiserror.workspace = true
 vm-memory.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-dillo-ipc.workspace = true
 dillo-machine-unix.workspace = true
 seccompiler = "0.5"
 anyhow.workspace = true

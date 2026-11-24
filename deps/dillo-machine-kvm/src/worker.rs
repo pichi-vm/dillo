@@ -14,23 +14,30 @@ pub struct Worker;
 impl dillo_machine::worker::WorkerHost for Worker {
     fn spawn(
         executable: &std::path::Path,
-    ) -> io::Result<(Box<dyn dillo_ipc::Process>, Box<dyn dillo_ipc::Channel>)> {
+    ) -> io::Result<(
+        Box<dyn dillo_machine::worker::Process>,
+        Box<dyn dillo_machine::worker::Channel>,
+    )> {
         dillo_machine_unix::spawn(executable)
     }
 
-    fn bootstrap() -> io::Result<Box<dyn dillo_ipc::Channel>> {
+    fn bootstrap() -> io::Result<Box<dyn dillo_machine::worker::Channel>> {
         dillo_machine_unix::bootstrap()
     }
 
-    fn map_memory(memory: dillo_ipc::MemoryExport) -> io::Result<vm_memory::GuestMemoryMmap> {
+    fn map_memory(
+        memory: dillo_machine::worker::MemoryExport,
+    ) -> io::Result<vm_memory::GuestMemoryMmap> {
         dillo_machine_unix::map_memory(memory)
     }
 
-    fn notification(resource: dillo_ipc::Resource) -> io::Result<Arc<dyn WriteNotification>> {
+    fn notification(
+        resource: dillo_machine::worker::Resource,
+    ) -> io::Result<Arc<dyn WriteNotification>> {
         Ok(Arc::new(Counter(std::fs::File::from(resource))))
     }
 
-    fn confine(files: &[dillo_ipc::BorrowedResource<'_>]) -> io::Result<()> {
+    fn confine(files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<()> {
         confine(files)
     }
 }
@@ -48,7 +55,7 @@ impl WriteNotification for Counter {
     fn write(&self, count: u64) -> io::Result<()> {
         (&self.0).write_all(&count.to_ne_bytes())
     }
-    fn export(&self) -> io::Result<Option<dillo_ipc::Resource>> {
+    fn export(&self) -> io::Result<Option<dillo_machine::worker::Resource>> {
         use std::os::fd::AsFd;
         self.0.as_fd().try_clone_to_owned().map(Some)
     }
@@ -57,7 +64,7 @@ impl WriteNotification for Counter {
 /// Deny new resources and process authority. Bootstrap has discarded ambient
 /// descriptors; authorized files and mappings already exist. seccompiler owns
 /// BPF generation, architecture checks and the all-thread installation.
-fn confine(files: &[dillo_ipc::BorrowedResource<'_>]) -> io::Result<()> {
+fn confine(files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<()> {
     use seccompiler::{
         BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
         SeccompRule,

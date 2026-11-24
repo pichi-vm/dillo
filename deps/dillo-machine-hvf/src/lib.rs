@@ -496,7 +496,7 @@ mod imp {
             crate::hypervisor::guest_address_bits()
         }
 
-        fn worker_memory(&self) -> std::io::Result<dillo_ipc::MemoryExport> {
+        fn worker_memory(&self) -> std::io::Result<dillo_machine::worker::MemoryExport> {
             let memory = self.inner.guest_memory().map_err(std::io::Error::other)?;
             dillo_machine_unix::export_memory(&memory)
         }

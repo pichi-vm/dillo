@@ -16,7 +16,6 @@ libc = "0.2"
 vm-memory.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-dillo-ipc.workspace = true
 dillo-machine-unix.workspace = true
 applevisor.workspace = true
 applevisor-sys.workspace = true

@@ -4,7 +4,7 @@
 use std::io;
 use std::os::windows::io::{AsHandle, FromRawHandle, OwnedHandle};
 
-use dillo_ipc::{MemoryExport, RamView};
+use dillo_machine::worker::{MemoryExport, RamView};
 use vm_memory::{Address, GuestAddress, GuestMemoryMmap, GuestRegionMmap, MmapRegion};
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::System::Memory::{CreateFileMappingW, PAGE_READWRITE, SEC_COMMIT};

@@ -604,7 +604,7 @@ mod imp {
                 .map_err(|e| Error::UnhandledExit(e.to_string()))
         }
 
-        fn worker_memory(&self) -> std::io::Result<dillo_ipc::MemoryExport> {
+        fn worker_memory(&self) -> std::io::Result<dillo_machine::worker::MemoryExport> {
             let memory = self.inner.memory().map_err(std::io::Error::other)?;
             dillo_machine_unix::export_memory(&memory.guest_memory())
         }

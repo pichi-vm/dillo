@@ -63,7 +63,7 @@ mod imp {
         mmio_bus: Arc<Mutex<MmioBus>>,
         shared_memory: Vec<Arc<dyn SharedMemory>>,
         ioapic: Option<Arc<IoApic>>,
-        worker_memory: Option<dillo_ipc::MemoryExport>,
+        worker_memory: Option<dillo_machine::worker::MemoryExport>,
     }
 
     impl std::fmt::Debug for Vm {
@@ -241,12 +241,12 @@ mod imp {
             self.inner.write_guest(gpa, data)
         }
 
-        fn worker_memory(&self) -> std::io::Result<dillo_ipc::MemoryExport> {
+        fn worker_memory(&self) -> std::io::Result<dillo_machine::worker::MemoryExport> {
             let export = self
                 .worker_memory
                 .as_ref()
                 .ok_or(std::io::ErrorKind::NotConnected)?;
-            Ok(dillo_ipc::MemoryExport {
+            Ok(dillo_machine::worker::MemoryExport {
                 views: export.views.clone(),
                 resources: export
                     .resources
@@ -398,7 +398,7 @@ mod imp {
 
     fn guest_memory_from_ranges(
         ranges: impl IntoIterator<Item = RamRange>,
-    ) -> Result<(GuestMemoryMmap, dillo_ipc::MemoryExport), Error> {
+    ) -> Result<(GuestMemoryMmap, dillo_machine::worker::MemoryExport), Error> {
         // Hyper-V TLFS defines 4 KiB GPA pages for x64.
         const PAGE_SIZE: u64 = 0x1000;
         let ranges: Vec<_> = ranges

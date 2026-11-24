@@ -11,19 +11,24 @@ pub struct Worker;
 impl dillo_machine::worker::WorkerHost for Worker {
     fn spawn(
         executable: &std::path::Path,
-    ) -> io::Result<(Box<dyn dillo_ipc::Process>, Box<dyn dillo_ipc::Channel>)> {
+    ) -> io::Result<(
+        Box<dyn dillo_machine::worker::Process>,
+        Box<dyn dillo_machine::worker::Channel>,
+    )> {
         dillo_machine_unix::spawn(executable)
     }
 
-    fn bootstrap() -> io::Result<Box<dyn dillo_ipc::Channel>> {
+    fn bootstrap() -> io::Result<Box<dyn dillo_machine::worker::Channel>> {
         dillo_machine_unix::bootstrap()
     }
 
-    fn map_memory(memory: dillo_ipc::MemoryExport) -> io::Result<vm_memory::GuestMemoryMmap> {
+    fn map_memory(
+        memory: dillo_machine::worker::MemoryExport,
+    ) -> io::Result<vm_memory::GuestMemoryMmap> {
         dillo_machine_unix::map_memory(memory)
     }
 
-    fn confine(_files: &[dillo_ipc::BorrowedResource<'_>]) -> io::Result<()> {
+    fn confine(_files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<()> {
         // Already-open, explicitly transferred descriptors retain their access.
         // No new path, network connection, child process or Mach service is
         // granted. Initialization and RAM mapping precede this permanent step.

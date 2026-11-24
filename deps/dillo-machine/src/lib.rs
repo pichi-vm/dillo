@@ -231,7 +231,7 @@ pub trait Machine: Sized + 'static {
 
     /// Export ordinary guest RAM to a worker without exporting native VM
     /// authority. Machines with private confidential RAM must refuse this.
-    fn worker_memory(&self) -> std::io::Result<dillo_ipc::MemoryExport> {
+    fn worker_memory(&self) -> std::io::Result<worker::MemoryExport> {
         Err(std::io::ErrorKind::Unsupported.into())
     }
 

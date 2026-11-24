@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io;
 use std::sync::Arc;
 
-use dillo_ipc::{MAX_RESOURCES, MemoryExport, RamView};
+use dillo_machine::worker::{MAX_RESOURCES, MemoryExport, RamView};
 use vm_memory::mmap::MmapRegionBuilder;
 use vm_memory::{
     Address, FileOffset, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion,

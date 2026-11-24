@@ -7,7 +7,7 @@ license.workspace = true
 description = "Unix resource-transfer primitives shared by KVM and HVF."
 
 [target.'cfg(unix)'.dependencies]
-dillo-ipc.workspace = true
+dillo-machine.workspace = true
 nix = { workspace = true, features = ["uio"] }
 libc.workspace = true
 vm-memory.workspace = true

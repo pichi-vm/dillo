@@ -11,14 +11,15 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use dillo_ipc::{Channel, MemoryExport, Process, Resource, encode};
+use dillo_ipc::encode;
 use dillo_machine::worker::WorkerHost;
+use dillo_machine::worker::{Channel, MemoryExport, Process, Resource};
 use dillo_mmio::Interrupt;
 use dillo_virtio::{
     ActivateError, DeviceJoinError, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
 };
 
-use crate::protocol::{CONFIG_LEN, Command, Geometry, Init, QUEUE_MAX, Request, Response};
+use dillo_ipc::block::{CONFIG_LEN, Command, Init, QUEUE_MAX, Request, Response};
 
 #[cfg(unix)]
 use std::os::fd::AsFd as AsResource;
@@ -149,7 +150,7 @@ impl Prepared {
     }
 }
 
-fn borrow_resources(resources: &[Resource]) -> Vec<dillo_ipc::BorrowedResource<'_>> {
+fn borrow_resources(resources: &[Resource]) -> Vec<dillo_machine::worker::BorrowedResource<'_>> {
     resources
         .iter()
         .map(|resource| {
@@ -189,7 +190,7 @@ fn receive(mut input: Box<dyn Channel>, shared: &Shared, replies: &mpsc::SyncSen
             if !frame.resources.is_empty() {
                 return Err(io::Error::other("worker returned unauthorized resources"));
             }
-            let response: Response = frame.decode()?;
+            let response: Response = dillo_ipc::decode(&frame)?;
             match response {
                 Response::Used { epoch } => {
                     let interrupt = shared
@@ -465,7 +466,7 @@ impl VirtioDevice for Proxy {
             Command::Activate {
                 epoch,
                 features: activation.negotiated_features(),
-                queue: Geometry::from_queue(&queue),
+                queue: crate::queue::describe(&queue),
                 native_kick,
             },
             resources,

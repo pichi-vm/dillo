@@ -5,7 +5,7 @@
 
 mod child;
 mod parent;
-mod protocol;
+mod queue;
 
 pub use child::run;
 pub use parent::{Control, Prepared, Proxy};

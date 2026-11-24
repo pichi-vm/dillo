@@ -5,9 +5,60 @@
 
 use std::io;
 use std::path::Path;
+use vm_memory::GuestMemoryMmap;
 
-pub use dillo_ipc::Resource;
-use dillo_ipc::{Channel, MemoryExport, Process};
+#[cfg(unix)]
+pub use std::os::fd::{BorrowedFd as BorrowedResource, OwnedFd as Resource};
+#[cfg(windows)]
+pub use std::os::windows::io::{BorrowedHandle as BorrowedResource, OwnedHandle as Resource};
+
+/// Bound allocations before decoding a control message. Guest buffers never
+/// travel in these messages.
+pub const MAX_MESSAGE: usize = 64 * 1024;
+// Stay below Linux's SCM_MAX_FD (253) for one startup message.
+pub const MAX_RESOURCES: usize = 240;
+
+/// One region in an exported RAM allocation. `resource` indexes the resources
+/// accompanying this description, never the receiver's native handle table.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RamView {
+    pub gpa: u64,
+    pub len: u64,
+    pub offset: u64,
+    pub resource: u32,
+}
+
+/// Owned native resources and the regions they back. Native Machine code alone
+/// constructs these exports; the child receives independent owning handles.
+#[derive(Debug)]
+pub struct MemoryExport {
+    pub views: Vec<RamView>,
+    pub resources: Vec<Resource>,
+}
+
+/// One framed message plus the native objects received with that frame.
+#[derive(Debug)]
+pub struct Message {
+    pub bytes: Vec<u8>,
+    pub resources: Vec<Resource>,
+}
+
+/// A private parent/child connection. Implementations enforce message/resource
+/// bounds before allocation and close received objects on every error path.
+pub trait Channel: Send + std::fmt::Debug {
+    fn send(&mut self, bytes: &[u8], resources: &[BorrowedResource<'_>]) -> io::Result<()>;
+    fn receive(&mut self) -> io::Result<Message>;
+    fn try_clone(&self) -> io::Result<Box<dyn Channel>>;
+}
+
+/// The parent retains process termination and reaping authority. None of these
+/// operations grants a child authority over the parent or a sibling.
+pub trait Process: Send + std::fmt::Debug {
+    fn terminate(&mut self) -> io::Result<()>;
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus>;
+    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>>;
+}
 
 /// A bound notification counter, without native registration authority.
 pub trait WriteNotification: Send + Sync + std::fmt::Debug {
@@ -20,7 +71,6 @@ pub trait WriteNotification: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 }
-use vm_memory::GuestMemoryMmap;
 
 /// Facilities available to a device worker. This interface deliberately has no
 /// native VM, vCPU, debugger, or arbitrary process-handle operation.
@@ -43,7 +93,7 @@ pub trait WorkerHost {
 
     /// Permanently remove ambient filesystem, network and process authority.
     /// Must succeed before any worker reports readiness or reads a guest queue.
-    fn confine(files: &[dillo_ipc::BorrowedResource<'_>]) -> io::Result<()>;
+    fn confine(files: &[BorrowedResource<'_>]) -> io::Result<()>;
 }
 
 /// Machines without process services refuse worker startup.
@@ -57,7 +107,7 @@ impl WorkerHost for () {
     fn map_memory(_: MemoryExport) -> io::Result<GuestMemoryMmap> {
         Err(io::ErrorKind::Unsupported.into())
     }
-    fn confine(_: &[dillo_ipc::BorrowedResource<'_>]) -> io::Result<()> {
+    fn confine(_: &[BorrowedResource<'_>]) -> io::Result<()> {
         Err(io::ErrorKind::Unsupported.into())
     }
 }

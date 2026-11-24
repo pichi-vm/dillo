@@ -11,9 +11,9 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use dillo_ipc::MemoryExport;
+use dillo_machine::worker::MemoryExport;
 #[cfg(not(target_os = "macos"))]
-use dillo_ipc::RamView;
+use dillo_machine::worker::RamView;
 #[cfg(not(target_os = "macos"))]
 use dillo_machine::worker::WorkerHost;
 use dillo_mmio::Interrupt;
@@ -346,8 +346,8 @@ fn exercise(mode: &str) -> io::Result<()> {
     let gate = if mode == "gated" {
         let (entered, notice) = std::io::pipe()?;
         let (release, proceed) = std::io::pipe()?;
-        files.push(File::from(dillo_ipc::Resource::from(notice)));
-        files.push(File::from(dillo_ipc::Resource::from(release)));
+        files.push(File::from(dillo_machine::worker::Resource::from(notice)));
+        files.push(File::from(dillo_machine::worker::Resource::from(release)));
         Some((entered, proceed))
     } else {
         None
