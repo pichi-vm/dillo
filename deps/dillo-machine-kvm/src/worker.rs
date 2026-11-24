@@ -45,6 +45,8 @@ fn confine(files: &[dillo_ipc::BorrowedResource<'_>]) -> io::Result<()> {
         libc::SYS_writev,
         libc::SYS_pread64,
         libc::SYS_pwrite64,
+        libc::SYS_preadv,
+        libc::SYS_pwritev,
         libc::SYS_close,
         libc::SYS_fstat,
         libc::SYS_lseek,

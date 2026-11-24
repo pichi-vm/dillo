@@ -186,6 +186,17 @@ jobs:
           CARGO_BUILD_RUSTFLAGS: "-D warnings"
         run: cargo test --workspace --exclude snuffler
 
+      - name: Worker loader dependencies (Windows failure)
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -property installationPath
+          $dumpbin = Get-ChildItem "$installation\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          Get-ChildItem target\debug\deps\block_process-*.exe | ForEach-Object {
+            & $dumpbin.FullName /dependents $_.FullName
+          }
+
       - name: Signed HVF native ownership tests
         if: runner.os == 'macOS'
         timeout-minutes: 2

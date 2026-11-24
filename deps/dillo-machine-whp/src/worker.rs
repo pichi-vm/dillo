@@ -405,6 +405,7 @@ fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> 
         )
         .finish()?;
     let child = Command::new(container.executable.path().join("dillo.exe"))
+        .creation_flags(CREATE_NO_WINDOW)
         .arg("--dillo-block-worker")
         .args(handles.map(|handle| (handle as usize).to_string()))
         .env_clear()

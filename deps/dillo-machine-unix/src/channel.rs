@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fs::File;
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
+use std::net::Shutdown;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -12,16 +14,38 @@ use dillo_ipc::{BorrowedResource, Channel, MAX_MESSAGE, MAX_RESOURCES, Message, 
 use nix::sys::socket::{ControlMessage, ControlMessageOwned, MsgFlags, recvmsg, sendmsg};
 
 #[derive(Debug)]
+enum Endpoint {
+    Resources(UnixStream),
+    Bytes(File),
+}
+
+impl Endpoint {
+    fn try_clone(&self) -> io::Result<Self> {
+        match self {
+            Self::Resources(socket) => Ok(Self::Resources(socket.try_clone()?)),
+            Self::Bytes(pipe) => Ok(Self::Bytes(pipe.try_clone()?)),
+        }
+    }
+
+    fn reader(&mut self) -> &mut dyn Read {
+        match self {
+            Self::Resources(socket) => socket,
+            Self::Bytes(pipe) => pipe,
+        }
+    }
+}
+
+#[derive(Debug)]
 struct Connection {
-    socket: UnixStream,
-    receive_resources: bool,
+    input: Endpoint,
+    output: Endpoint,
 }
 
 impl Channel for Connection {
     fn send(&mut self, bytes: &[u8], resources: &[BorrowedResource<'_>]) -> io::Result<()> {
         if bytes.len() > MAX_MESSAGE
             || resources.len() > MAX_RESOURCES
-            || (self.receive_resources && !resources.is_empty())
+            || (matches!(self.output, Endpoint::Bytes(_)) && !resources.is_empty())
         {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -34,35 +58,42 @@ impl Channel for Connection {
         } else {
             vec![ControlMessage::ScmRights(&fds)]
         };
-        let sent = sendmsg::<()>(
-            self.socket.as_raw_fd(),
-            &[IoSlice::new(&header)],
-            &controls,
-            MsgFlags::empty(),
-            None,
-        )?;
-        if sent == 0 {
-            return Err(io::ErrorKind::WriteZero.into());
+        match &mut self.output {
+            Endpoint::Resources(socket) => {
+                let sent = sendmsg::<()>(
+                    socket.as_raw_fd(),
+                    &[IoSlice::new(&header)],
+                    &controls,
+                    MsgFlags::empty(),
+                    None,
+                )?;
+                if sent == 0 {
+                    return Err(io::ErrorKind::WriteZero.into());
+                }
+                socket.write_all(&header[sent..])?;
+                socket.write_all(bytes)
+            }
+            Endpoint::Bytes(pipe) => {
+                pipe.write_all(&header)?;
+                pipe.write_all(bytes)
+            }
         }
-        self.socket.write_all(&header[sent..])?;
-        self.socket.write_all(bytes)
     }
 
     fn receive(&mut self) -> io::Result<Message> {
         let mut header = [0u8; 8];
         let mut resources = Vec::new();
         let mut controls = nix::cmsg_space!([i32; MAX_RESOURCES]);
-        let (count, truncated) = {
+        let (count, truncated) = if let Endpoint::Resources(socket) = &mut self.input {
             let mut slices = [IoSliceMut::new(&mut header)];
             let received = recvmsg::<()>(
-                self.socket.as_raw_fd(),
+                socket.as_raw_fd(),
                 &mut slices,
-                self.receive_resources.then_some(&mut controls),
+                Some(&mut controls),
                 MsgFlags::empty(),
             )?;
-            // Parent receive supplies no ancillary buffer: the kernel discards
-            // unsolicited child handles, without installing them in the parent.
-            // Only the trusted parent's bootstrap can transfer resources.
+            // Only the trusted parent sends on this socket. The reverse
+            // direction is a pipe, which cannot transfer descriptors.
             for message in received.cmsgs()? {
                 if let ControlMessageOwned::ScmRights(fds) = message {
                     for fd in fds {
@@ -76,11 +107,13 @@ impl Channel for Connection {
                 received.bytes,
                 received.flags.contains(MsgFlags::MSG_CTRUNC),
             )
+        } else {
+            (self.input.reader().read(&mut header)?, false)
         };
         if count == 0 {
             return Err(io::ErrorKind::UnexpectedEof.into());
         }
-        self.socket.read_exact(&mut header[count..])?;
+        self.input.reader().read_exact(&mut header[count..])?;
         let len = u32::from_le_bytes(header[..4].try_into().unwrap()) as usize;
         let expected = u32::from_le_bytes(header[4..].try_into().unwrap()) as usize;
         if truncated || len > MAX_MESSAGE || expected > MAX_RESOURCES || expected != resources.len()
@@ -97,14 +130,14 @@ impl Channel for Connection {
             )?;
         }
         let mut bytes = vec![0; len];
-        self.socket.read_exact(&mut bytes)?;
+        self.input.reader().read_exact(&mut bytes)?;
         Ok(Message { bytes, resources })
     }
 
     fn try_clone(&self) -> io::Result<Box<dyn Channel>> {
         Ok(Box::new(Self {
-            socket: self.socket.try_clone()?,
-            receive_resources: self.receive_resources,
+            input: self.input.try_clone()?,
+            output: self.output.try_clone()?,
         }))
     }
 }
@@ -137,19 +170,24 @@ impl Drop for Worker {
 pub fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> {
     let (parent, child) = UnixStream::pair()?;
     parent.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
+    // Make resource transfer unidirectional in the kernel, including for a
+    // compromised child. Replies use a pipe rather than an SCM_RIGHTS socket.
+    parent.shutdown(Shutdown::Read)?;
+    child.shutdown(Shutdown::Write)?;
+    let (replies, output) = std::io::pipe()?;
     let child = OwnedFd::from(child);
     let process = Command::new(executable)
         .arg("--dillo-block-worker")
         .env_clear()
         .stdin(Stdio::from(child))
-        .stdout(Stdio::null())
+        .stdout(Stdio::from(output))
         .stderr(Stdio::inherit())
         .spawn()?;
     Ok((
         Box::new(Worker(process)),
         Box::new(Connection {
-            socket: parent,
-            receive_resources: false,
+            input: Endpoint::Bytes(File::from(OwnedFd::from(replies))),
+            output: Endpoint::Resources(parent),
         }),
     ))
 }
@@ -180,8 +218,8 @@ pub fn bootstrap() -> io::Result<Box<dyn Channel>> {
         // stdin is the unique socket transferred by spawn; this function can
         // adopt it only once, and the worker never uses std::io::stdin.
         Ok(Box::new(Connection {
-            socket: UnixStream::from_raw_fd(0),
-            receive_resources: true,
+            input: Endpoint::Resources(UnixStream::from_raw_fd(0)),
+            output: Endpoint::Bytes(File::from_raw_fd(1)),
         }))
     }
 }
@@ -189,49 +227,46 @@ pub fn bootstrap() -> io::Result<Box<dyn Channel>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nix::unistd::{pipe, write};
 
     #[test]
-    fn parent_never_retains_reverse_descriptors() {
-        let (parent, child) = UnixStream::pair().unwrap();
-        let (reader, writer) = pipe().unwrap();
-        let header = [0u8; 8];
-        sendmsg::<()>(
-            child.as_raw_fd(),
-            &[IoSlice::new(&header)],
-            &[ControlMessage::ScmRights(&[reader.as_raw_fd()])],
-            MsgFlags::empty(),
-            None,
-        )
-        .unwrap();
+    fn child_cannot_transfer_resources_to_parent() {
+        let (socket, peer) = UnixStream::pair().unwrap();
+        socket.shutdown(Shutdown::Read).unwrap();
+        peer.shutdown(Shutdown::Write).unwrap();
+        let (reader, writer) = std::io::pipe().unwrap();
+        assert_eq!(
+            sendmsg::<()>(
+                writer.as_raw_fd(),
+                &[IoSlice::new(&[0u8; 8])],
+                &[ControlMessage::ScmRights(&[socket.as_raw_fd()])],
+                MsgFlags::empty(),
+                None,
+            ),
+            Err(nix::errno::Errno::ENOTSOCK)
+        );
+        assert_eq!(
+            nix::unistd::write(&peer, b"x"),
+            Err(nix::errno::Errno::EPIPE)
+        );
         drop(reader);
-        let mut parent = Connection {
-            socket: parent,
-            receive_resources: false,
-        };
-        // Linux reports ancillary truncation; Darwin discards these rights
-        // silently. Neither platform may install a child-supplied descriptor.
-        if let Ok(message) = parent.receive() {
-            assert!(message.resources.is_empty());
-        }
-        // A leaked installed descriptor would keep this pipe readable.
-        assert_eq!(write(&writer, b"x"), Err(nix::errno::Errno::EPIPE));
     }
 
     #[test]
     fn oversized_frame_is_refused_before_reading_its_body() {
-        let (parent, mut child) = UnixStream::pair().unwrap();
-        child
+        let (parent, child) = UnixStream::pair().unwrap();
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        writer
             .write_all(&((MAX_MESSAGE as u32) + 1).to_le_bytes())
             .unwrap();
-        child.write_all(&0u32.to_le_bytes()).unwrap();
+        writer.write_all(&0u32.to_le_bytes()).unwrap();
         let mut parent = Connection {
-            socket: parent,
-            receive_resources: false,
+            input: Endpoint::Bytes(File::from(OwnedFd::from(reader))),
+            output: Endpoint::Resources(parent),
         };
         assert_eq!(
             parent.receive().unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+        drop(child);
     }
 }

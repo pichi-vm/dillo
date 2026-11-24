@@ -17,6 +17,7 @@ use dillo_ipc::RamView;
 #[cfg(not(target_os = "macos"))]
 use dillo_machine::worker::WorkerHost;
 use dillo_mmio::Interrupt;
+use dillo_storage::{BlockBacking, Qcow2Backing};
 use dillo_virtio::queue::Queue;
 use dillo_virtio::{
     ActivateError, DeviceJoinError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
@@ -119,18 +120,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .is_err(),
                 "worker created a descendant"
             );
-            let backing = RawImageBacking::new(files.remove(0), false)?;
+            let mode = config["mode"].as_str().unwrap();
+            let backing: Arc<dyn BlockBacking> = if mode == "qcow2" {
+                Arc::new(Qcow2Backing::open(storage(files.remove(0))?, false)?)
+            } else {
+                Arc::new(RawImageBacking::new(files.remove(0), false)?)
+            };
             Ok(Box::new(Backend {
-                device: VirtioBlk::new(Arc::new(backing), false),
-                mode: config["mode"].as_str().unwrap().to_owned(),
+                device: VirtioBlk::new(backing, false),
+                mode: mode.to_owned(),
             }))
         })
         .map_err(Into::into);
     }
-    for mode in ["normal", "crash", "hang"] {
+    for mode in ["normal", "qcow2", "crash", "hang"] {
         exercise(mode)?;
     }
-    println!("block process: confinement, shared I/O, reset, crash and deadline passed");
+    println!("block process: confinement, raw/qcow2 I/O, reset, crash and deadline passed");
     Ok(())
 }
 
@@ -235,7 +241,15 @@ fn activation(interrupts: Arc<AtomicUsize>, fail_spawn: bool) -> (VirtioActivate
 fn exercise(mode: &str) -> io::Result<()> {
     let forbidden = tempfile::NamedTempFile::new()?;
     let disk = tempfile::tempfile()?;
-    disk.set_len(4096)?;
+    if mode == "qcow2" {
+        use imago::FormatCreateBuilder;
+        imago::qcow2::Qcow2::<imago::file::File>::create_builder(storage(disk.try_clone()?)?)
+            .cluster_size(65536)
+            .size(4096)
+            .create()?;
+    } else {
+        disk.set_len(4096)?;
+    }
     let (memory, export) =
         memory().map_err(|e| io::Error::new(e.kind(), format!("prepare test RAM: {e}")))?;
     let failed = Arc::new(AtomicBool::new(false));
@@ -256,7 +270,7 @@ fn exercise(mode: &str) -> io::Result<()> {
     let (activate, kick) = activation(Arc::clone(&interrupts), false);
     let start = Instant::now();
     let result = proxy.activate(activate);
-    if mode != "normal" {
+    if matches!(mode, "crash" | "hang") {
         assert!(result.is_err(), "bad child activated");
         assert!(
             failed.load(Ordering::Acquire),
@@ -274,8 +288,10 @@ fn exercise(mode: &str) -> io::Result<()> {
     kick.write(1)?;
     complete(&memory, 1)?;
     let mut bytes = [0u8; 512];
-    read_at(&disk, &mut bytes, 512)?;
-    assert_eq!(bytes, [0x6a; 512]);
+    if mode == "normal" {
+        read_at(&disk, &mut bytes, 512)?;
+        assert_eq!(bytes, [0x6a; 512]);
+    }
 
     request(&memory, 2, 0, 0);
     kick.write(1)?;
@@ -297,9 +313,17 @@ fn exercise(mode: &str) -> io::Result<()> {
     active.join().map_err(io::Error::other)?;
     control.shutdown()?;
     assert!(!failed.load(Ordering::Acquire));
-    read_at(&disk, &mut bytes, 512)?;
+    if mode == "qcow2" {
+        Qcow2Backing::open(storage(disk)?, true)?.read_at(512, &mut bytes)?;
+    } else {
+        read_at(&disk, &mut bytes, 512)?;
+    }
     assert_eq!(bytes, [0xa5; 512]);
     Ok(())
+}
+
+fn storage(file: File) -> io::Result<imago::file::File> {
+    imago::file::File::from_open_file(file, imago::StorageOpenOptions::new().write(true))
 }
 
 fn request(memory: &GuestMemoryMmap, index: u16, operation: u32, fill: u8) {
