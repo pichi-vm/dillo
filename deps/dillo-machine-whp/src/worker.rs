@@ -140,19 +140,17 @@ impl Container {
         // Copy the SID into an aligned, owning Rust buffer. SID data is immutable
         // and has no thread affinity; the process owner remains naturally Send.
         #[allow(unsafe_code)]
-        let owned_sid = unsafe {
+        let owner = unsafe {
             let len = GetLengthSid(sid);
-            let mut owned =
-                vec![0u32; (len as usize).div_ceil(size_of::<u32>())].into_boxed_slice();
-            let copied = CopySid(len, owned.as_mut_ptr().cast(), sid);
+            let mut owner = Self {
+                name,
+                sid: vec![0u32; (len as usize).div_ceil(size_of::<u32>())].into_boxed_slice(),
+                executable: directory,
+            };
+            let copied = check(CopySid(len, owner.sid.as_mut_ptr().cast(), sid));
             FreeSid(sid);
-            check(copied)?;
-            owned
-        };
-        let owner = Self {
-            name,
-            sid: owned_sid,
-            executable: directory,
+            copied?;
+            owner
         };
         owner.allow_executable(owner.executable.path())?;
         let worker_exe = owner.executable.path().join("dillo.exe");
@@ -481,12 +479,12 @@ fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> 
         drop(OwnedHandle::from_raw_handle(result.hThread));
         OwnedHandle::from_raw_handle(result.hProcess)
     };
-    let peer = Arc::new(child.try_clone()?);
     let process = ChildProcess {
         child,
         _container: container,
         _job: job,
     };
+    let peer = Arc::new(process.child.try_clone()?);
     let read = File::from(OwnedHandle::from(read));
     let write = File::from(OwnedHandle::from(write));
     Ok((
