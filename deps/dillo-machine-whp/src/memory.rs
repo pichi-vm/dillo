@@ -47,10 +47,15 @@ pub(crate) fn allocate(
         });
         export.resources.push(section);
     }
-    Ok((map(&export)?, export))
+    // SAFETY: these fresh committed pagefile sections have no other views.
+    #[allow(unsafe_code)]
+    let memory = unsafe { map(&export) }?;
+    Ok((memory, export))
 }
 
-pub(crate) fn map(export: &MemoryExport) -> io::Result<GuestMemoryMmap> {
+/// Requires the backing and aliasing guarantees of `WorkerHost::map_memory`.
+#[allow(unsafe_code)]
+pub(crate) unsafe fn map(export: &MemoryExport) -> io::Result<GuestMemoryMmap> {
     let mut regions = Vec::with_capacity(export.views.len());
     for view in &export.views {
         let section = export
@@ -58,11 +63,9 @@ pub(crate) fn map(export: &MemoryExport) -> io::Result<GuestMemoryMmap> {
             .get(view.resource as usize)
             .ok_or(io::ErrorKind::InvalidInput)?;
         let len = usize::try_from(view.len).map_err(|_| io::ErrorKind::InvalidInput)?;
-        // SAFETY: the Machine created committed pagefile sections; no path
-        // decommits or resizes them. All host accesses use vm-memory's volatile
-        // or atomic operations. A child mapping is an external RAM accessor;
-        // its lifetime cannot release the parent's view or the native backing.
-        #[allow(unsafe_code)]
+        // SAFETY: the caller supplies stable committed, cacheable RAM and
+        // synchronization for conflicting accesses through other host aliases.
+        // This owning view retains its backing independently of the handle.
         let region =
             unsafe { MmapRegion::from_mapping_handle(section.as_handle(), view.offset, len) }
                 .map_err(io::Error::other)?;

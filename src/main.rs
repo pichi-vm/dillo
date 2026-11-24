@@ -137,7 +137,12 @@ fn main() {
         .nth(1)
         .is_some_and(|arg| arg == "--dillo-block-worker")
     {
-        if let Err(error) = dillo_worker::run::<machine::worker::Worker>(block_worker::device) {
+        // SAFETY: dispatch precedes logging, threads and resource acquisition.
+        // The parent grants only its retained ordinary-RAM backing to this
+        // fresh process; native handles arrive on the private bootstrap channel.
+        #[allow(unsafe_code)]
+        let result = unsafe { dillo_worker::run::<machine::worker::Worker>(block_worker::device) };
+        if let Err(error) = result {
             eprintln!("dillo block worker: {error}");
             std::process::exit(1);
         }

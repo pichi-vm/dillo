@@ -33,11 +33,14 @@ impl dillo_machine::worker::WorkerHost for Worker {
     fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> {
         spawn(executable)
     }
-    fn bootstrap() -> io::Result<Box<dyn Channel>> {
+    #[allow(unsafe_code)]
+    unsafe fn bootstrap() -> io::Result<Box<dyn Channel>> {
         bootstrap()
     }
-    fn map_memory(memory: MemoryExport) -> io::Result<vm_memory::GuestMemoryMmap> {
-        crate::memory::map(&memory)
+    #[allow(unsafe_code)]
+    unsafe fn map_memory(memory: MemoryExport) -> io::Result<vm_memory::GuestMemoryMmap> {
+        // SAFETY: the caller guarantees stable backing and synchronized aliases.
+        unsafe { crate::memory::map(&memory) }
     }
     fn confine(_files: &[BorrowedResource<'_>]) -> io::Result<()> {
         // Confinement was installed atomically at process creation. Verify it

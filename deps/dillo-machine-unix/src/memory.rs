@@ -35,7 +35,12 @@ pub fn export_memory(memory: &GuestMemoryMmap) -> io::Result<MemoryExport> {
     Ok(export)
 }
 
-pub fn map_memory(export: MemoryExport) -> io::Result<GuestMemoryMmap> {
+/// Map the parent's raw backing descriptions into this process.
+///
+/// # Safety
+/// Requires the backing and aliasing guarantees of `WorkerHost::map_memory`.
+#[allow(unsafe_code)]
+pub unsafe fn map_memory(export: MemoryExport) -> io::Result<GuestMemoryMmap> {
     let files = export
         .resources
         .into_iter()
@@ -113,8 +118,13 @@ pub fn allocate_memory(ranges: &[(GuestAddress, usize)]) -> io::Result<GuestMemo
     }
     file.set_len(offset)
         .map_err(|e| io::Error::new(e.kind(), format!("size shared RAM: {e}")))?;
-    map_memory(MemoryExport {
-        views,
-        resources: vec![file.into()],
-    })
+    // SAFETY: a fresh unlinked POSIX shm allocation with no other mappings.
+    // Darwin refuses resizing after its initial allocation.
+    #[allow(unsafe_code)]
+    unsafe {
+        map_memory(MemoryExport {
+            views,
+            resources: vec![file.into()],
+        })
+    }
 }

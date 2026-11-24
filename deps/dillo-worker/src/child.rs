@@ -73,10 +73,17 @@ impl VirtioDeviceHost for Host {
 
 /// Child entry. Native handles originate only from the parent channel; the
 /// factory gets already-open files and runs after confinement, before queues.
-pub fn run<H: WorkerHost>(
+///
+/// # Safety
+/// Requires `WorkerHost::bootstrap`'s dedicated process entry contract. The
+/// trusted parent must grant RAM satisfying `WorkerHost::map_memory`'s backing
+/// requirements; this process must not have other mappings of those resources.
+#[allow(unsafe_code)]
+pub unsafe fn run<H: WorkerHost>(
     factory: impl FnOnce(serde_json::Value, Vec<File>) -> io::Result<Box<dyn VirtioDevice>>,
 ) -> io::Result<()> {
-    let mut channel = H::bootstrap()?;
+    // SAFETY: forwarded from this entry point's caller.
+    let mut channel = unsafe { H::bootstrap() }?;
     let mut message = channel.receive()?;
     let init: Init = dillo_ipc::decode(&message)?;
     if init.version != 1 || init.files > message.resources.len() {
@@ -87,10 +94,14 @@ pub fn run<H: WorkerHost>(
         .drain(..init.files)
         .map(File::from)
         .collect::<Vec<_>>();
-    let memory = H::map_memory(MemoryExport {
-        views: init.memory,
-        resources: message.resources,
-    })?;
+    // SAFETY: resources arrive from the trusted parent into a fresh process;
+    // the caller guarantees their backing. Native mapping validates extents.
+    let memory = unsafe {
+        H::map_memory(MemoryExport {
+            views: init.memory,
+            resources: message.resources,
+        })
+    }?;
     let output = Arc::new(Output(Mutex::new(channel.try_clone()?)));
     let host: Arc<dyn VirtioDeviceHost> = Arc::new(Host {
         memory: Arc::new(MappedSharedMemory::for_guest_memory(

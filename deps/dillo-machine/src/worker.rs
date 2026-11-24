@@ -29,8 +29,8 @@ pub struct RamView {
     pub resource: u32,
 }
 
-/// Owned native resources and the regions they back. Native Machine code alone
-/// constructs these exports; the child receives independent owning handles.
+/// Raw RAM descriptions and owning native resources. This bundle does not
+/// establish the backing or aliasing guarantees required by `map_memory`.
 #[derive(Debug)]
 pub struct MemoryExport {
     pub views: Vec<RamView>,
@@ -80,11 +80,25 @@ pub trait WorkerHost {
     fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)>;
 
     /// Adopt the private bootstrap connection in the child, once.
-    fn bootstrap() -> io::Result<Box<dyn Channel>>;
+    ///
+    /// # Safety
+    /// Call only at the entry of a dedicated worker process, before creating
+    /// threads or owning other resources. Bootstrap may close inherited handles
+    /// and takes exclusive ownership of its standard input/output handles.
+    #[allow(unsafe_code)]
+    unsafe fn bootstrap() -> io::Result<Box<dyn Channel>>;
 
     /// Map only RAM exported by the parent. The export retains its backing for
     /// at least as long as the returned owning views.
-    fn map_memory(memory: MemoryExport) -> io::Result<GuestMemoryMmap>;
+    ///
+    /// # Safety
+    /// Resources must back committed, cacheable, readable/writable RAM that
+    /// cannot be truncated, decommitted or otherwise invalidated while mapped.
+    /// Conflicting accesses through other aliases in this process must be
+    /// synchronized, unless both are atomic over exactly the same bytes.
+    /// External guest/process mutation follows vm-memory's access discipline.
+    #[allow(unsafe_code)]
+    unsafe fn map_memory(memory: MemoryExport) -> io::Result<GuestMemoryMmap>;
 
     /// Adopt a counter endpoint granted by the parent from this native family.
     fn notification(_resource: Resource) -> io::Result<std::sync::Arc<dyn WriteNotification>> {
@@ -101,10 +115,12 @@ impl WorkerHost for () {
     fn spawn(_: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> {
         Err(io::ErrorKind::Unsupported.into())
     }
-    fn bootstrap() -> io::Result<Box<dyn Channel>> {
+    #[allow(unsafe_code)]
+    unsafe fn bootstrap() -> io::Result<Box<dyn Channel>> {
         Err(io::ErrorKind::Unsupported.into())
     }
-    fn map_memory(_: MemoryExport) -> io::Result<GuestMemoryMmap> {
+    #[allow(unsafe_code)]
+    unsafe fn map_memory(_: MemoryExport) -> io::Result<GuestMemoryMmap> {
         Err(io::ErrorKind::Unsupported.into())
     }
     fn confine(_: &[BorrowedResource<'_>]) -> io::Result<()> {

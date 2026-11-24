@@ -158,7 +158,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .is_some_and(|arg| arg == "--dillo-block-worker")
     {
-        return dillo_worker::run::<Worker>(|config, mut files| {
+        let factory = |config: serde_json::Value,
+                       mut files: Vec<File>|
+         -> io::Result<Box<dyn VirtioDevice>> {
             let forbidden = config["forbidden"].as_str().unwrap();
             assert!(
                 File::open(forbidden).is_err(),
@@ -216,8 +218,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 device: VirtioBlk::new(backing, false),
                 mode: mode.to_owned(),
             }))
-        })
-        .map_err(Into::into);
+        };
+        // SAFETY: the fixture enters before creating threads or other owned
+        // handles; its parent supplies fixed shared RAM to a fresh process.
+        #[allow(unsafe_code)]
+        return unsafe { dillo_worker::run::<Worker>(factory) }.map_err(Into::into);
     }
     #[cfg(target_os = "macos")]
     if std::env::args().nth(1).as_deref() == Some("--require-hvf-denial") {
@@ -317,10 +322,15 @@ fn memory() -> io::Result<(GuestMemoryMmap, MemoryExport)> {
             offset: 0,
             resource: 0,
         }];
-        let memory = Worker::map_memory(MemoryExport {
-            views: views.clone(),
-            resources: vec![resource.try_clone()?],
-        })?;
+        // SAFETY: fixed, cacheable RAM with no existing host aliases. Later
+        // child views are external accessors; this is the parent's sole mapping.
+        #[allow(unsafe_code)]
+        let memory = unsafe {
+            Worker::map_memory(MemoryExport {
+                views: views.clone(),
+                resources: vec![resource.try_clone()?],
+            })
+        }?;
         Ok((
             memory,
             MemoryExport {

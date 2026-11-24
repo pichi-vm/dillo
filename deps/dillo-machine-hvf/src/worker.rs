@@ -18,14 +18,18 @@ impl dillo_machine::worker::WorkerHost for Worker {
         dillo_machine_unix::spawn(executable)
     }
 
-    fn bootstrap() -> io::Result<Box<dyn dillo_machine::worker::Channel>> {
-        dillo_machine_unix::bootstrap()
+    #[allow(unsafe_code)]
+    unsafe fn bootstrap() -> io::Result<Box<dyn dillo_machine::worker::Channel>> {
+        // SAFETY: the caller provides the dedicated process entry contract.
+        unsafe { dillo_machine_unix::bootstrap() }
     }
 
-    fn map_memory(
+    #[allow(unsafe_code)]
+    unsafe fn map_memory(
         memory: dillo_machine::worker::MemoryExport,
     ) -> io::Result<vm_memory::GuestMemoryMmap> {
-        dillo_machine_unix::map_memory(memory)
+        // SAFETY: the caller guarantees stable backing and synchronized aliases.
+        unsafe { dillo_machine_unix::map_memory(memory) }
     }
 
     fn confine(_files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<()> {

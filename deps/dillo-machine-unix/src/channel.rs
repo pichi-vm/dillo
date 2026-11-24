@@ -195,14 +195,18 @@ pub fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel
     ))
 }
 
-pub fn bootstrap() -> io::Result<Box<dyn Channel>> {
+/// Adopt the native worker connection and discard unrelated inherited handles.
+///
+/// # Safety
+/// Requires the dedicated process entry contract of `WorkerHost::bootstrap`.
+#[allow(unsafe_code)]
+pub unsafe fn bootstrap() -> io::Result<Box<dyn Channel>> {
     static ADOPTED: AtomicBool = AtomicBool::new(false);
     if ADOPTED.swap(true, Ordering::AcqRel) {
         return Err(io::ErrorKind::AlreadyExists.into());
     }
     // The private entry point executes before any other threads or file opens.
     // Discard every ambient descriptor except the explicit standard streams.
-    #[allow(unsafe_code)]
     unsafe {
         #[cfg(target_os = "linux")]
         if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) < 0 {
