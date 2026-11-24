@@ -75,7 +75,7 @@ worker communication. Native implementations remain in the machine backends.
 | `dillo-machine` | Machine and associated service contracts for CPU preparation, runner/control, memory ownership/export, interrupts, notifications, process/IPC primitives, device lifecycle controls and authorized debugging. |
 | `dillo-devtree` | Owned DT representation and consumption helpers, declaration/claim records and resource provenance. |
 | `dillo-ipc` | Versioned worker messages, encoding/decoding, request/transition identities and transferable-resource descriptions. |
-| `dillo-worker` | Parent register proxies, child dispatch, bootstrap/binding and worker lifecycle plumbing. |
+| `dillo-worker` | Parent backend proxies, child dispatch, bootstrap/binding and worker lifecycle plumbing. |
 | `dillo-machine-kvm` | Linux native VM, CPU, memory, interrupt, notification, process, confinement and resource-transfer services. |
 | `dillo-machine-hvf` | macOS implementations of those native services. |
 | `dillo-machine-whp` | Windows implementations of those native services. |
@@ -115,7 +115,7 @@ individual crates listed in LAYOUT-001.
 | `dillo-launch` | `dillo-machine`, `dillo-devtree` |
 | `dillo-runtime` | `dillo-machine`, `dillo-launch` |
 | `dillo-ipc` | `dillo-machine` |
-| `dillo-worker` | `dillo-machine`, `dillo-ipc`, `dillo-mmio`, `dillo-pci` |
+| `dillo-worker` | `dillo-machine`, `dillo-ipc`, `dillo-virtio` |
 | Each native machine crate | `dillo-machine`, `dillo-devtree`, `dillo-mmio` |
 | `dillo-mmio` | `dillo-machine` |
 | `dillo-pci` | `dillo-machine`, `dillo-mmio` |
@@ -144,14 +144,14 @@ flowchart TD
     Launch --> DT[dillo-devtree]
     Launch --> Machine
     Worker --> IPC[dillo-ipc]
-    Worker --> PCI[dillo-pci]
-    Worker --> MMIO[dillo-mmio]
+    Worker --> Virtio[dillo-virtio]
+    Virtio --> Machine
     Worker --> Machine
     IPC --> Machine
     Native --> Machine
     Native --> DT
-    Native --> MMIO
-    PCI --> MMIO
+    Native --> MMIO[dillo-mmio]
+    PCI[dillo-pci] --> MMIO
     PCI --> Machine
     MMIO --> Machine
 ```
@@ -170,21 +170,22 @@ proxies. It uses launch recipes for reconstruction and has no dependency on
 the worker implementation or concrete devices. Launch coordinates complete
 DT realization; backend handlers consume their delegated substrate facts.
 
-`dillo-worker` accepts local MMIO/PCI interfaces for register dispatch. The
-executable constructs the transport/device composition inside the worker.
-This supports non-virtio devices without making the worker mechanism depend
-on either virtio transport or any concrete device implementation.
+`dillo-worker` adapts the transport-independent device contract to backend
+processes. The executable composes PCI/MMIO transports with parent backend
+proxies and constructs concrete device/backing implementations in children.
+Process supervision is independent of virtio; the virtio control protocol
+does not expose PCI configuration or general MMIO register dispatch.
 
 `dillo-ipc` defines message meaning and resource descriptions. Native machine
 backends implement OS channels, event endpoints, confinement and resource
 transfer; the worker layer binds those implementations to the protocol.
 Wire identifiers do not themselves authorize access to host resources.
-Bulk payloads use exported guest-memory backing rather than register messages.
+Bulk payloads use exported guest-memory backing rather than control messages.
 
 The VM process contains launch/runtime, the selected native machine, bus
-routing and parent proxies. Device processes use the same executable's hidden
-entry points, confined machine-family services, worker dispatch and their
-transport/device/backing composition. Crate linkage is not the security
+routing, transports and parent backend proxies. Device processes use the same
+executable's hidden entry points, confined machine-family services, worker
+dispatch and their device/backing composition. Crate linkage is not the security
 boundary: transferred authority and OS confinement establish that boundary.
 Early worker creation remains compatible with later machine-instance binding.
 
@@ -238,6 +239,10 @@ owner admitting the component must enforce the machine contract, including
 resource identity, bounds, relationships, and conflicts on every admission
 path. Dispatchers route admitted accesses without independently defining the
 hardware model.
+
+Backend capability reports are inputs to admission, not permission to create
+hardware. The parent validates them against the selected device and machine
+contract before exposing them through a transport.
 
 #### COMPOSE-004 — Expose narrow component services
 
@@ -295,11 +300,12 @@ device protocol.
 
 ### Device processes and confinement
 
-#### PROCESS-001 — Isolate each device backend and its transport
+#### PROCESS-001 — Isolate backends and retain transports in the VM process
 
 Device execution uses separate sandboxed processes on Linux, macOS and
-Windows. Each built-in device worker contains its independently composed
-per-device PCI/MMIO transport and device backend. Machine retains bus routing,
+Windows. Each built-in device worker contains its device backend and queue
+processing. The VM process owns PCI/MMIO transport state and configuration,
+feature negotiation and queue setup. Machine retains bus routing,
 native CPU execution and instruction completion, memory allocation, native
 VM handles and registration authority. In-process device execution is not a
 fallback for missing isolation.
@@ -307,8 +313,8 @@ fallback for missing isolation.
 Workers use hidden device subcommands in the Dillo executable. Device and
 transport implementations remain reusable libraries; a worker may use threads
 internally. An external queue backend may be a separately packaged process.
-Vhost-user is the preferred interface to such backends; it does not define
-the parent-to-worker register proxy or dictate guest-visible transport choice.
+Vhost-user is the preferred interface to such backends; it does not dictate
+guest-visible transport choice or confer machine authority.
 
 #### PROCESS-002 — Establish workers through machine-family services
 
@@ -322,11 +328,17 @@ Rust pointers, closures and shared-address-space objects are not a process
 protocol. Early process creation must not leak inherited VM handles, unrelated
 mappings or host resources into a worker.
 
-#### PROCESS-003 — Preserve protocol semantics across the proxy
+Readiness means binding, resource setup and required confinement have
+succeeded and control requests can be serviced. It does not activate queues
+or authorize access to guest-selected buffers. Guest execution begins only
+after required workers are ready and PMI finalization succeeds.
 
-The parent routes admitted register operations to the responsible worker.
-The worker implements device configuration, queue negotiation and per-device
-transport state. Native instruction decoding and completion remain with the
+#### PROCESS-003 — Preserve protocol semantics across the backend boundary
+
+The parent handles transport registers locally. The backend supplies device
+capabilities and device-specific configuration, processes activated queues,
+and reports configuration changes and completion events. Configuration access
+may require IPC. Native instruction decoding and completion remain with the
 CPU runner; device workers receive no general CPU-state or VM-control API.
 
 Reads return the required value before native instruction completion. Writes,
@@ -340,6 +352,11 @@ successful zero-filled reads or silently discarded required writes. No shared
 bus or lifecycle lock may be held across a wait whose completion needs that
 lock. Control and completion services must remain able to progress while
 workers wait for host I/O or another participant.
+
+Control messages and replies have bounded sizes and validated contents.
+Completions are bound to their request and, where applicable, activation;
+stale replies cannot change a replacement activation. An uncertain mutation must
+not be retried as though it had no effect.
 
 #### PROCESS-004 — Restrict native resources before admitting guest input
 
@@ -373,6 +390,39 @@ transfers or access to another process.
 Host mechanisms must use existing platform facilities. Ptrace and custom
 kernel modifications are outside the design.
 
+#### PROCESS-005 — Distinguish activation, quiescence, reset and retirement
+
+The parent owns guest-visible queue configuration. Activation supplies the
+negotiated features, queue identities and geometry, authorized memory access,
+and bound notification/completion endpoints. The backend owns descriptor
+processing, queue progress and device I/O for that activation. It validates
+guest-controlled addresses and contents before use; the parent does not parse
+requests and forward their payloads over IPC.
+
+Activation completion means the backend has accepted its resources and can
+service the activated queues. Partial activation failure must account for
+already-started work and acquired resources before reporting cleanup complete.
+Transport status and register completion must reflect the operation's actual
+outcome, not merely delivery of its control message.
+
+Quiescence stops guest-memory access and device publication after accounting
+for admitted work, callbacks and notifications. It preserves queue progress
+and device state for resume; it does not clear negotiation or undo host I/O.
+The whole-machine barrier follows DEBUG-002 and NOTIFY-003, including work
+admitted while CPU exits settle.
+
+Guest device reset ends the activation before clearing its transport and
+backend state for renegotiation. Old work must not publish into newly
+configured queues. Reset is distinct from debugger quiescence, whole-machine
+reconstruction and recovery from worker failure. Retirement ends worker use
+and native registrations before resources can be reclaimed or reused, as
+required by MEMORY-001 and LIFECYCLE-001.
+
+These are ownership and completion contracts, not prescribed Rust signatures,
+wire encodings or scheduling mechanisms. PCI and MMIO share the virtio
+negotiation and activation semantics while retaining their own register and
+interrupt behavior.
+
 ### Notifications and interrupt delivery
 
 #### NOTIFY-001 — Separate register control from queue notifications
@@ -401,7 +451,7 @@ Queue state is authoritative; notification counts are not request counts.
 Publication ordering and receiver rechecks must prevent lost wakeups under
 coalescing, concurrent work and channel saturation.
 
-The worker transport maintains interrupt status, guest acknowledgements,
+The parent transport maintains interrupt status, guest acknowledgements,
 vector selection, masks and pending bits. Machine validates and installs
 native routes. Reconfiguration and delivery must be ordered so that a stale
 route cannot silently receive a new interrupt. Masked events remain pending
