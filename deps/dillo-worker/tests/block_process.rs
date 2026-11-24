@@ -104,24 +104,32 @@ impl VirtioDevice for Backend {
     }
 }
 
-// Hold one real backing call open so a control acknowledgement cannot pass
-// merely because the worker happened to be idle when the request arrived.
-struct GatedBacking {
-    disk: RawImageBacking,
-    gate: Mutex<Option<(File, File)>>,
+enum FirstWrite {
+    Wait(File, File),
+    Crash,
 }
 
-impl WritableBlockBacking for GatedBacking {
+// Intervene inside a real backing call, after activation has succeeded.
+struct ControlledBacking {
+    disk: RawImageBacking,
+    first: Mutex<Option<FirstWrite>>,
+}
+
+impl WritableBlockBacking for ControlledBacking {
     fn write_at(&self, offset: u64, data: &[u8]) -> io::Result<()> {
-        if let Some((mut entered, mut release)) = self.gate.lock().unwrap().take() {
-            entered.write_all(&[1])?;
-            release.read_exact(&mut [0])?;
+        match self.first.lock().unwrap().take() {
+            Some(FirstWrite::Wait(mut entered, mut release)) => {
+                entered.write_all(&[1])?;
+                release.read_exact(&mut [0])?;
+            }
+            Some(FirstWrite::Crash) => std::process::exit(42),
+            None => {}
         }
         self.disk.write_at(offset, data)
     }
 }
 
-impl BlockBacking for GatedBacking {
+impl BlockBacking for ControlledBacking {
     fn writer(&self) -> Option<&dyn WritableBlockBacking> {
         Some(self)
     }
@@ -179,10 +187,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let backing: Arc<dyn BlockBacking> = if mode == "qcow2" {
                 Arc::new(Qcow2Backing::open(storage(files.remove(0))?, false)?)
-            } else if mode == "gated" {
-                Arc::new(GatedBacking {
+            } else if mode.starts_with("gated") || mode == "crash-io" {
+                Arc::new(ControlledBacking {
                     disk: RawImageBacking::new(files.remove(0), false)?,
-                    gate: Mutex::new(Some((files.remove(0), files.remove(0)))),
+                    first: Mutex::new(Some(if mode == "crash-io" {
+                        FirstWrite::Crash
+                    } else {
+                        FirstWrite::Wait(files.remove(0), files.remove(0))
+                    })),
                 })
             } else {
                 Arc::new(RawImageBacking::new(files.remove(0), false)?)
@@ -198,8 +210,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "normal",
         "qcow2",
         "gated",
+        "gated-reset",
+        "gated-shutdown",
         "pci",
         "crash",
+        "crash-io",
         "hang",
         "oversized",
         "forged-resource",
@@ -351,7 +366,7 @@ fn exercise(mode: &str) -> io::Result<()> {
     let failed = Arc::new(AtomicBool::new(false));
     let signal = Arc::clone(&failed);
     let mut files = vec![disk.try_clone()?];
-    let gate = if mode == "gated" {
+    let gate = if mode.starts_with("gated") {
         let (entered, notice) = std::io::pipe()?;
         let (release, proceed) = std::io::pipe()?;
         files.push(File::from(dillo_machine::worker::Resource::from(notice)));
@@ -403,6 +418,20 @@ fn exercise(mode: &str) -> io::Result<()> {
     let old_activation = result.map_err(io::Error::other)?;
     request(&memory, 1, 1, 0x6a);
     kick.write(1)?;
+    if mode == "crash-io" {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !failed.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            failed.load(Ordering::Acquire),
+            "live failure was not reported"
+        );
+        assert!(control.check().is_err());
+        assert!(control.shutdown().is_err());
+        assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 0);
+        return Ok(());
+    }
     if let Some((mut entered, mut proceed)) = gate {
         let (send, receive) = std::sync::mpsc::channel();
         let notice = std::thread::spawn(move || send.send(entered.read_exact(&mut [0])));
@@ -411,21 +440,37 @@ fn exercise(mode: &str) -> io::Result<()> {
             .map_err(io::Error::other)??;
         notice.join().unwrap().unwrap();
         let (send, receive) = std::sync::mpsc::channel();
-        let pause = Arc::clone(&control);
-        let waiter = std::thread::spawn(move || send.send(pause.quiesce()));
+        let barrier = Arc::clone(&control);
+        let action = mode.to_owned();
+        let waiter = std::thread::spawn(move || {
+            send.send(match action.as_str() {
+                "gated-reset" => barrier.reset(),
+                "gated-shutdown" => barrier.shutdown(),
+                _ => barrier.quiesce(),
+            })
+        });
         let early = receive.recv_timeout(Duration::from_millis(30));
         // Release before asserting, including when an incorrect early ack was
         // observed, so a failed test cannot strand its backing operation.
         proceed.write_all(&[1])?;
         assert!(
             matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
-            "quiescence acknowledged an outstanding backing call"
+            "{mode} acknowledged an outstanding backing call"
         );
         receive
             .recv_timeout(Duration::from_secs(5))
             .map_err(io::Error::other)??;
         waiter.join().unwrap().unwrap();
         complete(&memory, 1)?;
+        if mode != "gated" {
+            let mut bytes = [0; 512];
+            read_at(&disk, &mut bytes, 512)?;
+            assert_eq!(bytes, [0x6a; 512]);
+            drop(old_activation);
+            control.shutdown()?;
+            assert!(!failed.load(Ordering::Acquire));
+            return Ok(());
+        }
         control.resume()?;
     }
     complete(&memory, 1)?;
