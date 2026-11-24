@@ -47,7 +47,10 @@ pub fn map_memory(export: MemoryExport) -> io::Result<GuestMemoryMmap> {
             .get(view.resource as usize)
             .ok_or(io::ErrorKind::InvalidInput)?;
         let len = usize::try_from(view.len).map_err(|_| io::ErrorKind::InvalidInput)?;
-        let file_len = file.metadata()?.len();
+        let file_len = file
+            .metadata()
+            .map_err(|e| io::Error::new(e.kind(), format!("RAM metadata: {e}")))?
+            .len();
         if len == 0
             || view
                 .offset
@@ -61,7 +64,7 @@ pub fn map_memory(export: MemoryExport) -> io::Result<GuestMemoryMmap> {
             .with_mmap_prot(libc::PROT_READ | libc::PROT_WRITE)
             .with_mmap_flags(libc::MAP_SHARED)
             .build()
-            .map_err(io::Error::other)?;
+            .map_err(|e| io::Error::other(format!("map shared RAM: {e}")))?;
         regions.push(
             GuestRegionMmap::new(map, GuestAddress(view.gpa)).ok_or(io::ErrorKind::InvalidInput)?,
         );
@@ -85,10 +88,12 @@ pub fn allocate_memory(ranges: &[(GuestAddress, usize)]) -> io::Result<GuestMemo
     );
     let fd = shm_open(
         name.as_str(),
-        OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC,
+        // POSIX shm_open sets FD_CLOEXEC itself.
+        OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL,
         Mode::S_IRUSR | Mode::S_IWUSR,
-    )?;
-    shm_unlink(name.as_str())?;
+    )
+    .map_err(|e| io::Error::other(format!("create shared RAM: {e}")))?;
+    shm_unlink(name.as_str()).map_err(|e| io::Error::other(format!("unlink shared RAM: {e}")))?;
     let file = File::from(fd);
     let mut views = Vec::with_capacity(ranges.len());
     let mut offset = 0u64;
@@ -106,7 +111,8 @@ pub fn allocate_memory(ranges: &[(GuestAddress, usize)]) -> io::Result<GuestMemo
             .checked_add(len as u64)
             .ok_or(io::ErrorKind::InvalidInput)?;
     }
-    file.set_len(offset)?;
+    file.set_len(offset)
+        .map_err(|e| io::Error::new(e.kind(), format!("size shared RAM: {e}")))?;
     map_memory(MemoryExport {
         views,
         resources: vec![file.into()],

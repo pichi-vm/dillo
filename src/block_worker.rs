@@ -76,7 +76,7 @@ pub(crate) fn device(
             let specs = partitions
                 .into_iter()
                 .map(|part| dillo_virtio_gpt::PartitionSpec {
-                    path: Default::default(),
+                    path: std::path::PathBuf::new(),
                     partuuid: uuid::Uuid::from_bytes(part.partuuid),
                     typeguid: uuid::Uuid::from_bytes(part.typeguid),
                     label: part.label,

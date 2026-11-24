@@ -408,10 +408,24 @@ fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> 
         .arg("--dillo-block-worker")
         .args(handles.map(|handle| (handle as usize).to_string()))
         .env_clear()
+        // AppContainer launch resolves its profile from LOCALAPPDATA, even
+        // with an explicit executable and a freshly created container SID.
+        .env(
+            "LOCALAPPDATA",
+            std::env::var_os("LOCALAPPDATA")
+                .ok_or_else(|| io::Error::other("AppContainer launch requires LOCALAPPDATA"))?,
+        )
+        .env(
+            "SystemRoot",
+            std::env::var_os("SystemRoot")
+                .ok_or_else(|| io::Error::other("Windows launch requires SystemRoot"))?,
+        )
+        .current_dir(container.executable.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn_with_attributes(&attributes)?;
+        .spawn_with_attributes(&attributes)
+        .map_err(|e| io::Error::new(e.kind(), format!("launch block AppContainer: {e}")))?;
     let peer = Arc::new(child.as_handle().try_clone_to_owned()?);
     let process = ChildProcess {
         child,

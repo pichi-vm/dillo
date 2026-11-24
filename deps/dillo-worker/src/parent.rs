@@ -64,30 +64,39 @@ impl Prepared {
             memory: memory.views,
             backend: self.backend,
         };
-        let resources = self
-            .files
-            .into_iter()
-            .chain(memory.resources)
-            .collect::<Vec<_>>();
-        #[cfg(unix)]
-        let borrowed = {
-            use std::os::fd::AsFd;
-            resources.iter().map(AsFd::as_fd).collect::<Vec<_>>()
-        };
-        #[cfg(windows)]
-        let borrowed = {
-            use std::os::windows::io::AsHandle;
-            resources
-                .iter()
-                .map(AsHandle::as_handle)
-                .collect::<Vec<_>>()
-        };
+        let resources = Arc::new(
+            self.files
+                .into_iter()
+                .chain(memory.resources)
+                .collect::<Vec<_>>(),
+        );
         let (commands, outgoing) = mpsc::sync_channel::<Request>(1);
-        let init_result = channel.send(&encode(&init)?, &borrowed);
+        let init = encode(&init)?;
+        let startup_resources = Arc::clone(&resources);
         let writer_shared = Arc::clone(&shared);
         let writer = std::thread::Builder::new()
             .name("block-controls".into())
             .spawn(move || {
+                #[cfg(unix)]
+                let borrowed = {
+                    use std::os::fd::AsFd;
+                    startup_resources
+                        .iter()
+                        .map(AsFd::as_fd)
+                        .collect::<Vec<_>>()
+                };
+                #[cfg(windows)]
+                let borrowed = {
+                    use std::os::windows::io::AsHandle;
+                    startup_resources
+                        .iter()
+                        .map(AsHandle::as_handle)
+                        .collect::<Vec<_>>()
+                };
+                if let Err(error) = channel.send(&init, &borrowed) {
+                    writer_shared.fail(error.to_string());
+                    return;
+                }
                 while let Ok(request) = outgoing.recv() {
                     if let Err(error) = encode(&request).and_then(|bytes| channel.send(&bytes, &[]))
                     {
@@ -107,7 +116,6 @@ impl Prepared {
             retired: AtomicBool::new(false),
             _resources: resources,
         });
-        init_result?;
         let Response::Ready { features, config } = session.response()? else {
             return Err(io::Error::other("worker did not report readiness"));
         };
@@ -179,7 +187,7 @@ fn receive(mut input: Box<dyn Channel>, shared: &Shared, replies: &mpsc::SyncSen
 
 struct Session {
     // Retain the parent's file locks until the child has retired.
-    _resources: Vec<Resource>,
+    _resources: Arc<Vec<Resource>>,
     shared: Arc<Shared>,
     process: Mutex<Box<dyn Process>>,
     commands: Mutex<Option<mpsc::SyncSender<Request>>>,

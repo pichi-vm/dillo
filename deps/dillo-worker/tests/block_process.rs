@@ -33,13 +33,16 @@ use dillo_machine_kvm::worker::Worker;
 use dillo_machine_whp::worker::Worker;
 
 #[derive(Debug)]
-struct Host;
+struct Host(bool);
 
 impl VirtioDeviceHost for Host {
     fn spawn(
         &self,
         run: Box<dyn FnOnce(VirtioRunToken) -> Result<(), DeviceJoinError> + Send>,
     ) -> Result<VirtioDeviceHandle, ActivateError> {
+        if self.0 {
+            return Err(io::Error::other("injected relay spawn failure").into());
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let token = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
@@ -206,7 +209,7 @@ fn memory() -> io::Result<(GuestMemoryMmap, MemoryExport)> {
     }
 }
 
-fn activation(interrupts: Arc<AtomicUsize>) -> (VirtioActivate, Kick) {
+fn activation(interrupts: Arc<AtomicUsize>, fail_spawn: bool) -> (VirtioActivate, Kick) {
     let kick = Kick::new().unwrap();
     let mut queue = Queue::new(256);
     queue.size = 16;
@@ -221,7 +224,7 @@ fn activation(interrupts: Arc<AtomicUsize>) -> (VirtioActivate, Kick) {
         VirtioActivate::with_host_and_queue_interrupts(
             vec![queue],
             vec![kick.clone()],
-            Arc::new(Host),
+            Arc::new(Host(fail_spawn)),
             vec![Some(interrupt)],
         )
         .with_negotiated_features((1 << 32) | (1 << 9)),
@@ -233,17 +236,24 @@ fn exercise(mode: &str) -> io::Result<()> {
     let forbidden = tempfile::NamedTempFile::new()?;
     let disk = tempfile::tempfile()?;
     disk.set_len(4096)?;
-    let (memory, export) = memory()?;
+    let (memory, export) =
+        memory().map_err(|e| io::Error::new(e.kind(), format!("prepare test RAM: {e}")))?;
     let failed = Arc::new(AtomicBool::new(false));
     let signal = Arc::clone(&failed);
     let prepared = dillo_worker::Prepared::new(
         &serde_json::json!({"mode":mode,"forbidden":forbidden.path()}),
         vec![disk.try_clone()?],
     )?;
-    let (mut proxy, control) =
-        prepared.start::<Worker>(export, move || signal.store(true, Ordering::Release))?;
+    let (mut proxy, control) = prepared
+        .start::<Worker>(export, move || signal.store(true, Ordering::Release))
+        .map_err(|e| io::Error::new(e.kind(), format!("start block worker: {e}")))?;
     let interrupts = Arc::new(AtomicUsize::new(0));
-    let (activate, kick) = activation(Arc::clone(&interrupts));
+    if mode == "normal" {
+        let (activate, _) = activation(Arc::clone(&interrupts), true);
+        assert!(proxy.activate(activate).is_err());
+        control.check()?;
+    }
+    let (activate, kick) = activation(Arc::clone(&interrupts), false);
     let start = Instant::now();
     let result = proxy.activate(activate);
     if mode != "normal" {
@@ -277,7 +287,7 @@ fn exercise(mode: &str) -> io::Result<()> {
     control.reset()?;
     memory.write_slice(&[0; 64], GuestAddress(0x2000)).unwrap();
     memory.write_slice(&[0; 256], GuestAddress(0x3000)).unwrap();
-    let (activate, kick) = activation(interrupts);
+    let (activate, kick) = activation(interrupts, false);
     let active = proxy.activate(activate).map_err(io::Error::other)?;
     // An old activation's eventual Drop must not stop the replacement epoch.
     drop(old_activation);

@@ -12,11 +12,17 @@ use dillo_ipc::{BorrowedResource, Channel, MAX_MESSAGE, MAX_RESOURCES, Message, 
 use nix::sys::socket::{ControlMessage, ControlMessageOwned, MsgFlags, recvmsg, sendmsg};
 
 #[derive(Debug)]
-struct Connection(UnixStream);
+struct Connection {
+    socket: UnixStream,
+    receive_resources: bool,
+}
 
 impl Channel for Connection {
     fn send(&mut self, bytes: &[u8], resources: &[BorrowedResource<'_>]) -> io::Result<()> {
-        if bytes.len() > MAX_MESSAGE || resources.len() > MAX_RESOURCES {
+        if bytes.len() > MAX_MESSAGE
+            || resources.len() > MAX_RESOURCES
+            || (self.receive_resources && !resources.is_empty())
+        {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         let mut header = [0u8; 8];
@@ -29,7 +35,7 @@ impl Channel for Connection {
             vec![ControlMessage::ScmRights(&fds)]
         };
         let sent = sendmsg::<()>(
-            self.0.as_raw_fd(),
+            self.socket.as_raw_fd(),
             &[IoSlice::new(&header)],
             &controls,
             MsgFlags::empty(),
@@ -38,8 +44,8 @@ impl Channel for Connection {
         if sent == 0 {
             return Err(io::ErrorKind::WriteZero.into());
         }
-        self.0.write_all(&header[sent..])?;
-        self.0.write_all(bytes)
+        self.socket.write_all(&header[sent..])?;
+        self.socket.write_all(bytes)
     }
 
     fn receive(&mut self) -> io::Result<Message> {
@@ -49,13 +55,14 @@ impl Channel for Connection {
         let (count, truncated) = {
             let mut slices = [IoSliceMut::new(&mut header)];
             let received = recvmsg::<()>(
-                self.0.as_raw_fd(),
+                self.socket.as_raw_fd(),
                 &mut slices,
-                Some(&mut controls),
+                self.receive_resources.then_some(&mut controls),
                 MsgFlags::empty(),
             )?;
-            // Adopt every received descriptor before inspecting framing errors,
-            // so all failure paths close the objects delivered by the kernel.
+            // Parent receive supplies no ancillary buffer: the kernel discards
+            // unsolicited child handles, without installing them in the parent.
+            // Only the trusted parent's bootstrap can transfer resources.
             for message in received.cmsgs()? {
                 if let ControlMessageOwned::ScmRights(fds) = message {
                     for fd in fds {
@@ -73,7 +80,7 @@ impl Channel for Connection {
         if count == 0 {
             return Err(io::ErrorKind::UnexpectedEof.into());
         }
-        self.0.read_exact(&mut header[count..])?;
+        self.socket.read_exact(&mut header[count..])?;
         let len = u32::from_le_bytes(header[..4].try_into().unwrap()) as usize;
         let expected = u32::from_le_bytes(header[4..].try_into().unwrap()) as usize;
         if truncated || len > MAX_MESSAGE || expected > MAX_RESOURCES || expected != resources.len()
@@ -90,12 +97,15 @@ impl Channel for Connection {
             )?;
         }
         let mut bytes = vec![0; len];
-        self.0.read_exact(&mut bytes)?;
+        self.socket.read_exact(&mut bytes)?;
         Ok(Message { bytes, resources })
     }
 
     fn try_clone(&self) -> io::Result<Box<dyn Channel>> {
-        Ok(Box::new(Self(self.0.try_clone()?)))
+        Ok(Box::new(Self {
+            socket: self.socket.try_clone()?,
+            receive_resources: self.receive_resources,
+        }))
     }
 }
 
@@ -135,7 +145,13 @@ pub fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()?;
-    Ok((Box::new(Worker(process)), Box::new(Connection(parent))))
+    Ok((
+        Box::new(Worker(process)),
+        Box::new(Connection {
+            socket: parent,
+            receive_resources: false,
+        }),
+    ))
 }
 
 pub fn bootstrap() -> io::Result<Box<dyn Channel>> {
@@ -163,6 +179,9 @@ pub fn bootstrap() -> io::Result<Box<dyn Channel>> {
         }
         // stdin is the unique socket transferred by spawn; this function can
         // adopt it only once, and the worker never uses std::io::stdin.
-        Ok(Box::new(Connection(UnixStream::from_raw_fd(0))))
+        Ok(Box::new(Connection {
+            socket: UnixStream::from_raw_fd(0),
+            receive_resources: true,
+        }))
     }
 }
