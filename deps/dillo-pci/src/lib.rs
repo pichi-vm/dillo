@@ -6,6 +6,7 @@
 //! Minimal root complex: no hotplug, no secondary-bus / root-port, and no
 //! multi-function endpoints.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -117,6 +118,7 @@ pub trait PciDeviceHost: Send + Sync + std::fmt::Debug {
 /// PCI MSI-X table adapter backed by a machine-owned message-interrupt domain.
 pub struct MsixInterruptAdapter {
     domain: Arc<dyn MessageInterruptDomain>,
+    interrupts: Mutex<BTreeMap<u16, dillo_mmio::Interrupt>>,
 }
 
 impl std::fmt::Debug for MsixInterruptAdapter {
@@ -128,17 +130,30 @@ impl std::fmt::Debug for MsixInterruptAdapter {
 
 impl MsixInterruptAdapter {
     pub fn new(domain: Arc<dyn MessageInterruptDomain>) -> Self {
-        Self { domain }
+        Self {
+            domain,
+            interrupts: Mutex::new(BTreeMap::new()),
+        }
     }
 
     /// Interrupt for a device completion on `vector`.
     pub fn interrupt_for(&self, vector: u16) -> Option<dillo_mmio::Interrupt> {
-        self.domain.interrupt(vector)
+        // Retain the bound endpoint between programming changes. In
+        // particular, KVM need not duplicate an eventfd for every completion.
+        let mut interrupts = self.interrupts.lock().expect("MSI-X endpoints poisoned");
+        if let Some(interrupt) = interrupts.get(&vector) {
+            return Some(interrupt.clone());
+        }
+        let interrupt = self.domain.interrupt(vector)?;
+        interrupts.insert(vector, interrupt.clone());
+        Some(interrupt)
     }
 }
 
 impl MsixNotifier for MsixInterruptAdapter {
     fn vector_updated(&self, vector: u16, entry: &MsixTableEntry) {
+        let mut interrupts = self.interrupts.lock().expect("MSI-X endpoints poisoned");
+        interrupts.remove(&vector);
         if let Err(e) = self.domain.update(
             vector,
             MessageInterrupt {
@@ -152,6 +167,8 @@ impl MsixNotifier for MsixInterruptAdapter {
     }
 
     fn msix_enabled(&self, vector: u16, enabled: bool) {
+        let mut interrupts = self.interrupts.lock().expect("MSI-X endpoints poisoned");
+        interrupts.remove(&vector);
         if let Err(e) = self.domain.enabled(vector, enabled) {
             log::warn!("PCI MSI-X vector {vector} enable={enabled} failed: {e}");
         }
@@ -974,6 +991,28 @@ mod tests {
                     signals.lock().unwrap().push(vector);
                 }))
             }
+        }
+
+        #[test]
+        fn endpoints_are_reused_until_route_or_enable_changes() {
+            let domain = Arc::new(RecordingDomain::default());
+            let adapter = MsixInterruptAdapter::new(domain.clone());
+            for _ in 0..3 {
+                adapter.interrupt_for(0).unwrap().signal();
+            }
+            assert_eq!(*domain.lookups.lock().unwrap(), [0]);
+            assert_eq!(*domain.signals.lock().unwrap(), [0, 0, 0]);
+
+            adapter.vector_updated(0, &MsixTableEntry::default());
+            adapter.interrupt_for(0).unwrap().signal();
+            assert_eq!(*domain.lookups.lock().unwrap(), [0, 0]);
+
+            adapter.msix_enabled(0, false);
+            adapter.msix_enabled(0, true);
+            adapter.interrupt_for(0).unwrap().signal();
+            adapter.interrupt_for(0).unwrap().signal();
+            assert_eq!(*domain.lookups.lock().unwrap(), [0, 0, 0]);
+            assert_eq!(*domain.signals.lock().unwrap(), [0, 0, 0, 0, 0, 0]);
         }
 
         #[derive(Debug)]
