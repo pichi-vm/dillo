@@ -37,6 +37,7 @@ nix = { workspace = true, features = ["event"] }
 dillo-machine-kvm.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
+applevisor.workspace = true
 dillo-machine-hvf.workspace = true
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]

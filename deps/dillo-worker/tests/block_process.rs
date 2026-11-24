@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exercise the real executable/process boundary without requiring a native VM.
+//! Exercise the real executable/process boundary. The optional signed macOS
+//! probe also requires native Hypervisor.framework availability in the parent.
 
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -26,6 +27,8 @@ use dillo_virtio::{
 use dillo_virtio_blk::{RawImageBacking, VirtioBlk};
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
+#[cfg(target_os = "macos")]
+use applevisor::prelude::{HypervisorError, VirtualMachine};
 #[cfg(target_os = "macos")]
 use dillo_machine_hvf::worker::Worker;
 #[cfg(target_os = "linux")]
@@ -174,6 +177,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "worker created a descendant"
             );
             let mode = config["mode"].as_str().unwrap();
+            #[cfg(target_os = "macos")]
+            if mode == "hvf-denial" {
+                match VirtualMachine::new() {
+                    Ok(vm) => {
+                        vm.try_destroy().expect("retire unexpected child VM");
+                        panic!("confined worker created a Hypervisor VM");
+                    }
+                    Err(error) => assert_eq!(error, HypervisorError::Denied),
+                }
+            }
             if matches!(mode, "oversized" | "forged-resource") {
                 // A compromised worker can write its pipe directly. Neither
                 // claimed length nor numeric resource count is authority.
@@ -205,6 +218,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }))
         })
         .map_err(Into::into);
+    }
+    #[cfg(target_os = "macos")]
+    if std::env::args().nth(1).as_deref() == Some("--require-hvf-denial") {
+        // Prove this signed executable has working VM authority before the
+        // same executable enters confinement as a fresh worker process.
+        VirtualMachine::new()
+            .expect("parent must be able to create a Hypervisor VM")
+            .try_destroy()
+            .expect("retire parent probe VM");
+        exercise("hvf-denial")?;
+        println!("block process: signed worker denied Hypervisor VM creation");
+        return Ok(());
     }
     for mode in [
         "normal",

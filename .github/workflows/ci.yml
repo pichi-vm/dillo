@@ -199,7 +199,7 @@ jobs:
           CARGO_BUILD_RUSTFLAGS: "-D warnings"
         run: cargo test --workspace --exclude snuffler
 
-      - name: Signed HVF native ownership tests
+      - name: Signed HVF native tests
         if: runner.os == 'macOS'
         timeout-minutes: 2
         shell: bash
@@ -229,6 +229,19 @@ jobs:
           EOF
           codesign --force --sign - --entitlements "$entitlements" "$binary"
           "$binary" --ignored --test-threads=1 hypervisor::tests::hvf_
+          worker="$(cargo test --locked -p dillo-worker --test block_process --no-run --message-format=json \
+            | python3 -c '
+          import json, sys
+          for line in sys.stdin:
+              event = json.loads(line)
+              if (event.get("reason") == "compiler-artifact"
+                      and event["target"]["name"] == "block_process"
+                      and event["profile"]["test"]):
+                  print(event["executable"])
+          ')"
+          test -x "$worker"
+          codesign --force --sign - --entitlements "$entitlements" "$worker"
+          "$worker" --require-hvf-denial
 
       - name: Reserve hugepages for guest RAM (Linux/KVM)
         if: runner.os == 'Linux'

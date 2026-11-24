@@ -809,6 +809,7 @@ dependencies = [
 name = "dillo-worker"
 version = "0.1.0"
 dependencies = [
+ "applevisor",
  "dillo-ipc",
  "dillo-machine",
  "dillo-machine-hvf",
