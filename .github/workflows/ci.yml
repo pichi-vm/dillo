@@ -22,6 +22,19 @@ env:
 # (which cross-builds tatu for a bare-metal target) and snuffler as a musl
 # artifact. See the pichi-vm split checklist's toolchain carve-out.
 jobs:
+  macos-worker:
+    name: macOS worker confinement
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install toolchain
+        run: rustup toolchain install "$NIGHTLY" --profile minimal --component rust-src
+      - uses: Swatinem/rust-cache@v2
+      # This hosted VM can exercise Seatbelt and shared-memory IPC without
+      # Hypervisor.framework. It does not replace the native HVF boot lane.
+      - run: cargo test --locked -p dillo-worker -p dillo-machine-unix
+
   license-headers:
     name: license headers
     runs-on: ubuntu-24.04
