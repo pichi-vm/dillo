@@ -117,7 +117,17 @@ impl Prepared {
             _resources: resources,
         });
         let response = session.response().map_err(|error| {
-            let status = session.process.lock().unwrap().try_wait();
+            // A failed child's last pipe may close before its process becomes
+            // signalled. Allow that short interval to retain the native exit
+            // status in the startup error, without an unbounded wait.
+            let mut status = session.process.lock().unwrap().try_wait();
+            for _ in 0..20 {
+                if !matches!(status, Ok(None)) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+                status = session.process.lock().unwrap().try_wait();
+            }
             let failure = session.shared.failure.lock().unwrap().clone();
             io::Error::other(format!(
                 "worker readiness: {error}; status={status:?}; failure={failure:?}"

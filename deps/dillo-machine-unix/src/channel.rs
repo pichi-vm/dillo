@@ -192,7 +192,7 @@ mod tests {
     use nix::unistd::{pipe, write};
 
     #[test]
-    fn parent_rejects_reverse_descriptors_without_retaining_them() {
+    fn parent_never_retains_reverse_descriptors() {
         let (parent, child) = UnixStream::pair().unwrap();
         let (reader, writer) = pipe().unwrap();
         let header = [0u8; 8];
@@ -209,7 +209,11 @@ mod tests {
             socket: parent,
             receive_resources: false,
         };
-        assert!(parent.receive().is_err());
+        // Linux reports ancillary truncation; Darwin discards these rights
+        // silently. Neither platform may install a child-supplied descriptor.
+        if let Ok(message) = parent.receive() {
+            assert!(message.resources.is_empty());
+        }
         // A leaked installed descriptor would keep this pipe readable.
         assert_eq!(write(&writer, b"x"), Err(nix::errno::Errno::EPIPE));
     }

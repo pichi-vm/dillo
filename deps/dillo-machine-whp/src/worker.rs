@@ -470,6 +470,11 @@ fn bootstrap() -> io::Result<Box<dyn Channel>> {
     }
     #[allow(unsafe_code)]
     unsafe {
+        let mut flags = 0;
+        check(GetHandleInformation(handles[2] as *mut c_void, &mut flags))?;
+        let log = OwnedHandle::from_raw_handle(handles[2] as *mut c_void);
+        check(SetStdHandle(STD_ERROR_HANDLE, log.as_raw_handle()))?;
+        let _ = LOG.set(log);
         for handle in &handles {
             let mut flags = 0;
             check(GetHandleInformation(*handle as *mut c_void, &mut flags))?;
@@ -481,9 +486,6 @@ fn bootstrap() -> io::Result<Box<dyn Channel>> {
         }
         // Only this early entry point owns the distinct, validated inherited
         // handles. None is used by stdio; logging is installed explicitly.
-        let log = OwnedHandle::from_raw_handle(handles[2] as *mut c_void);
-        check(SetStdHandle(STD_ERROR_HANDLE, log.as_raw_handle()))?;
-        let _ = LOG.set(log);
         Ok(Box::new(Connection {
             read: File::from(OwnedHandle::from_raw_handle(handles[0] as *mut c_void)),
             write: File::from(OwnedHandle::from_raw_handle(handles[1] as *mut c_void)),
