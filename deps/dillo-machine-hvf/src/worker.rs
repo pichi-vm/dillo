@@ -33,6 +33,11 @@ impl dillo_machine::worker::WorkerHost for Worker {
         // library's allocated error is released with its matching function.
         #[allow(unsafe_code)]
         unsafe {
+            if sandbox_check(libc::getpid(), std::ptr::null(), 0) != 0 {
+                return Err(io::Error::other(
+                    "worker inherited a Seatbelt sandbox; cannot install the device policy",
+                ));
+            }
             if sandbox_init(profile.as_ptr(), 0, &mut error) != 0 {
                 let detail = if error.is_null() {
                     "Seatbelt initialization failed".into()
@@ -54,6 +59,12 @@ impl dillo_machine::worker::WorkerHost for Worker {
 #[allow(unsafe_code)]
 #[link(name = "sandbox")]
 unsafe extern "C" {
+    fn sandbox_check(
+        pid: libc::pid_t,
+        operation: *const libc::c_char,
+        filter: libc::c_int,
+        ...
+    ) -> libc::c_int;
     fn sandbox_init(
         profile: *const libc::c_char,
         flags: u64,

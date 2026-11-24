@@ -46,6 +46,7 @@ impl Machine for TestMachine {
     type Error = io::Error;
     type Platform = ();
     type CpuPreparation = TestPreparation;
+    type Worker = ();
 
     fn guest_address_bits() -> Result<u32, Self::Error> {
         Ok(48)

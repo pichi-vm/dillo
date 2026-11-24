@@ -185,3 +185,49 @@ pub fn bootstrap() -> io::Result<Box<dyn Channel>> {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::unistd::{pipe, write};
+
+    #[test]
+    fn parent_rejects_reverse_descriptors_without_retaining_them() {
+        let (parent, child) = UnixStream::pair().unwrap();
+        let (reader, writer) = pipe().unwrap();
+        let header = [0u8; 8];
+        sendmsg::<()>(
+            child.as_raw_fd(),
+            &[IoSlice::new(&header)],
+            &[ControlMessage::ScmRights(&[reader.as_raw_fd()])],
+            MsgFlags::empty(),
+            None,
+        )
+        .unwrap();
+        drop(reader);
+        let mut parent = Connection {
+            socket: parent,
+            receive_resources: false,
+        };
+        assert!(parent.receive().is_err());
+        // A leaked installed descriptor would keep this pipe readable.
+        assert_eq!(write(&writer, b"x"), Err(nix::errno::Errno::EPIPE));
+    }
+
+    #[test]
+    fn oversized_frame_is_refused_before_reading_its_body() {
+        let (parent, mut child) = UnixStream::pair().unwrap();
+        child
+            .write_all(&((MAX_MESSAGE as u32) + 1).to_le_bytes())
+            .unwrap();
+        child.write_all(&0u32.to_le_bytes()).unwrap();
+        let mut parent = Connection {
+            socket: parent,
+            receive_resources: false,
+        };
+        assert_eq!(
+            parent.receive().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+}

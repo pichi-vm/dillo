@@ -116,12 +116,10 @@ impl Device {
         match self {
             Self::Local(device) => Ok(device),
             Self::Block(prepared) => {
-                let (proxy, control) = prepared.start::<crate::machine::worker::Worker>(
-                    machine.worker_memory()?,
-                    move || {
+                let (proxy, control) =
+                    prepared.start::<M::Worker>(machine.worker_memory()?, move || {
                         shutdown.store(true, std::sync::atomic::Ordering::Release);
-                    },
-                )?;
+                    })?;
                 controls.push(control);
                 Ok(Box::new(proxy))
             }

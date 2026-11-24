@@ -116,7 +116,14 @@ impl Prepared {
             retired: AtomicBool::new(false),
             _resources: resources,
         });
-        let Response::Ready { features, config } = session.response()? else {
+        let response = session.response().map_err(|error| {
+            let status = session.process.lock().unwrap().try_wait();
+            let failure = session.shared.failure.lock().unwrap().clone();
+            io::Error::other(format!(
+                "worker readiness: {error}; status={status:?}; failure={failure:?}"
+            ))
+        })?;
+        let Response::Ready { features, config } = response else {
             return Err(io::Error::other("worker did not report readiness"));
         };
         if config.len() != CONFIG_LEN || features & (1 << 32) == 0 {

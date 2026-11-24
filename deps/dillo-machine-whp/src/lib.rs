@@ -187,6 +187,7 @@ mod imp {
     }
 
     impl dillo_machine::Machine for Vm {
+        type Worker = crate::worker::Worker;
         type Error = Error;
         type Platform = PlatformMachine;
         type CpuPreparation = CpuPreparation;

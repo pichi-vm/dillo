@@ -27,3 +27,19 @@ pub trait WorkerHost {
     /// Must succeed before any worker reports readiness or reads a guest queue.
     fn confine(files: &[dillo_ipc::BorrowedResource<'_>]) -> io::Result<()>;
 }
+
+/// Machines without process services refuse worker startup.
+impl WorkerHost for () {
+    fn spawn(_: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    fn bootstrap() -> io::Result<Box<dyn Channel>> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    fn map_memory(_: MemoryExport) -> io::Result<GuestMemoryMmap> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    fn confine(_: &[dillo_ipc::BorrowedResource<'_>]) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}

@@ -208,6 +208,8 @@ pub trait Machine: Sized + 'static {
     /// Platform input accepted by this Machine's launch constructor.
     type Platform;
     type CpuPreparation: CpuPreparation<Error = Self::Error>;
+    /// Process and confinement implementation compatible with this Machine.
+    type Worker: worker::WorkerHost;
 
     /// Bind launch CPU inputs to this machine without creating a native runner.
     fn cpu_preparation(
@@ -517,6 +519,7 @@ mod tests {
         type Error = TestError;
         type Platform = ();
         type CpuPreparation = TestCpuPreparation;
+        type Worker = ();
 
         fn cpu_preparation(
             &mut self,
