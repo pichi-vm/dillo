@@ -62,6 +62,7 @@ const CC_QUEUE_USED_HI: u64 = 0x34;
 // Device status bits.
 const STATUS_FEATURES_OK: u8 = 8;
 const STATUS_DRIVER_OK: u8 = 4;
+const STATUS_DEVICE_NEEDS_RESET: u8 = 64;
 
 /// Per-queue state tracked by the transport layer.
 #[derive(Debug)]
@@ -591,12 +592,14 @@ impl VirtioPciDevice {
             // Device reset: clear all transport state so the driver can
             // re-initialize from scratch (e.g. after module reload).
             log::info!("virtio-pci: device reset");
+            self.activation.take();
+            self.queue_kicks.clear();
+            self.isr_status.store(0, Ordering::Release);
             self.device_status = 0;
             self.driver_features = 0;
             self.device_feature_select = 0;
             self.driver_feature_select = 0;
             self.queue_select = 0;
-            self.activation.take();
             self.activated = false;
             for qc in &mut self.queues {
                 *qc = QueueConfig::new(qc.queue.max_size);
@@ -604,7 +607,7 @@ impl VirtioPciDevice {
             return;
         }
 
-        self.device_status = new_status;
+        self.device_status = new_status | (self.device_status & STATUS_DEVICE_NEEDS_RESET);
 
         // Validate FEATURES_OK transition.
         if new_status & STATUS_FEATURES_OK != 0 && self.driver_features & VIRTIO_F_VERSION_1 == 0 {
@@ -614,8 +617,15 @@ impl VirtioPciDevice {
         }
 
         // DRIVER_OK transition -- activate device.
-        if new_status & STATUS_DRIVER_OK != 0 && !self.activated {
+        if new_status & STATUS_DRIVER_OK != 0
+            && !self.activated
+            && self.device_status & STATUS_DEVICE_NEEDS_RESET == 0
+        {
             self.activate_device();
+            if !self.activated {
+                self.queue_kicks.clear();
+                self.device_status |= STATUS_DEVICE_NEEDS_RESET;
+            }
         }
     }
 
@@ -1223,7 +1233,8 @@ mod tests {
         let status = bar0_read_u8(&dev, CC_DEVICE_STATUS);
         assert!(status & STATUS_FEATURES_OK != 0);
 
-        // DRIVER_OK -- no backend notifier in unit tests, but status should be set.
+        // No attachment host: DRIVER_OK records the driver's write, while the
+        // device reports that activation failed and requires reset.
         bar0_write_u8(
             &mut dev,
             CC_DEVICE_STATUS,
@@ -1231,6 +1242,11 @@ mod tests {
         );
         let status = bar0_read_u8(&dev, CC_DEVICE_STATUS);
         assert!(status & STATUS_DRIVER_OK != 0);
+        assert!(status & super::STATUS_DEVICE_NEEDS_RESET != 0);
+        bar0_write_u8(&mut dev, CC_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
+        assert!(bar0_read_u8(&dev, CC_DEVICE_STATUS) & super::STATUS_DEVICE_NEEDS_RESET != 0);
+        bar0_write_u8(&mut dev, CC_DEVICE_STATUS, 0);
+        assert_eq!(bar0_read_u8(&dev, CC_DEVICE_STATUS), 0);
     }
 
     // ==================== Queue Config Tests ====================

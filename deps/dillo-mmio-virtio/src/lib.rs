@@ -58,6 +58,7 @@ const CONFIG: u64 = 0x100;
 
 const MAGIC_VALUE: u32 = 0x7472_6976; // "virt"
 const STATUS_DRIVER_OK: u32 = 0x4;
+const STATUS_DEVICE_NEEDS_RESET: u32 = 0x40;
 /// InterruptStatus bit: used-buffer notification (a virtqueue completed).
 const INT_VRING: u32 = 0x1;
 
@@ -363,21 +364,36 @@ impl VirtioMmio {
                 }
             }
             STATUS => {
-                g.status = val;
+                g.status = val | (g.status & STATUS_DEVICE_NEEDS_RESET);
                 if val == 0 {
-                    // Reset: the driver will re-negotiate. Devices stay; a real
-                    // re-activation path is out of scope for the boot console.
+                    // Stop and join before clearing state used by callbacks or
+                    // allowing a replacement activation to reuse the queues.
                     g.activation.take();
                     g.kicks.clear();
                     g.activated = false;
+                    g.status = 0;
                     g.driver_features = 0;
                     g.drv_feat_sel = 0;
+                    g.dev_feat_sel = 0;
+                    g.queue_sel = 0;
+                    for queue in &mut g.queues {
+                        *queue = QueueCfg {
+                            max: queue.max,
+                            num: queue.max,
+                            ..Default::default()
+                        };
+                    }
+                    self.int_status.store(0, Ordering::SeqCst);
+                    self.irq.set(false);
                 } else {
                     maybe_activate(
                         &mut g,
                         self.window,
                         Self::interrupt(Arc::clone(&self.int_status), self.irq.clone()),
                     );
+                    if g.status & STATUS_DRIVER_OK != 0 && !g.activated {
+                        g.status |= STATUS_DEVICE_NEEDS_RESET;
+                    }
                 }
             }
             _ => {}
@@ -451,7 +467,8 @@ fn set_hi(g: &mut Inner, sel: usize, field: impl Fn(&mut QueueCfg) -> &mut u64, 
 }
 
 fn maybe_activate(g: &mut Inner, window: MmioWindow, interrupt: Interrupt) {
-    if g.activated || g.status & STATUS_DRIVER_OK == 0 {
+    if g.activated || g.status & STATUS_DRIVER_OK == 0 || g.status & STATUS_DEVICE_NEEDS_RESET != 0
+    {
         return;
     }
     let Some(host) = g.host.as_ref().map(Arc::clone) else {
@@ -683,8 +700,16 @@ mod tests {
                     .unwrap()
                     .clone();
                 assert_eq!(weak.strong_count() > 0, !fail);
+                let mut status = [0; 4];
+                transport.read(STATUS, &mut status);
+                assert_eq!(
+                    u32::from_le_bytes(status) & STATUS_DEVICE_NEEDS_RESET != 0,
+                    fail
+                );
                 transport.write(STATUS, &0u32.to_le_bytes());
                 assert_eq!(weak.strong_count(), 0);
+                transport.read(STATUS, &mut status);
+                assert_eq!(status, [0; 4]);
             }
         }
     }
