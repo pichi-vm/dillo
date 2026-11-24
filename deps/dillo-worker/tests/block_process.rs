@@ -4,9 +4,9 @@
 //! Exercise the real executable/process boundary without requiring a native VM.
 
 use std::fs::File;
-use std::io;
+use std::io::{self, Read, Write};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -17,7 +17,7 @@ use dillo_ipc::RamView;
 #[cfg(not(target_os = "macos"))]
 use dillo_machine::worker::WorkerHost;
 use dillo_mmio::Interrupt;
-use dillo_storage::{BlockBacking, Qcow2Backing};
+use dillo_storage::{BlockBacking, Qcow2Backing, WritableBlockBacking};
 use dillo_virtio::queue::Queue;
 use dillo_virtio::{
     ActivateError, DeviceJoinError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
@@ -104,6 +104,44 @@ impl VirtioDevice for Backend {
     }
 }
 
+// Hold one real backing call open so a control acknowledgement cannot pass
+// merely because the worker happened to be idle when the request arrived.
+struct GatedBacking {
+    disk: RawImageBacking,
+    gate: Mutex<Option<(File, File)>>,
+}
+
+impl WritableBlockBacking for GatedBacking {
+    fn write_at(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+        if let Some((mut entered, mut release)) = self.gate.lock().unwrap().take() {
+            entered.write_all(&[1])?;
+            release.read_exact(&mut [0])?;
+        }
+        self.disk.write_at(offset, data)
+    }
+}
+
+impl BlockBacking for GatedBacking {
+    fn writer(&self) -> Option<&dyn WritableBlockBacking> {
+        Some(self)
+    }
+    fn len_bytes(&self) -> u64 {
+        self.disk.len_bytes()
+    }
+    fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<usize> {
+        self.disk.read_at(offset, bytes)
+    }
+    fn flush(&self) -> io::Result<()> {
+        self.disk.flush()
+    }
+    fn get_id(&self) -> [u8; 20] {
+        self.disk.get_id()
+    }
+    fn is_read_only(&self) -> bool {
+        false
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os()
         .nth(1)
@@ -129,6 +167,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mode = config["mode"].as_str().unwrap();
             let backing: Arc<dyn BlockBacking> = if mode == "qcow2" {
                 Arc::new(Qcow2Backing::open(storage(files.remove(0))?, false)?)
+            } else if mode == "gated" {
+                Arc::new(GatedBacking {
+                    disk: RawImageBacking::new(files.remove(0), false)?,
+                    gate: Mutex::new(Some((files.remove(0), files.remove(0)))),
+                })
             } else {
                 Arc::new(RawImageBacking::new(files.remove(0), false)?)
             };
@@ -139,10 +182,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .map_err(Into::into);
     }
-    for mode in ["normal", "qcow2", "crash", "hang"] {
+    for mode in ["normal", "qcow2", "gated", "crash", "hang"] {
         exercise(mode)?;
     }
-    println!("block process: confinement, raw/qcow2 I/O, reset, crash and deadline passed");
+    println!(
+        "block process: confinement, raw/qcow2 I/O, quiescence, reset, crash and deadline passed"
+    );
     Ok(())
 }
 
@@ -260,13 +305,24 @@ fn exercise(mode: &str) -> io::Result<()> {
         memory().map_err(|e| io::Error::new(e.kind(), format!("prepare test RAM: {e}")))?;
     let failed = Arc::new(AtomicBool::new(false));
     let signal = Arc::clone(&failed);
+    let mut files = vec![disk.try_clone()?];
+    let gate = if mode == "gated" {
+        let (entered, notice) = std::io::pipe()?;
+        let (release, proceed) = std::io::pipe()?;
+        files.push(File::from(dillo_ipc::Resource::from(notice)));
+        files.push(File::from(dillo_ipc::Resource::from(release)));
+        Some((entered, proceed))
+    } else {
+        None
+    };
     let prepared = dillo_worker::Prepared::new(
         &serde_json::json!({"mode":mode,"forbidden":forbidden.path()}),
-        vec![disk.try_clone()?],
+        files,
     )?;
     let (mut proxy, control) = prepared
         .start::<Worker>(export, move || signal.store(true, Ordering::Release))
         .map_err(|e| io::Error::new(e.kind(), format!("start block worker: {e}")))?;
+    let control = Arc::new(control);
     let interrupts = Arc::new(AtomicUsize::new(0));
     if mode == "normal" {
         let (activate, _) = activation(Arc::clone(&interrupts), true);
@@ -292,6 +348,31 @@ fn exercise(mode: &str) -> io::Result<()> {
     let old_activation = result.map_err(io::Error::other)?;
     request(&memory, 1, 1, 0x6a);
     kick.write(1)?;
+    if let Some((mut entered, mut proceed)) = gate {
+        let (send, receive) = std::sync::mpsc::channel();
+        let notice = std::thread::spawn(move || send.send(entered.read_exact(&mut [0])));
+        receive
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(io::Error::other)??;
+        notice.join().unwrap().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let pause = Arc::clone(&control);
+        let waiter = std::thread::spawn(move || send.send(pause.quiesce()));
+        let early = receive.recv_timeout(Duration::from_millis(30));
+        // Release before asserting, including when an incorrect early ack was
+        // observed, so a failed test cannot strand its backing operation.
+        proceed.write_all(&[1])?;
+        assert!(
+            matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "quiescence acknowledged an outstanding backing call"
+        );
+        receive
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(io::Error::other)??;
+        waiter.join().unwrap().unwrap();
+        complete(&memory, 1)?;
+        control.resume()?;
+    }
     complete(&memory, 1)?;
     let mut bytes = [0u8; 512];
     if mode == "normal" {
@@ -320,8 +401,22 @@ fn exercise(mode: &str) -> io::Result<()> {
     );
     assert_eq!(memory.read_obj::<u8>(GuestAddress(0x6000)).unwrap(), 0xff);
     assert_eq!(interrupts.load(Ordering::Acquire), before);
-    control.resume()?;
-    complete(&memory, 3)?;
+    if mode == "gated" {
+        // Reset must join a parked worker without processing the queued write.
+        control.reset()?;
+        read_at(&disk, &mut bytes, 512)?;
+        assert_eq!(bytes, [0x6a; 512]);
+        assert_eq!(
+            memory
+                .read_obj::<u16>(GuestAddress(0x3002))
+                .unwrap()
+                .to_le(),
+            2
+        );
+    } else {
+        control.resume()?;
+        complete(&memory, 3)?;
+    }
 
     control.reset()?;
     memory.write_slice(&[0; 64], GuestAddress(0x2000)).unwrap();
