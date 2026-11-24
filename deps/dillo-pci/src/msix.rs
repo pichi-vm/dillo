@@ -222,7 +222,7 @@ impl MsixTable {
     }
 
     /// Clear the pending bit for a vector.
-    fn clear_pending(&mut self, vector: u16) {
+    pub fn clear_pending(&mut self, vector: u16) {
         let idx = vector as usize;
         let word = idx / 64;
         let bit = idx % 64;
@@ -231,38 +231,54 @@ impl MsixTable {
         }
     }
 
+    /// Record a device completion and deliver it if the current masks allow.
+    pub fn signal(&mut self, vector: u16, notifier: &dyn MsixNotifier) {
+        self.set_pending(vector);
+        self.deliver_pending(vector, notifier);
+    }
+
+    fn deliver_pending(&mut self, vector: u16, notifier: &dyn MsixNotifier) {
+        let pending = self
+            .pba
+            .get(usize::from(vector) / 64)
+            .is_some_and(|word| word & (1u64 << (vector % 64)) != 0);
+        if pending
+            && !self.is_vector_masked(vector)
+            && let Some(interrupt) = notifier.interrupt_for(vector)
+        {
+            interrupt.signal();
+            self.clear_pending(vector);
+        }
+    }
+
     /// Set the MSI-X enable state and notify.
     pub fn set_enabled(&mut self, enabled: bool, notifier: &dyn MsixNotifier) {
-        self.enabled = enabled;
-        // Effective enable = enabled && !function_masked
-        let effective = enabled && !self.function_masked;
-        for vector in 0..self.num_vectors() {
-            notifier.msix_enabled(vector, effective);
-        }
+        self.write_msg_ctl(
+            (u16::from(enabled) << 15) | (u16::from(self.function_masked) << 14),
+            notifier,
+        );
     }
 
     /// Set the function mask state and notify.
     pub fn set_function_masked(&mut self, masked: bool, notifier: &dyn MsixNotifier) {
-        self.function_masked = masked;
-        // Effective enable = enabled && !function_masked
-        let effective = self.enabled && !masked;
-        for vector in 0..self.num_vectors() {
-            notifier.msix_enabled(vector, effective);
-        }
+        self.write_msg_ctl(
+            (u16::from(self.enabled) << 15) | (u16::from(masked) << 14),
+            notifier,
+        );
     }
 
-    /// Handle guest writes to the MSI-X Message Control register.
-    ///
-    /// Detects changes to enable (bit 15) and function mask (bit 14) bits.
+    /// Apply both control bits before considering pending delivery.
     pub fn write_msg_ctl(&mut self, msg_ctl: u16, notifier: &dyn MsixNotifier) {
-        let new_enabled = msg_ctl & (1 << 15) != 0;
-        let new_function_masked = msg_ctl & (1 << 14) != 0;
-
-        if new_enabled != self.enabled {
-            self.set_enabled(new_enabled, notifier);
+        let enabled = msg_ctl & (1 << 15) != 0;
+        let masked = msg_ctl & (1 << 14) != 0;
+        if self.enabled == enabled && self.function_masked == masked {
+            return;
         }
-        if new_function_masked != self.function_masked {
-            self.set_function_masked(new_function_masked, notifier);
+        self.enabled = enabled;
+        self.function_masked = masked;
+        for vector in 0..self.num_vectors() {
+            notifier.msix_enabled(vector, enabled && !masked);
+            self.deliver_pending(vector, notifier);
         }
     }
 
@@ -361,9 +377,6 @@ impl MsixTable {
             return;
         }
 
-        // Read current value, apply write, detect mask changes
-        let was_masked = self.entries[entry_idx].is_masked();
-
         let entry = &mut self.entries[entry_idx];
         let field_val = match field_offset {
             0 => entry.msg_addr_lo,
@@ -391,14 +404,9 @@ impl MsixTable {
             _ => {}
         }
 
-        // If vector was unmasked (mask bit cleared), clear PBA pending bit
-        let is_masked = entry.is_masked();
-        if was_masked && !is_masked {
-            self.clear_pending(entry_idx as u16);
-        }
-
         let entry_copy = self.entries[entry_idx];
         notifier.vector_updated(entry_idx as u16, &entry_copy);
+        self.deliver_pending(entry_idx as u16, notifier);
     }
 
     /// Read from the PBA region.
@@ -474,6 +482,7 @@ mod tests {
     struct RecordingNotifier {
         vector_updates: Mutex<Vec<(u16, MsixTableEntry)>>,
         enable_calls: Mutex<Vec<(u16, bool)>>,
+        signals: std::sync::Arc<Mutex<Vec<u16>>>,
     }
 
     impl RecordingNotifier {
@@ -481,6 +490,7 @@ mod tests {
             Self {
                 vector_updates: Mutex::new(Vec::new()),
                 enable_calls: Mutex::new(Vec::new()),
+                signals: std::sync::Arc::default(),
             }
         }
     }
@@ -493,6 +503,27 @@ mod tests {
         fn msix_enabled(&self, vector: u16, enabled: bool) {
             self.enable_calls.lock().unwrap().push((vector, enabled));
         }
+
+        fn interrupt_for(&self, vector: u16) -> Option<Interrupt> {
+            let signals = std::sync::Arc::clone(&self.signals);
+            Some(Interrupt::from_fn(move || {
+                signals.lock().unwrap().push(vector);
+            }))
+        }
+    }
+
+    #[test]
+    fn simultaneous_enable_and_mask_retains_pending() {
+        let mut table = MsixTable::new(1, 0, 0, 0, 0x1000);
+        let notifier = RecordingNotifier::new();
+        table.bar_write(0, 12, &0u32.to_le_bytes(), &notifier);
+        table.signal(0, &notifier);
+        table.write_msg_ctl(0xc000, &notifier);
+        assert!(notifier.signals.lock().unwrap().is_empty());
+        table.write_msg_ctl(0x8000, &notifier);
+        assert_eq!(*notifier.signals.lock().unwrap(), [0]);
+        table.write_msg_ctl(0x8000, &notifier);
+        assert_eq!(*notifier.signals.lock().unwrap(), [0]);
     }
 
     // --- MsixTable tests ---
@@ -593,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn msix_table_pba_cleared_on_unmask() {
+    fn msix_table_pba_retained_without_delivery() {
         let mut table = MsixTable::new(1, 0, 0, 0, 0x1000);
         let notifier = NoopNotifier;
         table.set_pending(0);
@@ -602,7 +633,10 @@ mod tests {
         let mut buf = [0u8; 8];
         table.bar_read(0, 0x1000, &mut buf);
         let pba = u64::from_le_bytes(buf);
-        assert_eq!(pba, 0, "PBA should be cleared after unmask");
+        assert_eq!(
+            pba, 1,
+            "unmask without a delivery endpoint must retain pending work"
+        );
     }
 
     #[test]
@@ -677,16 +711,7 @@ mod tests {
         // Every vector follows its function's enable and mask changes.
         assert_eq!(
             *calls,
-            vec![
-                (0, true),
-                (1, true),
-                (2, true),
-                (3, true),
-                (0, false),
-                (1, false),
-                (2, false),
-                (3, false),
-            ]
+            vec![(0, false), (1, false), (2, false), (3, false),]
         );
     }
 

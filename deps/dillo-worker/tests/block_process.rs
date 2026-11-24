@@ -198,6 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "normal",
         "qcow2",
         "gated",
+        "pci",
         "crash",
         "hang",
         "oversized",
@@ -373,6 +374,9 @@ fn exercise(mode: &str) -> io::Result<()> {
     }
     let (mut proxy, control) =
         result.map_err(|e| io::Error::new(e.kind(), format!("start block worker: {e}")))?;
+    if mode == "pci" {
+        return pci_interrupts(proxy, control, &memory);
+    }
     let control = Arc::new(control);
     let interrupts = Arc::new(AtomicUsize::new(0));
     if mode == "normal" {
@@ -438,7 +442,26 @@ fn exercise(mode: &str) -> io::Result<()> {
     assert_eq!(bytes, [0x6a; 512]);
     assert!(interrupts.load(Ordering::Acquire) > 0);
 
-    control.quiesce()?;
+    // Keep notifications arriving while control makes progress. Counts coalesce
+    // and are not request counts; the queue is authoritative.
+    let stop = Arc::new(AtomicBool::new(false));
+    let pumping = Arc::clone(&stop);
+    let notifications = kick.clone();
+    let ready = Arc::new(std::sync::Barrier::new(2));
+    let started = Arc::clone(&ready);
+    let pump = std::thread::spawn(move || -> io::Result<()> {
+        started.wait();
+        while !pumping.load(Ordering::Acquire) {
+            notifications.write(1)?;
+            std::thread::yield_now();
+        }
+        Ok(())
+    });
+    ready.wait();
+    let paused = control.quiesce();
+    stop.store(true, Ordering::Release);
+    pump.join().unwrap()?;
+    paused?;
     let before = interrupts.load(Ordering::Acquire);
     request(&memory, 3, 1, 0x3c);
     kick.write(1)?;
@@ -489,6 +512,119 @@ fn exercise(mode: &str) -> io::Result<()> {
     }
     assert_eq!(bytes, [0xa5; 512]);
     Ok(())
+}
+
+// The native notifier intentionally does not filter masks. The parent transport
+// must retain pending work and select the current route before reaching it.
+#[derive(Default)]
+struct PciSignals {
+    entries: Mutex<[dillo_pci::MsixTableEntry; 2]>,
+    delivered: Arc<Mutex<Vec<(u16, u32)>>>,
+}
+
+impl dillo_pci::MsixNotifier for PciSignals {
+    fn vector_updated(&self, vector: u16, entry: &dillo_pci::MsixTableEntry) {
+        self.entries.lock().unwrap()[usize::from(vector)] = *entry;
+    }
+    fn msix_enabled(&self, _: u16, _: bool) {}
+    fn interrupt_for(&self, vector: u16) -> Option<Interrupt> {
+        let data = self
+            .entries
+            .lock()
+            .unwrap()
+            .get(usize::from(vector))?
+            .msg_data;
+        let delivered = Arc::clone(&self.delivered);
+        Some(Interrupt::from_fn(move || {
+            delivered.lock().unwrap().push((vector, data));
+        }))
+    }
+}
+
+fn pci_interrupts(
+    proxy: dillo_worker::Proxy,
+    control: dillo_worker::Control,
+    memory: &GuestMemoryMmap,
+) -> io::Result<()> {
+    use dillo_pci_virtio::VirtioPciDevice;
+    let signals = Arc::new(PciSignals::default());
+    let mut pci = VirtioPciDevice::new_with_notifier(
+        Arc::new(Mutex::new(Box::new(proxy))),
+        2,
+        0x1000_0000,
+        0x1000_1000,
+        signals.clone(),
+    );
+    pci.set_host(Arc::new(Host(false)));
+    let mut cap = pci.config_read(0x34 / 4) & 0xff;
+    while cap != 0 && pci.config_read(cap as usize / 4) as u8 != dillo_pci::CAP_ID_MSIX {
+        cap = (pci.config_read(cap as usize / 4) >> 8) & 0xff;
+    }
+    assert_ne!(cap, 0);
+    let cap = cap as usize / 4;
+    pci.config_write(cap, 2, &0x8000u16.to_le_bytes());
+    for (offset, value) in [
+        (0x08, 1u32),
+        (0x0c, 1),
+        (0x20, 0x1000),
+        (0x28, 0x2000),
+        (0x30, 0x3000),
+    ] {
+        assert!(pci.bar_write(0, offset, &value.to_le_bytes()));
+    }
+    for (offset, value) in [(0x18, 16u16), (0x1a, 0), (0x1c, 1)] {
+        assert!(pci.bar_write(0, offset, &value.to_le_bytes()));
+    }
+    assert!(pci.bar_write(0, 0x14, &[15]));
+    let pending = |pci: &VirtioPciDevice| {
+        let mut bytes = [0; 8];
+        assert!(pci.bar_read(2, 0x800, &mut bytes));
+        u64::from_le_bytes(bytes)
+    };
+    let submit = |pci: &mut VirtioPciDevice, index| -> io::Result<()> {
+        request(memory, index, 1, 0x6a);
+        assert!(pci.bar_write(0, 0x100, &0u16.to_le_bytes()));
+        complete(memory, index)?;
+        control.quiesce() // Also orders the parent's completion callback.
+    };
+
+    submit(&mut pci, 1)?;
+    assert_eq!(pending(&pci), 1);
+    assert!(signals.delivered.lock().unwrap().is_empty());
+    // A changed route must be installed before releasing a masked completion.
+    pci.bar_write(2, 8, &0x56u32.to_le_bytes());
+    pci.bar_write(2, 12, &0u32.to_le_bytes());
+    assert_eq!(*signals.delivered.lock().unwrap(), [(0, 0x56)]);
+    assert_eq!(pending(&pci), 0);
+
+    // Function masking also retains work; repeated masks cannot replay it.
+    pci.config_write(cap, 2, &0xc000u16.to_le_bytes());
+    control.resume()?;
+    submit(&mut pci, 2)?;
+    assert_eq!(pending(&pci), 1);
+    assert_eq!(signals.delivered.lock().unwrap().len(), 1);
+    pci.config_write(cap, 2, &0x8000u16.to_le_bytes());
+    pci.config_write(cap, 2, &0x8000u16.to_le_bytes());
+    assert_eq!(signals.delivered.lock().unwrap().len(), 2);
+
+    // Queue-vector selection remains parent state after activation.
+    pci.bar_write(2, 24, &0x78u32.to_le_bytes());
+    pci.bar_write(2, 28, &0u32.to_le_bytes());
+    pci.bar_write(0, 0x1a, &1u16.to_le_bytes());
+    control.resume()?;
+    submit(&mut pci, 3)?;
+    assert_eq!(signals.delivered.lock().unwrap().last(), Some(&(1, 0x78)));
+
+    pci.config_write(cap, 2, &0xc000u16.to_le_bytes());
+    control.resume()?;
+    submit(&mut pci, 4)?;
+    assert_eq!(pending(&pci), 2);
+    let delivered = signals.delivered.lock().unwrap().len();
+    pci.bar_write(0, 0x14, &[0]);
+    assert_eq!(pending(&pci), 0);
+    pci.config_write(cap, 2, &0x8000u16.to_le_bytes());
+    assert_eq!(signals.delivered.lock().unwrap().len(), delivered);
+    control.shutdown()
 }
 
 fn storage(file: File) -> io::Result<imago::file::File> {

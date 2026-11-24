@@ -9,7 +9,6 @@
 //! capabilities, common config BAR, MSI-X, device status FSM, feature
 //! negotiation, and queue notification.
 
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dillo_mmio::SharedMemory;
@@ -68,7 +67,6 @@ const STATUS_DEVICE_NEEDS_RESET: u8 = 64;
 #[derive(Debug)]
 struct QueueConfig {
     queue: Queue,
-    msix_vector: u16,
     desc_lo: u32,
     desc_hi: u32,
     avail_lo: u32,
@@ -82,7 +80,6 @@ impl QueueConfig {
     fn new(max_size: u16) -> Self {
         Self {
             queue: Queue::new(max_size),
-            msix_vector: 0xFFFF, // VIRTIO_MSI_NO_VECTOR
             desc_lo: 0,
             desc_hi: 0,
             avail_lo: 0,
@@ -94,15 +91,34 @@ impl QueueConfig {
     }
 
     /// Materialize the Queue from stored GPAs for activation.
-    fn to_queue(&self) -> Queue {
+    fn to_queue(&self, vector: u16) -> Queue {
         let mut q = Queue::new(self.queue.max_size);
         q.size = self.queue.size;
         q.ready = self.enabled;
         q.desc_table = GuestAddress((self.desc_hi as u64) << 32 | self.desc_lo as u64);
         q.avail_ring = GuestAddress((self.avail_hi as u64) << 32 | self.avail_lo as u64);
         q.used_ring = GuestAddress((self.used_hi as u64) << 32 | self.used_lo as u64);
-        q.msix_vector = self.msix_vector;
+        q.msix_vector = vector;
         q
+    }
+}
+
+// One parent-owned state serializes completion, mask and route changes.
+// The worker receives a bound callback, never table or route authority.
+struct CompletionState {
+    table: MsixTable,
+    vectors: Vec<u16>,
+    isr: u8,
+    notifier: Arc<dyn MsixNotifier>,
+}
+
+impl CompletionState {
+    fn reset(&mut self) {
+        self.vectors.fill(0xffff);
+        self.isr = 0;
+        for vector in 0..self.table.num_vectors() {
+            self.table.clear_pending(vector);
+        }
     }
 }
 
@@ -118,7 +134,7 @@ impl QueueConfig {
 pub struct VirtioPciDevice {
     device: Arc<Mutex<Box<dyn VirtioDevice>>>,
     config: PciConfiguration,
-    msix_table: MsixTable,
+    completion: Arc<Mutex<CompletionState>>,
     msix_cap_reg: usize,
 
     // Common config state.
@@ -133,9 +149,6 @@ pub struct VirtioPciDevice {
     // Queue configs.
     queues: Vec<QueueConfig>,
 
-    // ISR status (atomic for read-and-clear from &self).
-    isr_status: AtomicU8,
-
     // BAR GPAs.
     bar0_gpa: u64,
     bar2_gpa: u64,
@@ -144,9 +157,6 @@ pub struct VirtioPciDevice {
     activated: bool,
     activation: Option<VirtioDeviceHandle>,
     host: Option<Arc<dyn VirtioDeviceHost>>,
-
-    // MSI-X notifier (VMM provides real implementation, tests use NoopNotifier).
-    notifier: Arc<dyn MsixNotifier>,
 
     // Retained kick clones so the MMIO notify path can signal queue workers.
     queue_kicks: Vec<Kick>,
@@ -160,7 +170,6 @@ impl std::fmt::Debug for VirtioPciDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VirtioPciDevice")
             .field("config", &self.config)
-            .field("msix_table", &self.msix_table)
             .field("msix_cap_reg", &self.msix_cap_reg)
             .field("device_feature_select", &self.device_feature_select)
             .field("driver_feature_select", &self.driver_feature_select)
@@ -170,7 +179,6 @@ impl std::fmt::Debug for VirtioPciDevice {
             .field("queue_select", &self.queue_select)
             .field("msix_config_vector", &self.msix_config_vector)
             .field("queues", &self.queues)
-            .field("isr_status", &self.isr_status)
             .field("bar0_gpa", &self.bar0_gpa)
             .field("bar2_gpa", &self.bar2_gpa)
             .field("activated", &self.activated)
@@ -297,7 +305,12 @@ impl VirtioPciDevice {
         Self {
             device,
             config,
-            msix_table,
+            completion: Arc::new(Mutex::new(CompletionState {
+                table: msix_table,
+                vectors: vec![0xffff; num_queues],
+                isr: 0,
+                notifier,
+            })),
             msix_cap_reg,
             device_feature_select: 0,
             driver_feature_select: 0,
@@ -307,13 +320,11 @@ impl VirtioPciDevice {
             queue_select: 0,
             msix_config_vector: 0xFFFF,
             queues,
-            isr_status: AtomicU8::new(0),
             bar0_gpa,
             bar2_gpa,
             activated: false,
             activation: None,
             host: None,
-            notifier,
             queue_kicks: Vec::new(),
             device_features,
             num_queues: num_queues as u16,
@@ -326,7 +337,7 @@ impl VirtioPciDevice {
     }
 
     pub fn set_notifier(&mut self, notifier: Arc<dyn MsixNotifier>) {
-        self.notifier = notifier;
+        self.completion.lock().expect("completion mutex").notifier = notifier;
     }
 
     /// Return a clone of the inner `Arc<Mutex<Box<dyn VirtioDevice>>>`.
@@ -354,7 +365,7 @@ impl VirtioPciDevice {
 
     /// Set the ISR status bits (used by device to signal interrupts).
     pub fn set_isr(&self, value: u8) {
-        self.isr_status.store(value, Ordering::Release);
+        self.completion.lock().expect("completion mutex").isr = value;
     }
 
     /// Read from the PCI configuration space (dword index).
@@ -377,7 +388,11 @@ impl VirtioPciDevice {
             let write_end = offset as usize + data.len();
             if write_end > 2 {
                 let msg_ctl = (self.config.read_reg(self.msix_cap_reg) >> 16) as u16;
-                self.msix_table.write_msg_ctl(msg_ctl, &*self.notifier);
+                let mut state = self.completion.lock().expect("completion mutex");
+                let CompletionState {
+                    table, notifier, ..
+                } = &mut *state;
+                table.write_msg_ctl(msg_ctl, &**notifier);
             }
         }
     }
@@ -389,7 +404,12 @@ impl VirtioPciDevice {
                 self.bar0_read(offset, data);
                 true
             }
-            2 => self.msix_table.bar_read(2, offset, data),
+            2 => self
+                .completion
+                .lock()
+                .expect("completion mutex")
+                .table
+                .bar_read(2, offset, data),
             _ => false,
         }
     }
@@ -402,7 +422,13 @@ impl VirtioPciDevice {
                 self.bar0_write(offset, data);
                 true
             }
-            2 => self.msix_table.bar_write(2, offset, data, &*self.notifier),
+            2 => {
+                let mut state = self.completion.lock().expect("completion mutex");
+                let CompletionState {
+                    table, notifier, ..
+                } = &mut *state;
+                table.bar_write(2, offset, data, &**notifier)
+            }
             _ => false,
         }
     }
@@ -415,7 +441,11 @@ impl VirtioPciDevice {
     /// Number of MSI-X table entries this device exposes. The PCI root sums
     /// these across slots to size the shared message-interrupt domain.
     pub fn msix_vectors(&self) -> u16 {
-        self.msix_table.num_vectors()
+        self.completion
+            .lock()
+            .expect("completion mutex")
+            .table
+            .num_vectors()
     }
 
     // --- BAR 0 dispatch ---
@@ -502,7 +532,9 @@ impl VirtioPciDevice {
         let qc = &self.queues[qi];
         match offset {
             CC_QUEUE_SIZE => qc.queue.size as u32,
-            CC_QUEUE_MSIX_VECTOR => qc.msix_vector as u32,
+            CC_QUEUE_MSIX_VECTOR => {
+                self.completion.lock().expect("completion mutex").vectors[qi] as u32
+            }
             CC_QUEUE_ENABLE => qc.enabled as u32,
             CC_QUEUE_NOTIFY_OFF => qi as u32,
             CC_QUEUE_DESC_LO => qc.desc_lo,
@@ -560,7 +592,8 @@ impl VirtioPciDevice {
             CC_QUEUE_SIZE => qc.queue.size = val as u16,
             CC_QUEUE_MSIX_VECTOR => {
                 let vector = val as u16;
-                qc.msix_vector = if vector < self.msix_table.num_vectors() {
+                let mut state = self.completion.lock().expect("completion mutex");
+                state.vectors[qi] = if vector < state.table.num_vectors() {
                     vector
                 } else {
                     0xFFFF // VIRTIO_MSI_NO_VECTOR
@@ -594,7 +627,7 @@ impl VirtioPciDevice {
             log::info!("virtio-pci: device reset");
             self.activation.take();
             self.queue_kicks.clear();
-            self.isr_status.store(0, Ordering::Release);
+            self.completion.lock().expect("completion mutex").reset();
             self.device_status = 0;
             self.driver_features = 0;
             self.device_feature_select = 0;
@@ -635,17 +668,22 @@ impl VirtioPciDevice {
             self.bar0_gpa,
             self.bar2_gpa
         );
-        // Collect queues and create portable queue kicks.
-        let enabled_queues: Vec<&QueueConfig> =
-            self.queues.iter().filter(|qc| qc.enabled).collect();
-        let queues: Vec<Queue> = enabled_queues
-            .iter()
-            .map(|qc| QueueConfig::to_queue(qc))
-            .collect();
-        let queue_interrupts = enabled_queues
-            .iter()
-            .map(|qc| self.notifier.interrupt_for(qc.msix_vector))
-            .collect();
+        let mut queues = Vec::new();
+        let mut queue_interrupts = Vec::new();
+        for (index, config) in self.queues.iter().enumerate().filter(|(_, qc)| qc.enabled) {
+            let vector = self.completion.lock().expect("completion mutex").vectors[index];
+            queues.push(config.to_queue(vector));
+            let completion = Arc::clone(&self.completion);
+            queue_interrupts.push(Some(dillo_mmio::Interrupt::from_fn(move || {
+                let mut state = completion.lock().expect("completion mutex");
+                state.isr |= 1;
+                let vector = state.vectors[index];
+                let CompletionState {
+                    table, notifier, ..
+                } = &mut *state;
+                table.signal(vector, &**notifier);
+            })));
+        }
 
         let mut kicks: Vec<Kick> = Vec::new();
         for _ in &queues {
@@ -691,7 +729,7 @@ impl VirtioPciDevice {
     fn isr_read(&self, _offset: u64, data: &mut [u8]) {
         // Reading ISR atomically swaps and clears (read-and-clear per spec).
         if !data.is_empty() {
-            data[0] = self.isr_status.swap(0, Ordering::AcqRel);
+            data[0] = std::mem::take(&mut self.completion.lock().expect("completion mutex").isr);
         }
         for d in data.iter_mut().skip(1) {
             *d = 0;

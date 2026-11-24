@@ -816,6 +816,8 @@ dependencies = [
  "dillo-machine-unix",
  "dillo-machine-whp",
  "dillo-mmio",
+ "dillo-pci",
+ "dillo-pci-virtio",
  "dillo-storage",
  "dillo-virtio",
  "dillo-virtio-blk",

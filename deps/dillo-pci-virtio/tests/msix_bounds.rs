@@ -149,6 +149,19 @@ fn queue_vectors_stay_within_each_function_on_activation() {
 
         let mut expected = Vec::new();
         for (slot, local) in (1..=2).zip(locals) {
+            let mut cap = root.config_read(0, slot, 0, 0x34 / 4) & 0xff;
+            while cap != 0 {
+                let value = root.config_read(0, slot, 0, cap as usize / 4);
+                if value as u8 == dillo_pci::CAP_ID_MSIX {
+                    root.config_write(0, slot, 0, cap as usize / 4, 2, &0x8000u16.to_le_bytes());
+                    break;
+                }
+                cap = (value >> 8) & 0xff;
+            }
+            for vector in 0..2 {
+                root.bar_write(slot, 2, vector * 16 + 12, &0u32.to_le_bytes())
+                    .unwrap();
+            }
             // Negotiate VERSION_1 and enable queue 0 through the actual BAR path.
             root.bar_write(slot, 0, 0x08, &1u32.to_le_bytes()).unwrap();
             root.bar_write(slot, 0, 0x0c, &1u32.to_le_bytes()).unwrap();
@@ -168,7 +181,9 @@ fn queue_vectors_stay_within_each_function_on_activation() {
             }
         }
 
-        assert_eq!(*activations.lock().unwrap(), locals.map(|local| local < 2));
+        // Queue callbacks stay bound while the guest changes vector selection;
+        // invalid selections still cannot reach the native domain below.
+        assert_eq!(*activations.lock().unwrap(), vec![true, true]);
         assert_eq!(
             *domain.lookups.lock().unwrap(),
             expected,
