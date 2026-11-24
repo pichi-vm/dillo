@@ -189,6 +189,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(error) => assert_eq!(error, HypervisorError::Denied),
                 }
             }
+            #[cfg(target_os = "windows")]
+            if mode == "whp-denial" {
+                assert_eq!(
+                    whp_partition(),
+                    Err(windows_sys::Win32::Foundation::E_ACCESSDENIED),
+                    "worker must lack WHP partition authority"
+                );
+            }
             if matches!(mode, "oversized" | "forged-resource") {
                 // A compromised worker can write its pipe directly. Neither
                 // claimed length nor numeric resource count is authority.
@@ -236,6 +244,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("block process: signed worker denied Hypervisor VM creation");
         return Ok(());
     }
+    #[cfg(target_os = "windows")]
+    if std::env::args().nth(1).as_deref() == Some("--require-whp-denial") {
+        assert_eq!(whp_partition(), Ok(()), "parent WHP positive control");
+        exercise("whp-denial")?;
+        println!("block process: worker denied WHP partition creation");
+        return Ok(());
+    }
     for mode in [
         "normal",
         "qcow2",
@@ -259,6 +274,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "block process: confinement, raw/qcow2 I/O, quiescence, reset, crash and deadline passed"
     );
     Ok(())
+}
+
+// WHvCreatePartition only allocates a configuration object. Setup must be
+// attempted to check authority to create an actual hypervisor partition.
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+fn whp_partition() -> Result<(), i32> {
+    use windows_sys::Win32::System::Hypervisor::{
+        WHV_PARTITION_PROPERTY, WHvCreatePartition, WHvDeletePartition,
+        WHvPartitionPropertyCodeProcessorCount, WHvSetPartitionProperty, WHvSetupPartition,
+    };
+    let mut partition = 0;
+    // SAFETY: a valid output pointer; after success this fixture alone owns
+    // the partition, configures a correctly sized property, and deletes it on
+    // both setup success and failure. No vCPUs or RAM mappings are created.
+    unsafe {
+        let result = WHvCreatePartition(&raw mut partition);
+        if result < 0 {
+            return Err(result);
+        }
+        let property = WHV_PARTITION_PROPERTY { ProcessorCount: 1 };
+        let result = WHvSetPartitionProperty(
+            partition,
+            WHvPartitionPropertyCodeProcessorCount,
+            (&raw const property).cast(),
+            size_of::<WHV_PARTITION_PROPERTY>() as u32,
+        );
+        let result = if result < 0 {
+            result
+        } else {
+            WHvSetupPartition(partition)
+        };
+        assert_eq!(WHvDeletePartition(partition), 0, "retire WHP probe");
+        if result < 0 { Err(result) } else { Ok(()) }
+    }
 }
 
 fn memory() -> io::Result<(GuestMemoryMmap, MemoryExport)> {
