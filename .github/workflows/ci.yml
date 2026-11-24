@@ -199,16 +199,26 @@ jobs:
           CARGO_BUILD_RUSTFLAGS: "-D warnings"
         run: cargo test --workspace --exclude snuffler
 
-      - name: Worker loader dependencies (Windows failure)
+      - name: Diagnose worker loader (Windows failure)
         if: failure() && runner.os == 'Windows'
+        timeout-minutes: 3
         shell: pwsh
         run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $installation = & $vswhere -latest -products '*' -property installationPath
-          $dumpbin = Get-ChildItem "$installation\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
-          Get-ChildItem target\debug\deps\block_process-*.exe | ForEach-Object {
-            & $dumpbin.FullName /dependents $_.FullName
+          $tools = "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64"
+          $binary = Get-ChildItem target\debug\deps\block_process-*.exe | Select-Object -First 1
+          & "$tools\gflags.exe" /i dillo.exe +sls
+          try {
+            & "$tools\cdb.exe" -o -g -G -logo worker-loader.log $binary.FullName *> $null
+            Get-Content worker-loader.log -Tail 120
+          } finally {
+            & "$tools\gflags.exe" /i dillo.exe -sls
           }
+
+      - uses: actions/upload-artifact@v4
+        if: failure() && runner.os == 'Windows'
+        with:
+          name: windows-worker-loader
+          path: worker-loader.log
 
       - name: Signed HVF native ownership tests
         if: runner.os == 'macOS'
