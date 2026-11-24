@@ -153,9 +153,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 File::open(forbidden).is_err(),
                 "worker opened an unrelated host file"
             );
+            let address = config["network"].as_str().unwrap().parse().unwrap();
             assert!(
-                std::net::TcpListener::bind("127.0.0.1:0").is_err(),
-                "worker created a network socket"
+                std::net::TcpStream::connect_timeout(&address, Duration::from_secs(1)).is_err(),
+                "worker connected to an unauthorized host endpoint"
             );
             assert!(
                 std::process::Command::new(std::env::args_os().next().unwrap())
@@ -205,6 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .into_iter()
     .chain(cfg!(target_os = "linux").then_some("native"))
     {
+        eprintln!("block process: {mode}");
         exercise(mode)?;
     }
     println!(
@@ -328,6 +330,11 @@ fn activation(
 
 fn exercise(mode: &str) -> io::Result<()> {
     let forbidden = tempfile::NamedTempFile::new()?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let network = listener.local_addr()?;
+    // Establish a live endpoint, so refusal cannot pass through lack of a
+    // listener. AppContainer enforces communication rather than socket creation.
+    drop(std::net::TcpStream::connect(network)?);
     let disk = tempfile::tempfile()?;
     if mode == "qcow2" {
         use imago::FormatCreateBuilder;
@@ -353,7 +360,7 @@ fn exercise(mode: &str) -> io::Result<()> {
         None
     };
     let prepared = dillo_worker::Prepared::new(
-        &serde_json::json!({"mode":mode,"forbidden":forbidden.path()}),
+        &serde_json::json!({"mode":mode,"forbidden":forbidden.path(),"network":network}),
         files,
     )?;
     let startup = Instant::now();
