@@ -241,8 +241,10 @@ jobs:
           ')"
           test -x "$worker"
           codesign --force --sign - --entitlements "$entitlements" "$worker"
-          "$worker" --require-hvf-denial
-          "$binary" --ignored --nocapture --test-threads=1 hypervisor::tests::hvf_
+          failed=0
+          "$worker" --require-hvf-denial || failed=1
+          "$binary" --ignored --nocapture --test-threads=1 hypervisor::tests::hvf_ || failed=1
+          exit "$failed"
 
       - name: Reserve hugepages for guest RAM (Linux/KVM)
         if: runner.os == 'Linux'
