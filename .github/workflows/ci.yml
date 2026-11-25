@@ -222,13 +222,12 @@ jobs:
           test -x "$binary"
           entitlements="$(mktemp)"
           trap 'rm -f "$entitlements"' EXIT
-          cat > "$entitlements" <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict><key>com.apple.security.hypervisor</key><true/></dict>
-          </plist>
-          EOF
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0">' \
+            '<dict><key>com.apple.security.hypervisor</key><true/></dict>' \
+            '</plist>' > "$entitlements"
           codesign --force --sign - --entitlements "$entitlements" "$binary"
           "$binary" --ignored --test-threads=1 hypervisor::tests::hvf_
           worker="$(cargo test --locked -p dillo-worker --test block_process --no-run --message-format=json \
