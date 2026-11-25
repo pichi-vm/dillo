@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! macOS worker services; no Hypervisor.framework object enters a worker.
+//! macOS worker services; no parent Hypervisor.framework object enters a worker.
 
 use std::io;
 

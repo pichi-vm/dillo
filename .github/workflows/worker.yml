@@ -21,5 +21,3 @@ jobs:
         run: rustup toolchain install nightly-2026-07-06 --profile minimal --component rust-src
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked -p dillo-worker --test block_process
-      - if: runner.os == 'Windows'
-        run: cargo test --locked -p dillo-worker --test block_process -- --require-whp-denial

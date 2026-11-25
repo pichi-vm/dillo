@@ -339,7 +339,8 @@ The parent handles transport registers locally. The backend supplies device
 capabilities and device-specific configuration, processes activated queues,
 and reports configuration changes and completion events. Configuration access
 may require IPC. Native instruction decoding and completion remain with the
-CPU runner; device workers receive no general CPU-state or VM-control API.
+CPU runner; device workers receive no general CPU-state or VM-control API for
+the parent VM.
 
 Reads return the required value before native instruction completion. Writes,
 configuration changes and notifications preserve their protocol ordering.
@@ -361,10 +362,14 @@ not be retried as though it had no effect.
 #### PROCESS-004 — Restrict native resources before admitting guest input
 
 Each worker receives only its machine's permitted memory, bound event and
-control endpoints, and authorized host resources. VM, vCPU, debugger and
-unrestricted process-control handles remain outside device workers. Machine
-validates registration requests against declared device resources and rejects
-attempts to address another machine or acquire unrelated host authority.
+control endpoints, and authorized host resources. The parent VM's native and
+debugger handles, and unrestricted process-control handles, remain outside
+device workers. Machine validates registration requests against declared
+device resources and rejects access to ungranted resources or control over
+other machines.
+
+Workers may retain OS-granted authority to create independent VMs. This grants
+no access to the parent VM's native objects or control endpoints.
 
 Each host backend enforces a device-specific confinement policy:
 
