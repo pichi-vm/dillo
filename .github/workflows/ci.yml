@@ -229,7 +229,6 @@ jobs:
             '<dict><key>com.apple.security.hypervisor</key><true/></dict>' \
             '</plist>' > "$entitlements"
           codesign --force --sign - --entitlements "$entitlements" "$binary"
-          "$binary" --ignored --test-threads=1 hypervisor::tests::hvf_
           worker="$(cargo test --locked -p dillo-worker --test block_process --no-run --message-format=json \
             | python3 -c '
           import json, sys
@@ -243,6 +242,7 @@ jobs:
           test -x "$worker"
           codesign --force --sign - --entitlements "$entitlements" "$worker"
           "$worker" --require-hvf-denial
+          "$binary" --ignored --nocapture --test-threads=1 hypervisor::tests::hvf_
 
       - name: Reserve hugepages for guest RAM (Linux/KVM)
         if: runner.os == 'Linux'

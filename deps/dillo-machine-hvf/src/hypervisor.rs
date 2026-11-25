@@ -719,9 +719,13 @@ mod tests {
     #[test]
     #[ignore = "requires a codesigned binary with com.apple.security.hypervisor; run via the codesigned harness with --ignored"]
     fn hvf_exit_decoding_roundtrip() {
+        if !native_test_child("hypervisor::tests::hvf_exit_decoding_roundtrip") {
+            return;
+        }
         let _native_test = NATIVE_TESTS.lock().unwrap();
         let base = RAM_BASE;
         let mmio = 0x0C10_0000u64; // unmapped IPA in the device band
+        eprintln!("HVF roundtrip: creating native VM");
         let malformed = Vm::new(&gic(), 36)
             .unwrap()
             .with_memory(&[RamRange {
@@ -747,6 +751,7 @@ mod tests {
         let vm = vm
             .with_memory(&ranges)
             .expect("successful initial RAM registration after checked rollback");
+        eprintln!("HVF roundtrip: shared RAM registered");
 
         // hvc #0 ; ldr x1,[x2] ; str x1,[x2]
         let code: [u32; 3] = [0xd400_0002, 0xf940_0041, 0xf900_0041];
@@ -776,6 +781,7 @@ mod tests {
         let exported = vm.guest_memory().unwrap();
         let vcpu = vm.create_vcpu_current_thread().expect("create_vcpu");
         drop(vm);
+        eprintln!("HVF roundtrip: native vCPU created");
 
         // Only a host cancellation may become a successful stop.
         for ec in [0x16, 0x17] {
@@ -829,6 +835,7 @@ mod tests {
         vcpu.admit_arm_v8_0().unwrap();
         vcpu.inner.set_reg(Reg::PC, base + 0x100).unwrap();
         vcpu.set_gpr(1, base + 0x800).unwrap();
+        eprintln!("HVF roundtrip: entering register probe");
         assert!(matches!(
             vcpu.run().unwrap(),
             VmExit::Smccc {
@@ -930,6 +937,11 @@ mod tests {
     #[test]
     #[ignore = "requires a codesigned binary with com.apple.security.hypervisor"]
     fn hvf_partial_registration_preserves_first_native_map_until_retirement() {
+        if !native_test_child(
+            "hypervisor::tests::hvf_partial_registration_preserves_first_native_map_until_retirement",
+        ) {
+            return;
+        }
         let _native_test = NATIVE_TESTS.lock().unwrap();
         let vm = Vm::new(&gic(), 36).unwrap();
         let later = RAM_BASE + RAM_SIZE;
@@ -1044,7 +1056,7 @@ mod tests {
             return true;
         }
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--ignored", "--exact", name])
+            .args(["--ignored", "--exact", "--nocapture", name])
             .env(CHILD, name)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1054,13 +1066,14 @@ mod tests {
         if !matches!(finished, Ok(Some(_))) {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("{name} did not complete: {finished:?}");
         }
         let output = child.wait_with_output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            output.status.success() && stdout.contains("1 passed"),
-            "{stdout}{}",
+            matches!(finished, Ok(Some(_)))
+                && output.status.success()
+                && stdout.contains("1 passed"),
+            "{name}: {finished:?}\n{stdout}{}",
             String::from_utf8_lossy(&output.stderr)
         );
         false

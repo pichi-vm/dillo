@@ -236,10 +236,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().nth(1).as_deref() == Some("--require-hvf-denial") {
         // Prove this signed executable has working VM authority before the
         // same executable enters confinement as a fresh worker process.
+        eprintln!("block process: checking parent Hypervisor authority");
         VirtualMachine::new()
             .expect("parent must be able to create a Hypervisor VM")
             .try_destroy()
             .expect("retire parent probe VM");
+        eprintln!("block process: parent Hypervisor authority confirmed");
         exercise("hvf-denial")?;
         println!("block process: signed worker denied Hypervisor VM creation");
         return Ok(());
