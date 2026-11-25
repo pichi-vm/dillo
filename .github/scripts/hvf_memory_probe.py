@@ -94,11 +94,20 @@ int main(int argc, char **argv) {
         CHECK(hv_vcpu_get_sys_reg(cpu, HV_SYS_REG_SCTLR_EL1, &sctlr));
         CHECK(hv_vcpu_set_sys_reg(cpu, HV_SYS_REG_SCTLR_EL1, sctlr & ~0x02001005ULL));
     }
+    uint64_t execution_before, execution_after, cpsr, control;
+    CHECK(hv_vcpu_get_exec_time(cpu, &execution_before));
+    CHECK(hv_vcpu_get_reg(cpu, HV_REG_CPSR, &cpsr));
+    CHECK(hv_vcpu_get_sys_reg(cpu, HV_SYS_REG_SCTLR_EL1, &control));
+    printf("entry CPSR=0x%llx SCTLR_EL1=0x%llx\n",
+           (unsigned long long)cpsr, (unsigned long long)control);
     pthread_t watchdog;
     if (pthread_create(&watchdog, NULL, cancel_run, &cpu)) return 2;
     puts("entering guest");
     CHECK(hv_vcpu_run(cpu));
     pthread_join(watchdog, NULL);
+    CHECK(hv_vcpu_get_exec_time(cpu, &execution_after));
+    printf("execution ns before=%llu after=%llu\n",
+           (unsigned long long)execution_before, (unsigned long long)execution_after);
     uint64_t pc;
     CHECK(hv_vcpu_get_reg(cpu, HV_REG_PC, &pc));
     printf("exit reason=%u syndrome=0x%llx pc=0x%llx\n", exit->reason,
