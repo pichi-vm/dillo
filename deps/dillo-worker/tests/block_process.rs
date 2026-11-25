@@ -163,6 +163,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 File::open(forbidden).is_err(),
                 "worker opened an unrelated host file"
             );
+            #[cfg(target_os = "linux")]
+            {
+                use nix::libc;
+                use std::os::fd::AsRawFd;
+
+                let path = std::ffi::CString::new(forbidden).unwrap();
+                let mut metadata = std::mem::MaybeUninit::<libc::statx>::uninit();
+                // SAFETY: the path and output storage remain valid for the
+                // syscall; no output is read. An absolute path ignores dirfd.
+                #[allow(unsafe_code)]
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_statx,
+                        files[0].as_raw_fd(),
+                        path.as_ptr(),
+                        libc::AT_EMPTY_PATH,
+                        libc::STATX_BASIC_STATS,
+                        metadata.as_mut_ptr(),
+                    )
+                };
+                assert_eq!(result, -1, "worker queried unrelated host file metadata");
+            }
             let address = config["network"].as_str().unwrap().parse().unwrap();
             assert!(
                 std::net::TcpStream::connect_timeout(&address, Duration::from_secs(1)).is_err(),

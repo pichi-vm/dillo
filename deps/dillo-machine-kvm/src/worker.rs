@@ -23,6 +23,23 @@ impl dillo_machine::worker::WorkerHost for Worker {
 
     #[allow(unsafe_code)]
     unsafe fn bootstrap() -> io::Result<Box<dyn dillo_machine::worker::Channel>> {
+        use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
+
+        // statx resolves paths even with an authorized dirfd. Deny it before
+        // Rust's first metadata query so File::metadata selects fstat.
+        // Use EPERM: libc may emulate an ENOSYS statx with fstatat.
+        let filter: BpfProgram = SeccompFilter::new(
+            [(libc::SYS_statx, Vec::new())].into(),
+            SeccompAction::Allow,
+            SeccompAction::Errno(libc::EPERM as u32),
+            std::env::consts::ARCH
+                .try_into()
+                .map_err(io::Error::other)?,
+        )
+        .map_err(io::Error::other)?
+        .try_into()
+        .map_err(io::Error::other)?;
+        seccompiler::apply_filter_all_threads(&filter).map_err(io::Error::other)?;
         // SAFETY: the caller provides the dedicated process entry contract.
         unsafe { dillo_machine_unix::bootstrap() }
     }
@@ -139,12 +156,7 @@ fn confine(files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<
     for syscall in [libc::SYS_mmap, libc::SYS_mprotect] {
         rules.insert(syscall, vec![condition(2, libc::PROT_EXEC as u64, 0)?]);
     }
-    for syscall in [
-        libc::SYS_ftruncate,
-        libc::SYS_fallocate,
-        libc::SYS_fstatfs,
-        libc::SYS_statx,
-    ] {
+    for syscall in [libc::SYS_ftruncate, libc::SYS_fallocate, libc::SYS_fstatfs] {
         if !files.is_empty() {
             rules.insert(
                 syscall,
