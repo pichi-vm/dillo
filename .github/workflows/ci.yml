@@ -115,7 +115,7 @@ jobs:
             guest_musl: x86_64-unknown-linux-musl
           - name: linux-arm64       # Linux arm64 - full workspace + real KVM boot
             os: linux-arm64
-            runs_on: '["self-hosted","Linux","ARM64","bare-metal","aarch64","kvm"]'
+            runs_on: '["avrea-ubuntu-latest-arm-4-vcpu"]'
             guest_musl: aarch64-unknown-linux-musl
           - name: windows-2025      # Windows x86_64 - build + real WHP boot
             os: windows-2025
