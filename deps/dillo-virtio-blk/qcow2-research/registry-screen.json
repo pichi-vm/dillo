@@ -1,0 +1,1220 @@
+[
+  {
+    "crate": "qcow2",
+    "version": "0.1.2",
+    "repo": "https://github.com/vasi/qcow2-rs",
+    "description": "Reading qcow2 virtual disk images",
+    "source_hits": [
+      "src/bin/qcow2-dump.rs",
+      "src/error.rs",
+      "src/extension.rs",
+      "src/feature.rs",
+      "src/header.rs",
+      "src/int.rs",
+      "src/lib.rs",
+      "src/read.rs",
+      "tests/lib.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "qcow2-rs",
+    "version": "0.1.6",
+    "repo": "https://github.com/ublk-org/qcow2-rs.git",
+    "description": "A library for read/write qcow2 image in async/await",
+    "source_hits": [
+      "src/cache.rs",
+      "src/dev.rs",
+      "src/error.rs",
+      "src/helpers.rs",
+      "src/lib.rs",
+      "src/main.rs",
+      "src/meta.rs",
+      "src/ops.rs",
+      "src/sync_io.rs",
+      "src/tokio_io.rs",
+      "src/uring.rs",
+      "src/utils.rs",
+      "tests/basic.rs",
+      "tests/common/mod.rs",
+      "tests/qcow2_util.rs",
+      "tests/sync_io.rs",
+      "tests/uring_io.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "fstool",
+    "version": "0.5.2",
+    "repo": "https://github.com/KarpelesLab/fstool",
+    "description": "Build disk images and filesystems (ext2/3/4, MBR, GPT) from a directory tree and TOML spec, in the spirit of genext2fs.",
+    "source_hits": [
+      "src/bin/fstool/dd.rs",
+      "src/bin/fstool/main.rs",
+      "src/block/imageops/checksum.rs",
+      "src/block/imageops/convert.rs",
+      "src/block/luks/crypt.rs",
+      "src/block/luks/format.rs",
+      "src/block/mod.rs",
+      "src/block/qcow2/compress.rs",
+      "src/block/qcow2/crypto.rs",
+      "src/block/qcow2/header.rs",
+      "src/block/qcow2/l1l2.rs",
+      "src/block/qcow2/mod.rs",
+      "src/block/qcow2/refcount.rs",
+      "src/fs/ext/mod.rs",
+      "src/fs/ntfs/mod.rs",
+      "src/fs/ntfs/rw.rs",
+      "src/fs/ntfs/writer.rs",
+      "src/inspect.rs",
+      "src/lib.rs",
+      "src/repack.rs",
+      "src/spec.rs",
+      "tests/cli_external.rs",
+      "tests/ntfs_external.rs",
+      "tests/qcow2_external.rs",
+      "tests/reopen_mutate.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "virtdisk",
+    "version": "0.3.1",
+    "repo": "https://github.com/CaddyGlow/virtdisk",
+    "description": "Bounded virtual disk readers and offline image operations with explicit writable profiles",
+    "source_hits": [
+      "benches/conversion.rs",
+      "benches/io.rs",
+      "benches/lifecycle.rs",
+      "src/bin/virtdisk/capabilities_output.rs",
+      "src/bin/virtdisk/command.rs",
+      "src/bin/virtdisk/error_output.rs",
+      "src/bin/virtdisk/graph_output.rs",
+      "src/bin/virtdisk/metadata_output.rs",
+      "src/bin/virtdisk.rs",
+      "src/check.rs",
+      "src/compact.rs",
+      "src/forensic_metadata.rs",
+      "src/format.rs",
+      "src/graph.rs",
+      "src/graph_generation.rs",
+      "src/graph_manifest.rs",
+      "src/image.rs",
+      "src/image_writer.rs",
+      "src/info.rs",
+      "src/lib.rs",
+      "src/operation_context.rs",
+      "src/portable.rs",
+      "src/qcow2/snapshots.rs",
+      "src/qcow2/validation.rs",
+      "src/qcow2.rs",
+      "src/qcow2_allocate.rs",
+      "src/qcow2_journal.rs",
+      "src/qcow2_overlay.rs",
+      "src/qcow2_snapshot_write.rs",
+      "src/qcow2_write.rs",
+      "src/qcow2_writer.rs",
+      "src/write.rs",
+      "tests/check.rs",
+      "tests/check_context.rs",
+      "tests/check_limits.rs",
+      "tests/cli.rs",
+      "tests/compact.rs",
+      "tests/conversion_policy.rs",
+      "tests/discard.rs",
+      "tests/forensic_metadata.rs",
+      "tests/graph.rs",
+      "tests/graph_cli.rs",
+      "tests/graph_context.rs",
+      "tests/graph_delete_context.rs",
+      "tests/graph_generation.rs",
+      "tests/graph_limits.rs",
+      "tests/graph_manifest.rs",
+      "tests/graph_qcow2_format.rs",
+      "tests/graph_review.rs",
+      "tests/image.rs",
+      "tests/image_create.rs",
+      "tests/image_resize_native.rs",
+      "tests/image_writer.rs",
+      "tests/info.rs",
+      "tests/materialize_context.rs",
+      "tests/native_resize_context.rs",
+      "tests/native_snapshot_context.rs",
+      "tests/native_storage_context.rs",
+      "tests/operation_profile.rs",
+      "tests/portable_qcow_vdi.rs",
+      "tests/qcow2.rs",
+      "tests/qcow2_allocation_index.rs",
+      "tests/qcow2_backed_snapshots.rs",
+      "tests/qcow2_discard.rs",
+      "tests/qcow2_overlay.rs",
+      "tests/qcow2_overlay_writer.rs",
+      "tests/qcow2_pending.rs",
+      "tests/qcow2_refcount_growth.rs",
+      "tests/qcow2_resize.rs",
+      "tests/qcow2_shared_l2.rs",
+      "tests/qcow2_snapshot_lifecycle.rs",
+      "tests/qcow2_snapshot_resize.rs",
+      "tests/qcow2_snapshot_validation.rs",
+      "tests/qcow2_snapshot_write.rs",
+      "tests/qcow2_snapshots.rs",
+      "tests/qcow2_write.rs",
+      "tests/qcow2_writer.rs",
+      "tests/reader_open.rs",
+      "tests/recovery_review.rs",
+      "tests/resize_context.rs",
+      "tests/writer_open.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "rust-img-qcow2",
+    "version": "0.6.1",
+    "repo": "https://github.com/antimatter-studios/rust-img-qcow2",
+    "description": "Pure-Rust QCOW2 reader. Exposes a Rust API and a C ABI suitable for FFI from C/C++/Go/Swift.",
+    "source_hits": [
+      "examples/inspect.rs",
+      "src/capi.rs",
+      "src/cli/main.rs",
+      "src/cli/qcow2/img.rs",
+      "src/cli/qcow2/mod.rs",
+      "src/cli/qcow2/size.rs",
+      "src/error.rs",
+      "src/header.rs",
+      "src/lib.rs",
+      "src/reader.rs",
+      "tests/changelog.rs",
+      "tests/ci_profile.rs",
+      "tests/cli_write.rs",
+      "tests/common/mod.rs",
+      "tests/feature_gated_targets.rs",
+      "tests/fuzz_decoders.rs",
+      "tests/header_names_the_built_library.rs",
+      "tests/qemu_validation.rs",
+      "tests/release_attestation.rs",
+      "tests/siblings_the_contract_promises.rs",
+      "tests/synthetic.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "qcow2-fuse",
+    "version": "0.1.1",
+    "repo": "https://github.com/vasi/qcow2-fuse",
+    "description": "Mounting qcow2 virtual disk images",
+    "source_hits": [
+      "src/fs.rs",
+      "src/fuse_util.rs",
+      "src/main.rs",
+      "src/opts.rs",
+      "src/util.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "bux-qcow2",
+    "version": "0.2.0",
+    "repo": "https://github.com/qntx/bux",
+    "description": "Pure Rust QCOW2 v3 image operations \u2014 create overlays, read headers, flatten backing chains, resize",
+    "source_hits": [
+      "src/chain.rs",
+      "src/error.rs",
+      "src/format.rs",
+      "src/header.rs",
+      "src/lib.rs",
+      "src/ops.rs",
+      "src/overlay.rs",
+      "tests/roundtrip.rs"
+    ],
+    "disposition": "image management subset; see research inventory"
+  },
+  {
+    "crate": "qcow2-forensic",
+    "version": "0.3.1",
+    "repo": "https://github.com/SecurityRonin/qcow2-forensic",
+    "description": "Forensic anomaly auditor for QCOW2 images \u2014 backing files, encryption, internal snapshots, dirty/corrupt feature bits as graded report::Finding, built on qcow2-core",
+    "source_hits": [
+      "src/lib.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "qcow2-core",
+    "version": "0.3.4",
+    "repo": "https://github.com/SecurityRonin/qcow2-forensic",
+    "description": "Pure-Rust read-only QCOW2 (QEMU Copy-On-Write v2/v3) disk image reader",
+    "source_hits": [
+      "src/error.rs",
+      "src/header.rs",
+      "src/lib.rs",
+      "src/refcount.rs",
+      "src/snapshots.rs",
+      "src/testutil.rs",
+      "src/vfs.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "msb-imago",
+    "version": "0.1.7",
+    "repo": "https://github.com/superradcompany/imago",
+    "description": "A library for accessing virtual machine disk images.",
+    "source_hits": [
+      "src/async_lru_cache.rs",
+      "src/file.rs",
+      "src/format/access.rs",
+      "src/format/builder.rs",
+      "src/format/drivers.rs",
+      "src/format/gate.rs",
+      "src/format/mod.rs",
+      "src/format/sync_wrappers.rs",
+      "src/lib.rs",
+      "src/macros/on_disk_struct.rs",
+      "src/qcow2/allocation.rs",
+      "src/qcow2/builder.rs",
+      "src/qcow2/cache.rs",
+      "src/qcow2/compressed.rs",
+      "src/qcow2/cow.rs",
+      "src/qcow2/io_func.rs",
+      "src/qcow2/mappings.rs",
+      "src/qcow2/metadata.rs",
+      "src/qcow2/mod.rs",
+      "src/qcow2/preallocation.rs",
+      "src/qcow2/sync_wrappers.rs",
+      "src/qcow2/types.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "vmrunner",
+    "version": "0.0.6-alpha.3",
+    "repo": "https://codeberg.org/drahnr/vmrunner.git",
+    "description": "micro-vm runner for testcases that require root or invasive IO",
+    "source_hits": [
+      "src/bin/build-krun-init-blob.rs",
+      "src/guest_init/build.rs",
+      "src/guest_init.rs",
+      "src/image/download.rs",
+      "src/image.rs",
+      "src/lib.rs",
+      "src/tests.rs",
+      "tests/async_macro.rs",
+      "tests/distro_vms.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "imago",
+    "version": "0.2.6",
+    "repo": "https://gitlab.com/hreitz/imago",
+    "description": "A library for accessing virtual machine disk images.",
+    "source_hits": [
+      "src/async_lru_cache.rs",
+      "src/file.rs",
+      "src/format/access.rs",
+      "src/format/builder.rs",
+      "src/format/drivers.rs",
+      "src/format/gate.rs",
+      "src/format/mod.rs",
+      "src/format/sync_wrappers.rs",
+      "src/lib.rs",
+      "src/macros/on_disk_struct.rs",
+      "src/qcow2/allocation.rs",
+      "src/qcow2/builder.rs",
+      "src/qcow2/cache.rs",
+      "src/qcow2/cancel_tests.rs",
+      "src/qcow2/compressed.rs",
+      "src/qcow2/cow.rs",
+      "src/qcow2/io_func.rs",
+      "src/qcow2/mappings.rs",
+      "src/qcow2/metadata.rs",
+      "src/qcow2/mod.rs",
+      "src/qcow2/preallocation.rs",
+      "src/qcow2/sync_wrappers.rs",
+      "src/qcow2/types.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "rimimg",
+    "version": "0.10.1",
+    "repo": "https://github.com/mkidv/rim",
+    "description": "Disk image and container formats for rim",
+    "source_hits": [
+      "src/convert.rs",
+      "src/format.rs",
+      "src/io.rs",
+      "src/lib.rs",
+      "src/qcow2.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "guestkit",
+    "version": "0.3.2",
+    "repo": "https://github.com/ssahani/guestkit",
+    "description": "Pure Rust VM disk toolkit with beautiful output, Windows registry parsing, and VM migration support",
+    "source_hits": [
+      "benches/operations.rs",
+      "examples/command_and_archive.rs",
+      "examples/convert_disk.rs",
+      "examples/inspect_vm.rs",
+      "examples/lvm_luks_demo.rs",
+      "examples/mount_and_explore.rs",
+      "examples/system_info.rs",
+      "src/cli/commands.rs",
+      "src/cli/errors.rs",
+      "src/cli/parallel.rs",
+      "src/cli/plan/apply.rs",
+      "src/cli/plan/export.rs",
+      "src/cli/plan/generator.rs",
+      "src/cli/plan/preview.rs",
+      "src/cli/plan/types.rs",
+      "src/converters/disk_converter.rs",
+      "src/core/diagnostics.rs",
+      "src/core/types.rs",
+      "src/detectors/guest_detector.rs",
+      "src/disk/loop_device.rs",
+      "src/disk/nbd.rs",
+      "src/disk/reader.rs",
+      "src/guestfs/builder.rs",
+      "src/guestfs/command.rs",
+      "src/guestfs/fstab_rewriter.rs",
+      "src/guestfs/handle.rs",
+      "src/guestfs/luks.rs",
+      "src/guestfs/mount.rs",
+      "src/lib.rs",
+      "src/main.rs",
+      "src/python.rs",
+      "tests/output_formats_test.rs"
+    ],
+    "disposition": "consumer, wrapper, or shared interface; no additional qcow2 engine"
+  },
+  {
+    "crate": "herolib-virt",
+    "version": "0.3.13",
+    "repo": "https://github.com/herolib/herolib_rust",
+    "description": "Virtualization and container management for herolib (buildah, nerdctl, kubernetes)",
+    "source_hits": [
+      "src/lib.rs",
+      "src/qcow2/mod.rs",
+      "src/qcow2/rhai.rs",
+      "src/rhai.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "vmrunner-sysroot",
+    "version": "0.0.6-alpha.3",
+    "repo": "https://codeberg.org/drahnr/vmrunner.git",
+    "description": "micro-vm runner sysroot extraction helpers",
+    "source_hits": [
+      "src/lib.rs",
+      "src/linux.rs",
+      "src/main.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "cartconf",
+    "version": "1.0.0",
+    "repo": "https://github.com/avocado-framework/cartconf",
+    "description": "Cartesian config varianter plugin for the Avocado framework",
+    "source_hits": [
+      "src/filters.rs",
+      "src/main.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "dsk-vm",
+    "version": "0.1.0",
+    "repo": "https://github.com/danifunker/rusty-backup",
+    "description": "Virtual-machine disk images: VHD (fixed / dynamic), VMDK (flat and sparse) and QCOW2, read, write and edit in place",
+    "source_hits": [
+      "src/lib.rs",
+      "src/qcow2.rs",
+      "src/qemu_img_test.rs",
+      "src/sparse.rs",
+      "src/vmdk_sparse.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "vmrunner-test-harness",
+    "version": "0.0.6-alpha.3",
+    "repo": "https://codeberg.org/drahnr/vmrunner.git",
+    "description": "micro-vm runner for testcases that require root or invasive IO - test harness",
+    "source_hits": [
+      "src/case.rs",
+      "src/core.rs",
+      "src/lib.rs",
+      "src/tests.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "qcow",
+    "version": "1.2.0",
+    "repo": "https://github.com/panda-re/qcow-rs",
+    "description": "A library for working with QEMU qcow images",
+    "source_hits": [
+      "src/dynamic_qcow.rs",
+      "src/error.rs",
+      "src/features.rs",
+      "src/header.rs",
+      "src/header_ext/feature_name.rs",
+      "src/header_ext/mod.rs",
+      "src/levels.rs",
+      "src/lib.rs",
+      "src/methods.rs",
+      "src/reader.rs",
+      "src/snapshots.rs",
+      "src/v1.rs",
+      "tests/parse.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "cloud-image-download",
+    "version": "0.5.12",
+    "repo": "https://github.com/dupgit/cloud-image-download",
+    "description": "Downloads cloud images (qcow2 qemu files for instance) to a directory",
+    "source_hits": [
+      "src/checksums.rs",
+      "src/download.rs",
+      "src/image_history.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "foundation_testbed",
+    "version": "0.0.3",
+    "repo": null,
+    "description": "Holistic test harness: QEMU/KVM VM testbed (vms) + wasm32 browser/Deno/Workers harness (wasm), feature-gated",
+    "source_hits": [
+      "tests/common/mod.rs",
+      "tests/e2e_tauri.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "vm-curator",
+    "version": "1.5.0",
+    "repo": "https://github.com/mroboff/vm-curator",
+    "description": "A TUI application to manage QEMU VM library",
+    "source_hits": [
+      "src/app.rs",
+      "src/commands/qemu_img.rs",
+      "src/fs.rs",
+      "src/ui/mod.rs",
+      "src/ui/screens/create_wizard.rs",
+      "src/ui/screens/management.rs",
+      "src/ui/screens/resize_disk_picker.rs",
+      "src/vm/create.rs",
+      "src/vm/import.rs",
+      "src/vm/launch_parser.rs",
+      "src/vm/lifecycle.rs",
+      "src/vm/qemu_config.rs",
+      "src/vm/single_gpu_scripts.rs",
+      "src/vm/snapshot.rs",
+      "src/vm/tests/create.rs",
+      "src/vm/tests/import.rs",
+      "src/vm/tests/launch_parser.rs",
+      "src/vm/tests/lifecycle.rs",
+      "src/vm/tests/snapshot.rs",
+      "src/wizard_types.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "abt",
+    "version": "1.7.1",
+    "repo": "https://github.com/nervosys/AgenticBlockTransfer",
+    "description": "AgenticBlockTransfer \u2014 agentic-first CLI successor to dd, human-first GUI/TUI successor to balenaEtcher, Ventoy, Rufus, Fedora Media Writer, and rpi-imager",
+    "source_hits": [
+      "src/cli/commands/info.rs",
+      "src/cli/mod.rs",
+      "src/core/image.rs",
+      "src/core/mod.rs",
+      "src/core/plugin.rs",
+      "src/core/qcow2.rs",
+      "src/core/types.rs",
+      "src/core/wim.rs",
+      "src/gui/mod.rs",
+      "src/mcp/mod.rs",
+      "src/ontology/mod.rs",
+      "src/ontology/openapi.rs",
+      "src/tui/mod.rs",
+      "tests/core_tests.rs",
+      "tests/verification_proptest.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "hf-cli",
+    "version": "0.1.0",
+    "repo": "https://github.com/Unkno394/MellCore",
+    "description": "Local HoneyForge honeypot lifecycle CLI",
+    "source_hits": [
+      "src/high_local.rs",
+      "src/main.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "ibt",
+    "version": "2.0.0",
+    "repo": "https://github.com/nervosys/IronBlockTransfer",
+    "description": "IronBlockTransfer \u2014 agentic-first CLI successor to dd, human-first GUI/TUI successor to balenaEtcher, Ventoy, Rufus, Fedora Media Writer, and rpi-imager",
+    "source_hits": [
+      "src/cli/commands/info.rs",
+      "src/cli/mod.rs",
+      "src/core/image.rs",
+      "src/core/mod.rs",
+      "src/core/plugin.rs",
+      "src/core/qcow2.rs",
+      "src/core/types.rs",
+      "src/core/wim.rs",
+      "src/gui/mod.rs",
+      "src/mcp/mod.rs",
+      "src/ontology/mod.rs",
+      "src/ontology/openapi.rs",
+      "src/tui/mod.rs",
+      "tests/core_tests.rs",
+      "tests/verification_proptest.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "vhost-device-vsock",
+    "version": "0.3.0",
+    "repo": "https://github.com/rust-vmm/vhost-device",
+    "description": "A virtio-vsock device using the vhost-user protocol.",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "forensic-testgate",
+    "version": "0.1.0",
+    "repo": "https://github.com/SecurityRonin/forensic-testgate",
+    "description": "Loud-by-construction environment gates for oracle-backed tests \u2014 a skipped differential test can never pass silently.",
+    "source_hits": [
+      "src/lib.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "vmspect",
+    "version": "0.9.0",
+    "repo": "https://example.invalid/vmspect",
+    "description": "Blazing-fast static inspection, forensic analysis and information extraction library for virtual machine disk images (VMDK, RAW, QCOW2, VHD, VHDX, VDI).",
+    "source_hits": [
+      "src/bin/vmspect.rs",
+      "src/lib.rs",
+      "src/models/image.rs",
+      "src/vms/discovery.rs",
+      "src/vms/stream.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "qcow-cli",
+    "version": "0.3.1",
+    "repo": "https://github.com/panda-re/qcow-rs",
+    "description": "A CLI for working with qemu qcow files",
+    "source_hits": [
+      "src/args.rs",
+      "src/lib.rs",
+      "src/main.rs",
+      "src/output/file.rs",
+      "src/output/info.rs",
+      "src/output/mod.rs",
+      "src/output/partitions.rs",
+      "src/output/tree.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "isomage",
+    "version": "2.1.0",
+    "repo": "https://github.com/JackDanger/isomage",
+    "description": "Pure-Rust reader for ISO 9660, UDF, FAT, ext2/3/4, NTFS, HFS+, SquashFS, ZIP, TAR, and more. No unsafe, no runtime deps.",
+    "source_hits": [
+      "src/formats/mod.rs",
+      "src/formats/qcow2.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "disk-forensic",
+    "version": "0.11.7",
+    "repo": "https://github.com/SecurityRonin/disk-forensic",
+    "description": "Forensic disk-image orchestrator \u2014 decodes E01/VMDK/VHDX/VHD/QCOW2/DMG containers, auto-detects MBR/GPT/APM, and routes ISO 9660 to filesystem analysis",
+    "source_hits": [
+      "src/bin/disk4n6.rs",
+      "src/container.rs",
+      "src/lib.rs",
+      "tests/container_tests.rs",
+      "tests/decode_error_tests.rs",
+      "tests/open_tests.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "rgx-adapters-archive",
+    "version": "0.1.10",
+    "repo": "https://github.com/danalec/rgx",
+    "description": "rgx adapters: zip, tar, cpio, 7z, single-file decompressors",
+    "source_hits": [
+      "src/images.rs",
+      "src/lib.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "xhfs-core",
+    "version": "0.6.6",
+    "repo": "https://codeberg.org/futureg-lab/xhfs",
+    "description": "Bruteforce your way into storing files anywhere across an arbitrary combination of arbitrary devices.",
+    "source_hits": [
+      "src/device/fs_qcow2_device.rs",
+      "src/device/mod.rs",
+      "src/tests/devices.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "rgy-vendored-adapters-archive",
+    "version": "0.1.9",
+    "repo": "https://github.com/danalec/rgy",
+    "description": "rgx adapters: zip, tar, cpio, 7z, single-file decompressors",
+    "source_hits": [
+      "src/images.rs",
+      "src/lib.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "vmrunner-macros",
+    "version": "0.0.6-alpha.3",
+    "repo": "https://codeberg.org/drahnr/vmrunner.git",
+    "description": "micro-vm runner for testcases that require root or invasive IO - macros",
+    "source_hits": [
+      "src/lib.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "xhfs",
+    "version": "0.6.6",
+    "repo": "https://codeberg.org/futureg-lab/xhfs",
+    "description": "Bruteforce your way into storing files anywhere across an arbitrary combination of arbitrary devices.",
+    "source_hits": [
+      "src/interface/cli/init.rs",
+      "src/interface/config.rs",
+      "src/tests.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "rimcli",
+    "version": "0.10.1",
+    "repo": "https://github.com/mkidv/rim",
+    "description": "Unified CLI for rim",
+    "source_hits": [
+      "src/cli.rs",
+      "tests/copy_tests.rs"
+    ],
+    "disposition": "consumer, wrapper, or shared interface; no additional qcow2 engine"
+  },
+  {
+    "crate": "zic-rs-vendor-oracle-lab",
+    "version": "0.1.0",
+    "repo": "https://github.com/infinityabundance/zic-rs-vendor-oracle-lab",
+    "description": "Companion crate for the external zic-rs vendor-oracle lab: stable pointers to the evidence-generation harness that produces vendor-oracle-receipt-v1 receipts admitted by the zic-rs compiler.",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "ewf",
+    "version": "0.4.10",
+    "repo": "https://github.com/SecurityRonin/ewf-forensic",
+    "description": "Pure Rust reader for Expert Witness Format (E01/EWF) forensic disk images",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "vmdk-core",
+    "version": "0.8.4",
+    "repo": "https://github.com/SecurityRonin/vmdk-forensic",
+    "description": "Pure-Rust read-only VMware VMDK disk image reader (monolithicSparse, streamOptimized, twoGbMaxExtentFlat/Sparse, monolithicFlat)",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "dar-core",
+    "version": "0.7.2",
+    "repo": "https://github.com/SecurityRonin/dar-forensic",
+    "description": "Pure-Rust read-only parser for Denis Corbin DAR (Disk ARchiver) archives, including the Passware Kit Mobile variant; hardened and fuzz-tested against malicious input.",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "rublk",
+    "version": "0.2.15",
+    "repo": "https://github.com/ublk-org/rublk",
+    "description": "Rust ublk generic targets",
+    "source_hits": [
+      "src/args.rs",
+      "src/main.rs",
+      "src/qcow2.rs",
+      "tests/basic.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "magical_rs",
+    "version": "0.6.5",
+    "repo": "https://github.com/reim-developer/magical_rs",
+    "description": "Rust framework for file recognition, aiming for high extensibility and customization.",
+    "source_hits": [
+      "src/magical/kinds_meta.rs",
+      "src/magical/magic.rs",
+      "src/magical/signatures.rs",
+      "src/magical/signatures_ext.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "remanence",
+    "version": "0.1.0-alpha.1",
+    "repo": "https://github.com/ferroteca/remanence-lib",
+    "description": "Self-contained disk image analysis library",
+    "source_hits": [
+      "src/codec/inflate.rs",
+      "src/image/adapters.rs",
+      "src/image/mod.rs",
+      "src/image/qcow2.rs",
+      "src/image/vdi.rs",
+      "src/io/journal.rs",
+      "src/io/source.rs",
+      "src/lib.rs",
+      "src/model/device_type.rs",
+      "src/model/discovery.rs",
+      "src/model/disk/commit.rs",
+      "src/model/disk/fixtures.rs",
+      "src/model/disk/mod.rs",
+      "src/model/disk/recognition.rs",
+      "src/model/disk/state.rs",
+      "src/model/media.rs",
+      "src/model/pools.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "vmdk",
+    "version": "0.0.0",
+    "repo": "https://github.com/SecurityRonin/vmdk",
+    "description": "Pure-Rust read-only VMware VMDK disk image reader (monolithicSparse, streamOptimized, twoGbMaxExtentFlat/Sparse, monolithicFlat)",
+    "error": "HTTP Error 403: ",
+    "disposition": "reserved VMDK crate 0.0.0, not a qcow2 engine; archive unavailable (403)"
+  },
+  {
+    "crate": "dar-forensic",
+    "version": "0.8.2",
+    "repo": "https://github.com/SecurityRonin/dar-forensic",
+    "description": "Forensic-grade reader and anomaly auditor for Denis Corbin DAR (Disk ARchiver) archives, including the Passware Kit Mobile variant; hardened and fuzz-tested against malicious input. Built on dar-core.",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "cui-cui",
+    "version": "0.17.0",
+    "repo": "https://gitlab.freedesktop.org/bentiss/cui-cui",
+    "description": "A TUI for visualizing and debugging CI pipelines (GitLab CI, GitHub Actions)",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "vmdk-cli",
+    "version": "0.8.4",
+    "repo": "https://github.com/SecurityRonin/vmdk-forensic",
+    "description": "CLI tool for inspecting VMDK disk images",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "mbr-forensic",
+    "version": "0.4.1",
+    "repo": "https://github.com/SecurityRonin/mbr-forensic",
+    "description": "Forensic MBR parser \u2014 structure, anomaly detection, gap analysis, slack-space carving, and filesystem fingerprinting",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "vmadm",
+    "version": "0.5.0",
+    "repo": "https://gitlab.com/larswirzenius/vmadm",
+    "description": "Administer virtual machines in local libvirt",
+    "source_hits": [
+      "src/spec.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "infer",
+    "version": "0.22.0",
+    "repo": "https://github.com/bojand/infer",
+    "description": "Small crate to infer file type based on magic number signatures",
+    "source_hits": [
+      "src/map.rs",
+      "src/matchers/app.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "libublk",
+    "version": "0.4.8",
+    "repo": "https://github.com/ublk-org/libublk-rs",
+    "description": "Library for building linux block device in userspace",
+    "source_hits": [
+      "src/io.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "am-fs-core",
+    "version": "0.2.24",
+    "repo": "https://github.com/antimatter-studios/rust-fs-core",
+    "description": "Renamed to rust-fs-core: this crate receives no further versions. Depend on rust-fs-core instead; the import is unchanged (use fs_core).",
+    "source_hits": [
+      "src/block.rs",
+      "src/cli/version.rs",
+      "src/error.rs",
+      "src/ffi.rs",
+      "tests/ci_profile.rs",
+      "tests/device_growth.rs",
+      "tests/output_budget.rs"
+    ],
+    "disposition": "consumer, wrapper, or shared interface; no additional qcow2 engine"
+  },
+  {
+    "crate": "rust-fs-core",
+    "version": "0.4.4",
+    "repo": "https://github.com/antimatter-studios/rust-fs-core",
+    "description": "Pure-Rust block-device framework \u2014 BlockRead/BlockDevice traits + FileDevice + CallbackDevice + LRU cache. Foundation crate for the rust-fs-* drivers and rust-img-* containers.",
+    "source_hits": [
+      "src/block.rs",
+      "src/cli/version.rs",
+      "src/error.rs",
+      "src/ffi.rs",
+      "tests/ci_profile.rs",
+      "tests/device_growth.rs",
+      "tests/output_budget.rs"
+    ],
+    "disposition": "consumer, wrapper, or shared interface; no additional qcow2 engine"
+  },
+  {
+    "crate": "cargo-ohos",
+    "version": "0.3.4",
+    "repo": "https://github.com/openharmony-rs/cargo-ohos",
+    "description": "Cargo subcommand to cross-compile Rust for OpenHarmony",
+    "source_hits": [
+      "src/emulator/instance.rs",
+      "src/emulator/qemu.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "boxlite",
+    "version": "0.12.0",
+    "repo": "https://github.com/boxlite-ai/boxlite",
+    "description": "Embeddable virtual machine runtime for secure, isolated code execution",
+    "source_hits": [
+      "examples/disk_attachment_test.rs",
+      "src/db/base_disk.rs",
+      "src/db/migration/v6_to_v7.rs",
+      "src/db/snapshot.rs",
+      "src/disk/base_disk.rs",
+      "src/disk/constants.rs",
+      "src/disk/mod.rs",
+      "src/disk/qcow2.rs",
+      "src/jailer/mod.rs",
+      "src/litebox/archive.rs",
+      "src/litebox/box_impl.rs",
+      "src/litebox/clone_export.rs",
+      "src/litebox/init/mod.rs",
+      "src/litebox/init/tasks/container_rootfs.rs",
+      "src/litebox/init/tasks/vmm_spawn.rs",
+      "src/litebox/init/types.rs",
+      "src/litebox/local_snapshot.rs",
+      "src/litebox/snapshot_mgr.rs",
+      "src/litebox/ssh_tests.rs",
+      "src/rootfs/guest.rs",
+      "src/runtime/import.rs",
+      "src/runtime/layout.rs",
+      "src/runtime/options.rs",
+      "src/runtime/rt_impl.rs",
+      "src/vmm/controller/shim.rs",
+      "src/vmm/krun/context.rs",
+      "src/vmm/mod.rs",
+      "src/volumes/guest_volume.rs",
+      "tests/import_export_benchmark.rs",
+      "tests/snapshot.rs"
+    ],
+    "disposition": "image management subset; see research inventory"
+  },
+  {
+    "crate": "coxswain-core",
+    "version": "2.35.1",
+    "repo": "https://github.com/mwo-dk/coxswain",
+    "description": "The shared core of Coxswain, the two-panel file manager: file operations with undo, archives, previews and text from documents, search by name, text and meaning, git, ZFS, config, themes and translations",
+    "source_hits": [
+      "src/config.rs",
+      "src/disk_image.rs",
+      "src/space.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "coxswain",
+    "version": "2.35.1",
+    "repo": "https://github.com/mwo-dk/coxswain",
+    "description": "Coxswain: a Norton Commander style file manager for the terminal",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "infer2",
+    "version": "0.21.1",
+    "repo": "https://github.com/ldclabs/infer2",
+    "description": "Small crate to infer file type based on magic number signatures",
+    "source_hits": [
+      "src/map.rs",
+      "src/matchers/app.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "rsemu",
+    "version": "0.0.8",
+    "repo": "https://github.com/KarpelesLab/rsemu",
+    "description": "A multiplatform emulator in pure Rust, built bottom-up on a generic framework.",
+    "source_hits": [
+      "src/bin/rsemu.rs",
+      "src/core/device.rs",
+      "src/dev/ata/disk.rs",
+      "src/dev/ata/mod.rs",
+      "src/dev/blk/image/tests.rs",
+      "src/dev/blk/image.rs",
+      "src/dev/blk/mod.rs",
+      "src/dev/medium.rs",
+      "src/dev/nvme/ctrl.rs",
+      "src/dev/nvme/mod.rs",
+      "src/dev/riscv/tests.rs",
+      "src/dev/scsi/disk.rs",
+      "src/dev/usb/msd.rs",
+      "src/dev/virtio/blk/tests.rs",
+      "src/dev/virtio/blk.rs",
+      "src/dev/virtio/mod.rs",
+      "src/host/signal.rs",
+      "src/machine/timeline.rs",
+      "tests/blk_ata_image.rs",
+      "tests/cli_interrupt.rs",
+      "tests/medium_contract.rs",
+      "tests/riscv_virtio_blk.rs"
+    ],
+    "disposition": "consumer, wrapper, or shared interface; no additional qcow2 engine"
+  },
+  {
+    "crate": "forensic-vfs-engine",
+    "version": "0.1.10",
+    "repo": "https://github.com/SecurityRonin/forensic-vfs-engine",
+    "description": "The forensic-vfs registry + resolver: one Vfs::open(path) that detects the container/volume/filesystem stack of a piece of evidence and mounts a read-only dyn FileSystem.",
+    "source_hits": [
+      "src/lib.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "exav-unpack",
+    "version": "0.0.2",
+    "repo": "https://github.com/sylvinus/exav",
+    "description": "Bounded, memory-safe archive/container extraction for the exav scanner.",
+    "source_hits": [
+      "src/formats/mod.rs",
+      "src/formats/qcow2.rs",
+      "src/formats/sniff.rs",
+      "src/formats/vhdx.rs",
+      "src/formats/vmdk.rs",
+      "src/lib.rs",
+      "tests/suites/disabled_formats.rs",
+      "tests/suites/diskimage.rs",
+      "tests/suites/extreme.rs"
+    ],
+    "disposition": "format implementation or engine fork; see research inventory"
+  },
+  {
+    "crate": "whiff",
+    "version": "0.7.0",
+    "repo": "https://github.com/baoulo/whiff",
+    "description": "Sniff any file and get one JSON document describing it: identity, provenance, rights, physical properties and an LLM-ready view of its content.",
+    "source_hits": [
+      "src/formats/disk/vm.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "hardhat-core",
+    "version": "0.1.0",
+    "repo": "https://gitlab.com/ralpha9/hardhat",
+    "description": "Read-only Linux kernel hardening checker (core logic)",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "hardhat",
+    "version": "0.1.0",
+    "repo": "https://gitlab.com/ralpha9/hardhat",
+    "description": "Read-only Linux kernel hardening checker",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "bux-jail",
+    "version": "0.2.0",
+    "repo": "https://github.com/qntx/bux",
+    "description": "Process isolation for the bux-shim (bwrap / seatbelt / pre_exec)",
+    "source_hits": [
+      "src/landlock_setup.rs",
+      "src/lib.rs",
+      "src/seatbelt.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "windows-headless",
+    "version": "0.3.3-alpha",
+    "repo": "https://github.com/jzombie/windows-headless",
+    "description": "Microsoft ISO to SSH-ready Windows 11 VM in one command. Unattended install, portable QEMU, no Docker. Quick dev environments.",
+    "source_hits": [
+      "examples/boot.rs",
+      "src/commands.rs",
+      "src/main.rs",
+      "src/paths.rs",
+      "src/qemu.rs",
+      "src/qmp.rs",
+      "src/storage.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "disk-capture",
+    "version": "0.1.1",
+    "repo": "https://github.com/CaddyGlow/disk-capture",
+    "description": "Read-only offline NTFS metadata and logical-stream capture over virtdisk readers",
+    "source_hits": [
+      "examples/disk_view_proof.rs",
+      "examples/dos_alias_inventory.rs",
+      "examples/extract_setup_logs.rs",
+      "examples/frozen_metadata.rs",
+      "examples/inspect.rs",
+      "examples/manifest_diagnostics.rs",
+      "examples/read_file.rs",
+      "examples/recover_verified_file.rs",
+      "examples/reserved_security_inventory.rs",
+      "examples/security_path.rs",
+      "examples/trust_inventory.rs",
+      "examples/utf16_fixture.rs",
+      "tests/ntfs3g.rs"
+    ],
+    "disposition": "consumer, wrapper, or shared interface; no additional qcow2 engine"
+  },
+  {
+    "crate": "guestkit-job-spec",
+    "version": "0.1.0",
+    "repo": "https://github.com/ssahani/guestkit",
+    "description": "VM Operations Job Protocol specification and types",
+    "source_hits": [
+      "examples/create_job.rs",
+      "src/builder.rs",
+      "src/types.rs"
+    ],
+    "disposition": "consumer, wrapper, or shared interface; no additional qcow2 engine"
+  },
+  {
+    "crate": "sdme",
+    "version": "0.22.0",
+    "repo": "https://github.com/fiorix/sdme",
+    "description": "The systemd machine editor",
+    "source_hits": [
+      "src/import/img.rs",
+      "src/import/mod.rs",
+      "src/lib.rs",
+      "src/main.rs"
+    ],
+    "disposition": "consumer, wrapper, or inspection only"
+  },
+  {
+    "crate": "duvis",
+    "version": "0.1.8",
+    "repo": "https://github.com/yamadashy/duvis",
+    "description": "Disk usage visualizer for both AI and humans",
+    "source_hits": [
+      "src/classify/rules.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "kiln-ci",
+    "version": "0.2.7",
+    "repo": "https://github.com/Bunty9/kiln",
+    "description": "Self-hosted CI: a fresh rootless KVM virtual machine per GitHub Actions job, on hardware you own",
+    "source_hits": [
+      "src/confine.rs",
+      "src/main.rs",
+      "src/platform.rs",
+      "src/vm.rs",
+      "src/web.rs"
+    ],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "cargo-ignite",
+    "version": "0.1.7",
+    "repo": "https://github.com/vunholy/cargo-ignite",
+    "description": "A high-performance alternative to `cargo add` for adding, removing, fetching, and installing dependencies, delivering up to **45\u00d7 faster** performance than Cargo\u2019s default tooling.",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "image_writer_rs",
+    "version": "1.0.5",
+    "repo": "https://github.com/p-kraszewski/image_writer_rs.git",
+    "description": "Write bootable OS images to USB drive (dd on steroids)",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "fsmap",
+    "version": "0.3.0",
+    "repo": "https://github.com/berke/fsmap",
+    "description": "File system mapper and search tool",
+    "source_hits": [],
+    "disposition": "no independent qcow2 engine identified; incidental search match"
+  },
+  {
+    "crate": "guestkit-worker",
+    "version": "0.1.0",
+    "repo": "https://github.com/ssahani/guestkit",
+    "description": "Worker daemon for distributed VM operations",
+    "source_hits": [
+      "src/cli/daemon.rs",
+      "src/handlers/guestkit/inspect.rs",
+      "src/handlers/guestkit/profile.rs",
+      "src/lib.rs"
+    ],
+    "disposition": "consumer, wrapper, or shared interface; no additional qcow2 engine"
+  }
+]

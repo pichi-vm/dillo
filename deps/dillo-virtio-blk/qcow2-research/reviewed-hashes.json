@@ -1,0 +1,12 @@
+{
+  "PLAN-qcow2.md": "522f70afbd25be9b3b8e96c0b206b395262172dd87db729e8733f78536d23952",
+  "RESEARCH-qcow2.md": "49e3d61d1ff7412c716d07f1889165ff5a22454bc5de82337addac3bddaa99af",
+  "qcow2-research/imago-probe.log": "1408b4df8f89d8c0f7bd80ce5d381b4ec76cbb6e0a34fab76ec14ebc3b30d0be",
+  "qcow2-research/imago-probe.rs": "1c6b4d3aac78843a490b26b32c9151120b6378b902e1bc8d02a58c3b23c8a40b",
+  "qcow2-research/imago-tests.log": "76410d0408d4bac443b099dbe1fe03d4fd6e69b2f0af707f5019b1df93e34384",
+  "qcow2-research/qcow2-rs-tests.log": "382c4e57ecb8a2d552d99cfe4af95d512d79bdbacea6ed7805b4a55cc231c370",
+  "qcow2-research/qemu-probe.log": "04a4f85f6ddb7339bded0bf4e071354606e3114ca5b926c9dff7b6230d29b13e",
+  "qcow2-research/qemu-probe.py": "7012338d97da8060e3f9c5acc464106ed39f206b018cc4fee976ab66f0ee87c7",
+  "qcow2-research/registry-screen.json": "d362c25e5b86f0f726e3ea45b866876984852193792db3cf4ebd6835afac8510",
+  "qcow2-research/sources.json": "d63d3f3fcb0f7ee4d11de9ee61185417d701cd7eb9e2ad51a072c2ba43e7fe3a"
+}
