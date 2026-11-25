@@ -12,12 +12,14 @@ import tempfile
 
 SOURCE = r"""
 #include <Hypervisor/Hypervisor.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CHECK(call) do { \
@@ -36,6 +38,10 @@ static void *cancel_run(void *arg) {
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc != 3) return 2;
+    Dl_info origin = {0};
+    if (!dladdr((const void *)hv_vcpu_run, &origin)) return 2;
+    printf("hv_vcpu_run image=%s symbol=%s\n", origin.dli_fname,
+           origin.dli_sname ? origin.dli_sname : "unknown");
     const size_t size = getpagesize();
     const int native = strcmp(argv[1], "native") == 0;
     const int example = native || strcmp(argv[1], "example") == 0;
@@ -103,7 +109,13 @@ int main(int argc, char **argv) {
     pthread_t watchdog;
     if (pthread_create(&watchdog, NULL, cancel_run, &cpu)) return 2;
     puts("entering guest");
+    struct timespec entered, returned;
+    if (clock_gettime(CLOCK_MONOTONIC, &entered)) return 2;
     CHECK(hv_vcpu_run(cpu));
+    if (clock_gettime(CLOCK_MONOTONIC, &returned)) return 2;
+    printf("hv_vcpu_run elapsed ns=%lld\n",
+           (long long)(returned.tv_sec - entered.tv_sec) * 1000000000LL +
+           returned.tv_nsec - entered.tv_nsec);
     pthread_join(watchdog, NULL);
     CHECK(hv_vcpu_get_exec_time(cpu, &execution_after));
     printf("execution ns before=%llu after=%llu\n",
