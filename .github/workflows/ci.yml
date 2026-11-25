@@ -206,6 +206,7 @@ jobs:
         shell: bash
         env:
           CARGO_BUILD_RUSTFLAGS: "-D warnings"
+          TMPDIR: ${{ runner.temp }}
         run: |
           set -euo pipefail
           binary="$(cargo test --locked -p dillo-machine-hvf --lib --no-run --message-format=json \
