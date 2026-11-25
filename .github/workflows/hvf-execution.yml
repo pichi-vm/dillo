@@ -1,12 +1,11 @@
-name: HVF confinement feasibility
+name: HVF execution probe
 
 on:
   push:
     branches: [milestone/isolated-block]
     paths:
-      - .github/scripts/hvf_confinement_probe.py
       - .github/scripts/hvf_memory_probe.py
-      - .github/workflows/hvf-confinement.yml
+      - .github/workflows/hvf-execution.yml
   workflow_dispatch:
 
 permissions:
@@ -14,17 +13,11 @@ permissions:
 
 jobs:
   probe:
-    strategy:
-      fail-fast: false
-      matrix:
-        probe: [1, 2]
     runs-on: [self-hosted, macOS, ARM64, bare-metal, m1, self-managed-seatbelt]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Identify native host
         run: sw_vers
-      - name: Compare signed process policies
-        run: python3 .github/scripts/hvf_confinement_probe.py
       - name: Compare native RAM mappings
         run: python3 .github/scripts/hvf_memory_probe.py
