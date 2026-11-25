@@ -268,6 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ]
     .into_iter()
     .chain(cfg!(target_os = "linux").then_some("native"))
+    .chain(cfg!(target_os = "macos").then_some("inherited-fd"))
     {
         eprintln!("block process: {mode}");
         exercise(mode)?;
@@ -467,7 +468,15 @@ fn exercise(mode: &str) -> io::Result<()> {
         files,
     )?;
     let startup = Instant::now();
-    let result = prepared.start::<Worker>(export, move || signal.store(true, Ordering::Release));
+    let start = || prepared.start::<Worker>(export, move || signal.store(true, Ordering::Release));
+    #[cfg(target_os = "macos")]
+    let result = if mode == "inherited-fd" {
+        without_inherited_reader(start)
+    } else {
+        start()
+    };
+    #[cfg(not(target_os = "macos"))]
+    let result = start();
     if matches!(mode, "oversized" | "forged-resource") {
         assert!(result.is_err(), "malformed worker was admitted");
         assert!(failed.load(Ordering::Acquire));
@@ -644,6 +653,48 @@ fn exercise(mode: &str) -> io::Result<()> {
     }
     assert_eq!(bytes, [0xa5; 512]);
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn without_inherited_reader<T>(start: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    use nix::libc;
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let (reader, writer) = nix::unistd::pipe()?;
+    // Deliberately leave this descriptor inheritable, above the child's new
+    // limit. The worker must close it before reporting readiness.
+    let fd = nix::fcntl::fcntl(&reader, nix::fcntl::FcntlArg::F_DUPFD(128))?;
+    // SAFETY: fcntl created this unique owned descriptor.
+    let inherited = unsafe { OwnedFd::from_raw_fd(fd) };
+    drop(reader);
+    let mut saved = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: the pointer is writable; this standalone fixture has no active
+    // workers when it adjusts its own soft limit. The hard limit is preserved.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut saved) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let lower = libc::rlimit {
+        rlim_cur: 64,
+        rlim_max: saved.rlim_max,
+    };
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lower) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let result = start();
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const saved) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    drop(inherited);
+    let ready = result?;
+    assert_eq!(
+        nix::unistd::write(&writer, b"x"),
+        Err(nix::errno::Errno::EPIPE)
+    );
+    Ok(ready)
 }
 
 // The native notifier intentionally does not filter masks. The parent transport

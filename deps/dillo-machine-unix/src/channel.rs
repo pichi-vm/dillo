@@ -214,12 +214,46 @@ pub unsafe fn bootstrap() -> io::Result<Box<dyn Channel>> {
         }
         #[cfg(target_os = "macos")]
         {
-            let limit = libc::sysconf(libc::_SC_OPEN_MAX);
-            if limit < 0 {
+            // The current descriptor limit can be lower than inherited open
+            // descriptors. Enumerate the actual table before adopting handles;
+            // the entry contract excludes concurrent opens and closes.
+            let stride = std::mem::size_of::<libc::proc_fdinfo>();
+            let bytes = libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDLISTFDS,
+                0,
+                std::ptr::null_mut(),
+                0,
+            );
+            if bytes <= 0 {
                 return Err(io::Error::last_os_error());
             }
-            for fd in 3..limit {
-                libc::close(fd as i32);
+            let mut fds = vec![
+                libc::proc_fdinfo {
+                    proc_fd: 0,
+                    proc_fdtype: 0,
+                };
+                bytes as usize / stride
+            ];
+            let capacity = libc::c_int::try_from(std::mem::size_of_val(fds.as_slice()))
+                .map_err(io::Error::other)?;
+            let bytes = libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDLISTFDS,
+                0,
+                fds.as_mut_ptr().cast(),
+                capacity,
+            );
+            if bytes <= 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if bytes >= capacity || !(bytes as usize).is_multiple_of(stride) {
+                return Err(io::Error::other("incomplete inherited descriptor list"));
+            }
+            for fd in &fds[..bytes as usize / stride] {
+                if fd.proc_fd >= 3 && libc::close(fd.proc_fd) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
             }
         }
         // stdin is the unique socket transferred by spawn; this function can
