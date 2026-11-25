@@ -1,0 +1,35 @@
+name: KVM boot probe
+
+on:
+  push:
+    branches: [milestone/isolated-block]
+    paths: [.github/workflows/kvm-boot-probe.yml]
+  workflow_dispatch:
+
+jobs:
+  boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      RUST_LOG: dillo::boot=trace,dillo_machine_kvm=debug
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Record host
+        run: |
+          uname -a
+          lscpu
+          cat /sys/module/kvm_intel/parameters/unrestricted_guest || true
+          sudo chmod 666 /dev/kvm
+          sudo sysctl -w vm.nr_hugepages=256
+          test "$(sysctl -n vm.nr_hugepages)" -ge 256
+      - name: Install toolchain
+        run: |
+          mkdir -p .cargo
+          cp .copr/cargo-config.toml .cargo/config.toml
+          rustup toolchain install nightly-2026-07-06 --profile minimal --component rust-src
+          rustup target add --toolchain nightly-2026-07-06 x86_64-unknown-none x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: Ordinary guest without block worker
+        run: cargo test --locked -p dillo --features vm-tests --test boot boots_and_reports::mem_mib_1_256::cpus_1_1 -- --exact --nocapture
+      - name: Block I/O over PCI and MMIO
+        run: cargo test --locked -p dillo --features vm-tests --test boot boots_with_raw_disk -- --test-threads=1 --nocapture
