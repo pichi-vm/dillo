@@ -210,6 +210,9 @@ pub(super) fn exercise() -> io::Result<()> {
     // TX can start while RX has never been configured. Initially disabled,
     // it consumes the request without producing host output.
     peer.configure(1, 1)?;
+    peer.command(SET_VRING_BASE, wire::state(1, 5), &[])?;
+    peer.stop(1, 5)?;
+    peer.command(SET_VRING_BASE, wire::state(1, 0), &[])?;
     peer.start(1)?;
     super::queues::submit(&memory, 1, 1, b"discard", false);
     super::queues::wait_used(&memory, 1, 1)?;

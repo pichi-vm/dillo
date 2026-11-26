@@ -35,8 +35,7 @@ use std::os::fd::AsFd as AsResource;
 use std::os::windows::io::AsHandle as AsResource;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
-const PROTOCOL: u64 = wire::MQ
-    | wire::REPLY_ACK
+const PROTOCOL: u64 = wire::REPLY_ACK
     | wire::CONFIG
     | wire::RESET_DEVICE
     | wire::CONFIGURE_MEM_SLOTS
@@ -266,12 +265,14 @@ impl Prepared {
         }
         session.exchange(
             SET_PROTOCOL_FEATURES,
-            PROTOCOL.to_ne_bytes().to_vec(),
+            (PROTOCOL | (offered & wire::MQ)).to_ne_bytes().to_vec(),
             Vec::new(),
             Reply::None,
         )?;
         session.set(SET_OWNER, Vec::new(), Vec::new())?;
-        if wire::scalar(&session.get(GET_QUEUE_NUM, Vec::new())?)? != self.info.queues.len() as u64
+        if offered & wire::MQ != 0
+            && wire::scalar(&session.get(GET_QUEUE_NUM, Vec::new())?)?
+                != self.info.queues.len() as u64
         {
             return Err(io::Error::other("unexpected backend queue count"));
         }

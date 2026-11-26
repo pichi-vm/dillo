@@ -475,7 +475,9 @@ impl Backend {
                     }
                     GET_VRING_BASE => {
                         ring.control.set_started(false);
-                        ring.base = ring.control.base();
+                        if !ring.dirty {
+                            ring.base = ring.control.base();
+                        }
                         reply = Some(wire::state(index as u32, u32::from(ring.base)));
                     }
                     SET_VRING_ENABLE => {
