@@ -1,37 +1,42 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-// MIDL owns marshalling. Keep Windows SEH inside C, outside Rust stack frames.
-#include <windows.h>
-#include <rpc.h>
-#include <rpcasync.h>
+// Private ALPC boundary. Rust owns ports, received handles and message queues.
+#include "native.h"
 #include <sddl.h>
-#include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <winternl.h>
-#include "wire.h"
+#include <wchar.h>
 
-extern unsigned long wm_authorize_sid(const UUID *, const BYTE *, unsigned long);
-extern unsigned long wm_server_open(const UUID *, UUID *, HANDLE *);
-extern unsigned long wm_context_matches(const UUID *, const UUID *);
-extern unsigned long wm_server_send(const UUID *, const Packet *, HANDLE, HANDLE);
-extern unsigned long wm_server_receive(const UUID *, Packet *, HANDLE, HANDLE);
+#define MAX_DATA (60 * 1024)
+#define MAX_HANDLES 240
 
-void *__RPC_USER midl_user_allocate(size_t size) { return malloc(size); }
-void __RPC_USER midl_user_free(void *value) { free(value); }
-void *wm_allocate(size_t size) { return calloc(1, size); }
+typedef struct { PortMessage head; unsigned char data[MAX_DATA]; } Message;
+typedef union { uint64_t align; unsigned char bytes[128]; } AttributeBuffer;
+typedef struct {
+    Message message;
+    HANDLE handles[MAX_HANDLES];
+    ULONG count;
+    uintptr_t context;
+    ULONG attached;
+} Received;
+
+static DWORD result(NTSTATUS status)
+{
+    if (status == STATUS_TIMEOUT_VALUE) return ERROR_TIMEOUT;
+    return status < 0 ? RtlNtStatusToDosError(status) : ERROR_SUCCESS;
+}
+
 void wm_free(void *value) { free(value); }
 
-static DWORD token_sid(HANDLE token, BYTE **sid, DWORD *length)
+static DWORD token_sid(HANDLE token, BOOLEAN user, BYTE **sid, DWORD *length)
 {
     DWORD container = 0, size = 0, error;
     TOKEN_INFORMATION_CLASS kind;
     void *information;
     PSID source;
-    if (!GetTokenInformation(token, TokenIsAppContainer, &container, sizeof(container), &size))
-        return GetLastError();
+    if (!user && !GetTokenInformation(token, TokenIsAppContainer, &container,
+                                      sizeof(container), &size)) return GetLastError();
     kind = container ? TokenAppContainerSid : TokenUser;
     GetTokenInformation(token, kind, NULL, 0, &size);
     information = malloc(size);
@@ -52,283 +57,206 @@ static DWORD token_sid(HANDLE token, BYTE **sid, DWORD *length)
 DWORD wm_process_sid(HANDLE process, BYTE **sid, DWORD *length)
 {
     HANDLE token;
-    DWORD result;
+    DWORD error;
     if (!OpenProcessToken(process, TOKEN_QUERY, &token)) return GetLastError();
-    result = token_sid(token, sid, length);
+    error = token_sid(token, FALSE, sid, length);
     CloseHandle(token);
-    return result;
+    return error;
 }
 
-static RPC_STATUS RPC_ENTRY authorize(RPC_IF_HANDLE interface_id, void *binding)
+DWORD wm_peer_sid(HANDLE port, PortMessage *message, BYTE **sid, DWORD *length)
 {
-    UUID object;
+    HANDLE process;
+    OBJECT_ATTRIBUTES oa = {0};
+    oa.Length = sizeof(oa);
+    // Resolve the sender through the live kernel message, not a supplied PID.
+    // Query-only authority cannot access the peer's memory or handle table.
+    DWORD error = result(NtAlpcOpenSenderProcess(&process, port, message, 0,
+                        PROCESS_QUERY_LIMITED_INFORMATION, &oa));
+    if (error) return error;
+    error = wm_process_sid(process, sid, length);
+    CloseHandle(process);
+    return error;
+}
+
+static PortAttributes port_attributes(void)
+{
+    PortAttributes a = {0};
+    a.flags = 0x20000 | 0x80000 | 0x2000000; // requests, handles, handle arrays
+    a.qos.Length = sizeof(a.qos);
+    a.qos.ImpersonationLevel = SecurityIdentification;
+    a.max_message = sizeof(Message);
+    a.max_pool = 32 * 1024 * 1024; // bound native queued-message storage too
+    a.max_section = a.max_view = a.max_total = SIZE_MAX;
+    a.object_types = 0x0091; // files (including pipes), events and sections
+    return a;
+}
+
+static UNICODE_STRING port_name(const wchar_t *name, wchar_t *storage)
+{
+    int count = swprintf(storage, 128, L"\\RPC Control\\%ls", name);
+    UNICODE_STRING value = {(USHORT)(count * 2), (USHORT)((count + 1) * 2), storage};
+    return value;
+}
+
+DWORD wm_listen(const wchar_t *name, const BYTE *sid, DWORD length, HANDLE *port)
+{
     HANDLE token;
-    BYTE *sid = NULL;
-    DWORD length = 0, result;
-    (void)interface_id;
-    result = RpcBindingInqObject(binding, &object);
-    if (result) return result;
-    result = RpcImpersonateClient(binding);
-    if (result) return result;
-    if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token)) result = GetLastError();
-    else { result = token_sid(token, &sid, &length); CloseHandle(token); }
-    {
-        DWORD reverted = RpcRevertToSelfEx(binding);
-        if (reverted) result = reverted;
-    }
-    if (!result) result = wm_authorize_sid(&object, sid, length);
-    free(sid);
-    return result;
-}
-
-DWORD wm_start(const wchar_t *endpoint)
-{
-    PSECURITY_DESCRIPTOR descriptor;
-    DWORD result;
-    // The endpoint permits entry to the per-listener identity check above.
-    // It grants no access to a listener or its messages by itself.
+    BYTE *owner_sid = NULL;
+    DWORD owner_length, error;
+    LPWSTR owner = NULL, allowed = NULL;
+    wchar_t sddl[512], storage[128];
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    PortAttributes a = port_attributes();
+    UNICODE_STRING path = port_name(name, storage);
+    OBJECT_ATTRIBUTES oa = {0};
+    // Bounds precede any SID API: these APIs do not take a buffer length.
+    if (length < 8 || length != 8u + 4u * sid[1] || !IsValidSid((PSID)sid))
+        return ERROR_INVALID_SID;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return GetLastError();
+    error = token_sid(token, TRUE, &owner_sid, &owner_length);
+    CloseHandle(token);
+    if (error) return error;
+    if (!ConvertSidToStringSidW(owner_sid, &owner) ||
+        !ConvertSidToStringSidW((PSID)sid, &allowed)) { error = GetLastError(); goto out; }
+    swprintf(sddl, 512, L"D:P(A;;GA;;;%ls)(A;;GA;;;%ls)S:(ML;;NW;;;LW)", owner, allowed);
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:(A;;GA;;;WD)(A;;GA;;;AC)S:(ML;;NW;;;LW)", SDDL_REVISION_1, &descriptor, NULL))
-        return GetLastError();
-    result = RpcServerUseProtseqEpW((RPC_WSTR)L"ncalrpc", RPC_C_PROTSEQ_MAX_REQS_DEFAULT,
-                                    (RPC_WSTR)endpoint, descriptor);
-    if (!result) result = RpcServerRegisterIf3(server_LocalMessage_v1_0_s_ifspec, NULL, NULL,
-        RPC_IF_AUTOLISTEN | RPC_IF_ALLOW_LOCAL_ONLY | RPC_IF_ALLOW_CALLBACKS_WITH_NO_AUTH
-            | RPC_IF_SEC_NO_CACHE,
-        RPC_C_LISTEN_MAX_CALLS_DEFAULT, 65536, authorize, descriptor);
-    LocalFree(descriptor);
-    return result;
+            sddl, SDDL_REVISION_1, &descriptor, NULL)) { error = GetLastError(); goto out; }
+    oa.Length = sizeof(oa);
+    oa.ObjectName = &path;
+    oa.SecurityDescriptor = descriptor;
+    a.flags |= 0x40000; // waitable listener, including shutdown wake
+    error = result(NtAlpcCreatePort(port, &oa, &a));
+out:
+    free(owner_sid);
+    if (owner) LocalFree(owner);
+    if (allowed) LocalFree(allowed);
+    if (descriptor) LocalFree(descriptor);
+    return error;
 }
 
-DWORD wm_bind(const wchar_t *endpoint, const UUID *object, handle_t *binding)
+DWORD wm_connect(const wchar_t *name, HANDLE *port)
 {
-    RPC_WSTR address = NULL;
-    DWORD result = RpcStringBindingComposeW(NULL, (RPC_WSTR)L"ncalrpc", NULL,
-        (RPC_WSTR)endpoint, (RPC_WSTR)L"Security=identification static true", &address);
-    if (!result) result = RpcBindingFromStringBindingW(address, binding);
-    if (address) RpcStringFreeW(&address);
-    if (!result) result = RpcBindingSetObject(*binding, (UUID *)object);
-    if (result && *binding) RpcBindingFree(binding);
-    return result;
+    wchar_t storage[128];
+    UNICODE_STRING path = port_name(name, storage);
+    PortAttributes a = port_attributes();
+    a.flags |= 0x40000; // waitable client port for cancellable receive
+    LARGE_INTEGER timeout = {.QuadPart = -300000000};
+    return result(NtAlpcConnectPort(port, &path, NULL, &a, SYNC_REQUEST,
+                                   NULL, NULL, NULL, NULL, NULL, &timeout));
 }
 
-void wm_unbind(handle_t *binding) { RpcBindingFree(binding); }
-
-DWORD wm_lifetime_pipe(HANDLE *reader, HANDLE *writer)
+DWORD wm_accept(HANDLE listener, PortMessage *message, uintptr_t context,
+                 BOOLEAN allow, HANDLE *port)
 {
-    UUID id;
-    RPC_WSTR text = NULL;
-    wchar_t name[96];
-    OVERLAPPED operation = {0};
-    DWORD result = UuidCreate(&id), count;
-    *reader = *writer = INVALID_HANDLE_VALUE;
-    if (result && result != RPC_S_UUID_LOCAL_ONLY) return result;
-    result = UuidToStringW(&id, &text);
-    if (result) return result;
-    swprintf_s(name, 96, L"\\\\.\\pipe\\vhost-lifetime-%ls", text);
-    RpcStringFreeW(&text);
-    *reader = CreateNamedPipeW(name, PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED
-        | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE
-        | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 4096, 4096, 0, NULL);
-    if (*reader == INVALID_HANDLE_VALUE) return GetLastError();
-    *writer = CreateFileW(name, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
-    if (*writer == INVALID_HANDLE_VALUE) { result = GetLastError(); goto fail; }
-    operation.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (!operation.hEvent) { result = GetLastError(); goto fail; }
-    if (!ConnectNamedPipe(*reader, &operation)) {
-        result = GetLastError();
-        if (result == ERROR_PIPE_CONNECTED) result = ERROR_SUCCESS;
-        else if (result == ERROR_IO_PENDING)
-            result = GetOverlappedResult(*reader, &operation, &count, TRUE) ? 0 : GetLastError();
-    }
-    CloseHandle(operation.hEvent);
-    if (!result) return ERROR_SUCCESS;
-fail:
-    if (*writer != INVALID_HANDLE_VALUE) CloseHandle(*writer);
-    CloseHandle(*reader);
-    *reader = *writer = INVALID_HANDLE_VALUE;
-    return result;
+    PortAttributes a = port_attributes();
+    return result(NtAlpcAcceptConnectPort(port, listener, 0, NULL, &a,
+        (void *)context, message, NULL, allow));
 }
 
-void wm_watch_lifetime(HANDLE reader, HANDLE stopped)
+void wm_disconnect(HANDLE port) { NtAlpcDisconnectPort(port, 0); }
+
+static DWORD attributes(AttributeBuffer *buffer)
 {
-    OVERLAPPED operation = {0};
-    HANDLE events[2];
-    BYTE byte;
-    DWORD count;
-    operation.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (!operation.hEvent) return;
-    events[0] = operation.hEvent;
-    events[1] = stopped;
-    if (!ReadFile(reader, &byte, 1, &count, &operation) && GetLastError() == ERROR_IO_PENDING) {
-        WaitForMultipleObjects(2, events, FALSE, INFINITE);
-        // The buffer and OVERLAPPED remain live until cancellation/completion drains.
-        CancelIoEx(reader, &operation);
-        GetOverlappedResult(reader, &operation, &count, TRUE);
-    }
-    CloseHandle(operation.hEvent);
+    SIZE_T required;
+    memset(buffer, 0, sizeof(*buffer));
+    return result(AlpcInitializeMessageAttribute(ATTR_HANDLE | ATTR_CONTEXT,
+        (Attributes *)buffer, sizeof(*buffer), &required));
 }
 
-typedef struct {
-    RPC_BINDING_HANDLE call;
-    HANDLE events[2];
-    unsigned int subscribed;
-} Notifications;
-
-static const RPC_NOTIFICATIONS kinds[2] = {RpcNotificationCallCancel, RpcNotificationClientDisconnect};
-
-static void notifications_end(Notifications *state)
+DWORD wm_send(HANDLE port, const BYTE *bytes, DWORD size, const HANDLE *handles, DWORD count)
 {
-    unsigned int i;
-    for (i = 0; i != state->subscribed; ++i) {
-        unsigned long queued = 0;
-        DWORD result = RpcServerUnsubscribeForNotification(state->call, kinds[i], &queued);
-        if (!result) {
-            if (queued) WaitForSingleObject(state->events[i], INFINITE);
-            CloseHandle(state->events[i]);
+    Message *message;
+    AttributeBuffer buffer;
+    HandleEntry entries[MAX_HANDLES] = {0};
+    Attributes *a = (Attributes *)&buffer;
+    DWORD error;
+    if (size > MAX_DATA || count > MAX_HANDLES) return ERROR_INVALID_PARAMETER;
+    error = attributes(&buffer);
+    if (error) return error;
+    if (count) {
+        HandleAttribute *h = AlpcGetMessageAttribute(a, ATTR_HANDLE);
+        for (ULONG i = 0; i < count; ++i) {
+            if ((uintptr_t)handles[i] > UINT32_MAX) return ERROR_INVALID_HANDLE;
+            entries[i].flags = SAME_ACCESS;
+            entries[i].handle = (ULONG)(uintptr_t)handles[i];
         }
-        // An unexpected native failure must not reuse an event still owned by RPC.
+        if (count == 1) { h->flags = SAME_ACCESS; h->u.handle = handles[0]; }
+        else { h->flags = INDIRECT_HANDLES; h->u.array = entries; h->v.count = count; }
+        a->valid = ATTR_HANDLE;
     }
+    message = calloc(1, sizeof(PortMessage) + size);
+    if (!message) return ERROR_NOT_ENOUGH_MEMORY;
+    message->head.data_length = (USHORT)size;
+    message->head.total_length = (USHORT)(sizeof(PortMessage) + size);
+    memcpy(message->data, bytes, size);
+    error = result(NtAlpcSendWaitReceivePort(port, RELEASE_MESSAGE, &message->head, a,
+                                           NULL, NULL, NULL, NULL));
+    free(message);
+    return error;
 }
 
-static DWORD notifications_begin(PRPC_ASYNC_STATE async, Notifications *state)
+static DWORD release_message(HANDLE port, PortMessage *message)
 {
-    unsigned int i;
-    DWORD result;
-    RPC_ASYNC_NOTIFICATION_INFO info;
-    memset(state, 0, sizeof(*state));
-    state->call = RpcAsyncGetCallHandle(async);
-    for (i = 0; i != 2; ++i) {
-        state->events[i] = CreateEventW(NULL, TRUE, FALSE, NULL);
-        if (!state->events[i]) { result = GetLastError(); break; }
-        info.hEvent = state->events[i];
-        result = RpcServerSubscribeForNotification(state->call, kinds[i], RpcNotificationTypeEvent, &info);
-        if (result) { CloseHandle(state->events[i]); break; }
-        ++state->subscribed;
+    PortMessage reply = {0};
+    NTSTATUS status;
+    if (!(message->type & CONTINUATION)) return ERROR_SUCCESS;
+    reply.id = message->id;
+    reply.u.callback = message->u.callback;
+    reply.total_length = sizeof(reply);
+    status = NtAlpcSendWaitReceivePort(port, RELEASE_MESSAGE, &reply, NULL,
+                                     NULL, NULL, NULL, NULL);
+    // A peer can close after delivery and cancel this native continuation.
+    if (status == (NTSTATUS)0xc0000703 || status == (NTSTATUS)0xc0000037) return ERROR_SUCCESS;
+    return result(status);
+}
+
+DWORD wm_receive(HANDLE port, HANDLE stopped, Received *r)
+{
+    AttributeBuffer buffer;
+    Attributes *a = (Attributes *)&buffer;
+    SIZE_T size = sizeof(r->message);
+    LARGE_INTEGER immediate = {0};
+    DWORD error = attributes(&buffer), released;
+    NTSTATUS status;
+    memset(r, 0, sizeof(*r));
+    if (error) return error;
+    for (;;) {
+        HANDLE waits[2] = {stopped, port};
+        DWORD wait = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+        if (wait == WAIT_OBJECT_0) return ERROR_OPERATION_ABORTED;
+        if (wait != WAIT_OBJECT_0 + 1) return GetLastError();
+        a->valid = 0;
+        size = sizeof(r->message);
+        status = NtAlpcSendWaitReceivePort(port, 0, NULL, NULL, &r->message.head,
+                                          &size, a, &immediate);
+        if (status != STATUS_TIMEOUT_VALUE) break;
     }
-    if (state->subscribed == 2) return ERROR_SUCCESS;
-    notifications_end(state);
-    return result;
-}
-
-void server_Open(PRPC_ASYNC_STATE async, handle_t binding, Connection *connection, HANDLE *lifetime)
-{
-    UUID object;
-    DWORD result = RpcBindingInqObject(binding, &object);
-    memset(connection, 0, sizeof(*connection));
-    *lifetime = NULL;
-    if (!result) result = wm_server_open(&object, connection, lifetime);
-    RpcAsyncCompleteCall(async, &result);
-}
-
-static DWORD check_context(handle_t binding, const Connection *connection)
-{
-    UUID object;
-    DWORD result = RpcBindingInqObject(binding, &object);
-    return result ? result : wm_context_matches(&object, connection);
-}
-
-void server_Send(PRPC_ASYNC_STATE async, handle_t binding, Connection connection, Packet *packet)
-{
-    Notifications notifications;
-    DWORD result = check_context(binding, &connection);
-    if (!result) result = notifications_begin(async, &notifications);
-    if (!result) {
-        result = wm_server_send(&connection, packet, notifications.events[0], notifications.events[1]);
-        notifications_end(&notifications);
+    if (status < 0) return result(status);
+    if (a->valid & ATTR_CONTEXT) {
+        ContextAttribute *c = AlpcGetMessageAttribute(a, ATTR_CONTEXT);
+        r->context = (uintptr_t)c->port_context;
     }
-    RpcAsyncCompleteCall(async, &result);
-}
-
-void server_Receive(PRPC_ASYNC_STATE async, handle_t binding, Connection connection, Packet *packet)
-{
-    Notifications notifications;
-    DWORD result = check_context(binding, &connection);
-    memset(packet, 0, sizeof(*packet));
-    if (!result) result = notifications_begin(async, &notifications);
-    if (!result) {
-        result = wm_server_receive(&connection, packet, notifications.events[0], notifications.events[1]);
-        notifications_end(&notifications);
-    }
-    RpcAsyncCompleteCall(async, &result);
-}
-
-void wm_packet_free(Packet *packet, int resources);
-
-DWORD wm_call(unsigned int operation, handle_t binding, Connection *connection,
-              HANDLE *lifetime, Packet *packet, HANDLE cancel, DWORD timeout)
-{
-    RPC_ASYNC_STATE async;
-    HANDLE events[2];
-    DWORD result = RpcAsyncInitializeHandle(&async, sizeof(async)), reply = 0, wait;
-    int completed = 0;
-    if (result) return result;
-    events[0] = CreateEventW(NULL, TRUE, FALSE, NULL);
-    events[1] = cancel;
-    if (!events[0]) return GetLastError();
-    async.NotificationType = RpcNotificationTypeEvent;
-    async.u.hEvent = events[0];
-    RpcTryExcept {
-        switch (operation) {
-        case 0: client_Open(&async, binding, connection, lifetime); break;
-        case 1: client_Send(&async, binding, *connection, packet); break;
-        case 2: client_Receive(&async, binding, *connection, packet); break;
-        default: result = ERROR_INVALID_PARAMETER; break;
-        }
-    } RpcExcept(RpcExceptionFilter(RpcExceptionCode())) {
-        result = RpcExceptionCode();
-    } RpcEndExcept
-    if (!result) {
-        wait = WaitForMultipleObjects(cancel ? 2 : 1, events, FALSE, timeout);
-        if (wait != WAIT_OBJECT_0) RpcAsyncCancelCall(&async, TRUE);
-        // Arguments remain live until the runtime finishes, including cancellation.
-        WaitForSingleObject(events[0], INFINITE);
-        result = RpcAsyncCompleteCall(&async, &reply);
-        if (!result) {
-            completed = 1;
-            result = reply;
-            // A valid RPC response may contain resources even when the peer
-            // reports an application error. We own those outputs in that case.
-            if (result && operation == 2) wm_packet_free(packet, 1);
-            if (result && operation == 0 && *lifetime) {
-                CloseHandle(*lifetime);
-                *lifetime = NULL;
-            }
-        } else if (wait == WAIT_TIMEOUT && result == RPC_S_CALL_CANCELLED) {
-            result = ERROR_TIMEOUT;
+    r->attached = !!(a->valid & ATTR_HANDLE);
+    if (r->message.head.data_length > MAX_DATA ||
+        r->message.head.total_length != sizeof(PortMessage) + r->message.head.data_length ||
+        r->message.head.total_length > size) error = ERROR_INVALID_DATA;
+    if (!error && r->attached && (r->message.head.type & 0xff) == TYPE_DATAGRAM) {
+        HandleAttribute *h = AlpcGetMessageAttribute(a, ATTR_HANDLE);
+        if (h->v.count > MAX_HANDLES) error = ERROR_INVALID_DATA;
+        for (ULONG i = 0; !error && i < h->v.count; ++i) {
+            HandleInfo info = {.index = i};
+            error = result(NtAlpcQueryInformationMessage(port, &r->message.head, 3,
+                           &info, sizeof(info), NULL));
+            if (!error) r->handles[r->count++] = (HANDLE)(uintptr_t)info.handle;
         }
     }
-    // Failed RPC output is invalid and already cleaned by the runtime. A
-    // successful completion racing cancellation still transfers its outputs.
-    if (!completed && operation == 0) *lifetime = NULL;
-    CloseHandle(events[0]);
-    return result;
-}
-
-void wm_packet_free(Packet *packet, int resources)
-{
-    unsigned long i;
-    if (resources && packet->resources) for (i = 0; i != packet->count; ++i)
-        if (packet->resources[i].object.event_handle) CloseHandle(packet->resources[i].object.event_handle);
-    free(packet->bytes);
-    free(packet->resources);
-    memset(packet, 0, sizeof(*packet));
-}
-
-DWORD wm_kind(HANDLE handle, unsigned long *kind)
-{
-    typedef NTSTATUS (WINAPI *query_fn)(HANDLE, OBJECT_INFORMATION_CLASS, PVOID, ULONG, PULONG);
-    union { void *alignment; BYTE bytes[1024]; } storage;
-    PUBLIC_OBJECT_TYPE_INFORMATION *info = (PUBLIC_OBJECT_TYPE_INFORMATION *)&storage;
-    query_fn query = (query_fn)(void *)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryObject");
-    NTSTATUS result;
-    if (!query) return ERROR_NOT_SUPPORTED;
-    result = query(handle, ObjectTypeInformation, info, sizeof(storage), NULL);
-    if (result < 0) return ERROR_INVALID_HANDLE;
-    if (info->TypeName.Length == 10 && !memcmp(info->TypeName.Buffer, L"Event", 10)) *kind = 1;
-    else if (info->TypeName.Length == 14 && !memcmp(info->TypeName.Buffer, L"Section", 14)) *kind = 2;
-    else if (info->TypeName.Length == 8 && !memcmp(info->TypeName.Buffer, L"File", 8))
-        *kind = GetFileType(handle) == FILE_TYPE_PIPE ? 4 : 3;
-    else return ERROR_NOT_SUPPORTED;
-    return ERROR_SUCCESS;
+    released = (r->message.head.type & 0xff) == TYPE_CONNECT
+        ? ERROR_SUCCESS : release_message(port, &r->message.head);
+    if (!error) error = released;
+    if (error) {
+        for (ULONG i = 0; i < r->count; ++i) CloseHandle(r->handles[i]);
+        r->count = 0;
+    }
+    return error;
 }

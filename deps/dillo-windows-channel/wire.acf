@@ -1,9 +1,0 @@
-// SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
-// SPDX-License-Identifier: Apache-2.0
-
-interface LocalMessage
-{
-    [async] Open();
-    [async] Send();
-    [async] Receive();
-}

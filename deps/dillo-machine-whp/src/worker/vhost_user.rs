@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Standard vhost-user bytes with RPC-owned Windows resource attachments.
+//! Standard vhost-user bytes with ALPC-owned Windows resource attachments.
 
 use std::io;
 use std::os::windows::io::{AsHandle, OwnedHandle};
@@ -59,7 +59,7 @@ impl Endpoint {
 struct Connection {
     endpoint: Endpoint,
     // Only the separate Winsock grant uses the supervised process identity.
-    // RPC resource transfer never reads or writes a peer's handle table.
+    // ALPC resource transfer never reads or writes a peer's handle table.
     backend: Option<Arc<OwnedHandle>>,
 }
 

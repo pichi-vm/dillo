@@ -1,66 +1,75 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The native boundary. RPC stubs supply bounded packets and keep borrowed input
-//! handles live through callbacks. Output arrays use the stub's allocator.
+//! Owned ports and resource adoption at the private Windows native boundary.
 #![allow(unsafe_code)]
 
-use std::os::windows::io::{
-    AsRawHandle, BorrowedHandle, FromRawHandle, IntoRawHandle, OwnedHandle,
-};
-use std::sync::{OnceLock, RwLock};
-use std::{ffi::c_void, io, mem::size_of, ptr, slice};
-use windows_sys::Win32::Foundation::*;
+use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
+use std::sync::{Arc, Mutex};
+use std::{ffi::c_void, io, ptr, slice};
+use windows_sys::Win32::Foundation::{DuplicateHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-use windows_sys::Win32::System::Memory::*;
-use windows_sys::Win32::System::Threading::*;
+use windows_sys::Win32::System::Memory::{
+    CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MapViewOfFile, PAGE_READWRITE,
+    SECTION_MAP_READ, SECTION_QUERY, UnmapViewOfFile,
+};
+use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcess, SetEvent};
 
-use super::{Envelope, Id, MAX_MESSAGE, MAX_RESOURCES};
+use super::{Address, MAX_MESSAGE, MAX_RESOURCES, Message};
 
 #[repr(C)]
-struct Resource {
-    kind: u32,
-    handle: HANDLE,
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Header {
+    length: u16,
+    total: u16,
+    kind: u16,
+    offset: u16,
+    client: [usize; 2],
+    id: u32,
+    padding: u32,
+    callback: usize,
 }
 #[repr(C)]
-#[derive(Default)]
 struct Packet {
-    length: u32,
-    bytes: *mut u8,
+    header: Header,
+    bytes: [u8; MAX_MESSAGE],
+    handles: [HANDLE; MAX_RESOURCES],
     count: u32,
-    resources: *mut Resource,
+    context: usize,
+    attached: u32,
 }
 
 unsafe extern "C" {
-    fn wm_start(endpoint: *const u16) -> u32;
-    fn wm_bind(endpoint: *const u16, object: *const Id, binding: *mut usize) -> u32;
-    fn wm_unbind(binding: *mut usize);
-    fn wm_call(
-        operation: u32,
-        binding: usize,
-        context: *mut Id,
-        lifetime: *mut HANDLE,
-        packet: *mut Packet,
-        cancel: HANDLE,
-        timeout: u32,
-    ) -> u32;
-    fn wm_lifetime_pipe(reader: *mut HANDLE, writer: *mut HANDLE) -> u32;
-    fn wm_watch_lifetime(reader: HANDLE, stopped: HANDLE);
     fn wm_process_sid(process: HANDLE, sid: *mut *mut u8, length: *mut u32) -> u32;
-    fn wm_kind(handle: HANDLE, kind: *mut u32) -> u32;
-    fn wm_allocate(size: usize) -> *mut c_void;
+    fn wm_peer_sid(port: HANDLE, header: *mut Header, sid: *mut *mut u8, length: *mut u32) -> u32;
     fn wm_free(value: *mut c_void);
-    fn wm_packet_free(packet: *mut Packet, handles: i32);
+    fn wm_listen(name: *const u16, sid: *const u8, length: u32, port: *mut HANDLE) -> u32;
+    fn wm_connect(name: *const u16, port: *mut HANDLE) -> u32;
+    fn wm_accept(
+        port: HANDLE,
+        header: *mut Header,
+        context: usize,
+        allow: u8,
+        peer: *mut HANDLE,
+    ) -> u32;
+    fn wm_disconnect(port: HANDLE);
+    fn wm_send(
+        port: HANDLE,
+        bytes: *const u8,
+        size: u32,
+        handles: *const HANDLE,
+        count: u32,
+    ) -> u32;
+    fn wm_receive(port: HANDLE, stopped: HANDLE, packet: *mut Packet) -> u32;
 }
 
 fn check(status: u32) -> io::Result<()> {
     if status == 0 {
         Ok(())
     } else {
-        Err(io::Error::from_raw_os_error(status as i32))
+        Err(io::Error::from_raw_os_error(status.cast_signed()))
     }
 }
-
 fn bool_result(result: i32) -> io::Result<()> {
     if result == 0 {
         Err(io::Error::last_os_error())
@@ -69,455 +78,226 @@ fn bool_result(result: i32) -> io::Result<()> {
     }
 }
 
-pub(super) fn identity(process: BorrowedHandle<'_>) -> io::Result<Vec<u8>> {
+fn sid(query: impl FnOnce(*mut *mut u8, *mut u32) -> u32) -> io::Result<Vec<u8>> {
     let mut bytes = ptr::null_mut();
     let mut len = 0;
-    // SAFETY: the process is borrowed, output allocation is released once copied.
+    let status = query(&raw mut bytes, &raw mut len);
+    // SAFETY: the native query supplies a bounded SID allocation on success;
+    // any output allocation is released on both success and failure.
     unsafe {
-        check(wm_process_sid(
-            process.as_raw_handle(),
-            &mut bytes,
-            &mut len,
-        ))?;
-        let result = slice::from_raw_parts(bytes, len as usize).to_vec();
+        let value = if status == 0 {
+            slice::from_raw_parts(bytes, len as usize).to_vec()
+        } else {
+            Vec::new()
+        };
         wm_free(bytes.cast());
-        Ok(result)
+        check(status)?;
+        Ok(value)
     }
 }
 
-pub(super) fn server_endpoint() -> io::Result<&'static [u16]> {
-    static ENDPOINT: OnceLock<Result<Vec<u16>, u32>> = OnceLock::new();
-    match ENDPOINT.get_or_init(|| {
-        let name = format!("vhost-local-{}", uuid::Uuid::new_v4().simple());
-        let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-        // SAFETY: RPC copies the terminated endpoint name during registration.
-        let result = unsafe { wm_start(name.as_ptr()) };
-        if result == 0 { Ok(name) } else { Err(result) }
-    }) {
-        Ok(name) => Ok(name),
-        Err(error) => Err(io::Error::from_raw_os_error(*error as i32)),
+pub(super) fn identity(process: BorrowedHandle<'_>) -> io::Result<Vec<u8>> {
+    // SAFETY: the process is borrowed only for querying its token.
+    sid(|bytes, len| unsafe { wm_process_sid(process.as_raw_handle(), bytes, len) })
+}
+
+fn endpoint(address: &Address) -> io::Result<Vec<u16>> {
+    let name = &address.endpoint;
+    if name.is_empty()
+        || name.len() > 63
+        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err(io::ErrorKind::InvalidInput.into());
     }
+    Ok(name.encode_utf16().chain(Some(0)).collect())
 }
 
 #[derive(Debug)]
 pub(super) struct Event(OwnedHandle);
 impl Event {
-    pub(super) fn new(set: bool) -> io::Result<Self> {
-        // SAFETY: creates one unnamed, non-inheritable event with no external pointers.
+    pub(super) fn new() -> io::Result<Self> {
+        // SAFETY: creates one unnamed, noninheritable manual-reset event.
         unsafe {
-            let handle = CreateEventW(ptr::null(), 1, i32::from(set), ptr::null());
+            let handle = CreateEventW(ptr::null(), 1, 0, ptr::null());
             if handle.is_null() {
                 return Err(io::Error::last_os_error());
             }
             Ok(Self(OwnedHandle::from_raw_handle(handle)))
         }
     }
-    pub(super) fn set(&self) -> io::Result<()> {
-        // SAFETY: this owns a live event.
-        unsafe { bool_result(SetEvent(self.0.as_raw_handle())) }
-    }
-    pub(super) fn reset(&self) -> io::Result<()> {
-        // SAFETY: this owns a live event.
-        unsafe { bool_result(ResetEvent(self.0.as_raw_handle())) }
-    }
-    pub(super) fn wait(&self, closed: &Self, cancelled: &[BorrowedHandle<'_>]) -> io::Result<()> {
-        let handles: Vec<_> = std::iter::once(closed.0.as_raw_handle())
-            .chain(cancelled.iter().map(AsRawHandle::as_raw_handle))
-            .chain(Some(self.0.as_raw_handle()))
-            .collect();
-        // SAFETY: all handles stay borrowed through the wait; no array is retained.
-        match unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, INFINITE) }
-        {
-            WAIT_FAILED => Err(io::Error::last_os_error()),
-            index if index == WAIT_OBJECT_0 + handles.len() as u32 - 1 => Ok(()),
-            _ => Err(io::ErrorKind::BrokenPipe.into()),
+    pub(super) fn set(&self) {
+        // SAFETY: the event remains owned throughout the call.
+        unsafe {
+            SetEvent(self.0.as_raw_handle());
         }
     }
 }
 
 #[derive(Debug)]
-pub(super) struct Handle {
-    pub(super) kind: u32,
-    pub(super) handle: OwnedHandle,
+pub(super) struct Port {
+    handle: Mutex<Option<Arc<OwnedHandle>>>,
+    stopped: Option<Event>,
 }
 
-pub(super) fn lifetime_pipe() -> io::Result<(OwnedHandle, OwnedHandle)> {
-    let (mut reader, mut writer) = (ptr::null_mut(), ptr::null_mut());
-    // SAFETY: failure closes partial construction; success returns two owned handles.
-    unsafe {
-        check(wm_lifetime_pipe(&mut reader, &mut writer))?;
-        Ok((
-            OwnedHandle::from_raw_handle(reader),
-            OwnedHandle::from_raw_handle(writer),
-        ))
-    }
+pub(super) enum Received {
+    Connect(Header, bool),
+    Data(usize, Message),
+    Closed(usize),
+    Cancelled,
 }
 
-pub(super) fn watch_lifetime(reader: OwnedHandle, stopped: &Event) {
-    // SAFETY: both handles remain live; the native wrapper drains its pending read.
-    unsafe { wm_watch_lifetime(reader.as_raw_handle(), stopped.0.as_raw_handle()) };
-}
-
-impl Handle {
-    pub(super) fn copy(handle: BorrowedHandle<'_>) -> io::Result<Self> {
-        let mut kind = 0;
-        // SAFETY: query only this borrowed native handle; no remote process access.
-        unsafe {
-            check(wm_kind(handle.as_raw_handle(), &mut kind))?;
-        }
+impl Port {
+    fn new(handle: OwnedHandle, waitable: bool) -> io::Result<Self> {
         Ok(Self {
-            kind,
-            handle: handle.try_clone_to_owned()?,
+            handle: Mutex::new(Some(Arc::new(handle))),
+            stopped: waitable.then(Event::new).transpose()?,
         })
     }
-}
-
-#[derive(Debug)]
-pub(super) struct Remote {
-    binding: usize,
-    id: Id,
-    // Shutdown drains calls before closing the connection's last pipe writer.
-    lifetime: RwLock<Option<OwnedHandle>>,
-    cancelled: Event,
-}
-
-impl Remote {
-    pub(super) fn connect(descriptor: BorrowedHandle<'_>) -> io::Result<Self> {
-        let (endpoint, id) = read_descriptor(descriptor)?;
-        Self::connect_to(&endpoint, id)
+    fn handle(&self) -> io::Result<Arc<OwnedHandle>> {
+        self.handle
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| io::ErrorKind::BrokenPipe.into())
     }
-
-    pub(super) fn connect_at(address: &super::Address) -> io::Result<Self> {
-        if address.endpoint.is_empty()
-            || address.endpoint.len() >= 64
-            || !address
-                .endpoint
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        {
+    pub(super) fn listen(address: &Address, identity: &[u8]) -> io::Result<Self> {
+        let name = endpoint(address)?;
+        let mut handle = ptr::null_mut();
+        let len = u32::try_from(identity.len()).map_err(io::Error::other)?;
+        // SAFETY: the native boundary validates the SID extent before SID APIs,
+        // copies the name/ACL and returns a newly owned port.
+        unsafe {
+            check(wm_listen(
+                name.as_ptr(),
+                identity.as_ptr(),
+                len,
+                &raw mut handle,
+            ))?;
+            Self::new(OwnedHandle::from_raw_handle(handle), true)
+        }
+    }
+    pub(super) fn connect(address: &Address) -> io::Result<Self> {
+        let name = endpoint(address)?;
+        let mut handle = ptr::null_mut();
+        // SAFETY: a bounded, terminated name; successful output is newly owned.
+        unsafe {
+            check(wm_connect(name.as_ptr(), &raw mut handle))?;
+            Self::new(OwnedHandle::from_raw_handle(handle), true)
+        }
+    }
+    pub(super) fn peer_identity(&self, header: &mut Header) -> io::Result<Vec<u8>> {
+        let handle = self.handle()?;
+        // SAFETY: the header is an unmodified kernel connection request on this
+        // listener. Native code queries only that sender's process identity.
+        sid(|bytes, len| unsafe { wm_peer_sid(handle.as_raw_handle(), header, bytes, len) })
+    }
+    pub(super) fn accept(
+        &self,
+        header: &mut Header,
+        context: usize,
+        allow: bool,
+    ) -> io::Result<Option<Self>> {
+        let listener = self.handle()?;
+        let mut handle = ptr::null_mut();
+        // SAFETY: the request came from this port. The numeric context is never
+        // dereferenced; it is returned only for routing this accepted peer.
+        unsafe {
+            check(wm_accept(
+                listener.as_raw_handle(),
+                header,
+                context,
+                u8::from(allow),
+                &raw mut handle,
+            ))?;
+            allow
+                .then(|| Self::new(OwnedHandle::from_raw_handle(handle), false))
+                .transpose()
+        }
+    }
+    pub(super) fn disconnect(&self) {
+        if let Some(stopped) = &self.stopped {
+            stopped.set();
+        }
+        if let Some(handle) = self.handle.lock().unwrap().take() {
+            // SAFETY: disconnection interrupts local operations. Each in-flight
+            // call retains the handle, so closing it cannot race handle reuse.
+            // Final close also notifies the peer, even while Session lives on.
+            unsafe {
+                wm_disconnect(handle.as_raw_handle());
+            }
+        }
+    }
+    pub(super) fn send(&self, bytes: &[u8], handles: &[BorrowedHandle<'_>]) -> io::Result<()> {
+        if bytes.len() > MAX_MESSAGE || handles.len() > MAX_RESOURCES {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let endpoint: Vec<_> = address.endpoint.encode_utf16().chain(Some(0)).collect();
-        Self::connect_to(&endpoint, address.listener.to_bytes_le())
-    }
-
-    fn connect_to(endpoint: &[u16], id: Id) -> io::Result<Self> {
-        let mut binding = 0;
-        let cancelled = Event::new(false)?;
-        // SAFETY: terminated name and writable output; binding is newly owned.
+        let handle = self.handle()?;
+        let handles: Vec<_> = handles.iter().map(AsRawHandle::as_raw_handle).collect();
+        // SAFETY: inputs remain borrowed for the call; the kernel retains its
+        // transfer references independently before successful return.
         unsafe {
-            check(wm_bind(endpoint.as_ptr(), &id, &mut binding))?;
-        }
-        let mut remote = Self {
-            binding,
-            id: [0; 16],
-            lifetime: RwLock::new(None),
-            cancelled,
-        };
-        let mut lifetime = ptr::null_mut();
-        // SAFETY: call drains completion/cancellation before returning; all arguments live.
-        let result = unsafe {
-            wm_call(
-                0,
-                binding,
-                &mut remote.id,
-                &mut lifetime,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                5000,
-            )
-        };
-        if !lifetime.is_null() {
-            // SAFETY: successful RPC output transfers one owned pipe handle.
-            *remote.lifetime.get_mut().unwrap() =
-                Some(unsafe { OwnedHandle::from_raw_handle(lifetime) });
-        }
-        check(result)?;
-        if remote.lifetime.get_mut().unwrap().is_none() {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        Ok(remote)
-    }
-
-    pub(super) fn shutdown(&self) {
-        let _ = self.cancelled.set();
-        self.lifetime.write().unwrap().take();
-    }
-
-    fn call(&self, operation: u32, packet: &mut Packet, timeout: u32) -> io::Result<()> {
-        let borrowed = self.lifetime.read().unwrap();
-        let mut context = self.id;
-        if borrowed.is_none() {
-            return Err(io::ErrorKind::BrokenPipe.into());
-        }
-        // SAFETY: read guard retains the context, binding and packet through native completion.
-        unsafe {
-            check(wm_call(
-                operation,
-                self.binding,
-                &mut context,
-                ptr::null_mut(),
-                packet,
-                self.cancelled.0.as_raw_handle(),
-                timeout,
+            check(wm_send(
+                handle.as_raw_handle(),
+                bytes.as_ptr(),
+                bytes.len() as u32,
+                handles.as_ptr(),
+                handles.len() as u32,
             ))
         }
     }
-
-    pub(super) fn send(&self, bytes: &[u8], handles: &[BorrowedHandle<'_>]) -> io::Result<()> {
-        let mut resources = Vec::with_capacity(handles.len());
-        for handle in handles {
-            let mut kind = 0;
-            // SAFETY: handles are borrowed for the entire call, including cancellation.
-            unsafe {
-                check(wm_kind(handle.as_raw_handle(), &mut kind))?;
+    pub(super) fn receive(&self) -> io::Result<Received> {
+        let stopped = self.stopped.as_ref().ok_or(io::ErrorKind::Unsupported)?;
+        let handle = self.handle()?;
+        let mut packet = Box::<Packet>::new_uninit();
+        // SAFETY: native code bounds lengths/counts, obtains owned handles, and
+        // releases the native continuation. On error it closes partial imports.
+        unsafe {
+            let status = wm_receive(
+                handle.as_raw_handle(),
+                stopped.0.as_raw_handle(),
+                packet.as_mut_ptr(),
+            );
+            // Native code initializes the output even on failure and closes
+            // partial imports. A message-bound error retires only that peer.
+            let packet = packet.assume_init();
+            if status != 0 && packet.context != 0 {
+                return Ok(Received::Closed(packet.context));
             }
-            resources.push(Resource {
-                kind,
-                handle: handle.as_raw_handle(),
-            });
-        }
-        let mut packet = Packet {
-            length: bytes.len() as u32,
-            bytes: bytes.as_ptr().cast_mut(),
-            count: resources.len() as u32,
-            resources: resources.as_mut_ptr(),
-        };
-        self.call(1, &mut packet, 5000)
-    }
-
-    pub(super) fn receive(&self) -> io::Result<Envelope> {
-        let mut packet = Packet::default();
-        self.call(2, &mut packet, INFINITE)?;
-        // SAFETY: successful NDR output transfers owned resources and allocations to us.
-        unsafe {
-            let result = import(&packet, true);
-            wm_packet_free(&mut packet, i32::from(result.is_err()));
-            result
-        }
-    }
-}
-
-impl Drop for Remote {
-    fn drop(&mut self) {
-        self.shutdown();
-        // SAFETY: last owner; every operation drained before binding release.
-        unsafe {
-            wm_unbind(&mut self.binding);
-        }
-    }
-}
-
-unsafe fn bytes<'a, T>(pointer: *const T, length: usize) -> &'a [T] {
-    if length == 0 {
-        &[]
-    } else {
-        // SAFETY: caller receives a validated NDR array of this element count.
-        unsafe { slice::from_raw_parts(pointer, length) }
-    }
-}
-
-unsafe fn import(packet: &Packet, owned: bool) -> io::Result<Envelope> {
-    if packet.length as usize > MAX_MESSAGE
-        || packet.count as usize > MAX_RESOURCES
-        || (packet.length != 0 && packet.bytes.is_null())
-        || (packet.count != 0 && packet.resources.is_null())
-    {
-        return Err(io::ErrorKind::InvalidData.into());
-    }
-    // SAFETY: the stub supplied complete bounded arrays with runtime-owned input
-    // handles or newly owned successful output handles, as selected by the caller.
-    unsafe {
-        let wire = bytes(packet.resources, packet.count as usize);
-        if wire.iter().any(|r| {
-            !(1..=4).contains(&r.kind) || r.handle.is_null() || r.handle == INVALID_HANDLE_VALUE
-        }) {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        let mut resources = Vec::with_capacity(wire.len());
-        for resource in wire {
-            let handle = if owned {
-                OwnedHandle::from_raw_handle(resource.handle)
-            } else {
-                BorrowedHandle::borrow_raw(resource.handle).try_clone_to_owned()?
+            check(status)?;
+            let resources = packet.handles[..packet.count as usize]
+                .iter()
+                .map(|h| OwnedHandle::from_raw_handle(*h))
+                .collect();
+            let message = Message {
+                bytes: packet.bytes[..packet.header.length as usize].to_vec(),
+                resources,
             };
-            resources.push(Handle {
-                kind: resource.kind,
-                handle,
-            });
-        }
-        Ok(Envelope {
-            bytes: bytes(packet.bytes, packet.length as usize).to_vec(),
-            resources,
-        })
-    }
-}
-
-unsafe fn export(value: Envelope, packet: &mut Packet) -> io::Result<()> {
-    // SAFETY: output allocations use the same allocator as generated stubs. Once
-    // committed, RPC owns both allocations and each dedicated output handle.
-    unsafe {
-        let data = wm_allocate(value.bytes.len().max(1)).cast::<u8>();
-        let resources =
-            wm_allocate((value.resources.len() * size_of::<Resource>()).max(1)).cast::<Resource>();
-        if data.is_null() || resources.is_null() {
-            wm_free(data.cast());
-            wm_free(resources.cast());
-            return Err(io::Error::from_raw_os_error(ERROR_NOT_ENOUGH_MEMORY as i32));
-        }
-        ptr::copy_nonoverlapping(value.bytes.as_ptr(), data, value.bytes.len());
-        *packet = Packet {
-            length: value.bytes.len() as u32,
-            bytes: data,
-            count: value.resources.len() as u32,
-            resources,
-        };
-        for (i, object) in value.resources.into_iter().enumerate() {
-            resources.add(i).write(Resource {
-                kind: object.kind,
-                handle: object.handle.into_raw_handle(),
-            });
+            match packet.header.kind & 0xff {
+                3 => Ok(Received::Data(packet.context, message)),
+                10 => Ok(Received::Connect(
+                    packet.header,
+                    message.bytes.is_empty() && packet.attached == 0,
+                )),
+                5 | 6 => Ok(Received::Closed(packet.context)),
+                12 => Ok(Received::Cancelled),
+                _ if packet.context != 0 => Ok(Received::Closed(packet.context)),
+                _ => Err(io::ErrorKind::InvalidData.into()),
+            }
         }
     }
-    Ok(())
 }
 
-fn callback(action: impl FnOnce() -> io::Result<()> + std::panic::UnwindSafe) -> u32 {
-    match std::panic::catch_unwind(action) {
-        Ok(Ok(())) => 0,
-        Ok(Err(error)) => error
-            .raw_os_error()
-            .map(|e| e as u32)
-            .unwrap_or(match error.kind() {
-                io::ErrorKind::PermissionDenied => ERROR_ACCESS_DENIED,
-                io::ErrorKind::BrokenPipe => ERROR_BROKEN_PIPE,
-                io::ErrorKind::WouldBlock => ERROR_BUSY,
-                _ => ERROR_INVALID_DATA,
-            }),
-        Err(_) => ERROR_UNHANDLED_EXCEPTION,
-    }
-}
+const DESCRIPTOR_SIZE: usize = 8 + 128;
+const MAGIC: &[u8; 8] = b"WMALPC1\0";
 
-#[unsafe(no_mangle)]
-unsafe extern "C" fn wm_authorize_sid(id: *const Id, sid: *const u8, len: u32) -> u32 {
-    callback(|| {
-        // SAFETY: the RPC callback supplies kernel-derived SID data and a UUID.
-        let (id, sid) = unsafe { (*id, bytes(sid, len as usize)) };
-        let endpoint = super::endpoint(id).ok_or(io::ErrorKind::PermissionDenied)?;
-        if endpoint.identity != sid {
-            return Err(io::ErrorKind::PermissionDenied.into());
-        }
-        Ok(())
-    })
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn wm_context_matches(id: *const Id, context: *const Id) -> u32 {
-    callback(|| {
-        let contexts = super::CONTEXTS
-            .get_or_init(std::sync::Mutex::default)
-            .lock()
-            .unwrap();
-        // SAFETY: the manager supplies a complete connection identifier.
-        let context = contexts
-            .get(unsafe { &*context })
-            .ok_or(io::ErrorKind::BrokenPipe)?;
-        // SAFETY: the manager supplies the binding object's UUID for this call.
-        if context.endpoint.id != unsafe { *id } {
-            return Err(io::ErrorKind::PermissionDenied.into());
-        }
-        Ok(())
-    })
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn wm_server_open(id: *const Id, context: *mut Id, lifetime: *mut HANDLE) -> u32 {
-    callback(|| {
-        // SAFETY: the manager supplies valid input/output pointers for this call.
-        unsafe {
-            let (connection, writer) = super::open(*id)?;
-            *context = connection;
-            *lifetime = writer.into_raw_handle();
-        }
-        Ok(())
-    })
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn wm_server_send(
-    context: *const Id,
-    packet: *const Packet,
-    cancel: HANDLE,
-    disconnect: HANDLE,
-) -> u32 {
-    callback(|| {
-        // SAFETY: the manager owns the connection identifier for this call.
-        let state = super::state(unsafe { *context })?;
-        // SAFETY: the manager owns packet parameters and notification events until return.
-        let result = unsafe {
-            import(&*packet, false).and_then(|value| {
-                state.inbound.push(
-                    value,
-                    &state,
-                    &[
-                        BorrowedHandle::borrow_raw(cancel),
-                        BorrowedHandle::borrow_raw(disconnect),
-                    ],
-                )
-            })
-        };
-        if result.is_err() {
-            state.close();
-        }
-        result
-    })
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn wm_server_receive(
-    context: *const Id,
-    packet: *mut Packet,
-    cancel: HANDLE,
-    disconnect: HANDLE,
-) -> u32 {
-    callback(|| {
-        // SAFETY: the manager owns the connection identifier for this call.
-        let state = super::state(unsafe { *context })?;
-        // SAFETY: the manager retains output storage and notification handles.
-        let result = unsafe {
-            state
-                .outbound
-                .pop(
-                    &state,
-                    &[
-                        BorrowedHandle::borrow_raw(cancel),
-                        BorrowedHandle::borrow_raw(disconnect),
-                    ],
-                )
-                .and_then(|value| export(value, &mut *packet))
-        };
-        if result.is_err() {
-            state.close();
-        }
-        result
-    })
-}
-
-const DESCRIPTOR_SIZE: usize = 8 + 16 + 128;
-const MAGIC: &[u8; 8] = b"WMCHAN1\0";
-
-pub(super) fn descriptor(endpoint: &[u16], id: Id) -> io::Result<OwnedHandle> {
-    if endpoint.len() > 64 {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
+pub(super) fn descriptor(address: &Address) -> io::Result<OwnedHandle> {
+    let endpoint = endpoint(address)?;
     let mut bytes = [0u8; DESCRIPTOR_SIZE];
     bytes[..8].copy_from_slice(MAGIC);
-    bytes[8..24].copy_from_slice(&id);
-    for (out, value) in bytes[24..].chunks_exact_mut(2).zip(endpoint) {
+    for (out, value) in bytes[8..].as_chunks_mut::<2>().0.iter_mut().zip(endpoint) {
         out.copy_from_slice(&value.to_le_bytes());
     }
-    // SAFETY: the new private section has no aliases until initialized. Only a
-    // read-only handle is exported, after the writable view and handle are gone.
+    // SAFETY: initialize before publishing only a read-only section handle.
     unsafe {
         let section = CreateFileMappingW(
             INVALID_HANDLE_VALUE,
@@ -548,7 +328,7 @@ pub(super) fn descriptor(endpoint: &[u16], id: Id) -> io::Result<OwnedHandle> {
             GetCurrentProcess(),
             section.as_raw_handle(),
             GetCurrentProcess(),
-            &mut read_only,
+            &raw mut read_only,
             SECTION_MAP_READ | SECTION_QUERY,
             0,
             0,
@@ -557,11 +337,10 @@ pub(super) fn descriptor(endpoint: &[u16], id: Id) -> io::Result<OwnedHandle> {
     }
 }
 
-fn read_descriptor(descriptor: BorrowedHandle<'_>) -> io::Result<(Vec<u16>, Id)> {
+pub(super) fn read_descriptor(descriptor: BorrowedHandle<'_>) -> io::Result<Address> {
     let mut bytes = [0u8; DESCRIPTOR_SIZE];
-    // SAFETY: copy through the OS into owned storage before parsing untrusted
-    // contents. ReadProcessMemory also reports inaccessible/in-page failures
-    // rather than making a potentially faulting Rust load from a peer's section.
+    // SAFETY: use the OS to copy a potentially hostile section into owned
+    // storage, including handling in-page faults before parsing its contents.
     unsafe {
         let view = MapViewOfFile(
             descriptor.as_raw_handle(),
@@ -586,22 +365,19 @@ fn read_descriptor(descriptor: BorrowedHandle<'_>) -> io::Result<(Vec<u16>, Id)>
     if &bytes[..8] != MAGIC {
         return Err(io::ErrorKind::InvalidData.into());
     }
-    let id = bytes[8..24].try_into().unwrap();
-    let mut endpoint: Vec<_> = bytes[24..]
-        .chunks_exact(2)
-        .map(|b| u16::from_le_bytes(b.try_into().unwrap()))
-        .collect();
-    let end = endpoint
+    let units: Vec<_> = bytes[8..]
+        .as_chunks::<2>()
+        .0
         .iter()
-        .position(|value| *value == 0)
+        .map(|b| u16::from_le_bytes(*b))
+        .collect();
+    let end = units
+        .iter()
+        .position(|v| *v == 0)
         .ok_or(io::ErrorKind::InvalidData)?;
-    if end == 0
-        || endpoint[..end]
-            .iter()
-            .any(|v| !matches!(*v, 45 | 48..=57 | 65..=90 | 97..=122))
-    {
-        return Err(io::ErrorKind::InvalidData.into());
-    }
-    endpoint.truncate(end + 1);
-    Ok((endpoint, id))
+    let address = Address {
+        endpoint: String::from_utf16(&units[..end]).map_err(io::Error::other)?,
+    };
+    endpoint(&address)?;
+    Ok(address)
 }

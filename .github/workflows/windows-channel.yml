@@ -1,0 +1,41 @@
+name: Windows ALPC channel
+
+on:
+  push:
+    branches: [milestone/vhost-user-alpc]
+  workflow_dispatch:
+
+concurrency:
+  group: windows-channel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  channel:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Rust
+        shell: pwsh
+        run: rustup toolchain install nightly-2026-07-06 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Native channel lifecycle
+        timeout-minutes: 3
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+        shell: pwsh
+        run: |
+          1..5 | ForEach-Object {
+            cargo +nightly-2026-07-06 test --locked -p dillo-windows-channel -- --nocapture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Confined device workers
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-D warnings"
+        run: cargo +nightly-2026-07-06 test --locked -p dillo-worker --test device_process

@@ -19,7 +19,8 @@ pub use std::os::windows::io::{BorrowedSocket, OwnedSocket as Socket};
 
 /// Bound allocations before decoding a control message. Guest buffers never
 /// travel in these messages.
-pub const MAX_MESSAGE: usize = 64 * 1024;
+// Leaves space for the native ALPC header within its 16-bit message length.
+pub const MAX_MESSAGE: usize = 60 * 1024;
 // Stay below Linux's SCM_MAX_FD (253) for one startup message.
 pub const MAX_RESOURCES: usize = 240;
 
