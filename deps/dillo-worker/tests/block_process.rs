@@ -198,10 +198,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 assert_eq!(result, -1, "worker queried unrelated host file metadata");
             }
             let address = config["network"].as_str().unwrap().parse().unwrap();
-            assert!(
-                std::net::TcpStream::connect_timeout(&address, Duration::from_secs(1)).is_err(),
-                "worker connected to an unauthorized host endpoint"
-            );
+            let network = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(1));
+            if config["mode"] == "network-grant" {
+                network.expect("authorized host networking must include localhost");
+            } else {
+                assert!(network.is_err(), "worker reached an unauthorized endpoint");
+            }
             assert!(
                 std::process::Command::new(std::env::args_os().next().unwrap())
                     .arg("--not-a-worker")
@@ -261,6 +263,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .into_iter()
     .chain(cfg!(target_os = "linux").then_some("native"))
     .chain(cfg!(target_os = "macos").then_some("inherited-fd"))
+    .chain(cfg!(target_os = "windows").then_some("network-grant"))
     {
         eprintln!("block process: {mode}");
         exercise(mode)?;
@@ -435,7 +438,10 @@ fn exercise(mode: &str) -> io::Result<()> {
         },
         &serde_json::json!({"mode":mode,"forbidden":forbidden.path(),"network":network}),
         files,
-    )?;
+    )?
+    .with_policy(dillo_machine::worker::Policy {
+        network: mode == "network-grant",
+    });
     let startup = Instant::now();
     let start = || prepared.start::<Worker>(export, move || signal.store(true, Ordering::Release));
     #[cfg(target_os = "macos")]
