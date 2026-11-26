@@ -7,6 +7,7 @@ use dillo_machine::worker::{MAX_MESSAGE, Message};
 use std::io;
 
 pub mod block;
+pub mod vhost_user;
 
 pub fn decode<T: serde::de::DeserializeOwned>(message: &Message) -> io::Result<T> {
     serde_json::from_slice(&message.bytes).map_err(io::Error::other)
