@@ -14,6 +14,10 @@ pub(crate) mod network;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Backing {
+    #[cfg(target_os = "linux")]
+    FrameNet {
+        mac: [u8; 6],
+    },
     UserNet {
         mac: [u8; 6],
         forwards: Vec<dillo_virtio_net::Forward>,
@@ -61,6 +65,17 @@ pub(crate) fn device<H: dillo_machine::worker::WorkerHost>(
 ) -> io::Result<Box<dyn VirtioDevice>> {
     let backing: Backing = serde_json::from_value(value).map_err(io::Error::other)?;
     let device = match backing {
+        #[cfg(target_os = "linux")]
+        Backing::FrameNet { mac } => {
+            if files.len() != 1 {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            let backend = dillo_virtio_net::FrameFd::new(files.remove(0));
+            return Ok(Box::new(dillo_virtio_net::VirtioNet::new(
+                mac,
+                Arc::new(backend),
+            )));
+        }
         Backing::UserNet { mac, forwards } => {
             if !files.is_empty() {
                 return Err(io::ErrorKind::InvalidInput.into());

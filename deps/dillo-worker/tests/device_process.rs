@@ -162,6 +162,9 @@ mod bad_peer;
 mod console;
 #[path = "cases/filesystem.rs"]
 mod filesystem;
+#[cfg(target_os = "linux")]
+#[path = "cases/frames.rs"]
+mod frames;
 #[path = "cases/queues.rs"]
 mod queues;
 #[path = "cases/sockets.rs"]
@@ -194,6 +197,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                        mut files: Vec<File>,
                        grants: Option<dillo_worker::grant::Client>|
          -> io::Result<Box<dyn VirtioDevice>> {
+            #[cfg(target_os = "linux")]
+            if config["mode"] == "frames" {
+                return Ok(Box::new(dillo_virtio_net::VirtioNet::new(
+                    [2, 0, 0, 0, 0, 1],
+                    Arc::new(dillo_virtio_net::FrameFd::new(files.remove(0))),
+                )));
+            }
             if config["mode"] == "sockets" {
                 sockets::receive(grants.unwrap())?;
                 return Ok(Box::new(dillo_virtio_console::VirtioConsole::new()));
@@ -309,6 +319,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     console::exercise()?;
     filesystem::exercise()?;
     sockets::exercise()?;
+    #[cfg(target_os = "linux")]
+    frames::exercise()?;
     #[cfg(unix)]
     vsock::exercise()?;
     println!(

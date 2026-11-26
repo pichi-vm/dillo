@@ -143,6 +143,7 @@ fn confine(files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<
         libc::SYS_epoll_create1,
         libc::SYS_epoll_ctl,
         libc::SYS_epoll_pwait,
+        libc::SYS_ppoll,
         libc::SYS_eventfd2,
         libc::SYS_futex,
         libc::SYS_clock_gettime,
@@ -168,7 +169,9 @@ fn confine(files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<
         rules.insert(syscall, Vec::new());
     }
     #[cfg(target_arch = "x86_64")]
-    rules.insert(libc::SYS_epoll_wait, Vec::new());
+    for syscall in [libc::SYS_epoll_wait, libc::SYS_poll] {
+        rules.insert(syscall, Vec::new());
+    }
     let condition = |index, mask, value| -> io::Result<SeccompRule> {
         SeccompRule::new(vec![
             SeccompCondition::new(

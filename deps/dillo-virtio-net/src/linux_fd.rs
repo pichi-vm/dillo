@@ -5,7 +5,7 @@
 
 //! Shared frame I/O over a Linux character-device fd (the TAP `/dev/net/tun`
 //! handle and a macvtap `/dev/tapN` handle behave identically: raw Ethernet
-//! frames, one per `read`/`write`). Both [`TapBackend`](crate::TapBackend) and
+//! frames, one per `read`/`write`). Both [`BridgeBackend`](crate::BridgeBackend) and
 //! [`MacvtapBackend`](crate::MacvtapBackend) wrap a [`FrameFd`].
 
 use std::fs::File;
@@ -16,17 +16,30 @@ use crate::backend::RECV_POLL;
 
 /// A non-blocking fd carrying one raw Ethernet frame per read/write.
 #[derive(Debug)]
-pub(crate) struct FrameFd {
+pub struct FrameFd {
     file: File,
 }
 
 impl FrameFd {
-    pub(crate) fn new(file: File) -> Self {
+    /// Adopt an already configured, nonblocking frame endpoint. Interface
+    /// creation and network administration remain with the resource owner.
+    pub fn new(file: File) -> Self {
         Self { file }
     }
 
+    pub fn into_file(self) -> File {
+        self.file
+    }
+}
+
+impl crate::NetBackend for FrameFd {
+    fn reset(&self) -> io::Result<()> {
+        // No connection or guest state lives here. The external link remains
+        // configured while the virtqueue workers are replaced.
+        Ok(())
+    }
     /// Write one Ethernet frame to the device.
-    pub(crate) fn send(&self, frame: &[u8]) -> io::Result<()> {
+    fn send(&self, frame: &[u8]) -> io::Result<()> {
         // `&File` implements `Write`, so no `&mut self` is needed (the backend
         // is shared across worker threads behind an `Arc`).
         match (&self.file).write(frame) {
@@ -38,7 +51,7 @@ impl FrameFd {
     }
 
     /// Block up to [`RECV_POLL`] for one inbound frame.
-    pub(crate) fn recv(&self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+    fn recv(&self, buf: &mut [u8]) -> io::Result<Option<usize>> {
         if !self.poll_readable()? {
             return Ok(None);
         }
@@ -49,7 +62,9 @@ impl FrameFd {
             Err(e) => Err(e),
         }
     }
+}
 
+impl FrameFd {
     /// `poll(2)` the fd for readability with a bounded timeout. Returns `true`
     /// when a frame is waiting.
     fn poll_readable(&self) -> io::Result<bool> {

@@ -826,6 +826,7 @@ dependencies = [
  "dillo-virtio-blk",
  "dillo-virtio-console",
  "dillo-virtio-fs",
+ "dillo-virtio-net",
  "dillo-virtio-vsock",
  "imago",
  "log",

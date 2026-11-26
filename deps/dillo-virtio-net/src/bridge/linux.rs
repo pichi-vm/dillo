@@ -151,9 +151,17 @@ impl BridgeBackend {
     pub fn bridge(&self) -> &str {
         &self.bridge
     }
+
+    /// Transfer the configured endpoint; no control socket survives setup.
+    pub fn into_file(self) -> std::fs::File {
+        self.fd.into_file()
+    }
 }
 
 impl NetBackend for BridgeBackend {
+    fn reset(&self) -> io::Result<()> {
+        self.fd.reset()
+    }
     fn send(&self, frame: &[u8]) -> io::Result<()> {
         self.fd.send(frame)
     }

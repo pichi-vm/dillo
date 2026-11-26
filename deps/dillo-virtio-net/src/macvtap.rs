@@ -69,9 +69,17 @@ impl MacvtapBackend {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// Transfer the configured frame endpoint into its device worker.
+    pub fn into_file(self) -> std::fs::File {
+        self.fd.into_file()
+    }
 }
 
 impl NetBackend for MacvtapBackend {
+    fn reset(&self) -> io::Result<()> {
+        self.fd.reset()
+    }
     fn send(&self, frame: &[u8]) -> io::Result<()> {
         self.fd.send(frame)
     }

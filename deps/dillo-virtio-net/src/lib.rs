@@ -60,6 +60,8 @@ pub use bridge::BridgeBackend;
 #[cfg(target_os = "macos")]
 pub use bridge::VmnetBackend;
 #[cfg(target_os = "linux")]
+pub use linux_fd::FrameFd;
+#[cfg(target_os = "linux")]
 pub use macvtap::MacvtapBackend;
 
 /// VIRTIO_F_VERSION_1 from the virtio 1.x spec.
