@@ -156,6 +156,8 @@ impl BlockBacking for ControlledBacking {
     }
 }
 
+#[path = "cases/bad_peer.rs"]
+mod bad_peer;
 #[path = "cases/console.rs"]
 mod console;
 
@@ -212,16 +214,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "worker created a descendant"
             );
             let mode = config["mode"].as_str().unwrap();
-            if matches!(mode, "oversized" | "forged-resource") {
-                // A compromised worker can write its pipe directly. Neither
-                // claimed length nor numeric resource count is authority.
-                let header = if mode == "oversized" {
-                    [255, 255, 255, 255, 0, 0, 0, 0]
-                } else {
-                    [0, 0, 0, 0, 1, 0, 0, 0]
-                };
-                std::io::stdout().write_all(&header)?;
-                return Err(io::Error::other("injected malformed worker reply"));
+            if bad_peer::configure(mode, &mut files) {
+                return Ok(Box::new(dillo_virtio_console::VirtioConsole::new()));
             }
             let backing: Arc<dyn BlockBacking> = if mode == "qcow2" {
                 Arc::new(Qcow2Backing::open(storage(files.remove(0))?, false)?)
@@ -245,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // SAFETY: the fixture enters before creating threads or other owned
         // handles; its parent supplies fixed shared RAM to a fresh process.
         #[allow(unsafe_code)]
-        return unsafe { dillo_worker::run::<Worker>(factory) }.map_err(Into::into);
+        return unsafe { dillo_worker::run::<bad_peer::Host>(factory) }.map_err(Into::into);
     }
     for mode in [
         "normal",
@@ -257,8 +251,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "crash",
         "crash-io",
         "hang",
-        "oversized",
-        "forged-resource",
+        "bad-flags",
+        "bad-request",
+        "reply-resource",
     ]
     .into_iter()
     .chain(cfg!(target_os = "linux").then_some("native"))
@@ -452,8 +447,17 @@ fn exercise(mode: &str) -> io::Result<()> {
     };
     #[cfg(not(target_os = "macos"))]
     let result = start();
-    if matches!(mode, "oversized" | "forged-resource") {
+    if matches!(mode, "bad-flags" | "bad-request" | "reply-resource") {
         assert!(result.is_err(), "malformed worker was admitted");
+        let error = result.err().unwrap().to_string();
+        assert!(
+            error.contains(match mode {
+                "bad-flags" => "invalid",
+                "bad-request" => "unexpected vhost-user reply",
+                _ => "unexpected backend reply resources",
+            }),
+            "{mode}: {error}"
+        );
         assert!(failed.load(Ordering::Acquire));
         assert!(startup.elapsed() < Duration::from_secs(5));
         return Ok(());
