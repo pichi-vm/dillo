@@ -74,7 +74,7 @@ worker communication. Native implementations remain in the machine backends.
 | `dillo-runtime` | Shared CPU/device supervision, lifecycle arbitration, stop barriers, reconstruction orchestration and debugger session/hold policy. |
 | `dillo-machine` | Machine and associated service contracts for CPU preparation, runner/control, memory ownership/export, interrupts, notifications, process/IPC primitives, device lifecycle controls and authorized debugging. |
 | `dillo-devtree` | Owned DT representation and consumption helpers, declaration/claim records and resource provenance. |
-| `dillo-ipc` | Versioned worker messages, encoding/decoding, request/transition identities and transferable-resource descriptions. |
+| `dillo-ipc` | Vhost-user framing and feature/message definitions, plus separate worker bootstrap encoding. |
 | `dillo-worker` | Parent backend proxies, child dispatch, bootstrap/binding and worker lifecycle plumbing. |
 | `dillo-machine-kvm` | Linux native VM, CPU, memory, interrupt, notification, process, confinement and resource-transfer services. |
 | `dillo-machine-hvf` | macOS implementations of those native services. |
@@ -173,10 +173,11 @@ DT realization; backend handlers consume their delegated substrate facts.
 `dillo-worker` adapts the transport-independent device contract to backend
 processes. The executable composes PCI/MMIO transports with parent backend
 proxies and constructs concrete device/backing implementations in children.
-Process supervision is independent of virtio; the virtio control protocol
+Process supervision is independent of virtio; the vhost-user control protocol
 does not expose PCI configuration or general MMIO register dispatch.
 
-`dillo-ipc` defines message meaning and resource descriptions. Native machine
+`dillo-ipc` defines standard vhost-user messages and a separate private worker
+bootstrap. Native machine
 backends implement OS channels, event endpoints, confinement and resource
 transfer; the worker layer binds those implementations to the protocol.
 Wire identifiers do not themselves authorize access to host resources.
@@ -200,9 +201,12 @@ Console owns its resize format and data-plane pipe/stdio helpers without
 depending on launcher configuration. Terminal ownership, session liveness
 and shutdown policy belong to executable/runtime integration. Device-local
 helpers participate in the worker lifecycle, including activity outside
-virtqueue activation. Network-stack threads, native network callbacks and
-filesystem adapters belong within their device workers; their implementations
-remain modules of the respective device crates.
+virtqueue activation. Network-stack threads, native network callbacks, FUSE
+dispatch and file-content I/O belong within their device workers. Scoped native
+services outside those workers grant sockets and files or perform namespace
+operations under the configured directory and read-only policy. These services
+receive no guest-memory access; their separate resource channels do not extend
+vhost-user or carry guest file contents.
 
 `snuffler` is consumed by host boot tests as a report schema and guest binary
 artifact. Arma is an external image-building test dependency. The standalone
@@ -313,8 +317,10 @@ fallback for missing isolation.
 Workers use hidden device subcommands in the Dillo executable. Device and
 transport implementations remain reusable libraries; a worker may use threads
 internally. An external queue backend may be a separately packaged process.
-Vhost-user is the preferred interface to such backends; it does not dictate
-guest-visible transport choice or confer machine authority.
+Built-in and external queue backends use vhost-user; it does not dictate
+guest-visible transport choice or confer machine authority. Unix uses its
+standard socket/descriptor binding. Windows uses the provisional native binding
+in [VHOST_USER_WINDOWS.md](VHOST_USER_WINDOWS.md).
 
 #### PROCESS-002 — Establish workers through machine-family services
 

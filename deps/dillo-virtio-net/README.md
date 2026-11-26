@@ -82,8 +82,10 @@ attachment is not covered by the automated suite.
 
 ### macOS testing
 
-The XPC parameter dictionary is unit-tested. Real vmnet startup and frame
-transmission are not covered by the automated suite.
+The XPC parameter dictionary is unit-tested. The opt-in `worker.yml` workflow
+with `runner=macos-15` and `vmnet=true` exercises real privileged vmnet startup,
+frame transmission and reset in the confined worker. It does not establish
+external-peer receive or real-guest bridge delivery.
 
 ## `macvtap` — Linux only
 
@@ -116,7 +118,7 @@ sudo ip link set macvtap0 address 52:54:00:ab:cd:ef up
   internet reach** (`dillo.net_reach=`: the guest masquerades to a well-known
   external endpoint on 443 and the connection holds), all asserted via
   `NetBench` on every CI lane.
-- **Layer 3 (opt-in, never CI):** the bridge integration test above.
+- **Layer 3 (opt-in, native networking):** the macOS vmnet worker probe above.
 - **Layer 5 (fuzz):** `dillo/fuzz` target `net_demux` fuzzes the untrusted
   guest-frame demux.
 

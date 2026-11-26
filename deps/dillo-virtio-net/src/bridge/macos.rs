@@ -15,9 +15,9 @@
 //! Needs root or the `com.apple.vm.networking` entitlement. **All** unsafe FFI
 //! is isolated in this module; the rest of the crate stays unsafe-free.
 //!
-//! This path cannot be exercised in CI (privilege/driver); it is compile-checked
-//! on the macOS lane and covered by an opt-in integration test (see the crate
-//! README).
+//! The opt-in worker workflow exercises privileged interface startup, frame
+//! transmission and reset under Seatbelt. External-peer receive and real-guest
+//! bridge delivery require separate qualification (see the crate README).
 #![allow(unsafe_code)]
 
 use std::collections::VecDeque;

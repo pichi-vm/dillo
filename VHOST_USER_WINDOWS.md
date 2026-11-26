@@ -1,7 +1,8 @@
 # Proposed Windows binding for vhost-user
 
-Status: proposal for review, not implemented or natively qualified. This is a
-platform binding for the [vhost-user specification][vhost], with three changes:
+Status: provisional binding implemented on `milestone/vhost-user`; design
+finalization and upstream specification review remain separate steps. This is
+a platform binding for the [vhost-user specification][vhost], with three changes:
 message transport, attachment transfer, and native resource meanings. Requests,
 replies, feature bits, header fields, payloads, and device lifecycle stay as
 specified. Unix wire behavior is unchanged.
@@ -123,8 +124,22 @@ The frontend's handle-table authority and failed-transfer retirement obligation
 are explicit costs. This proposal suits a trusted frontend supervising an
 untrusted backend. A mutually isolated, persistent service may instead need
 kernel-mediated transfer such as [RPC system handles][rpc]; that would add a
-different transport/runtime integration. Native failure-path qualification is
-required before treating this smaller design as implemented or proven.
+different transport/runtime integration.
+
+## Implementation evidence and limits
+
+Dillo's Windows implementation uses this binding for block, console, network
+and filesystem workers. Native CI exercises AppContainer confinement, shared
+memory, queue notifications, worker reset/retirement, guest I/O, and handle
+round trips in both directions. The native transfer tests also reject invalid
+handle values. Process bootstrap and scoped host-resource grants use separate
+channels; they add no vhost-user requests or payload fields.
+
+The implementation has not been interoperability-tested with an external
+vhost-user implementation. It does not implement DAX, GPU resource semantics,
+migration, or every optional protocol feature. Tests do not exhaust native I/O
+failure interleavings or prove safe recovery for a persistent backend after an
+uncertain transfer. Those remain limits on any upstream compatibility claim.
 
 [vhost]: https://www.qemu.org/docs/master/interop/vhost-user.html
 [pipe]: https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-type-read-and-wait-modes
