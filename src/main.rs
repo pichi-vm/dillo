@@ -369,7 +369,7 @@ fn build_placements(
     args: &Args,
     platform: &dillo_devtree::platform::Machine,
 ) -> anyhow::Result<Vec<runner::DevicePlacement>> {
-    use device_worker::Device::{Local, Process};
+    use device_worker::Device as Process;
 
     let resolved = dillo_config::resolve(layout_from_args(args)?)?;
 
@@ -433,9 +433,22 @@ fn build_placements(
                 ..
             } => {
                 use anyhow::Context as _;
-                let fs = dillo_virtio_fs::VirtioFs::passthrough(tag, source.clone(), *readonly)
+                let mut authority = device_worker::filesystem::Authority::new(source, *readonly)
                     .with_context(|| format!("sharing virtio-fs source {}", source.display()))?;
-                built.push(("virtio-fs", Local(Box::new(fs))));
+                let fs = dillo_worker::Prepared::new(
+                    dillo_worker::DeviceInfo {
+                        kind: 26,
+                        queues: vec![128; 2],
+                        config_len: 40,
+                    },
+                    &device_worker::Backing::Fs {
+                        tag: tag.clone(),
+                        readonly: *readonly,
+                    },
+                    Vec::new(),
+                )?
+                .with_grants(move |request, _| authority.serve(request));
+                built.push(("virtio-fs", Process(fs)));
             }
             dillo_config::ResolvedDevice::Net {
                 backend,
@@ -639,7 +652,7 @@ fn build_net_device(
 ) -> anyhow::Result<device_worker::Device> {
     #[cfg(unix)]
     use anyhow::Context as _;
-    use device_worker::Device::Process;
+    use device_worker::Device as Process;
     use dillo_config::NetBackendKind;
 
     match backend {

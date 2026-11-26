@@ -129,6 +129,7 @@ fn confine(files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<
         libc::SYS_close,
         libc::SYS_fstat,
         libc::SYS_lseek,
+        libc::SYS_copy_file_range,
         libc::SYS_fsync,
         libc::SYS_fdatasync,
         libc::SYS_recvmsg,

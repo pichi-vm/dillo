@@ -10,10 +10,15 @@ use std::sync::Arc;
 use dillo_virtio::VirtioDevice;
 use dillo_virtio_blk::{RawImageBacking, VirtioBlk};
 
+pub(crate) mod filesystem;
 pub(crate) mod network;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Backing {
+    Fs {
+        tag: String,
+        readonly: bool,
+    },
     #[cfg(target_os = "macos")]
     Vmnet {
         mac: [u8; 6],
@@ -88,6 +93,15 @@ pub(crate) fn device<H: dillo_machine::worker::WorkerHost>(
     #[cfg(not(target_os = "macos"))]
     let _ = prepared;
     let device = match backing {
+        Backing::Fs { tag, readonly } => {
+            if !files.is_empty() {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            let backend = filesystem::GrantedFs::new(grants.ok_or(io::ErrorKind::InvalidInput)?);
+            return dillo_virtio_fs::VirtioFs::new(&tag, Arc::new(backend), readonly)
+                .map(|device| Box::new(device) as Box<dyn VirtioDevice>)
+                .map_err(io::Error::other);
+        }
         #[cfg(target_os = "macos")]
         Backing::Vmnet { mac, .. } => {
             if !files.is_empty() {
@@ -231,17 +245,11 @@ pub(crate) fn device<H: dillo_machine::worker::WorkerHost>(
     Ok(Box::new(device))
 }
 
-pub(crate) enum Device {
-    Local(Box<dyn VirtioDevice>),
-    Process(dillo_worker::Prepared),
-}
+pub(crate) struct Device(pub dillo_worker::Prepared);
 
 impl Device {
     pub(crate) fn num_queues(&self) -> usize {
-        match self {
-            Self::Local(device) => device.num_queues(),
-            Self::Process(prepared) => prepared.num_queues(),
-        }
+        self.0.num_queues()
     }
 
     pub(crate) fn bind<M: dillo_machine::Machine>(
@@ -250,17 +258,13 @@ impl Device {
         controls: &mut Vec<dillo_worker::Control>,
         shutdown: &'static std::sync::atomic::AtomicBool,
     ) -> io::Result<Box<dyn VirtioDevice>> {
-        match self {
-            Self::Local(device) => Ok(device),
-            Self::Process(prepared) => {
-                let (proxy, control) =
-                    prepared.start::<M::Worker>(machine.worker_memory()?, move || {
-                        shutdown.store(true, std::sync::atomic::Ordering::Release);
-                    })?;
-                controls.push(control);
-                Ok(Box::new(proxy))
-            }
-        }
+        let (proxy, control) = self
+            .0
+            .start::<M::Worker>(machine.worker_memory()?, move || {
+                shutdown.store(true, std::sync::atomic::Ordering::Release);
+            })?;
+        controls.push(control);
+        Ok(Box::new(proxy))
     }
 }
 

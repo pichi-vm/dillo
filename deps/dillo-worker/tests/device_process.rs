@@ -162,6 +162,8 @@ mod bad_peer;
 mod console;
 #[path = "cases/filesystem.rs"]
 mod filesystem;
+#[path = "../../../src/device_worker/filesystem.rs"]
+mod filesystem_resources;
 #[cfg(target_os = "linux")]
 #[path = "cases/frames.rs"]
 mod frames;
@@ -231,6 +233,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if config["mode"] == "filesystem" {
                 return Ok(filesystem::device());
+            }
+            if config["mode"] == "filesystem-native" {
+                return filesystem::native(grants.unwrap(), config["readonly"].as_bool().unwrap());
             }
             #[cfg(unix)]
             if config["mode"] == "vsock" {
@@ -319,7 +324,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|arg| arg == "--socket-probe") {
         return sockets::exercise().map_err(Into::into);
     }
-
+    if std::env::args().any(|arg| arg == "--filesystem-probe") {
+        return filesystem::native_exercise().map_err(Into::into);
+    }
     for mode in [
         "normal",
         "qcow2",
@@ -343,6 +350,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     console::exercise()?;
     filesystem::exercise()?;
+    filesystem::native_exercise()?;
     sockets::exercise()?;
     #[cfg(target_os = "linux")]
     frames::exercise()?;

@@ -148,3 +148,129 @@ fn read_args(handle: u64) -> [u8; 40] {
     body[16..20].copy_from_slice(&6u32.to_le_bytes());
     body
 }
+
+pub(super) fn native(
+    client: dillo_worker::grant::Client,
+    readonly: bool,
+) -> io::Result<Box<dyn VirtioDevice>> {
+    use dillo_virtio_fs::{FsBackend, LinuxErrno, SetAttr};
+    use std::path::Path;
+
+    let backend = super::filesystem_resources::GrantedFs::new(client);
+    let source = Path::new("seed");
+    assert_eq!(backend.read(source, 0, 6)?, b"worker");
+    assert_eq!(backend.stat(source)?.size, 6);
+    let error = backend.read(Path::new("../outside"), 0, 10).unwrap_err();
+    assert_eq!(
+        error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<LinuxErrno>()
+            .unwrap()
+            .linux,
+        13
+    );
+    // Long names make each page exceed one native control frame. Pagination
+    // bounds the authority's memory while the worker assembles FUSE metadata.
+    assert_eq!(backend.readdir(Path::new("many"))?.len(), 300);
+    if readonly {
+        for result in [
+            backend.write(source, 0, b"bad").map(|_| ()),
+            backend.create(Path::new("denied"), 0o600).map(|_| ()),
+        ] {
+            assert_eq!(
+                result
+                    .unwrap_err()
+                    .get_ref()
+                    .unwrap()
+                    .downcast_ref::<LinuxErrno>()
+                    .unwrap()
+                    .linux,
+                30
+            );
+        }
+    } else {
+        let data = vec![0xa5; 96 * 1024];
+        let path = Path::new("created");
+        backend.create(path, 0o600)?;
+        assert_eq!(backend.write(path, 0, &data)?, data.len() as u32);
+        assert_eq!(backend.read(path, 0, data.len() as u32)?, data);
+        backend.create(Path::new("copy"), 0o600)?;
+        assert_eq!(
+            backend.copy_file_range(path, 0, Path::new("copy"), 0, data.len() as u64, 0)?,
+            data.len() as u32
+        );
+        backend.setattr(
+            path,
+            &SetAttr {
+                size: Some(3),
+                ..Default::default()
+            },
+        )?;
+        backend.rename(path, Path::new("renamed"), 0)?;
+        backend.link(Path::new("renamed"), Path::new("alias"))?;
+        assert_eq!(
+            backend.stat(Path::new("alias"))?.ino,
+            backend.stat(Path::new("renamed"))?.ino
+        );
+        backend.unlink(Path::new("alias"))?;
+        backend.mkdir(Path::new("dir"), 0o700)?;
+        backend.rmdir(Path::new("dir"))?;
+        #[cfg(unix)]
+        {
+            backend.symlink(Path::new("link"), b"renamed")?;
+            assert_eq!(backend.readlink(Path::new("link"))?, b"renamed");
+            // Exercise the native xattr buffer's growth beyond its first read.
+            let value = vec![255; 1024];
+            backend.set_xattr(Path::new("renamed"), "user.vhost", &value, 0)?;
+            assert_eq!(
+                backend.get_xattr(Path::new("renamed"), "user.vhost")?,
+                value
+            );
+            backend.remove_xattr(Path::new("renamed"), "user.vhost")?;
+        }
+    }
+    Ok(Box::new(
+        dillo_virtio_fs::VirtioFs::new("native", Arc::new(backend), readonly).unwrap(),
+    ))
+}
+
+pub(super) fn native_exercise() -> io::Result<()> {
+    eprintln!("vhost process: native filesystem grants, contents and read-only policy");
+    for readonly in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let share = directory.path().join("share");
+        std::fs::create_dir(&share)?;
+        std::fs::write(directory.path().join("outside"), b"private")?;
+        std::fs::write(share.join("seed"), b"worker")?;
+        std::fs::create_dir(share.join("many"))?;
+        for i in 0..300 {
+            std::fs::File::create(
+                share
+                    .join("many")
+                    .join(format!("{i:03}-{}", "x".repeat(235))),
+            )?;
+        }
+        let mut authority = super::filesystem_resources::Authority::new(&share, readonly)?;
+        let prepared = dillo_worker::Prepared::new(
+            dillo_worker::DeviceInfo {
+                kind: 26,
+                queues: vec![128; 2],
+                config_len: 40,
+            },
+            &serde_json::json!({"mode":"filesystem-native", "readonly":readonly}),
+            Vec::new(),
+        )?
+        .with_grants(move |bytes, _| authority.serve(bytes));
+        let (_, export) = memory()?;
+        let (_, control) = prepared.start::<Worker>(export, || {})?;
+        control.shutdown()?;
+        assert_eq!(std::fs::read(share.join("seed"))?, b"worker");
+        assert!(!share.join("denied").exists());
+        if !readonly {
+            assert_eq!(std::fs::read(share.join("renamed"))?, [0xa5; 3]);
+            assert_eq!(std::fs::read(share.join("copy"))?, vec![0xa5; 96 * 1024]);
+        }
+    }
+    Ok(())
+}
