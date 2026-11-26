@@ -160,6 +160,8 @@ impl BlockBacking for ControlledBacking {
 mod bad_peer;
 #[path = "cases/console.rs"]
 mod console;
+#[path = "cases/filesystem.rs"]
+mod filesystem;
 #[cfg(windows)]
 #[path = "cases/windows_sockets.rs"]
 mod windows_sockets;
@@ -174,6 +176,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          -> io::Result<Box<dyn VirtioDevice>> {
             if config["mode"] == "console" {
                 return Ok(console::device(files));
+            }
+            if config["mode"] == "filesystem" {
+                return Ok(filesystem::device());
             }
             let forbidden = config["forbidden"].as_str().unwrap();
             assert!(
@@ -277,6 +282,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         exercise(mode)?;
     }
     console::exercise()?;
+    filesystem::exercise()?;
     println!(
         "block process: confinement, raw/qcow2 I/O, quiescence, reset, crash and deadline passed"
     );

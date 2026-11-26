@@ -823,6 +823,7 @@ dependencies = [
  "dillo-virtio",
  "dillo-virtio-blk",
  "dillo-virtio-console",
+ "dillo-virtio-fs",
  "imago",
  "log",
  "nix 0.30.1",
