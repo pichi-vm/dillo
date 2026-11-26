@@ -44,6 +44,10 @@ struct Connection {
 }
 
 impl Channel for Connection {
+    fn pair(&self) -> io::Result<(Box<dyn Channel>, OwnedFd)> {
+        crate::vhost_user::pair()
+    }
+
     fn send(&mut self, bytes: &[u8], resources: &[BorrowedResource<'_>]) -> io::Result<()> {
         if bytes.len() > MAX_MESSAGE
             || resources.len() > MAX_RESOURCES

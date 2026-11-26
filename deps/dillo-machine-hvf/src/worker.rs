@@ -9,6 +9,12 @@ use std::io;
 pub struct Worker;
 
 impl dillo_machine::worker::WorkerHost for Worker {
+    fn channel(
+        resource: dillo_machine::worker::Resource,
+    ) -> io::Result<Box<dyn dillo_machine::worker::Channel>> {
+        Ok(dillo_machine_unix::vhost_user::adopt(resource))
+    }
+
     fn spawn(
         executable: &std::path::Path,
     ) -> io::Result<(

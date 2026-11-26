@@ -50,6 +50,13 @@ pub trait Channel: Send + std::fmt::Debug {
     fn send(&mut self, bytes: &[u8], resources: &[BorrowedResource<'_>]) -> io::Result<()>;
     fn receive(&mut self) -> io::Result<Message>;
     fn try_clone(&self) -> io::Result<Box<dyn Channel>>;
+
+    /// Create a vhost-user connection for this same peer. The returned resource
+    /// is transferred through bootstrap (or SET_BACKEND_REQ_FD), never opened
+    /// by name by the worker. Windows retains this connection's pinned peer.
+    fn pair(&self) -> io::Result<(Box<dyn Channel>, Resource)> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
 }
 
 /// The parent retains process termination and reaping authority. None of these
@@ -87,6 +94,11 @@ pub trait WorkerHost {
     /// and takes exclusive ownership of its standard input/output handles.
     #[allow(unsafe_code)]
     unsafe fn bootstrap() -> io::Result<Box<dyn Channel>>;
+
+    /// Adopt a vhost-user endpoint explicitly granted by the parent.
+    fn channel(_resource: Resource) -> io::Result<Box<dyn Channel>> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
 
     /// Map only RAM exported by the parent. The export retains its backing for
     /// at least as long as the returned owning views.
