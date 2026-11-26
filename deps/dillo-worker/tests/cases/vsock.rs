@@ -63,8 +63,11 @@ pub(super) fn exercise() -> io::Result<()> {
     );
     assert!(failed.load(super::Ordering::Acquire));
     assert!(started.elapsed() < Duration::from_secs(6));
-    let directory = tempfile::tempdir_in("/tmp")?;
-    let listener = UnixListener::bind(directory.path().join("42.sock"))?;
+    // The checkout is writable even when the runner denies global /tmp.
+    // Use a relative socket name to stay within sockaddr_un's path limit.
+    let directory = tempfile::tempdir_in(".")?;
+    let path = std::path::PathBuf::from(directory.path().file_name().unwrap());
+    let listener = UnixListener::bind(path.join("42.sock"))?;
     listener.set_nonblocking(true)?;
     let echo = std::thread::spawn(move || -> io::Result<()> {
         for _ in 0..2 {
@@ -94,7 +97,6 @@ pub(super) fn exercise() -> io::Result<()> {
         }
         Ok(())
     });
-    let path = directory.path().to_owned();
     let prepared = dillo_worker::Prepared::new(
         dillo_worker::DeviceInfo {
             kind: 19,
