@@ -313,8 +313,7 @@ impl Queue {
     /// Validate that the queue configuration is usable.
     ///
     /// Checks: size is non-zero and power of 2, size <= max_size, ring GPAs
-    /// are non-zero and properly aligned, all ring regions fit within
-    /// `mem_size`.
+    /// are properly aligned, and all ring regions fit within `mem_size`.
     pub fn is_valid(&self, mem_size: u64) -> bool {
         let size = self.size as u64;
 
@@ -323,14 +322,9 @@ impl Queue {
             return false;
         }
 
-        // GPAs must be non-zero.
         let desc = self.desc_table.raw_value();
         let avail = self.avail_ring.raw_value();
         let used = self.used_ring.raw_value();
-
-        if desc == 0 || avail == 0 || used == 0 {
-            return false;
-        }
 
         // Alignment: desc 16-byte, avail 2-byte, used 4-byte.
         if !desc.is_multiple_of(16) || !avail.is_multiple_of(2) || !used.is_multiple_of(4) {
@@ -530,11 +524,10 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_zero_desc_gpa() {
+    fn test_valid_zero_desc_gpa() {
         let mut q = make_valid_queue(QUEUE_SIZE);
         q.desc_table = GuestAddress(0);
-        // desc_table at 0 should be invalid (zero GPA)
-        assert!(!q.is_valid(0x10000));
+        assert!(q.is_valid(0x10000));
     }
 
     #[test]
