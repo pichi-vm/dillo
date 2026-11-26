@@ -671,11 +671,13 @@ impl VirtioDevice for Proxy {
                 let relay = host
                     .spawn(Box::new(move |token| {
                         loop {
-                            call.read()
-                                .map_err(|error| DeviceJoinError::Worker(error.to_string()))?;
-                            if token.is_shutdown_requested() {
+                            let result = call.read();
+                            if token.is_shutdown_requested()
+                                || shared.active.load(Ordering::Acquire) != epoch
+                            {
                                 return Ok(());
                             }
+                            result.map_err(|error| DeviceJoinError::Worker(error.to_string()))?;
                             if shared.active.load(Ordering::Acquire) == epoch
                                 && let Some(interrupt) = &interrupt
                             {
@@ -698,17 +700,26 @@ impl VirtioDevice for Proxy {
                     let (read, write) = (session.pair)()?;
                     let signal = (session.endpoint)(write, NotificationRole::Signal)?;
                     let wake = kick.clone();
+                    let shared = Arc::clone(&session.shared);
                     let relay = host
                         .spawn(Box::new(move |token| {
                             loop {
-                                kick.read()
-                                    .map_err(|error| DeviceJoinError::Worker(error.to_string()))?;
-                                if token.is_shutdown_requested() {
+                                let result = kick.read();
+                                if token.is_shutdown_requested()
+                                    || shared.active.load(Ordering::Acquire) != epoch
+                                {
                                     return Ok(());
                                 }
-                                signal
-                                    .write(1)
+                                result
                                     .map_err(|error| DeviceJoinError::Worker(error.to_string()))?;
+                                if let Err(error) = signal.write(1) {
+                                    // Reset may close the receiving pipe after
+                                    // the epoch check above.
+                                    if shared.active.load(Ordering::Acquire) != epoch {
+                                        return Ok(());
+                                    }
+                                    return Err(DeviceJoinError::Worker(error.to_string()));
+                                }
                             }
                         }))
                         .map_err(io::Error::other)?
@@ -730,10 +741,10 @@ impl VirtioDevice for Proxy {
         })();
         drop(lifecycle);
         if let Err(error) = result {
+            let _ = session.reset(epoch);
             for relay in &mut relays {
                 relay.shutdown();
             }
-            let _ = session.reset(epoch);
             for relay in relays {
                 let _ = relay.join();
             }
@@ -743,13 +754,13 @@ impl VirtioDevice for Proxy {
         let stop_relays = Arc::clone(&relays);
         Ok(VirtioDeviceHandle::new(
             move || {
+                if let Err(error) = session.reset(epoch) {
+                    session.shared.fail(error.to_string());
+                }
                 if let Some(relays) = stop_relays.lock().unwrap().as_mut() {
                     for relay in relays {
                         relay.shutdown();
                     }
-                }
-                if let Err(error) = session.reset(epoch) {
-                    session.shared.fail(error.to_string());
                 }
             },
             move || {
