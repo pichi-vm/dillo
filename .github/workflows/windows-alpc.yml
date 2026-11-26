@@ -1,0 +1,66 @@
+name: Windows kernel handle transfer
+
+on:
+  push:
+    branches: [milestone/windows-kernel-transfer]
+  workflow_dispatch:
+
+concurrency:
+  group: windows-alpc-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cross-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - run: |
+          mkdir -p target/windows-alpc
+          x86_64-w64-mingw32-gcc --version
+          x86_64-w64-mingw32-gcc -std=c11 -Wall -Wextra -Werror -O2 probes/windows-alpc/probe.c -o target/windows-alpc/probe.exe -lntdll -ladvapi32 -luserenv
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: alpc-cross-built
+          path: target/windows-alpc/probe.exe
+  windows:
+    needs: cross-build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: alpc-cross-built
+          path: target/windows-alpc
+      - name: Native Windows ALPC experiment
+        shell: pwsh
+        run: ./probes/windows-alpc/run.ps1
+      - uses: msys2/setup-msys2@v2.34.0
+        if: always() && matrix.os == 'windows-2025'
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc
+          update: false
+      - name: Native MinGW build
+        if: always() && matrix.os == 'windows-2025'
+        shell: msys2 {0}
+        run: |
+          mkdir -p target/windows-alpc-native
+          gcc --version
+          gcc -std=c11 -Wall -Wextra -Werror -O2 probes/windows-alpc/probe.c -o target/windows-alpc-native/probe.exe -lntdll -ladvapi32 -luserenv
+      - name: Run native MinGW binary
+        if: always() && matrix.os == 'windows-2025'
+        shell: pwsh
+        run: ./probes/windows-alpc/run.ps1 -Probe ./target/windows-alpc-native/probe.exe
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: alpc-evidence-${{ matrix.os }}
+          path: |
+            target/windows-alpc
+            target/windows-alpc-native
