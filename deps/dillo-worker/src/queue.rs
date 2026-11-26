@@ -1,9 +1,16 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use dillo_ipc::block::Geometry;
 use dillo_virtio::queue::Queue;
 use vm_memory::{Address, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Geometry {
+    pub(crate) size: u16,
+    pub(crate) desc: u64,
+    pub(crate) avail: u64,
+    pub(crate) used: u64,
+}
 
 pub(crate) fn describe(queue: &Queue) -> Geometry {
     Geometry {

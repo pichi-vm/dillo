@@ -169,7 +169,7 @@ mod windows_sockets;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os()
         .nth(1)
-        .is_some_and(|arg| arg == "--dillo-block-worker")
+        .is_some_and(|arg| arg == "--dillo-worker")
     {
         let factory = |config: serde_json::Value,
                        mut files: Vec<File>|

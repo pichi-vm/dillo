@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! AppContainer worker launch and one-way, parent-authorized handle transfer.
+//! AppContainer worker launch and parent-authorized resource transfer.
 
 use std::ffi::c_void;
 use std::fs::File;
@@ -524,7 +524,7 @@ fn spawn(executable: &Path, policy: Policy) -> io::Result<(Box<dyn Process>, Box
     // lpApplicationName is explicit; argv contains only a fixed name, a fixed
     // entry switch and decimal handle values, so no caller text is quoted.
     let mut command = wide(std::ffi::OsStr::new(&format!(
-        "dillo.exe --dillo-block-worker {} {} {}",
+        "dillo.exe --dillo-worker {} {} {}",
         handles[0] as usize, handles[1] as usize, handles[2] as usize,
     )));
     let mut environment = Vec::new();

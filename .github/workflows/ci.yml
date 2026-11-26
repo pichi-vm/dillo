@@ -228,13 +228,13 @@ jobs:
             '<dict><key>com.apple.security.hypervisor</key><true/></dict>' \
             '</plist>' > "$entitlements"
           codesign --force --sign - --entitlements "$entitlements" "$binary"
-          worker="$(cargo test --locked -p dillo-worker --test block_process --no-run --message-format=json \
+          worker="$(cargo test --locked -p dillo-worker --test device_process --no-run --message-format=json \
             | python3 -c '
           import json, sys
           for line in sys.stdin:
               event = json.loads(line)
               if (event.get("reason") == "compiler-artifact"
-                      and event["target"]["name"] == "block_process"
+                      and event["target"]["name"] == "device_process"
                       and event["profile"]["test"]):
                   print(event["executable"])
           ')"

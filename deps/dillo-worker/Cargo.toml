@@ -17,8 +17,8 @@ serde_json.workspace = true
 log.workspace = true
 
 [[test]]
-name = "block_process"
-path = "tests/block_process.rs"
+name = "device_process"
+path = "tests/device_process.rs"
 harness = false
 
 [dev-dependencies]

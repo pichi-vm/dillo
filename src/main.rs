@@ -12,7 +12,7 @@ use dillo_machine::Host;
 use machine_select::machine;
 use machine_select::runner;
 
-mod block_worker;
+mod device_worker;
 
 static SUPERVISOR_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -135,13 +135,13 @@ mod boot_trace {
 fn main() {
     if std::env::args_os()
         .nth(1)
-        .is_some_and(|arg| arg == "--dillo-block-worker")
+        .is_some_and(|arg| arg == "--dillo-worker")
     {
         // SAFETY: dispatch precedes logging, threads and resource acquisition.
         // The parent grants only its retained ordinary-RAM backing to this
         // fresh process; native handles arrive on the private bootstrap channel.
         #[allow(unsafe_code)]
-        let result = unsafe { dillo_worker::run::<machine::worker::Worker>(block_worker::device) };
+        let result = unsafe { dillo_worker::run::<machine::worker::Worker>(device_worker::device) };
         if let Err(error) = result {
             eprintln!("dillo block worker: {error}");
             std::process::exit(1);
@@ -364,7 +364,7 @@ fn build_placements(
     args: &Args,
     platform: &dillo_devtree::platform::Machine,
 ) -> anyhow::Result<Vec<runner::DevicePlacement>> {
-    use block_worker::Device::{Block, Local};
+    use device_worker::Device::{Local, Process};
 
     let resolved = dillo_config::resolve(layout_from_args(args)?)?;
 
@@ -372,12 +372,12 @@ fn build_placements(
     // queues it will use; the MSI-X table gets one vector per queue plus one
     // for config-space changes.
     let mut requests: Vec<dillo_config::Placement> = Vec::with_capacity(resolved.devices.len() + 1);
-    let mut built: Vec<(&'static str, block_worker::Device)> = Vec::new();
+    let mut built: Vec<(&'static str, device_worker::Device)> = Vec::new();
 
     requests.push(resolved.console.placement.clone());
     built.push((
         "virtio-console",
-        Block(build_console_device(
+        Process(build_console_device(
             &resolved.console,
             args.console_resize.as_deref(),
         )?),
@@ -423,7 +423,7 @@ fn build_placements(
             }
             other => {
                 let (name, blk) = build_block_device(other)?;
-                built.push((name, Block(blk)));
+                built.push((name, Process(blk)));
             }
         }
     }
@@ -479,7 +479,7 @@ fn build_console_device(
                 files.push(PipeEnd::adopt(&port.name, direction, pipe.number())?.into_file());
             }
         }
-        ports.push(block_worker::Port {
+        ports.push(device_worker::Port {
             name: port.name.clone(),
             rx: port.rx.is_some(),
             tx: port.tx.is_some(),
@@ -493,7 +493,7 @@ fn build_console_device(
             queues: vec![dillo_virtio_console::QUEUE_MAX; queues],
             config_len: 12,
         },
-        &block_worker::Backing::Console {
+        &device_worker::Backing::Console {
             ports,
             resize: resize.is_some(),
         },
@@ -511,7 +511,7 @@ fn build_block_device(
     device: &dillo_config::ResolvedDevice,
 ) -> anyhow::Result<(&'static str, dillo_worker::Prepared)> {
     use anyhow::Context as _;
-    use block_worker::{Backing, Partition};
+    use device_worker::{Backing, Partition};
     match device {
         dillo_config::ResolvedDevice::Blk {
             path,
@@ -563,7 +563,7 @@ fn build_block_device(
             };
             Ok((
                 "virtio-blk",
-                dillo_worker::Prepared::new(block_worker::block_info(), &backing, vec![file])?,
+                dillo_worker::Prepared::new(device_worker::block_info(), &backing, vec![file])?,
             ))
         }
         dillo_config::ResolvedDevice::Gpt {
@@ -588,7 +588,7 @@ fn build_block_device(
             Ok((
                 "virtio-gpt",
                 dillo_worker::Prepared::new(
-                    block_worker::block_info(),
+                    device_worker::block_info(),
                     &Backing::Gpt {
                         device_id: *device_id,
                         disk_guid: *disk_guid,
@@ -2193,7 +2193,7 @@ mod machine_select {
             pub(crate) index: u32,
             pub(crate) msix_vectors: u16,
             pub(crate) name: &'static str,
-            pub(crate) device: crate::block_worker::Device,
+            pub(crate) device: crate::device_worker::Device,
         }
 
         impl std::fmt::Debug for DevicePlacement {

@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Versioned worker controls over Machine-owned channels and resources.
+//! Worker bootstrap and vhost-user framing over Machine-owned channels.
 
 use dillo_machine::worker::{MAX_MESSAGE, Message};
 use std::io;
 
-pub mod block;
+pub mod bootstrap;
 pub mod vhost_user;
 
 pub fn decode<T: serde::de::DeserializeOwned>(message: &Message) -> io::Result<T> {

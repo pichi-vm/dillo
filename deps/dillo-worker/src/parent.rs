@@ -11,7 +11,7 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use dillo_ipc::block::Init;
+use dillo_ipc::bootstrap::Init;
 use dillo_ipc::vhost_user::{
     self as wire, Frame,
     request::{

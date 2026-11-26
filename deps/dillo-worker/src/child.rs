@@ -9,7 +9,8 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU16, Ordering},
 };
 
-use dillo_ipc::block::{Geometry, Init};
+use crate::queue::Geometry;
+use dillo_ipc::bootstrap::Init;
 use dillo_ipc::vhost_user::{
     self as wire, Frame,
     request::{

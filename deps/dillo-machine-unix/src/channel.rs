@@ -184,7 +184,7 @@ pub fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel
     let (replies, output) = std::io::pipe()?;
     let child = OwnedFd::from(child);
     let process = Command::new(executable)
-        .arg("--dillo-block-worker")
+        .arg("--dillo-worker")
         .env_clear()
         .stdin(Stdio::from(child))
         .stdout(Stdio::from(output))

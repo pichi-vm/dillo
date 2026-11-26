@@ -143,14 +143,14 @@ pub(crate) fn device(
 
 pub(crate) enum Device {
     Local(Box<dyn VirtioDevice>),
-    Block(dillo_worker::Prepared),
+    Process(dillo_worker::Prepared),
 }
 
 impl Device {
     pub(crate) fn num_queues(&self) -> usize {
         match self {
             Self::Local(device) => device.num_queues(),
-            Self::Block(prepared) => prepared.num_queues(),
+            Self::Process(prepared) => prepared.num_queues(),
         }
     }
 
@@ -162,7 +162,7 @@ impl Device {
     ) -> io::Result<Box<dyn VirtioDevice>> {
         match self {
             Self::Local(device) => Ok(device),
-            Self::Block(prepared) => {
+            Self::Process(prepared) => {
                 let (proxy, control) =
                     prepared.start::<M::Worker>(machine.worker_memory()?, move || {
                         shutdown.store(true, std::sync::atomic::Ordering::Release);
