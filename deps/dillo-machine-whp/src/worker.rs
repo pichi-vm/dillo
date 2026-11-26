@@ -542,6 +542,11 @@ fn spawn(executable: &Path, policy: Policy) -> io::Result<(Box<dyn Process>, Box
         );
         environment.extend(wide(&entry));
     }
+    if let Some(filter) = std::env::var_os("RUST_LOG") {
+        let mut entry = std::ffi::OsString::from("RUST_LOG=");
+        entry.push(filter);
+        environment.extend(wide(&entry));
+    }
     environment.push(0);
     // std::Command duplicates standard handles independently of the supplied
     // HANDLE_LIST. Supply the same three handles in both structures so CRT

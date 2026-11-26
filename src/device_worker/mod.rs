@@ -72,6 +72,7 @@ pub(crate) struct Partition {
 pub(crate) fn prepare(
     value: &serde_json::Value,
 ) -> io::Result<Option<Arc<dyn dillo_virtio_net::NetBackend>>> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     #[cfg(target_os = "macos")]
     if let Backing::Vmnet { interface, .. } =
         serde_json::from_value(value.clone()).map_err(io::Error::other)?

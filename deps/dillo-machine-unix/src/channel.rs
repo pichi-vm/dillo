@@ -186,6 +186,7 @@ pub fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel
     let process = Command::new(executable)
         .arg("--dillo-worker")
         .env_clear()
+        .envs(std::env::var_os("RUST_LOG").map(|value| ("RUST_LOG", value)))
         .stdin(Stdio::from(child))
         .stdout(Stdio::from(output))
         .stderr(Stdio::inherit())
