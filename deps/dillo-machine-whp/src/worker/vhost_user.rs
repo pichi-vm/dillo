@@ -241,7 +241,12 @@ impl Channel for Connection {
             .collect::<Vec<_>>();
         if values.len() > MAX_HANDLES
             || values.iter().enumerate().any(|(i, value)| {
-                *value == 0 || *value > isize::MAX as u64 || values[..i].contains(value)
+                *value == 0
+                    || *value > isize::MAX as u64
+                    // Windows also accepts zero-extended 32-bit pseudo-handles.
+                    // None names a transferable entry in the backend's table.
+                    || (u64::from(u32::MAX - 5)..=u64::from(u32::MAX)).contains(value)
+                    || values[..i].contains(value)
             })
         {
             return Err(io::ErrorKind::InvalidData.into());
@@ -287,5 +292,89 @@ impl Channel for Connection {
         pair(Arc::clone(
             self.backend.as_ref().ok_or(io::ErrorKind::Unsupported)?,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::windows::io::AsHandle;
+
+    fn endpoints() -> (Box<dyn Channel>, Connection) {
+        // SAFETY: make an owned reference to this process so the real transfer
+        // path can be exercised without launching another executable.
+        #[allow(unsafe_code)]
+        let process = unsafe {
+            let mut handle = std::ptr::null_mut();
+            check(DuplicateHandle(
+                GetCurrentProcess(),
+                GetCurrentProcess(),
+                GetCurrentProcess(),
+                &mut handle,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            ))
+            .unwrap();
+            OwnedHandle::from_raw_handle(handle)
+        };
+        let (frontend, backend) = pair(Arc::new(process)).unwrap();
+        (
+            frontend,
+            Connection {
+                pipe: Arc::new(backend),
+                backend: None,
+            },
+        )
+    }
+
+    fn header() -> Vec<u8> {
+        [1u32, 5, 0]
+            .into_iter()
+            .flat_map(u32::to_ne_bytes)
+            .collect()
+    }
+
+    #[test]
+    fn borrowed_resource_round_trip() {
+        let (mut frontend, mut backend) = endpoints();
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        frontend.send(&header(), &[reader.as_handle()]).unwrap();
+        drop(reader);
+        let first = backend.receive().unwrap().resources.remove(0);
+        backend.send(&header(), &[first.as_handle()]).unwrap();
+        drop(first);
+        let returned = frontend.receive().unwrap().resources.remove(0);
+        let mut returned = std::fs::File::from(returned);
+        writer.write_all(b"x").unwrap();
+        let mut byte = [0];
+        returned.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, *b"x");
+        drop(returned);
+        assert_eq!(
+            writer.write(b"x").unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[test]
+    fn untrusted_handle_numbers_are_rejected() {
+        for value in [
+            0,
+            u64::MAX,
+            u64::MAX - 1,
+            u64::from(u32::MAX),
+            u64::from(u32::MAX - 5),
+        ] {
+            let (mut frontend, backend) = endpoints();
+            let mut bytes = header();
+            bytes.extend(value.to_ne_bytes());
+            backend.transfer(&mut bytes, true).unwrap();
+            assert_eq!(
+                frontend.receive().unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
     }
 }
