@@ -31,10 +31,14 @@ impl dillo_machine::worker::WorkerHost for Worker {
 
     fn spawn(
         executable: &std::path::Path,
+        policy: dillo_machine::worker::Policy,
     ) -> io::Result<(
         Box<dyn dillo_machine::worker::Process>,
         Box<dyn dillo_machine::worker::Channel>,
     )> {
+        if policy.network {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
         dillo_machine_unix::spawn(executable)
     }
 
@@ -52,7 +56,13 @@ impl dillo_machine::worker::WorkerHost for Worker {
         unsafe { dillo_machine_unix::map_memory(memory) }
     }
 
-    fn confine(_files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<()> {
+    fn confine(
+        _files: &[dillo_machine::worker::BorrowedResource<'_>],
+        policy: dillo_machine::worker::Policy,
+    ) -> io::Result<()> {
+        if policy.network {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
         // Already-open, explicitly transferred descriptors retain their access.
         // No new path, network connection, child process or Mach service is
         // granted. Initialization and RAM mapping precede this permanent step.

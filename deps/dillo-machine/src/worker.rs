@@ -18,6 +18,15 @@ pub const MAX_MESSAGE: usize = 64 * 1024;
 // Stay below Linux's SCM_MAX_FD (253) for one startup message.
 pub const MAX_RESOURCES: usize = 240;
 
+/// Native authority selected by the launcher, outside vhost-user negotiation.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Policy {
+    /// Permit host IP networking for the network backend, including forwards.
+    /// This does not grant access to additional host files or processes.
+    pub network: bool,
+}
+
 /// One region in an exported RAM allocation. `resource` indexes the resources
 /// accompanying this description, never the receiver's native handle table.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -90,7 +99,8 @@ pub enum NotificationRole {
 pub trait WorkerHost {
     /// Start the same executable at its private worker entry point, returning a
     /// channel whose peer is that child. Startup is not a readiness report.
-    fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)>;
+    fn spawn(executable: &Path, policy: Policy)
+    -> io::Result<(Box<dyn Process>, Box<dyn Channel>)>;
 
     /// Adopt the private bootstrap connection in the child, once.
     ///
@@ -136,14 +146,14 @@ pub trait WorkerHost {
         Self::notification(resource)
     }
 
-    /// Permanently remove ambient filesystem, network and process authority.
+    /// Remove ambient authority except the launcher's explicit resource policy.
     /// Must succeed before any worker reports readiness or reads a guest queue.
-    fn confine(files: &[BorrowedResource<'_>]) -> io::Result<()>;
+    fn confine(files: &[BorrowedResource<'_>], policy: Policy) -> io::Result<()>;
 }
 
 /// Machines without process services refuse worker startup.
 impl WorkerHost for () {
-    fn spawn(_: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> {
+    fn spawn(_: &Path, _: Policy) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> {
         Err(io::ErrorKind::Unsupported.into())
     }
     #[allow(unsafe_code)]
@@ -154,7 +164,7 @@ impl WorkerHost for () {
     unsafe fn map_memory(_: MemoryExport) -> io::Result<GuestMemoryMmap> {
         Err(io::ErrorKind::Unsupported.into())
     }
-    fn confine(_: &[BorrowedResource<'_>]) -> io::Result<()> {
+    fn confine(_: &[BorrowedResource<'_>], _: Policy) -> io::Result<()> {
         Err(io::ErrorKind::Unsupported.into())
     }
 }

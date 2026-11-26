@@ -30,10 +30,14 @@ impl dillo_machine::worker::WorkerHost for Worker {
 
     fn spawn(
         executable: &std::path::Path,
+        policy: dillo_machine::worker::Policy,
     ) -> io::Result<(
         Box<dyn dillo_machine::worker::Process>,
         Box<dyn dillo_machine::worker::Channel>,
     )> {
+        if policy.network {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
         dillo_machine_unix::spawn(executable)
     }
 
@@ -74,7 +78,13 @@ impl dillo_machine::worker::WorkerHost for Worker {
         Ok(Arc::new(Counter(std::fs::File::from(resource))))
     }
 
-    fn confine(files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<()> {
+    fn confine(
+        files: &[dillo_machine::worker::BorrowedResource<'_>],
+        policy: dillo_machine::worker::Policy,
+    ) -> io::Result<()> {
+        if policy.network {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
         confine(files)
     }
 }

@@ -562,7 +562,7 @@ pub unsafe fn run<H: WorkerHost>(
         use std::os::windows::io::AsHandle;
         files.iter().map(AsHandle::as_handle).collect::<Vec<_>>()
     };
-    H::confine(&borrowed)?;
+    H::confine(&borrowed, init.policy)?;
     let device = factory(init.backend, files)?;
     drop(bootstrap);
     let rings = device

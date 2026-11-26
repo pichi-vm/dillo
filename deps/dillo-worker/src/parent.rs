@@ -22,8 +22,8 @@ use dillo_ipc::vhost_user::{
     },
 };
 use dillo_machine::worker::{
-    BorrowedResource, Channel, MemoryExport, NotificationRole, Process, Resource, WorkerHost,
-    WriteNotification,
+    BorrowedResource, Channel, MemoryExport, NotificationRole, Policy, Process, Resource,
+    WorkerHost, WriteNotification,
 };
 use dillo_virtio::{
     ActivateError, DeviceJoinError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
@@ -64,6 +64,7 @@ pub struct Prepared {
     files: Vec<Resource>,
     updates: Option<Box<dyn FnMut() -> io::Result<Option<Vec<u8>>> + Send>>,
     retained: Vec<Box<dyn Send>>,
+    policy: Policy,
 }
 
 impl std::fmt::Debug for Prepared {
@@ -86,11 +87,17 @@ impl Prepared {
             files: files.into_iter().map(Into::into).collect(),
             updates: None,
             retained: Vec::new(),
+            policy: Policy::default(),
         })
     }
 
     pub fn num_queues(&self) -> usize {
         self.info.queues.len()
+    }
+
+    pub fn with_policy(mut self, policy: Policy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Retain a launcher-owned host adapter until the worker is retired.
@@ -114,7 +121,7 @@ impl Prepared {
         memory: MemoryExport,
         failed: impl Fn() + Send + Sync + 'static,
     ) -> io::Result<(Proxy, Control)> {
-        let (process, mut bootstrap) = H::spawn(&std::env::current_exe()?)?;
+        let (process, mut bootstrap) = H::spawn(&std::env::current_exe()?, self.policy)?;
         let (mut channel, endpoint) = bootstrap.pair()?;
         let handoff = endpoint.try_clone()?;
         let input = channel.try_clone()?;
@@ -133,6 +140,7 @@ impl Prepared {
             version: 2,
             files: self.files.len(),
             backend: self.backend,
+            policy: self.policy,
         })?;
         let files = Arc::new(self.files);
         let startup_files = Arc::clone(&files);

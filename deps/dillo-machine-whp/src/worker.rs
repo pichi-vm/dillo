@@ -14,7 +14,7 @@ use std::process::ExitStatus;
 use std::sync::Arc;
 
 use dillo_machine::worker::{
-    BorrowedResource, Channel, MAX_MESSAGE, MAX_RESOURCES, MemoryExport, Message, Process,
+    BorrowedResource, Channel, MAX_MESSAGE, MAX_RESOURCES, MemoryExport, Message, Policy, Process,
 };
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Security::Authorization::*;
@@ -23,6 +23,7 @@ use windows_sys::Win32::Security::*;
 use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::Console::*;
 use windows_sys::Win32::System::JobObjects::*;
+use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::System::WindowsProgramming::*;
 
@@ -57,8 +58,11 @@ impl dillo_machine::worker::WorkerHost for Worker {
         Ok(Arc::new(Event(resource)))
     }
 
-    fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> {
-        spawn(executable)
+    fn spawn(
+        executable: &Path,
+        policy: Policy,
+    ) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> {
+        spawn(executable, policy)
     }
     #[allow(unsafe_code)]
     unsafe fn bootstrap() -> io::Result<Box<dyn Channel>> {
@@ -69,7 +73,7 @@ impl dillo_machine::worker::WorkerHost for Worker {
         // SAFETY: the caller guarantees stable backing and synchronized aliases.
         unsafe { crate::memory::map(&memory) }
     }
-    fn confine(_files: &[BorrowedResource<'_>]) -> io::Result<()> {
+    fn confine(_files: &[BorrowedResource<'_>], _policy: Policy) -> io::Result<()> {
         // Confinement was installed atomically at process creation. Verify it
         // before reporting readiness, including invocations of the private CLI.
         #[allow(unsafe_code)]
@@ -425,7 +429,7 @@ impl Channel for Connection {
     }
 }
 
-fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> {
+fn spawn(executable: &Path, policy: Policy) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> {
     let container = Container::new(executable)?;
     let (input, write) = std::io::pipe()?;
     let (read, output) = std::io::pipe()?;
@@ -437,10 +441,37 @@ fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> 
         output.as_raw_handle(),
         log.as_raw_handle(),
     ];
+    let mut network_sids = [[0u32; (SECURITY_MAX_SID_SIZE as usize).div_ceil(4)]; 2];
+    let mut granted = Vec::new();
+    if policy.network {
+        for (kind, sid) in [
+            WinCapabilityInternetClientServerSid,
+            WinCapabilityPrivateNetworkClientServerSid,
+        ]
+        .into_iter()
+        .zip(&mut network_sids)
+        {
+            let mut size = size_of_val(sid) as u32;
+            // SAFETY: aligned writable SID buffers remain live through launch.
+            #[allow(unsafe_code)]
+            unsafe {
+                check(CreateWellKnownSid(
+                    kind,
+                    std::ptr::null_mut(),
+                    sid.as_mut_ptr().cast(),
+                    &mut size,
+                ))?;
+            }
+            granted.push(SID_AND_ATTRIBUTES {
+                Sid: sid.as_mut_ptr().cast(),
+                Attributes: SE_GROUP_ENABLED as u32,
+            });
+        }
+    }
     let capabilities = SECURITY_CAPABILITIES {
         AppContainerSid: container.sid.as_ptr().cast_mut().cast(),
-        Capabilities: std::ptr::null_mut(),
-        CapabilityCount: 0,
+        Capabilities: granted.as_mut_ptr(),
+        CapabilityCount: granted.len() as u32,
         Reserved: 0,
     };
     // The job and child-process policy apply before any child instruction.

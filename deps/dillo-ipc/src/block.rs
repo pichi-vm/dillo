@@ -10,6 +10,7 @@ pub struct Init {
     pub version: u32,
     pub files: usize,
     pub backend: serde_json::Value,
+    pub policy: dillo_machine::worker::Policy,
 }
 
 #[derive(Clone, Debug, Default)]
