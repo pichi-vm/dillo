@@ -562,6 +562,11 @@ fn drain_requests(
         && let Some(head) = q.pop(queue_memory)
     {
         let head_index = head.index;
+        if !q.enabled() {
+            q.add_used(queue_memory, head_index, 0);
+            signaled = true;
+            continue;
+        }
 
         // Split the chain into device-readable and device-writable descriptors.
         let mut readable: Vec<Desc> = Vec::new();

@@ -169,6 +169,8 @@ mod filesystem_resources;
 mod frames;
 #[path = "cases/queues.rs"]
 mod queues;
+#[path = "cases/rings.rs"]
+mod rings;
 #[path = "cases/sockets.rs"]
 mod sockets;
 #[cfg(target_os = "macos")]
@@ -226,6 +228,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if config["mode"] == "sockets" {
                 sockets::receive(grants.unwrap())?;
+                return Ok(Box::new(dillo_virtio_console::VirtioConsole::new()));
+            }
+            if config["mode"] == "rings" {
+                dillo_virtio_console::worker_stdio(files.remove(0), files.remove(0));
                 return Ok(Box::new(dillo_virtio_console::VirtioConsole::new()));
             }
             if config["mode"] == "console" {
@@ -349,6 +355,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         exercise(mode)?;
     }
     console::exercise()?;
+    rings::exercise()?;
     filesystem::exercise()?;
     filesystem::native_exercise()?;
     sockets::exercise()?;

@@ -6,7 +6,7 @@ use std::io;
 use std::num::Wrapping;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU16, Ordering},
+    atomic::{AtomicBool, Ordering},
 };
 
 use crate::queue::Geometry;
@@ -24,6 +24,7 @@ use dillo_machine::worker::{
     MAX_RESOURCES, MemoryExport, NotificationRole, RamView, Resource, WorkerHost, WriteNotification,
 };
 use dillo_mmio::{Interrupt, MappedSharedMemory, SharedAccess, SharedMemory};
+use dillo_virtio::queue::{Queue, QueueControl};
 use dillo_virtio::{
     ActivateError, DeviceJoinError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
     VirtioDeviceHost, VirtioRunToken,
@@ -95,13 +96,15 @@ struct Endpoint(Mutex<Option<Arc<dyn WriteNotification>>>);
 
 impl WriteNotification for Endpoint {
     fn read(&self) -> io::Result<u64> {
-        let endpoint = self
-            .0
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or(io::ErrorKind::NotConnected)?;
-        endpoint.read()
+        let endpoint = self.0.lock().unwrap().clone();
+        if let Some(endpoint) = endpoint {
+            endpoint.read()
+        } else {
+            // No kick descriptor requests polling. This also keeps not-yet
+            // configured queues available for their first start.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            Ok(0)
+        }
     }
     fn write(&self, count: u64) -> io::Result<()> {
         let endpoint = self.0.lock().unwrap().clone();
@@ -113,9 +116,8 @@ struct Ring {
     max: u16,
     geometry: Geometry,
     base: u16,
-    progress: Option<Arc<AtomicU16>>,
-    enabled: bool,
-    started: bool,
+    control: Arc<QueueControl>,
+    dirty: bool,
     kick: Arc<Endpoint>,
     call: Arc<Endpoint>,
 }
@@ -126,17 +128,11 @@ impl Ring {
             max,
             geometry: Geometry::default(),
             base: 0,
-            progress: None,
-            enabled: false,
-            started: false,
+            control: Arc::default(),
+            dirty: true,
             kick: Arc::default(),
             call: Arc::default(),
         }
-    }
-    fn base(&self) -> u16 {
-        self.progress
-            .as_ref()
-            .map_or(self.base, |progress| progress.load(Ordering::Acquire))
     }
 }
 
@@ -185,7 +181,7 @@ impl Backend {
     }
 
     fn start(&mut self) -> io::Result<()> {
-        if !self.rings.iter().all(|ring| ring.started && ring.enabled) {
+        if !self.rings.iter().any(|ring| ring.control.started()) {
             return Ok(());
         }
         if self.active.is_some() {
@@ -203,14 +199,8 @@ impl Backend {
         let mut kicks = Vec::new();
         let mut interrupts = Vec::new();
         for ring in &mut self.rings {
-            let mut queue = crate::queue::admit(ring.geometry.clone(), ring.max, &self.memory)?;
-            queue.next_avail = Wrapping(ring.base);
-            queue.next_used = Wrapping(u16::from_le(
-                self.memory
-                    .read_obj::<u16>(GuestAddress(ring.geometry.used + 2))
-                    .map_err(io::Error::other)?,
-            ));
-            ring.progress = Some(queue.track_progress());
+            let mut queue = Queue::new(ring.max);
+            queue.control_with(Arc::clone(&ring.control));
             queue.pause_with(Arc::clone(&self.barrier.requested));
             queues.push(queue);
             kicks.push(Kick::from_notification(ring.kick.clone()));
@@ -289,10 +279,9 @@ impl Backend {
                 require(!self.owner)?;
                 self.owner = true;
             }
-            RESET_OWNER => {
-                self.reset()?;
-                self.owner = false;
-            }
+            // Deprecated; ignoring it preserves the connection state, as
+            // recommended by vhost-user. RESET_DEVICE performs device reset.
+            RESET_OWNER => {}
             SET_FEATURES => {
                 let features = wire::take_u64(&mut data)?;
                 require(
@@ -303,7 +292,7 @@ impl Backend {
                 self.features = features;
                 if features & wire::PROTOCOL_FEATURES == 0 {
                     for ring in &mut self.rings {
-                        ring.enabled = true;
+                        ring.control.set_enabled(true);
                     }
                 }
             }
@@ -431,36 +420,40 @@ impl Backend {
                 require(index < self.rings.len())?;
                 if frame.request == GET_VRING_BASE {
                     require(value == 0)?;
+                }
+                if matches!(frame.request, GET_VRING_BASE | SET_VRING_ENABLE) {
                     self.pause()?;
                 }
                 let ring = &mut self.rings[index];
                 match frame.request {
                     SET_VRING_NUM => {
                         require(
-                            self.active.is_none()
+                            !ring.control.started()
                                 && value != 0
                                 && value.is_power_of_two()
                                 && value <= u32::from(ring.max),
                         )?;
                         ring.geometry.size = value as u16;
+                        ring.dirty = true;
                     }
                     SET_VRING_BASE => {
-                        require(self.active.is_none())?;
+                        require(!ring.control.started())?;
                         ring.base = u16::try_from(value).map_err(io::Error::other)?;
+                        ring.dirty = true;
                     }
                     GET_VRING_BASE => {
-                        ring.started = false;
-                        reply = Some(wire::state(index as u32, u32::from(ring.base())));
+                        ring.control.set_started(false);
+                        ring.base = ring.control.base();
+                        reply = Some(wire::state(index as u32, u32::from(ring.base)));
                     }
                     SET_VRING_ENABLE => {
-                        require(value <= 1 && self.active.is_none())?;
-                        ring.enabled = value != 0;
+                        require(value <= 1 && self.features & wire::PROTOCOL_FEATURES != 0)?;
+                        ring.control.set_enabled(value != 0);
                     }
                     _ => unreachable!(),
                 }
             }
             SET_VRING_ADDR => {
-                require(self.active.is_none())?;
                 let index = wire::take_u32(&mut data)? as usize;
                 require(wire::take_u32(&mut data)? == 0)?;
                 let desc = self.translate(wire::take_u64(&mut data)?)?;
@@ -471,6 +464,8 @@ impl Backend {
                     .rings
                     .get_mut(index)
                     .ok_or(io::ErrorKind::InvalidInput)?;
+                require(!ring.control.started())?;
+                ring.dirty = true;
                 ring.geometry.desc = desc;
                 ring.geometry.used = used;
                 ring.geometry.avail = avail;
@@ -482,7 +477,6 @@ impl Backend {
                 let index = (value & 0xff) as usize;
                 require(index < self.rings.len() && resources.len() == usize::from(present))?;
                 if frame.request == SET_VRING_KICK {
-                    require(present)?;
                     self.pause()?;
                 }
                 let endpoint = if present {
@@ -500,7 +494,19 @@ impl Backend {
                 let ring = &mut self.rings[index];
                 if frame.request == SET_VRING_KICK {
                     *ring.kick.0.lock().unwrap() = endpoint;
-                    ring.started = true;
+                    if ring.dirty {
+                        let mut queue =
+                            crate::queue::admit(ring.geometry.clone(), ring.max, &self.memory)?;
+                        queue.next_avail = Wrapping(ring.base);
+                        queue.next_used = Wrapping(u16::from_le(
+                            self.memory
+                                .read_obj::<u16>(GuestAddress(ring.geometry.used + 2))
+                                .map_err(io::Error::other)?,
+                        ));
+                        ring.control.configure(queue);
+                        ring.dirty = false;
+                    }
+                    ring.control.set_started(true);
                 } else if frame.request == SET_VRING_CALL {
                     *ring.call.0.lock().unwrap() = endpoint;
                 }

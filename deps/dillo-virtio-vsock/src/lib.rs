@@ -315,7 +315,9 @@ fn tx_worker(
         let mut signaled = false;
         while let Some(head) = q.pop(queue_memory) {
             let head_index = head.index;
-            if let Some(pkt) = read_tx_packet(queue_memory, buffer_memory, head) {
+            if q.enabled()
+                && let Some(pkt) = read_tx_packet(queue_memory, buffer_memory, head)
+            {
                 conn_mgr
                     .lock()
                     .expect("virtio-vsock conn_mgr mutex")
@@ -422,6 +424,9 @@ fn write_rx_packet(
     queue: &mut Queue,
     pkt: &VsockPacket,
 ) -> Option<u32> {
+    if !queue.enabled() {
+        return None;
+    }
     let head = queue.pop(queue_memory)?;
     let head_index = head.index;
 

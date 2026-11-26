@@ -9,8 +9,8 @@
 //! consumption, and used ring production against guest memory.
 
 use std::num::Wrapping;
-use std::sync::Arc;
-use std::sync::atomic::{Ordering, fence};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering, fence};
+use std::sync::{Arc, Mutex};
 
 use dillo_mmio::{SharedAccess, SharedMemory, SharedMemoryError, SharedRange};
 use vm_memory::{Address, GuestAddress};
@@ -198,6 +198,46 @@ impl QueueMemory for SharedQueueMemory {
     }
 }
 
+/// Control-plane state for one ring. Configuration changes and stopping must
+/// follow the host's drain barrier; stopping alone does not drain admitted I/O.
+/// The fast path reads atomics, locking only when adopting new configuration.
+#[derive(Debug, Default)]
+pub struct QueueControl {
+    started: AtomicBool,
+    enabled: AtomicBool,
+    progress: AtomicU16,
+    pending: Mutex<Option<Queue>>,
+    updated: AtomicBool,
+}
+
+impl QueueControl {
+    pub fn started(&self) -> bool {
+        self.started.load(Ordering::Acquire)
+    }
+
+    pub fn set_started(&self, started: bool) {
+        self.started.store(started, Ordering::Release);
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Release);
+    }
+
+    /// Sample only after draining the queue's admitted work.
+    pub fn base(&self) -> u16 {
+        self.progress.load(Ordering::Acquire)
+    }
+
+    /// Replace a stopped ring's configuration without resetting device state.
+    pub fn configure(&self, mut queue: Queue) {
+        queue.control = None;
+        queue.pause = None;
+        self.progress.store(queue.next_avail.0, Ordering::Release);
+        *self.pending.lock().unwrap() = Some(queue);
+        self.updated.store(true, Ordering::Release);
+    }
+}
+
 /// Split virtqueue state.
 ///
 /// Tracks guest-provided ring GPAs, queue size, and read/write cursors for
@@ -220,8 +260,7 @@ pub struct Queue {
 
     /// Next available ring index to consume.
     pub next_avail: Wrapping<u16>,
-    /// Optional control-plane observation, sampled only after the queue stops.
-    progress: Option<Arc<std::sync::atomic::AtomicU16>>,
+    control: Option<Arc<QueueControl>>,
     pause: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Next used ring index to produce.
     pub next_used: Wrapping<u16>,
@@ -239,13 +278,18 @@ impl Queue {
         self.pause = Some(requested);
     }
 
-    /// Observe the consumed available index after a worker's drain barrier.
-    pub fn track_progress(&mut self) -> Arc<std::sync::atomic::AtomicU16> {
-        Arc::clone(
-            self.progress.get_or_insert_with(|| {
-                Arc::new(std::sync::atomic::AtomicU16::new(self.next_avail.0))
-            }),
-        )
+    /// Bind a queue to an independently controlled ring. Configuration is
+    /// adopted at the next admission, after the host has drained old work.
+    pub fn control_with(&mut self, control: Arc<QueueControl>) {
+        self.control = Some(control);
+    }
+
+    /// Disabled TX queues complete requests without executing them; disabled
+    /// RX queues retain their buffers. The device applies that distinction.
+    pub fn enabled(&self) -> bool {
+        self.control
+            .as_ref()
+            .is_none_or(|control| control.enabled.load(Ordering::Acquire))
     }
 
     /// Create a new queue with the given maximum size.
@@ -258,7 +302,7 @@ impl Queue {
             avail_ring: GuestAddress(0),
             used_ring: GuestAddress(0),
             next_avail: Wrapping(0),
-            progress: None,
+            control: None,
             pause: None,
             next_used: Wrapping(0),
             uses_notif_suppression: false,
@@ -315,6 +359,17 @@ impl Queue {
         {
             return None;
         }
+        if let Some(control) = &self.control {
+            if !control.started() {
+                return None;
+            }
+            if control.updated.swap(false, Ordering::Acquire) {
+                let mut next = control.pending.lock().unwrap().take()?;
+                next.control = self.control.take();
+                next.pause = self.pause.take();
+                *self = next;
+            }
+        }
         // Read avail_idx from avail ring (offset 2).
         let avail_idx = mem.read_u16(self.avail_ring.unchecked_add(2))?;
 
@@ -342,8 +397,8 @@ impl Queue {
         let next = mem.read_u16(desc_addr.unchecked_add(14))?;
 
         self.next_avail += Wrapping(1);
-        if let Some(progress) = &self.progress {
-            progress.store(self.next_avail.0, Ordering::Release);
+        if let Some(control) = &self.control {
+            control.progress.store(self.next_avail.0, Ordering::Release);
         }
 
         Some(DescriptorChain {

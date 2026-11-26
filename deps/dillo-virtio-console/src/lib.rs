@@ -1004,7 +1004,7 @@ fn drain_rx(
     let mut q = queue.lock().expect("virtio-console RX queue mutex");
     let mut signaled = false;
     let mut made_progress = false;
-    while !pending.is_empty() {
+    while q.enabled() && !pending.is_empty() {
         let Some(head) = q.pop(queue_memory) else {
             break;
         };
@@ -1078,8 +1078,14 @@ fn drain_tx_buffers(
 ) -> Vec<Vec<u8>> {
     let mut q = queue.lock().expect("virtio-console TX queue mutex");
     let mut out = Vec::new();
+    let mut completed = false;
     while let Some(head) = q.pop(queue_memory) {
+        completed = true;
         let head_index = head.index;
+        if !q.enabled() {
+            q.add_used(queue_memory, head_index, 0);
+            continue;
+        }
         let mut written: u32 = 0;
         let mut message = Vec::new();
         // Walk the chain manually — DescriptorChain isn't an Iterator,
@@ -1108,9 +1114,7 @@ fn drain_tx_buffers(
         q.add_used(queue_memory, head_index, written);
         out.push(message);
     }
-    if !out.is_empty()
-        && let Some(intr) = call_interrupt
-    {
+    if completed && let Some(intr) = call_interrupt {
         // Tell the guest one or more descriptors completed.
         intr.signal();
     }
@@ -1131,6 +1135,9 @@ fn push_to_queue(
     call_interrupt: Option<&Interrupt>,
 ) -> bool {
     let mut q = queue.lock().expect("virtio-console queue mutex");
+    if !q.enabled() {
+        return false;
+    }
     let Some(head) = q.pop(queue_memory) else {
         return false;
     };

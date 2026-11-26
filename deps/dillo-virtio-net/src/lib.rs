@@ -360,7 +360,8 @@ fn drain_tx(
     let mut signaled = false;
     while let Some(head) = q.pop(queue_memory) {
         let head_index = head.index;
-        if let Some(frame) = read_tx_frame(queue_memory, buffer_memory, head)
+        if q.enabled()
+            && let Some(frame) = read_tx_frame(queue_memory, buffer_memory, head)
             && let Err(e) = backend.send(&frame)
         {
             log::warn!("virtio-net TX: backend send ({} bytes): {e}", frame.len());
@@ -458,6 +459,9 @@ fn write_rx_frame(
     queue: &mut Queue,
     frame: &[u8],
 ) -> bool {
+    if !queue.enabled() {
+        return false;
+    }
     let Some(head) = queue.pop(queue_memory) else {
         return false;
     };
