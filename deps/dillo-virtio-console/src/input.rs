@@ -12,16 +12,26 @@ use std::{
 
 const CHUNK: usize = 8192;
 const QUEUED_CHUNKS: usize = 8;
+static FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+pub(super) fn configure(file: std::fs::File) {
+    *FILE.lock().unwrap() = Some(file);
+}
+
 static INPUT: OnceLock<io::Result<Mutex<mpsc::Receiver<Vec<u8>>>>> = OnceLock::new();
 
 pub(super) fn next() -> io::Result<Option<Vec<u8>>> {
     let receiver = INPUT
         .get_or_init(|| {
             let (sender, receiver) = mpsc::sync_channel(QUEUED_CHUNKS);
+            let input = FILE.lock().unwrap().take();
             thread::Builder::new()
                 .name("console-stdin".into())
                 .spawn(move || {
-                    if let Err(error) = copy(io::stdin().lock(), sender) {
+                    if let Err(error) = match input {
+                        Some(file) => copy(file, sender),
+                        None => copy(io::stdin().lock(), sender),
+                    } {
                         log::debug!("console stdin reader: {error}");
                     }
                     super::liveness::input_closed();

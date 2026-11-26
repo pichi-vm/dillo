@@ -36,7 +36,8 @@ mod control;
 mod input;
 pub mod liveness;
 pub mod pipe;
-mod resize;
+pub mod resize;
+pub mod stdio;
 
 use std::collections::VecDeque;
 use std::io::{self, BufWriter, Write};
@@ -64,7 +65,7 @@ pub const VIRTIO_ID_CONSOLE: u32 = 3;
 const VIRTIO_CONSOLE_F_MULTIPORT: u64 = 1 << 1;
 
 /// Queue sizes (per spec a power of two; 64 is the typical hvc0 size).
-const QUEUE_MAX: u16 = 64;
+pub const QUEUE_MAX: u16 = 64;
 const QUEUE_SIZES: [u16; 2] = [QUEUE_MAX, QUEUE_MAX];
 
 /// Queue index of the control receiveq (device → guest) under MULTIPORT.
@@ -106,14 +107,18 @@ const TX_BACKLOG_LIMIT: usize = 1024 * 1024;
 #[derive(Debug)]
 pub struct NamedPort {
     name: String,
-    rx: Option<pipe::PipeEnd>,
-    tx: Option<pipe::PipeEnd>,
+    rx: Option<Arc<pipe::PipeEnd>>,
+    tx: Option<Arc<pipe::PipeEnd>>,
 }
 
 impl NamedPort {
     /// `rx` carries host → guest, `tx` carries guest → host (device sense).
     pub fn new(name: String, rx: Option<pipe::PipeEnd>, tx: Option<pipe::PipeEnd>) -> Self {
-        Self { name, rx, tx }
+        Self {
+            name,
+            rx: rx.map(Arc::new),
+            tx: tx.map(Arc::new),
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -169,10 +174,24 @@ fn output_tx() -> &'static Mutex<mpsc::Sender<OutputMessage>> {
     })
 }
 
+static OUTPUT_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+/// Bind port zero to the explicitly granted worker streams. Call before use.
+pub fn worker_stdio(input: std::fs::File, output: std::fs::File) {
+    input::configure(input);
+    *OUTPUT_FILE.lock().unwrap() = Some(output);
+}
+
 fn output_worker(rx: mpsc::Receiver<OutputMessage>) {
-    let stdout = io::stdout();
-    let mut stdout = BufWriter::with_capacity(128 * 1024, stdout.lock());
-    pump_output(&rx, &mut stdout);
+    if let Some(file) = OUTPUT_FILE.lock().unwrap().take() {
+        pump_output(&rx, &mut BufWriter::with_capacity(128 * 1024, file));
+    } else {
+        let stdout = io::stdout();
+        pump_output(
+            &rx,
+            &mut BufWriter::with_capacity(128 * 1024, stdout.lock()),
+        );
+    }
 }
 
 /// Drain `rx` into `out`, flushing after every burst. hvc0 is a console:
@@ -291,6 +310,14 @@ impl VirtioConsole {
         Ok(self)
     }
 
+    /// Accept terminal-size updates from the vhost-user frontend.
+    #[must_use]
+    pub fn with_size_updates(mut self) -> Self {
+        self.size = Some(Arc::new(std::sync::atomic::AtomicU32::new(0)));
+        self.queue_sizes.resize(4 + 2 * self.ports.len(), QUEUE_MAX);
+        self
+    }
+
     /// Total ports the guest may see: port 0 plus every named port.
     fn max_nr_ports(&self) -> u32 {
         1 + self.ports.len() as u32
@@ -405,6 +432,7 @@ impl VirtioDevice for VirtioConsole {
                 activation.queue_interrupt(CONTROL_RX_QUEUE),
                 activation.queue_interrupt(CONTROL_TX_QUEUE),
                 self.resize.take(),
+                self.size.clone(),
             )?);
 
             // Take only PipeEnds. Emptying `ports` would collapse MULTIPORT
@@ -413,8 +441,8 @@ impl VirtioDevice for VirtioConsole {
             for (index, port) in self.ports.iter_mut().enumerate() {
                 let id = index as u32 + 1;
                 let (rx_index, tx_index) = port_queues(id);
-                let rx = port.rx.take();
-                let tx = port.tx.take();
+                let rx = port.rx.clone();
+                let tx = port.tx.clone();
                 let open = usize::from(rx.is_some()) + usize::from(tx.is_some());
                 let liveness = Arc::new(PortLiveness {
                     id,
@@ -524,8 +552,25 @@ impl VirtioDevice for VirtioConsole {
         }
     }
 
-    fn write_config(&mut self, _offset: u64, _data: &[u8]) {
-        // No writable fields.
+    fn write_config(&mut self, offset: u64, data: &[u8]) {
+        if offset == 0
+            && data.len() == 4
+            && let Some(size) = &self.size
+        {
+            let bytes: [u8; 4] = data.try_into().unwrap();
+            if dillo_config::ConsoleSize::try_from(bytes).is_ok() {
+                size.store(
+                    u32::from_le_bytes(bytes),
+                    std::sync::atomic::Ordering::Release,
+                );
+            }
+        }
+    }
+
+    fn reset(&mut self) -> Result<(), ActivateError> {
+        flush_output();
+        self.activated = false;
+        Ok(())
     }
 }
 
@@ -594,6 +639,7 @@ fn spawn_control_worker(
     rx_call_interrupt: Option<Interrupt>,
     tx_call_interrupt: Option<Interrupt>,
     resize: Option<resize::Receiver>,
+    size: Option<Arc<std::sync::atomic::AtomicU32>>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
     host.spawn(Box::new(move |token| {
         control_worker(
@@ -606,6 +652,7 @@ fn spawn_control_worker(
             tx_call_interrupt.as_ref(),
             &token,
             resize,
+            size,
         );
         Ok(())
     }))
@@ -615,7 +662,7 @@ fn spawn_control_worker(
 /// bytes to the guest through that port's receiveq.
 fn spawn_port_rx_worker(
     host: Arc<dyn VirtioDeviceHost>,
-    end: pipe::PipeEnd,
+    end: Arc<pipe::PipeEnd>,
     liveness: Arc<PortLiveness>,
     queue_memory: Arc<dyn QueueMemory>,
     buffer_memory: Arc<dyn VirtioMemory>,
@@ -640,7 +687,7 @@ fn spawn_port_rx_worker(
 /// write the bytes to its pipe.
 fn spawn_port_tx_worker(
     host: Arc<dyn VirtioDeviceHost>,
-    end: pipe::PipeEnd,
+    end: Arc<pipe::PipeEnd>,
     liveness: Arc<PortLiveness>,
     queue_memory: Arc<dyn QueueMemory>,
     buffer_memory: Arc<dyn VirtioMemory>,
@@ -678,7 +725,9 @@ fn control_worker(
     tx_call_interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
     mut resize: Option<resize::Receiver>,
+    size: Option<Arc<std::sync::atomic::AtomicU32>>,
 ) {
+    let mut previous_size = 0;
     let rx_queue = Arc::new(Mutex::new(rx_queue));
     let tx_queue = Arc::new(Mutex::new(tx_queue));
     loop {
@@ -697,6 +746,17 @@ fn control_worker(
                 Err(error) => {
                     log::warn!("virtio-console: resize endpoint failed: {error}");
                     resize = None;
+                }
+            }
+        }
+
+        if let Some(size) = &size {
+            let current = size.load(std::sync::atomic::Ordering::Acquire);
+            if current != previous_size {
+                previous_size = current;
+                if let Ok(size) = dillo_config::ConsoleSize::try_from(current.to_le_bytes()) {
+                    plane.resize(size);
+                    progress = true;
                 }
             }
         }

@@ -12,6 +12,10 @@ use dillo_virtio_blk::{RawImageBacking, VirtioBlk};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Backing {
+    Console {
+        ports: Vec<Port>,
+        resize: bool,
+    },
     Raw {
         readonly: bool,
     },
@@ -23,6 +27,13 @@ pub(crate) enum Backing {
         disk_guid: [u8; 16],
         partitions: Vec<Partition>,
     },
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Port {
+    pub name: String,
+    pub rx: bool,
+    pub tx: bool,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -39,6 +50,40 @@ pub(crate) fn device(
 ) -> io::Result<Box<dyn VirtioDevice>> {
     let backing: Backing = serde_json::from_value(value).map_err(io::Error::other)?;
     let device = match backing {
+        Backing::Console { ports, resize } => {
+            use dillo_virtio_console::{
+                NamedPort, VirtioConsole,
+                pipe::{Direction, PipeEnd},
+            };
+            if files.len()
+                != 2 + ports
+                    .iter()
+                    .map(|p| usize::from(p.rx) + usize::from(p.tx))
+                    .sum::<usize>()
+            {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            let mut files = files.into_iter();
+            dillo_virtio_console::worker_stdio(files.next().unwrap(), files.next().unwrap());
+            let ports = ports
+                .into_iter()
+                .map(|port| {
+                    let rx = port.rx.then(|| {
+                        PipeEnd::from_file(&port.name, Direction::Rx, files.next().unwrap())
+                    });
+                    let tx = port.tx.then(|| {
+                        PipeEnd::from_file(&port.name, Direction::Tx, files.next().unwrap())
+                    });
+                    NamedPort::new(port.name, rx, tx)
+                })
+                .collect();
+            let console = VirtioConsole::with_ports(ports);
+            return Ok(Box::new(if resize {
+                console.with_size_updates()
+            } else {
+                console
+            }));
+        }
         Backing::Raw { readonly } => {
             if files.len() != 1 {
                 return Err(io::ErrorKind::InvalidInput.into());
@@ -103,7 +148,7 @@ impl Device {
     pub(crate) fn num_queues(&self) -> usize {
         match self {
             Self::Local(device) => device.num_queues(),
-            Self::Block(_) => 1,
+            Self::Block(prepared) => prepared.num_queues(),
         }
     }
 
@@ -124,5 +169,13 @@ impl Device {
                 Ok(Box::new(proxy))
             }
         }
+    }
+}
+
+pub(crate) fn block_info() -> dillo_worker::DeviceInfo {
+    dillo_worker::DeviceInfo {
+        kind: 2,
+        queues: vec![256],
+        config_len: 48,
     }
 }

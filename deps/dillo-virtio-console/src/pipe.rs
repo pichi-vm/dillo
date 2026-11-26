@@ -89,6 +89,31 @@ impl PipeEnd {
         })
     }
 
+    /// Configure an owned native pipe for bounded polling.
+    pub fn nonblocking(
+        port: &str,
+        direction: Direction,
+        file: std::fs::File,
+    ) -> std::io::Result<Self> {
+        let mut pipe = Self::from_file(port, direction, file);
+        pipe.inner.nonblocking()?;
+        Ok(pipe)
+    }
+
+    /// Adopt a transferred, already nonblocking pipe endpoint.
+    pub fn from_file(port: &str, direction: Direction, file: std::fs::File) -> Self {
+        Self {
+            port: port.into(),
+            direction,
+            inner: imp::PipeEnd::from_file(file),
+        }
+    }
+
+    /// Transfer this endpoint to another process without retaining a duplicate.
+    pub fn into_file(self) -> std::fs::File {
+        self.inner.into_file()
+    }
+
     /// The port this end belongs to.
     pub fn port(&self) -> &str {
         &self.port
@@ -125,6 +150,13 @@ mod imp {
     }
 
     impl PipeEnd {
+        pub(super) fn from_file(file: std::fs::File) -> Self {
+            Self { fd: file.into() }
+        }
+        pub(super) fn into_file(self) -> std::fs::File {
+            self.fd.into()
+        }
+
         pub(super) fn adopt(number: u64) -> io::Result<Self> {
             let raw: RawFd = i32::try_from(number).map_err(|_| {
                 io::Error::new(
@@ -159,6 +191,12 @@ mod imp {
             fcntl(&fd, FcntlArg::F_SETFL(flags)).map_err(io::Error::from)?;
 
             Ok(Self { fd })
+        }
+
+        pub(super) fn nonblocking(&mut self) -> io::Result<()> {
+            let flags = OFlag::from_bits_truncate(fcntl(&self.fd, FcntlArg::F_GETFL)?);
+            fcntl(&self.fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
+            Ok(())
         }
 
         pub(super) fn read(&self, buf: &mut [u8]) -> io::Result<super::Transfer> {
@@ -224,6 +262,15 @@ mod imp {
     // `OwnedHandle` is only `Send`/`Sync` by virtue of being a plain handle
     // wrapper; the device shares one end across its worker threads.
     impl PipeEnd {
+        pub(super) fn from_file(file: std::fs::File) -> Self {
+            Self {
+                handle: file.into(),
+            }
+        }
+        pub(super) fn into_file(self) -> std::fs::File {
+            self.handle.into()
+        }
+
         pub(super) fn adopt(number: u64) -> io::Result<Self> {
             let inherited = number as HANDLE;
             let mut duplicate: HANDLE = std::ptr::null_mut();
@@ -292,6 +339,24 @@ mod imp {
             #[allow(unsafe_code)]
             let handle = unsafe { OwnedHandle::from_raw_handle(duplicate as RawHandle) };
             Ok(Self { handle })
+        }
+
+        pub(super) fn nonblocking(&mut self) -> io::Result<()> {
+            let mode = PIPE_NOWAIT;
+            // SAFETY: the owned pipe remains live and mode is a valid input.
+            #[allow(unsafe_code)]
+            let ok = unsafe {
+                SetNamedPipeHandleState(
+                    self.raw(),
+                    &raw const mode,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
         }
 
         /// Bytes queued on the pipe, or `None` once the write end is gone.

@@ -10,7 +10,16 @@ use std::sync::{
 };
 
 use dillo_ipc::block::{Geometry, Init};
-use dillo_ipc::vhost_user::{self as wire, Frame, request::*};
+use dillo_ipc::vhost_user::{
+    self as wire, Frame,
+    request::{
+        ADD_MEM_REG, GET_CONFIG, GET_FEATURES, GET_MAX_MEM_SLOTS, GET_PROTOCOL_FEATURES,
+        GET_QUEUE_NUM, GET_VRING_BASE, REM_MEM_REG, RESET_DEVICE, RESET_OWNER, SET_CONFIG,
+        SET_FEATURES, SET_MEM_TABLE, SET_OWNER, SET_PROTOCOL_FEATURES, SET_VRING_ADDR,
+        SET_VRING_BASE, SET_VRING_CALL, SET_VRING_ENABLE, SET_VRING_ERR, SET_VRING_KICK,
+        SET_VRING_NUM,
+    },
+};
 use dillo_machine::worker::{
     MAX_RESOURCES, MemoryExport, NotificationRole, RamView, Resource, WorkerHost, WriteNotification,
 };
@@ -268,7 +277,7 @@ impl Backend {
                     (self.device.features() | wire::PROTOCOL_FEATURES)
                         .to_ne_bytes()
                         .to_vec(),
-                )
+                );
             }
             GET_PROTOCOL_FEATURES => reply = Some(PROTOCOL.to_ne_bytes().to_vec()),
             SET_PROTOCOL_FEATURES => {
@@ -440,8 +449,8 @@ impl Backend {
                         ring.geometry.size = value as u16;
                     }
                     SET_VRING_BASE => {
-                        require(self.active.is_none() && value <= u32::from(u16::MAX))?;
-                        ring.base = value as u16;
+                        require(self.active.is_none())?;
+                        ring.base = u16::try_from(value).map_err(io::Error::other)?;
                     }
                     GET_VRING_BASE => {
                         ring.started = false;
@@ -532,7 +541,9 @@ pub unsafe fn run<H: WorkerHost>(
     factory: impl FnOnce(serde_json::Value, Vec<File>) -> io::Result<Box<dyn VirtioDevice>>,
 ) -> io::Result<()> {
     let mut bootstrap = unsafe { H::bootstrap() }?;
-    let mut message = bootstrap.receive()?;
+    let mut message = bootstrap
+        .receive()
+        .map_err(|e| io::Error::new(e.kind(), format!("worker bootstrap receive: {e}")))?;
     let init: Init = dillo_ipc::decode(&message)?;
     require(init.version == 2 && message.resources.len() == init.files + 1)?;
     let mut channel = H::channel(message.resources.pop().unwrap())?;
@@ -573,7 +584,9 @@ pub unsafe fn run<H: WorkerHost>(
         barrier: Arc::default(),
     };
     loop {
-        let message = channel.receive()?;
+        let message = channel
+            .receive()
+            .map_err(|e| io::Error::new(e.kind(), format!("vhost backend receive: {e}")))?;
         let frame = Frame::decode(&message.bytes)?;
         require(
             frame.flags & wire::REPLY == 0
@@ -583,7 +596,7 @@ pub unsafe fn run<H: WorkerHost>(
         match result {
             Ok(Some(payload)) => channel.send(&frame.reply(payload).encode()?, &[])?,
             Ok(None) if frame.flags & wire::NEED_REPLY != 0 => {
-                channel.send(&frame.reply(0u64.to_ne_bytes().to_vec()).encode()?, &[])?
+                channel.send(&frame.reply(0u64.to_ne_bytes().to_vec()).encode()?, &[])?;
             }
             Ok(None) => {}
             Err(error) => {

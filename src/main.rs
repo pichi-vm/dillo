@@ -377,10 +377,10 @@ fn build_placements(
     requests.push(resolved.console.placement.clone());
     built.push((
         "virtio-console",
-        Local(Box::new(build_console_device(
+        Block(build_console_device(
             &resolved.console,
             args.console_resize.as_deref(),
-        )?)),
+        )?),
     ));
 
     for device in &resolved.devices {
@@ -461,26 +461,52 @@ fn msix_vectors_for(queues: usize) -> u16 {
 fn build_console_device(
     console: &dillo_config::ResolvedConsole,
     resize: Option<&std::path::Path>,
-) -> anyhow::Result<dillo_virtio_console::VirtioConsole> {
+) -> anyhow::Result<dillo_worker::Prepared> {
     use dillo_virtio_console::pipe::{Direction, PipeEnd};
-
+    let (bridge, input, output) = dillo_virtio_console::stdio::Bridge::new()?;
+    let mut files = vec![input, output];
     let mut ports = Vec::with_capacity(console.ports.len());
     for port in &console.ports {
-        let adopt = |direction, pipe: Option<dillo_config::PipeRef>| {
-            pipe.map(|p| PipeEnd::adopt(&port.name, direction, p.number()))
-                .transpose()
-        };
-        ports.push(dillo_virtio_console::NamedPort::new(
-            port.name.clone(),
-            adopt(Direction::Rx, port.rx)?,
-            adopt(Direction::Tx, port.tx)?,
-        ));
+        for (direction, pipe) in [(Direction::Rx, port.rx), (Direction::Tx, port.tx)] {
+            if let Some(pipe) = pipe {
+                files.push(PipeEnd::adopt(&port.name, direction, pipe.number())?.into_file());
+            }
+        }
+        ports.push(block_worker::Port {
+            name: port.name.clone(),
+            rx: port.rx.is_some(),
+            tx: port.tx.is_some(),
+        });
     }
-    let device = dillo_virtio_console::VirtioConsole::with_ports(ports);
-    Ok(match resize {
-        Some(path) => device.with_resize(path)?,
-        None => device,
-    })
+    let multiport = !ports.is_empty() || resize.is_some();
+    let queues = if multiport { 4 + 2 * ports.len() } else { 2 };
+    let mut prepared = dillo_worker::Prepared::new(
+        dillo_worker::DeviceInfo {
+            kind: 3,
+            queues: vec![dillo_virtio_console::QUEUE_MAX; queues],
+            config_len: 12,
+        },
+        &block_worker::Backing::Console {
+            ports,
+            resize: resize.is_some(),
+        },
+        files,
+    )?
+    .retain(bridge);
+    if let Some(path) = resize {
+        let mut receiver = dillo_virtio_console::resize::Receiver::bind(
+            path,
+            std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        )?;
+        prepared = prepared.with_config_updates(move || {
+            receiver.poll().map(|size| {
+                size.map(|size| {
+                    [size.cols.get().to_le_bytes(), size.rows.get().to_le_bytes()].concat()
+                })
+            })
+        });
+    }
+    Ok(prepared)
 }
 
 /// Construct the `VirtioBlk` for one resolved device (opening its backing files).
@@ -540,7 +566,7 @@ fn build_block_device(
             };
             Ok((
                 "virtio-blk",
-                dillo_worker::Prepared::new(&backing, vec![file])?,
+                dillo_worker::Prepared::new(block_worker::block_info(), &backing, vec![file])?,
             ))
         }
         dillo_config::ResolvedDevice::Gpt {
@@ -565,6 +591,7 @@ fn build_block_device(
             Ok((
                 "virtio-gpt",
                 dillo_worker::Prepared::new(
+                    block_worker::block_info(),
                     &Backing::Gpt {
                         device_id: *device_id,
                         disk_guid: *disk_guid,

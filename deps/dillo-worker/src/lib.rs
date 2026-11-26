@@ -9,4 +9,4 @@ mod pause;
 mod queue;
 
 pub use child::run;
-pub use parent::{Control, Prepared, Proxy};
+pub use parent::{Control, DeviceInfo, Prepared, Proxy};

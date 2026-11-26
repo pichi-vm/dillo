@@ -156,6 +156,9 @@ impl BlockBacking for ControlledBacking {
     }
 }
 
+#[path = "cases/console.rs"]
+mod console;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os()
         .nth(1)
@@ -164,6 +167,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let factory = |config: serde_json::Value,
                        mut files: Vec<File>|
          -> io::Result<Box<dyn VirtioDevice>> {
+            if config["mode"] == "console" {
+                return console::device(files);
+            }
             let forbidden = config["forbidden"].as_str().unwrap();
             assert!(
                 File::open(forbidden).is_err(),
@@ -259,6 +265,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("block process: {mode}");
         exercise(mode)?;
     }
+    console::exercise()?;
     println!(
         "block process: confinement, raw/qcow2 I/O, quiescence, reset, crash and deadline passed"
     );
@@ -421,6 +428,11 @@ fn exercise(mode: &str) -> io::Result<()> {
         None
     };
     let prepared = dillo_worker::Prepared::new(
+        dillo_worker::DeviceInfo {
+            kind: 2,
+            queues: vec![256],
+            config_len: 48,
+        },
         &serde_json::json!({"mode":mode,"forbidden":forbidden.path(),"network":network}),
         files,
     )?;

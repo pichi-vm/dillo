@@ -11,8 +11,16 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use dillo_ipc::block::{CONFIG_LEN, Init, QUEUE_MAX};
-use dillo_ipc::vhost_user::{self as wire, Frame, request::*};
+use dillo_ipc::block::Init;
+use dillo_ipc::vhost_user::{
+    self as wire, Frame,
+    request::{
+        ADD_MEM_REG, GET_CONFIG, GET_FEATURES, GET_MAX_MEM_SLOTS, GET_PROTOCOL_FEATURES,
+        GET_QUEUE_NUM, GET_VRING_BASE, RESET_DEVICE, SET_CONFIG, SET_FEATURES, SET_MEM_TABLE,
+        SET_OWNER, SET_PROTOCOL_FEATURES, SET_VRING_ADDR, SET_VRING_BASE, SET_VRING_CALL,
+        SET_VRING_ENABLE, SET_VRING_KICK, SET_VRING_NUM,
+    },
+};
 use dillo_machine::worker::{
     BorrowedResource, Channel, MemoryExport, NotificationRole, Process, Resource, WorkerHost,
     WriteNotification,
@@ -40,18 +48,65 @@ struct Outgoing {
     sent: Option<mpsc::SyncSender<()>>,
 }
 
-#[derive(Debug)]
+/// Frontend metadata comes from the device model selected by the launcher.
+/// Vhost-user negotiates its features and queue state, not its virtio type.
+#[derive(Clone, Debug)]
+pub struct DeviceInfo {
+    pub kind: u32,
+    pub queues: Vec<u16>,
+    pub config_len: usize,
+}
+
+#[must_use]
 pub struct Prepared {
+    info: DeviceInfo,
     backend: serde_json::Value,
     files: Vec<Resource>,
+    updates: Option<Box<dyn FnMut() -> io::Result<Option<Vec<u8>>> + Send>>,
+    retained: Vec<Box<dyn Send>>,
+}
+
+impl std::fmt::Debug for Prepared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Prepared")
+            .field("info", &self.info)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Prepared {
-    pub fn new(backend: &impl serde::Serialize, files: Vec<File>) -> io::Result<Self> {
+    pub fn new(
+        info: DeviceInfo,
+        backend: &impl serde::Serialize,
+        files: Vec<File>,
+    ) -> io::Result<Self> {
         Ok(Self {
+            info,
             backend: serde_json::to_value(backend).map_err(io::Error::other)?,
             files: files.into_iter().map(Into::into).collect(),
+            updates: None,
+            retained: Vec::new(),
         })
+    }
+
+    pub fn num_queues(&self) -> usize {
+        self.info.queues.len()
+    }
+
+    /// Retain a launcher-owned host adapter until the worker is retired.
+    pub fn retain(mut self, resource: impl Send + 'static) -> Self {
+        self.retained.push(Box::new(resource));
+        self
+    }
+
+    /// Poll an explicit host configuration source, such as terminal size.
+    /// Updates are frontend-originated SET_CONFIG requests, never guest writes.
+    pub fn with_config_updates(
+        mut self,
+        updates: impl FnMut() -> io::Result<Option<Vec<u8>>> + Send + 'static,
+    ) -> Self {
+        self.updates = Some(Box::new(updates));
+        self
     }
 
     pub fn start<H: WorkerHost>(
@@ -125,6 +180,7 @@ impl Prepared {
             pair: H::notification_pair,
             endpoint: H::notification_endpoint,
             _files: files,
+            retained: Mutex::new(self.retained),
         });
         let features = wire::scalar(&session.get(GET_FEATURES, Vec::new())?)?;
         if features & (wire::PROTOCOL_FEATURES | (1 << 32)) != wire::PROTOCOL_FEATURES | (1 << 32) {
@@ -145,7 +201,8 @@ impl Prepared {
             Reply::None,
         )?;
         session.set(SET_OWNER, Vec::new(), Vec::new())?;
-        if wire::scalar(&session.get(GET_QUEUE_NUM, Vec::new())?)? != 1 {
+        if wire::scalar(&session.get(GET_QUEUE_NUM, Vec::new())?)? != self.info.queues.len() as u64
+        {
             return Err(io::Error::other("unexpected backend queue count"));
         }
         let slots = wire::scalar(&session.get(GET_MAX_MEM_SLOTS, Vec::new())?)?;
@@ -165,18 +222,53 @@ impl Prepared {
                 .collect();
             session.set(ADD_MEM_REG, payload, vec![resource])?;
         }
-        let mut config_request = wire::state(0, CONFIG_LEN as u32);
+        let mut config_request = wire::state(0, self.info.config_len as u32);
         config_request.extend(0u32.to_ne_bytes());
-        config_request.resize(12 + CONFIG_LEN, 0);
+        config_request.resize(12 + self.info.config_len, 0);
         let config = session.get(GET_CONFIG, config_request.clone())?;
         if config.len() != config_request.len() || config[..12] != config_request[..12] {
             return Err(io::Error::other("invalid backend configuration reply"));
         }
+        let config = Arc::new(Mutex::new(config[12..].to_vec()));
+        if let Some(mut updates) = self.updates {
+            let weak = Arc::downgrade(&session);
+            let config = Arc::clone(&config);
+            let thread = std::thread::Builder::new()
+                .name("vhost-config".into())
+                .spawn(move || {
+                    while let Some(session) = weak.upgrade() {
+                        if session.shared.retiring.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let result = updates().and_then(|update| {
+                            if let Some(bytes) = update {
+                                if bytes.len() > config.lock().unwrap().len() {
+                                    return Err(io::ErrorKind::InvalidInput.into());
+                                }
+                                let mut payload = wire::state(0, bytes.len() as u32);
+                                payload.extend(1u32.to_ne_bytes()); // frontend update
+                                payload.extend(&bytes);
+                                session.set(SET_CONFIG, payload, Vec::new())?;
+                                config.lock().unwrap()[..bytes.len()].copy_from_slice(&bytes);
+                            }
+                            Ok(())
+                        });
+                        if let Err(error) = result {
+                            session.shared.fail(error.to_string());
+                            break;
+                        }
+                        drop(session);
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                })?;
+            session.threads.lock().unwrap().push(thread);
+        }
         Ok((
             Proxy {
                 session: Arc::clone(&session),
+                info: self.info,
                 features: features & !wire::PROTOCOL_FEATURES,
-                config: config[12..].to_vec(),
+                config,
                 next_epoch: 1,
             },
             Control(session),
@@ -219,7 +311,9 @@ impl Shared {
 fn receive(mut channel: Box<dyn Channel>, shared: &Shared, replies: &mpsc::SyncSender<Frame>) {
     let result = (|| -> io::Result<()> {
         loop {
-            let message = channel.receive()?;
+            let message = channel
+                .receive()
+                .map_err(|e| io::Error::new(e.kind(), format!("vhost reply receive: {e}")))?;
             if !message.resources.is_empty() {
                 return Err(io::Error::other("unexpected backend reply resources"));
             }
@@ -248,6 +342,7 @@ type NotificationEndpoint =
 
 struct Session {
     _files: Arc<Vec<Resource>>,
+    retained: Mutex<Vec<Box<dyn Send>>>,
     shared: Arc<Shared>,
     process: Mutex<Box<dyn Process>>,
     commands: Mutex<Option<mpsc::SyncSender<Outgoing>>>,
@@ -310,7 +405,16 @@ impl Session {
                 .lock()
                 .unwrap()
                 .recv_timeout(CONTROL_TIMEOUT)
-                .map_err(io::Error::other)?;
+                .map_err(|error| {
+                    io::Error::other(
+                        self.shared
+                            .failure
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .unwrap_or_else(|| error.to_string()),
+                    )
+                })?;
             if frame.request != request {
                 return Err(io::Error::other("unexpected vhost-user reply"));
             }
@@ -353,6 +457,7 @@ impl Session {
             process.terminate()?;
         }
         process.wait()?;
+        drop(process);
         self.retired.store(true, Ordering::Release);
         self.commands.lock().unwrap().take();
         for thread in self.threads.lock().unwrap().drain(..) {
@@ -360,6 +465,7 @@ impl Session {
                 .join()
                 .map_err(|_| io::Error::other("worker relay panicked"))?;
         }
+        self.retained.lock().unwrap().clear();
         Ok(())
     }
 }
@@ -450,8 +556,9 @@ impl Drop for Control {
 
 pub struct Proxy {
     session: Arc<Session>,
+    info: DeviceInfo,
     features: u64,
-    config: Vec<u8>,
+    config: Arc<Mutex<Vec<u8>>>,
     next_epoch: u64,
 }
 
@@ -465,23 +572,24 @@ impl std::fmt::Debug for Proxy {
 
 impl VirtioDevice for Proxy {
     fn device_type(&self) -> u32 {
-        2
+        self.info.kind
     }
     fn num_queues(&self) -> usize {
-        1
+        self.info.queues.len()
     }
     fn queue_max_sizes(&self) -> &[u16] {
-        &[QUEUE_MAX]
+        &self.info.queues
     }
     fn features(&self) -> u64 {
         self.features
     }
     fn read_config(&self, offset: u64, data: &mut [u8]) {
+        let config = self.config.lock().unwrap();
         for (i, byte) in data.iter_mut().enumerate() {
             *byte = usize::try_from(offset)
                 .ok()
                 .and_then(|offset| offset.checked_add(i))
-                .and_then(|offset| self.config.get(offset))
+                .and_then(|offset| config.get(offset))
                 .copied()
                 .unwrap_or(0);
         }
@@ -493,7 +601,7 @@ impl VirtioDevice for Proxy {
         mut activation: VirtioActivate,
     ) -> Result<VirtioDeviceHandle, ActivateError> {
         let session = Arc::clone(&self.session);
-        let _lifecycle = session.lifecycle.lock().unwrap();
+        let lifecycle = session.lifecycle.lock().unwrap();
         let host = activation.host()?;
         let queues = activation.take_queues();
         let kicks = activation.take_queue_evts();
@@ -605,7 +713,7 @@ impl VirtioDevice for Proxy {
             }
             Ok(())
         })();
-        drop(_lifecycle);
+        drop(lifecycle);
         if let Err(error) = result {
             for relay in &mut relays {
                 relay.shutdown();

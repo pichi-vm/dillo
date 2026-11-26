@@ -16,8 +16,8 @@ impl dillo_machine::worker::WorkerHost for Worker {
         dillo_machine::worker::Resource,
         dillo_machine::worker::Resource,
     )> {
-        let event = nix::sys::eventfd::EventFd::new()?;
         use std::os::fd::AsFd;
+        let event = nix::sys::eventfd::EventFd::new()?;
         let sender = event.as_fd().try_clone_to_owned()?;
         Ok((event.into(), sender))
     }

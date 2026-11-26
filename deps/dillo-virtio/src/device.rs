@@ -225,6 +225,7 @@ impl VirtioRunToken {
     }
 
     /// Install the host's cooperative drain barrier for this worker.
+    #[must_use]
     pub fn with_checkpoint(mut self, checkpoint: impl Fn() + Send + Sync + 'static) -> Self {
         self.checkpoint = Some(Arc::new(checkpoint));
         self

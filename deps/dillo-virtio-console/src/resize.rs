@@ -20,7 +20,7 @@ use std::{
 };
 
 #[derive(Debug)]
-pub(super) struct Receiver {
+pub struct Receiver {
     listener: Listener,
     pending: Option<Pending>,
     current: Arc<AtomicU32>,
@@ -35,7 +35,7 @@ struct Pending {
 }
 
 impl Receiver {
-    pub(super) fn bind(path: &Path, current: Arc<AtomicU32>) -> io::Result<Self> {
+    pub fn bind(path: &Path, current: Arc<AtomicU32>) -> io::Result<Self> {
         let options = ListenerOptions::new()
             .name(path.to_fs_name::<GenericFilePath>()?)
             .nonblocking(ListenerNonblockingMode::Both);
@@ -60,7 +60,7 @@ impl Receiver {
 
     /// At most one accept and one nonblocking read per control-worker turn.
     /// A partial or idle client owns four bytes and one connection for ≤1 s.
-    pub(super) fn poll(&mut self) -> io::Result<Option<ConsoleSize>> {
+    pub fn poll(&mut self) -> io::Result<Option<ConsoleSize>> {
         if self.pending.is_none() {
             match self.listener.accept() {
                 Ok(stream) => {

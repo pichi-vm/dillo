@@ -90,6 +90,7 @@ impl Frame {
         }
     }
 
+    #[must_use]
     pub fn reply(&self, payload: Vec<u8>) -> Self {
         Self {
             request: self.request,
