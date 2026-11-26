@@ -5,12 +5,9 @@
 
 //! virtio-vsock device implementing [`VirtioDevice`].
 //!
-//! Ported from the dillo PoC `dillo-virtio-vsock` crate. The connection state
-//! machine (`csm`), the 44-byte packet codec (`packet`), and the host Unix-
-//! socket bridge (`uds`) are transport-agnostic and carry over intact. The
-//! PoC's vhost-user `run()`, seccomp filter, and `PR_SET_PDEATHSIG` plumbing
-//! are dropped — the device now runs in-process, driven directly by the
-//! Machine attachment exactly like `dillo-virtio-console`.
+//! The connection state machine, packet codec and socket I/O are independent
+//! of the parent transport. A confined worker may receive connected streams
+//! from its launcher instead of opening host paths itself.
 //!
 //! Three queues per virtio-vsock spec §5.10:
 //! - Queue 0: RX (host → guest).
@@ -25,6 +22,8 @@ mod csm;
 mod packet;
 #[cfg(unix)]
 mod uds;
+#[cfg(unix)]
+pub use uds::connect_port;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -52,7 +51,7 @@ const QUEUE_SIZES: [u16; 3] = [QUEUE_MAX, QUEUE_MAX, QUEUE_MAX];
 /// How often the RX worker re-polls for host → guest data when idle.
 const RX_POLL: Duration = Duration::from_millis(10);
 
-/// virtio-vsock: in-process, thread-mode device.
+/// Virtio-vsock queue and connection state.
 pub struct VirtioVsock {
     guest_cid: u64,
     conn_mgr: Arc<Mutex<ConnectionManager>>,
@@ -74,6 +73,19 @@ impl VirtioVsock {
     #[cfg(unix)]
     pub fn new(guest_cid: u64, uds_path: std::path::PathBuf) -> Self {
         Self::new_with_backend(guest_cid, Box::new(uds::UdsBackend::new(uds_path)))
+    }
+
+    /// Use a port-scoped resource authority. Returned streams must have bounded
+    /// read/write timeouts, as those operations hold the connection-state lock.
+    #[cfg(unix)]
+    pub fn with_connector(
+        guest_cid: u64,
+        connect: impl FnMut(u32) -> std::io::Result<std::os::unix::net::UnixStream> + Send + 'static,
+    ) -> Self {
+        Self::new_with_backend(
+            guest_cid,
+            Box::new(uds::UdsBackend::with_connector(connect)),
+        )
     }
 
     /// Create a vsock device with a caller-supplied backend (used by tests).

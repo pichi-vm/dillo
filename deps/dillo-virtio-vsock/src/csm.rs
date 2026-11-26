@@ -37,7 +37,7 @@ pub(crate) enum ConnState {
 /// Implementations decide what happens when the guest initiates connections
 /// and sends data. The default `EchoBackend` reflects data back; `UdsBackend`
 /// bridges to Unix domain sockets on the host.
-pub(crate) trait VsockBackend: Send + Sync {
+pub(crate) trait VsockBackend: Send {
     /// Discard all connections and buffered data after queue workers stop.
     fn reset(&mut self);
 
