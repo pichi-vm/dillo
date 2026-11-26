@@ -168,7 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                        mut files: Vec<File>|
          -> io::Result<Box<dyn VirtioDevice>> {
             if config["mode"] == "console" {
-                return console::device(files);
+                return Ok(console::device(files));
             }
             let forbidden = config["forbidden"].as_str().unwrap();
             assert!(

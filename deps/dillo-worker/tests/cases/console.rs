@@ -1,21 +1,24 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::*;
+use super::{
+    Arc, AtomicUsize, Bytes, Duration, File, GuestAddress, GuestMemoryMmap, Host, Instant, Kick,
+    Ordering, Queue, VirtioActivate, VirtioDevice, Worker, Write, io, memory, read_at,
+};
 use dillo_machine::worker::Resource;
 use dillo_virtio_console::{
     NamedPort, VirtioConsole,
     pipe::{Direction, PipeEnd, Transfer},
 };
 
-pub(super) fn device(mut files: Vec<File>) -> io::Result<Box<dyn VirtioDevice>> {
+pub(super) fn device(mut files: Vec<File>) -> Box<dyn VirtioDevice> {
     dillo_virtio_console::worker_stdio(files.remove(0), files.remove(0));
     let rx = PipeEnd::from_file("api", Direction::Rx, files.remove(0));
     let tx = PipeEnd::from_file("api", Direction::Tx, files.remove(0));
-    Ok(Box::new(
+    Box::new(
         VirtioConsole::with_ports(vec![NamedPort::new("api".into(), Some(rx), Some(tx))])
             .with_size_updates(),
-    ))
+    )
 }
 
 fn base(queue: u64) -> u64 {
