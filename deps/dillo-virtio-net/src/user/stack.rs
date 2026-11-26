@@ -17,6 +17,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration as StdDuration;
 
@@ -68,6 +69,7 @@ pub(super) struct Stack {
     inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
     outbound: Arc<(Mutex<VecDeque<Vec<u8>>>, Condvar)>,
     stop: Arc<AtomicBool>,
+    resets: Receiver<super::Reset>,
 
     /// Next mio token to hand out for a dynamically registered source.
     next_token: usize,
@@ -110,34 +112,12 @@ impl Stack {
         inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
         outbound: Arc<(Mutex<VecDeque<Vec<u8>>>, Condvar)>,
         stop: Arc<AtomicBool>,
+        resets: Receiver<super::Reset>,
     ) -> std::io::Result<Self> {
         let mut device = ProxyDevice::new();
         let iface = build_interface(&mut device);
-        let mut sockets = SocketSet::new(Vec::new());
-
-        // The gateway DNS responder: a smoltcp UDP socket on DNS_IP:53. set_any_ip
-        // + DNS_IP in the interface's addresses route the guest's queries here.
+        let (sockets, dns_socket, dhcp_socket) = service_sockets()?;
         let dns = Resolver::new(waker);
-        let mut dns_sock = make_udp_socket();
-        dns_sock
-            .bind(IpListenEndpoint {
-                addr: Some(DNS_IP),
-                port: DNS_PORT,
-            })
-            .map_err(|_| std::io::Error::other("failed to bind DNS responder socket"))?;
-        let dns_socket = sockets.add(dns_sock);
-
-        // The DHCP responder: a smoltcp UDP socket on :67 (any local address) so
-        // it catches the guest's broadcast DISCOVER/REQUEST. Replies go back
-        // broadcast (the client has no IP yet).
-        let mut dhcp_sock = make_udp_socket();
-        dhcp_sock
-            .bind(IpListenEndpoint {
-                addr: None,
-                port: dhcp::SERVER_PORT,
-            })
-            .map_err(|_| std::io::Error::other("failed to bind DHCP responder socket"))?;
-        let dhcp_socket = sockets.add(dhcp_sock);
 
         let mut next_token = FIRST_DYNAMIC_TOKEN;
         let mut bound = Vec::with_capacity(forwards.len());
@@ -180,6 +160,7 @@ impl Stack {
             inbound,
             outbound,
             stop,
+            resets,
             next_token,
             next_ephemeral: EPHEMERAL_BASE,
             tcp_flows: HashMap::new(),
@@ -198,6 +179,10 @@ impl Stack {
     /// Run until the stop flag is set (on backend drop).
     pub(super) fn run(mut self) {
         while !self.stop.load(Ordering::Acquire) {
+            if let Ok(ack) = self.resets.try_recv() {
+                let result = self.reset();
+                let _ = ack.send(result);
+            }
             self.ingest_inbound();
 
             let mut rounds = 0;
@@ -244,6 +229,49 @@ impl Stack {
                 }
             }
         }
+    }
+
+    fn reset(&mut self) -> std::io::Result<()> {
+        let (sockets, dns_socket, dhcp_socket) = service_sockets()?;
+        for (_, mut flow) in self.tcp_flows.drain() {
+            let _ = self.poll.registry().deregister(&mut flow.stream);
+        }
+        for (_, (_, flow)) in self.udp_flows.drain() {
+            for mut source in flow.into_sources() {
+                let _ = self.poll.registry().deregister(&mut source.sock);
+            }
+        }
+        self.tcp_flow_tokens.clear();
+        self.tcp_listening.clear();
+        self.forward_udp_local_ports.clear();
+        self.pending_removal.clear();
+        self.dns.reset();
+        self.sockets = sockets;
+        self.dns_socket = dns_socket;
+        self.dhcp_socket = dhcp_socket;
+        for forward in &mut self.forwards {
+            if let ForwardListener::Udp {
+                outside,
+                guest_socket,
+                ..
+            } = forward
+            {
+                *outside = None;
+                *guest_socket = None;
+            }
+        }
+        self.device = ProxyDevice::new();
+        self.iface = build_interface(&mut self.device);
+        self.inbound
+            .lock()
+            .expect("user-net inbound poisoned")
+            .clear();
+        self.outbound
+            .0
+            .lock()
+            .expect("user-net outbound poisoned")
+            .clear();
+        Ok(())
     }
 
     // --- ingest + demux ----------------------------------------------------
@@ -845,6 +873,27 @@ fn ipv6_l4(first: IpProtocol, payload: &[u8]) -> Option<(IpProtocol, &[u8])> {
 #[doc(hidden)]
 pub fn fuzz_inspect_frame(frame: &[u8]) {
     let _ = inspect_frame(frame);
+}
+
+/// Guest-facing service bindings are rebuilt with empty buffers on reset.
+fn service_sockets() -> std::io::Result<(SocketSet<'static>, SocketHandle, SocketHandle)> {
+    let mut sockets = SocketSet::new(Vec::new());
+    let mut bind = |endpoint| {
+        let mut socket = make_udp_socket();
+        socket
+            .bind(endpoint)
+            .map_err(|_| std::io::Error::other("invalid service binding"))?;
+        Ok::<_, std::io::Error>(sockets.add(socket))
+    };
+    let dns = bind(IpListenEndpoint {
+        addr: Some(DNS_IP),
+        port: DNS_PORT,
+    })?;
+    let dhcp = bind(IpListenEndpoint {
+        addr: None,
+        port: dhcp::SERVER_PORT,
+    })?;
+    Ok((sockets, dns, dhcp))
 }
 
 fn make_tcp_socket() -> tcp::Socket<'static> {

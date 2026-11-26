@@ -164,6 +164,12 @@ impl VirtioDevice for VirtioNet {
         // MAC and status are read-only.
     }
 
+    fn reset(&mut self) -> Result<(), ActivateError> {
+        self.backend.reset()?;
+        self.activated = false;
+        Ok(())
+    }
+
     fn activate(
         &mut self,
         mut activation: VirtioActivate,

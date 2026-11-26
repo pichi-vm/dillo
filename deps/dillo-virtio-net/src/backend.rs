@@ -32,6 +32,12 @@ pub const MAX_FRAME_LEN: usize = 65_535;
 /// Implementations are shared across the RX and TX worker threads behind an
 /// `Arc`, so every method takes `&self` and must be `Send + Sync`.
 pub trait NetBackend: Send + Sync + std::fmt::Debug {
+    /// Discard backend-local session state after the queue workers have joined.
+    /// Backends must explicitly support reuse across activations.
+    fn reset(&self) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
     /// Guest → host: transmit one Ethernet frame (no virtio-net header).
     fn send(&self, frame: &[u8]) -> io::Result<()>;
 
@@ -65,6 +71,10 @@ impl NullBackend {
 }
 
 impl NetBackend for NullBackend {
+    fn reset(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     fn send(&self, _frame: &[u8]) -> io::Result<()> {
         // Sink: the guest's transmit completes, the frame goes nowhere.
         Ok(())

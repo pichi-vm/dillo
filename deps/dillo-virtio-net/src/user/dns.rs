@@ -24,7 +24,7 @@
 use std::collections::VecDeque;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::mpsc::{Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 
 use mio::Waker;
@@ -191,12 +191,14 @@ fn synthesize(query: &DnsQuery, addrs: &[IpAddr], rcode: u8) -> Vec<u8> {
 struct Job {
     query: DnsQuery,
     client: IpEndpoint,
+    session: Weak<()>,
 }
 
 /// A finished response ready to send back to the guest.
 pub(super) struct DnsResult {
     pub(super) client: IpEndpoint,
     pub(super) response: Vec<u8>,
+    session: Weak<()>,
 }
 
 /// Off-thread DNS resolver: a worker pool that turns parsed queries into
@@ -205,6 +207,7 @@ pub(super) struct Resolver {
     tx: Sender<Job>,
     results: Arc<Mutex<VecDeque<DnsResult>>>,
     _workers: Vec<JoinHandle<()>>,
+    session: Arc<()>,
 }
 
 impl Resolver {
@@ -227,6 +230,9 @@ impl Resolver {
                     let Ok(job) = job else {
                         break; // sender dropped: shut down
                     };
+                    if job.session.upgrade().is_none() {
+                        continue;
+                    }
                     let response = resolve(&job.query);
                     results
                         .lock()
@@ -234,6 +240,7 @@ impl Resolver {
                         .push_back(DnsResult {
                             client: job.client,
                             response,
+                            session: job.session,
                         });
                     let _ = waker.wake();
                 }
@@ -243,12 +250,22 @@ impl Resolver {
             tx,
             results,
             _workers: workers,
+            session: Arc::new(()),
         }
     }
 
     /// Submit a parsed query for off-thread resolution.
     pub(super) fn submit(&self, query: DnsQuery, client: IpEndpoint) {
-        let _ = self.tx.send(Job { query, client });
+        let _ = self.tx.send(Job {
+            query,
+            client,
+            session: Arc::downgrade(&self.session),
+        });
+    }
+
+    pub(super) fn reset(&mut self) {
+        self.session = Arc::new(());
+        self.results.lock().expect("dns results poisoned").clear();
     }
 
     /// Take all responses resolved since the last drain.
@@ -257,6 +274,8 @@ impl Resolver {
             .lock()
             .expect("dns results poisoned")
             .drain(..)
+            // A lookup may complete after reset clears the result queue.
+            .filter(|result| result.session.ptr_eq(&Arc::downgrade(&self.session)))
             .collect()
     }
 }
@@ -292,6 +311,32 @@ pub fn fuzz_parse_dns_query(payload: &[u8]) {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn completed_lookup_from_old_session_is_discarded() {
+        let poll = mio::Poll::new().unwrap();
+        let waker = Arc::new(Waker::new(poll.registry(), mio::Token(0)).unwrap());
+        let mut resolver = Resolver::new(waker);
+        let old = Arc::downgrade(&resolver.session);
+        resolver.reset();
+        // Simulate an old native lookup finishing after the reset ack.
+        let client = IpEndpoint::new(super::super::GUEST_IP, 1234);
+        resolver.results.lock().unwrap().extend([
+            DnsResult {
+                client,
+                response: b"old".to_vec(),
+                session: old,
+            },
+            DnsResult {
+                client,
+                response: b"new".to_vec(),
+                session: Arc::downgrade(&resolver.session),
+            },
+        ]);
+        let replies = resolver.drain();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].response, b"new");
+    }
 
     /// A well-formed `A example.com` query (mirrors the harness's hand-rolled
     /// query constant), used to exercise parse + synthesize without a network.

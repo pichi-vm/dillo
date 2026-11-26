@@ -408,6 +408,27 @@ fn outbound_tcp_masquerade() {
     let _ = server.join();
 }
 
+#[test]
+fn reset_closes_host_connections_and_allows_new_flows() {
+    let mut h = Harness::new(vec![]);
+    for epoch in 0..2 {
+        let (port, server) = spawn_tcp_echo();
+        let handle = h.connect(IpEndpoint::new(GATEWAY_IP, port), 49010 + epoch);
+        assert_eq!(
+            echo_exchange(&mut h, handle, b"before-reset"),
+            b"before-reset"
+        );
+        h.backend.reset().unwrap();
+        let deadline = StdInstant::now() + DEADLINE;
+        while !server.is_finished() && StdInstant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(server.is_finished(), "reset retained the host connection");
+        server.join().unwrap();
+        h.sockets.remove(handle);
+    }
+}
+
 /// guest → host redirect: dialing the gateway IP folds to host loopback.
 #[test]
 fn gateway_to_host_redirect() {
@@ -434,6 +455,8 @@ fn inbound_forward_tcp() {
         guest_port: GUEST_PORT,
     }];
     let mut h = Harness::new(forwards);
+    // Reset retains the configured listener and its host port reservation.
+    h.backend.reset().unwrap();
     let listen = h.listen(GUEST_PORT);
 
     // From the outside, connect to the forwarded host port and exchange data.

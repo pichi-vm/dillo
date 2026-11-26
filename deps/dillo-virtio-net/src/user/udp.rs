@@ -64,6 +64,10 @@ impl UdpFlow {
         }
     }
 
+    pub(super) fn into_sources(self) -> impl Iterator<Item = UdpSource> {
+        self.sources.into_values()
+    }
+
     /// The host address every source for this destination connects to.
     pub(super) fn target(&self) -> SocketAddr {
         self.target

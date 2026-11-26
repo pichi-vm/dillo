@@ -44,6 +44,7 @@ mod udp;
 use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -133,6 +134,8 @@ pub(crate) const UDP_META_SLOTS: usize = 32;
 /// Reclaim a UDP flow after this much idleness (no datagrams either way).
 pub(crate) const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
+type Reset = SyncSender<io::Result<()>>;
+
 /// The host-side socket bridge for one virtio-net device, in user mode.
 pub struct UserNetBackend {
     /// Guest → stack frames awaiting ingestion.
@@ -145,6 +148,7 @@ pub struct UserNetBackend {
     /// Set on drop to unwind the stack thread.
     stop: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    resets: SyncSender<Reset>,
 }
 
 impl std::fmt::Debug for UserNetBackend {
@@ -166,6 +170,7 @@ impl UserNetBackend {
         let inbound = Arc::new(Mutex::new(VecDeque::new()));
         let outbound = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
         let stop = Arc::new(AtomicBool::new(false));
+        let (resets, pending_resets) = mpsc::sync_channel(1);
 
         let stack = stack::Stack::new(
             poll,
@@ -174,6 +179,7 @@ impl UserNetBackend {
             Arc::clone(&inbound),
             Arc::clone(&outbound),
             Arc::clone(&stop),
+            pending_resets,
         )?;
 
         let thread = std::thread::Builder::new()
@@ -186,11 +192,21 @@ impl UserNetBackend {
             waker,
             stop,
             thread: Mutex::new(Some(thread)),
+            resets,
         })
     }
 }
 
 impl NetBackend for UserNetBackend {
+    fn reset(&self) -> io::Result<()> {
+        let (ack, completed) = mpsc::sync_channel(1);
+        self.resets.try_send(ack).map_err(io::Error::other)?;
+        self.waker.wake()?;
+        completed
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(io::Error::other)?
+    }
+
     fn send(&self, frame: &[u8]) -> io::Result<()> {
         {
             let mut q = self.inbound.lock().expect("user-net inbound poisoned");

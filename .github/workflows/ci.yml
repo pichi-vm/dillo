@@ -33,7 +33,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # This hosted VM can exercise Seatbelt and shared-memory IPC without
       # Hypervisor.framework. It does not replace the native HVF boot lane.
-      - run: cargo test --locked -p dillo-worker -p dillo-machine-unix
+      - run: cargo test --locked -p dillo-worker -p dillo-machine-unix -p dillo-virtio-net
 
   license-headers:
     name: license headers
