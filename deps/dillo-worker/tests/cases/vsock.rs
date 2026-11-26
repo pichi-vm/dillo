@@ -81,6 +81,9 @@ pub(super) fn exercise() -> io::Result<()> {
                     Err(error) => return Err(error),
                 }
             };
+            // Darwin inherits O_NONBLOCK from the listener; the echo peer uses
+            // bounded blocking reads on each accepted stream.
+            stream.set_nonblocking(false)?;
             stream.set_read_timeout(Some(Duration::from_secs(5)))?;
             stream.set_write_timeout(Some(Duration::from_secs(5)))?;
             let mut bytes = [0; 4];
