@@ -171,7 +171,7 @@ fn error_reply(unique: u64, errno: i32) -> Vec<u8> {
     buf
 }
 
-fn errno_of(e: &io::Error) -> i32 {
+pub(crate) fn errno_of(e: &io::Error) -> i32 {
     if let Some(linux) = e
         .get_ref()
         .and_then(|inner| inner.downcast_ref::<LinuxErrno>())

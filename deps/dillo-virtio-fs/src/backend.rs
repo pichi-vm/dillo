@@ -51,7 +51,7 @@ pub(crate) const LINUX_ERANGE: i32 = 34;
 pub(crate) const LINUX_ENODATA: i32 = 61;
 
 /// Stat-like attributes for one filesystem node, in the subset virtio-fs needs.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct Attr {
     /// Backend inode number. FUSE retains its initial value for each cached node.
     pub ino: u64,
@@ -93,7 +93,7 @@ impl Attr {
 }
 
 /// One directory entry surfaced by [`FsBackend::readdir`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DirEntry {
     /// The component name (no path separators).
     pub name: String,
@@ -103,7 +103,7 @@ pub struct DirEntry {
 /// Attributes to change in [`FsBackend::setattr`]. Each `Some` field is applied;
 /// `None` is left untouched. Ownership is not exposed here; FUSE rejects
 /// ownership changes explicitly. Time updates are best-effort cross-platform.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SetAttr {
     /// Truncate/extend the regular file to this size.
     pub size: Option<u64>,
@@ -128,8 +128,8 @@ fn unsupported_error() -> io::Error {
 
 /// A Linux errno carried explicitly so non-Linux hosts do not put their native
 /// numbers on the FUSE wire. The FUSE dispatcher checks this before `ErrorKind`.
-#[derive(Debug)]
-pub(crate) struct LinuxErrno {
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct LinuxErrno {
     pub linux: i32,
 }
 
@@ -140,6 +140,20 @@ impl std::fmt::Display for LinuxErrno {
 }
 
 impl std::error::Error for LinuxErrno {}
+
+impl From<io::Error> for LinuxErrno {
+    fn from(error: io::Error) -> Self {
+        Self {
+            linux: crate::fuse::errno_of(&error),
+        }
+    }
+}
+
+impl From<LinuxErrno> for io::Error {
+    fn from(error: LinuxErrno) -> Self {
+        Self::other(error)
+    }
+}
 
 pub(crate) fn linux_errno(linux: i32, kind: io::ErrorKind) -> io::Error {
     io::Error::new(kind, LinuxErrno { linux })
@@ -312,7 +326,10 @@ mod passthrough {
     // on Unix the real mode is read straight from `MetadataExt`.
     #[cfg(not(unix))]
     use super::{S_IFDIR, S_IFLNK, S_IFREG};
-    use std::fs::{self, File, FileTimes, Metadata, OpenOptions};
+    #[cfg(unix)]
+    use cap_std::fs::Permissions;
+    use cap_std::fs::{Dir, Metadata, OpenOptions};
+    use std::fs::{File, FileTimes};
     use std::io;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, UNIX_EPOCH};
@@ -320,53 +337,162 @@ mod passthrough {
     /// Passthrough of a host directory subtree.
     #[derive(Debug)]
     pub struct Passthrough {
-        root: PathBuf,
+        root: Dir,
     }
 
     impl Passthrough {
-        /// Create a passthrough rooted at `root`. The directory must exist.
+        /// Open the directory once. All later namespace operations are rooted
+        /// at this capability, including traversal through relative symlinks.
         pub fn new(root: impl Into<PathBuf>) -> io::Result<Self> {
-            let root = root.into();
-            let meta = fs::metadata(&root)?;
-            if !meta.is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotADirectory,
-                    format!("virtio-fs source {} is not a directory", root.display()),
-                ));
-            }
-            // Canonicalize so the per-request containment check compares against
-            // a stable absolute root.
-            let root = fs::canonicalize(&root)?;
-            Ok(Self { root })
+            Ok(Self {
+                root: Dir::open_ambient_dir(root.into(), cap_std::ambient_authority())?,
+            })
         }
 
-        /// Resolve `rel` under the root with a symlink-escape guard. `sanitize_rel`
-        /// already blocks lexical escapes (`..`, absolute/prefix). We then
-        /// canonicalize the **deepest existing ancestor** of the target and
-        /// confirm it stays within the root — this catches a symlink in any
-        /// existing component for both reads and writes-to-not-yet-existing
-        /// targets (e.g. CREATE inside a symlinked-out directory). A genuinely
-        /// missing leaf surfaces later as `NotFound` from the stat/open.
-        fn resolve(&self, rel: &Path) -> io::Result<PathBuf> {
-            let clean = sanitize_rel(rel)?;
-            let full = self.root.join(&clean);
-            let mut probe = full.as_path();
-            loop {
-                match fs::canonicalize(probe) {
-                    Ok(canon) => {
-                        if !canon.starts_with(&self.root) {
-                            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
-                        }
-                        break;
-                    }
-                    // `probe` doesn't exist yet; check its parent instead.
-                    Err(_) => match probe.parent() {
-                        Some(parent) => probe = parent,
-                        None => break,
-                    },
-                }
+        fn resolve(rel: &Path) -> io::Result<PathBuf> {
+            let path = sanitize_rel(rel)?;
+            Ok(if path.as_os_str().is_empty() {
+                PathBuf::from(".")
+            } else {
+                path
+            })
+        }
+
+        fn parent(&self, rel: &Path) -> io::Result<(Dir, std::ffi::OsString)> {
+            let rel = Self::resolve(rel)?;
+            let name = rel
+                .file_name()
+                .ok_or(io::ErrorKind::InvalidInput)?
+                .to_owned();
+            let parent = rel
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            Ok((self.root.open_dir(parent)?, name))
+        }
+
+        /// Enumerate metadata without materializing the entire directory.
+        pub fn entries(
+            &self,
+            rel: &Path,
+        ) -> io::Result<impl Iterator<Item = io::Result<DirEntry>> + Send + use<>> {
+            let directory = self.root.open_dir(Self::resolve(rel)?)?;
+            let entries = directory.entries()?;
+            Ok(entries.filter_map(move |entry| {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => return Some(Err(error)),
+                };
+                let Ok(name) = entry.file_name().into_string() else {
+                    return None;
+                };
+                Some(directory.symlink_metadata(&name).map(|meta| DirEntry {
+                    name,
+                    attr: meta_to_attr(&meta),
+                }))
+            }))
+        }
+
+        /// Open regular file contents without granting namespace access.
+        pub fn open_file(&self, rel: &Path, write: bool) -> io::Result<File> {
+            let mut options = OpenOptions::new();
+            options.read(!write).write(write);
+            #[cfg(unix)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits().cast_signed());
             }
-            Ok(full)
+            let file = self
+                .root
+                .open_with(Self::resolve(rel)?, &options)?
+                .into_std();
+            if !file.metadata()?.is_file() {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            Ok(file)
+        }
+
+        fn xattr_file(&self, rel: &Path) -> io::Result<XattrTarget> {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::fd::AsRawFd;
+                // l*xattr has no *at variant on supported kernels. Anchor the
+                // parent through its owned fd and do not follow the leaf.
+                let (parent, name) = if rel.as_os_str().is_empty() || rel == Path::new(".") {
+                    (self.root.try_clone()?, ".".into())
+                } else {
+                    self.parent(rel)?
+                };
+                let path =
+                    PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd())).join(name);
+                Ok(XattrTarget {
+                    _parent: parent,
+                    path,
+                })
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
+                let mut options = OpenOptions::new();
+                options
+                    .read(true)
+                    .maybe_dir(true)
+                    .follow(FollowSymlinks::No);
+                #[cfg(target_os = "macos")]
+                {
+                    use cap_std::fs::OpenOptionsExt;
+                    options.custom_flags(libc::O_SYMLINK | libc::O_EVTONLY);
+                }
+                self.root
+                    .open_with(Self::resolve(rel)?, &options)
+                    .map(cap_std::fs::File::into_std)
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct XattrTarget {
+        _parent: Dir,
+        path: PathBuf,
+    }
+    #[cfg(not(target_os = "linux"))]
+    type XattrTarget = File;
+
+    /// File-content operations on an already authorized native file.
+    #[derive(Debug)]
+    pub struct FileContent(File);
+
+    impl From<File> for FileContent {
+        fn from(file: File) -> Self {
+            Self(file)
+        }
+    }
+
+    impl FileContent {
+        pub fn read(&self, offset: u64, size: u32) -> io::Result<Vec<u8>> {
+            let mut bytes = vec![0; size as usize];
+            let count = read_full(&self.0, &mut bytes, offset)?;
+            bytes.truncate(count);
+            Ok(bytes)
+        }
+
+        pub fn write(&self, offset: u64, bytes: &[u8]) -> io::Result<u32> {
+            write_full(&self.0, bytes, offset)?;
+            Ok(bytes.len() as u32)
+        }
+
+        pub fn seek(&self, offset: u64, whence: u32) -> io::Result<u64> {
+            seek_data_hole(&self.0, offset, whence)
+        }
+
+        pub fn copy_to(
+            &self,
+            offset: u64,
+            target: &Self,
+            target_offset: u64,
+            length: u64,
+        ) -> io::Result<u32> {
+            copy_range(&self.0, offset, &target.0, target_offset, length)
         }
     }
 
@@ -457,11 +583,10 @@ mod passthrough {
     }
 
     /// Map host metadata to the FUSE [`Attr`] the Linux guest expects.
-    fn meta_to_attr(meta: &Metadata, full: &Path) -> Attr {
+    fn meta_to_attr(meta: &Metadata) -> Attr {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            let _ = full;
+            use cap_std::fs::MetadataExt;
             Attr {
                 ino: meta.ino(),
                 size: meta.size(),
@@ -477,6 +602,7 @@ mod passthrough {
         }
         #[cfg(not(unix))]
         {
+            use cap_fs_ext::MetadataExt;
             use std::time::UNIX_EPOCH;
             let ft = meta.file_type();
             let (type_bits, perm) = if ft.is_dir() {
@@ -491,12 +617,10 @@ mod passthrough {
             let (mtime, mtime_nsec) = meta
                 .modified()
                 .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .and_then(|t| t.into_std().duration_since(UNIX_EPOCH).ok())
                 .map_or((0, 0), |d| (d.as_secs(), d.subsec_nanos()));
-            // NTFS file index is shared by hard links. A path hash stands in
-            // only when the host does not report one.
-            let (ino, nlink) =
-                file_id(full).unwrap_or((synth_ino(full), if ft.is_dir() { 2 } else { 1 }));
+            // NTFS file index is shared by hard links.
+            let (ino, nlink) = (meta.ino(), meta.nlink() as u32);
             Attr {
                 ino,
                 size: meta.len(),
@@ -512,222 +636,147 @@ mod passthrough {
         }
     }
 
-    /// Volume, file index, and link count from `BY_HANDLE_FILE_INFORMATION`.
-    #[cfg(windows)]
-    struct HostId {
-        volume: u32,
-        index: u64,
-        nlink: u32,
-    }
-
-    /// `std::os::windows::fs::MetadataExt::{file_index, number_of_links}` need
-    /// the unstable `windows_by_handle` feature. This is the same Win32 query
-    /// those methods wrap, and it stays available on the pinned nightly.
-    #[cfg(windows)]
-    #[allow(unsafe_code)]
-    fn host_id(path: &Path) -> Option<HostId> {
-        use std::os::windows::fs::OpenOptionsExt;
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            GetFileInformationByHandle,
-        };
-        // Access 0 would be enough, but `OpenOptions` has no public way to ask
-        // for it. Read access plus backup semantics opens files and directories.
-        // `FILE_FLAG_OPEN_REPARSE_POINT` matches `symlink_metadata` (do not follow).
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-            .ok()?;
-        let mut info = BY_HANDLE_FILE_INFORMATION::default();
-        // SAFETY: `file` owns a live handle, and `info` is a valid out-buffer
-        // that outlives the call.
-        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
-        if ok == 0 {
-            return None;
-        }
-        let index = u64::from(info.nFileIndexLow) | (u64::from(info.nFileIndexHigh) << 32);
-        (index != 0).then_some(HostId {
-            volume: info.dwVolumeSerialNumber,
-            index,
-            nlink: info.nNumberOfLinks,
-        })
-    }
-
-    /// File index and link count. The index is shared by every hard link.
-    #[cfg(windows)]
-    fn file_id(path: &Path) -> Option<(u64, u32)> {
-        host_id(path).map(|id| (id.index, id.nlink))
-    }
-
-    /// True when both paths name the same file on the same volume.
-    #[cfg(windows)]
-    fn same_file(a: &Path, b: &Path) -> bool {
-        match (host_id(a), host_id(b)) {
-            (Some(a), Some(b)) => a.volume == b.volume && a.index == b.index,
-            _ => false,
-        }
-    }
-
-    /// Stable, nonzero cosmetic inode number derived from the full host path.
-    #[cfg(not(unix))]
-    fn synth_ino(path: &Path) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        path.hash(&mut hasher);
-        hasher.finish() | 1
-    }
-
     impl FsBackend for Passthrough {
         fn stat(&self, rel: &Path) -> io::Result<Attr> {
-            let path = self.resolve(rel)?;
+            let path = Self::resolve(rel)?;
             // lstat: do not follow a trailing symlink.
-            let meta = fs::symlink_metadata(&path)?;
-            Ok(meta_to_attr(&meta, &path))
+            let meta = self.root.symlink_metadata(&path)?;
+            Ok(meta_to_attr(&meta))
         }
 
         fn readdir(&self, rel: &Path) -> io::Result<Vec<DirEntry>> {
-            let path = self.resolve(rel)?;
-            let mut out = Vec::new();
-            for entry in fs::read_dir(&path)? {
-                let entry = entry?;
-                let Ok(name) = entry.file_name().into_string() else {
-                    // Skip non-UTF-8 names — the guest probe and our wire format
-                    // work in UTF-8; such names are rare in a build context.
-                    continue;
-                };
-                let entry_path = entry.path();
-                let meta = entry.metadata().or_else(|_| {
-                    // Fall back to lstat-style metadata for dangling symlinks.
-                    fs::symlink_metadata(&entry_path)
-                })?;
-                out.push(DirEntry {
-                    name,
-                    attr: meta_to_attr(&meta, &entry_path),
-                });
-            }
-            Ok(out)
+            self.entries(rel)?.collect()
         }
 
         fn read(&self, rel: &Path, offset: u64, size: u32) -> io::Result<Vec<u8>> {
-            let path = self.resolve(rel)?;
-            let file = File::open(&path)?;
-            let mut buf = vec![0u8; size as usize];
-            let n = read_full(&file, &mut buf, offset)?;
-            buf.truncate(n);
-            Ok(buf)
+            let path = Self::resolve(rel)?;
+            let file = self.open_file(&path, false)?;
+            FileContent::from(file).read(offset, size)
         }
 
         fn readlink(&self, rel: &Path) -> io::Result<Vec<u8>> {
-            let path = self.resolve(rel)?;
-            let target = fs::read_link(&path)?;
+            let path = Self::resolve(rel)?;
+            let target = self.root.read_link_contents(&path)?;
             Ok(target.into_os_string().into_encoded_bytes())
         }
 
         fn write(&self, rel: &Path, offset: u64, data: &[u8]) -> io::Result<u32> {
-            let path = self.resolve(rel)?;
-            let file = OpenOptions::new().write(true).open(&path)?;
-            write_full(&file, data, offset)?;
-            Ok(data.len() as u32)
+            let path = Self::resolve(rel)?;
+            let file = self.open_file(&path, true)?;
+            FileContent::from(file).write(offset, data)
         }
 
         fn create(&self, rel: &Path, mode: u32) -> io::Result<Attr> {
-            let path = self.resolve(rel)?;
+            let path = Self::resolve(rel)?;
             let mut opts = OpenOptions::new();
             opts.write(true).create(true).truncate(false);
             #[cfg(unix)]
             {
-                use std::os::unix::fs::OpenOptionsExt;
+                use cap_std::fs::OpenOptionsExt;
                 opts.mode(mode & 0o777);
+                opts.custom_flags(rustix::fs::OFlags::NONBLOCK.bits().cast_signed());
             }
-            let _file = opts.open(&path)?;
+            let file = self.root.open_with(&path, &opts)?;
+            if !file.metadata()?.is_file() {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
             // On non-Unix the mode can't be honored beyond the read-only bit,
             // which `create` never sets; the file is created writable.
             #[cfg(not(unix))]
             let _ = mode;
-            let meta = fs::symlink_metadata(&path)?;
-            Ok(meta_to_attr(&meta, &path))
+            let meta = self.root.symlink_metadata(&path)?;
+            Ok(meta_to_attr(&meta))
         }
 
         fn mkdir(&self, rel: &Path, mode: u32) -> io::Result<Attr> {
-            let path = self.resolve(rel)?;
-            fs::create_dir(&path)?;
+            let path = Self::resolve(rel)?;
+            self.root.create_dir(&path)?;
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&path, fs::Permissions::from_mode(mode & 0o777))?;
+                use cap_std::fs::PermissionsExt;
+                self.root
+                    .set_permissions(&path, Permissions::from_mode(mode & 0o777))?;
             }
             #[cfg(not(unix))]
             let _ = mode;
-            let meta = fs::symlink_metadata(&path)?;
-            Ok(meta_to_attr(&meta, &path))
+            let meta = self.root.symlink_metadata(&path)?;
+            Ok(meta_to_attr(&meta))
         }
 
         fn unlink(&self, rel: &Path) -> io::Result<()> {
-            let path = self.resolve(rel)?;
-            fs::remove_file(&path)
+            let path = Self::resolve(rel)?;
+            self.root.remove_file(&path)
         }
 
         fn rmdir(&self, rel: &Path) -> io::Result<()> {
-            let path = self.resolve(rel)?;
-            fs::remove_dir(&path)
+            let path = Self::resolve(rel)?;
+            self.root.remove_dir(&path)
         }
 
         fn rename(&self, from: &Path, to: &Path, flags: u32) -> io::Result<()> {
-            let from = self.resolve(from)?;
-            let to = self.resolve(to)?;
-            rename_with(&from, &to, flags)
+            let from = Self::resolve(from)?;
+            let to = Self::resolve(to)?;
+            rename_with(
+                &self.root,
+                self.parent(&from)?,
+                self.parent(&to)?,
+                &from,
+                &to,
+                flags,
+            )
         }
 
         fn link(&self, from: &Path, to: &Path) -> io::Result<Attr> {
-            let from = self.resolve(from)?;
-            let to = self.resolve(to)?;
-            fs::hard_link(&from, &to)?;
-            let meta = fs::symlink_metadata(&to)?;
-            Ok(meta_to_attr(&meta, &to))
+            let from = Self::resolve(from)?;
+            let to = Self::resolve(to)?;
+            self.root.hard_link(&from, &self.root, &to)?;
+            let meta = self.root.symlink_metadata(&to)?;
+            Ok(meta_to_attr(&meta))
         }
 
         fn mknod(&self, rel: &Path, mode: u32, rdev: u32) -> io::Result<Attr> {
-            let path = self.resolve(rel)?;
-            make_node(&path, mode, rdev)?;
-            let meta = fs::symlink_metadata(&path)?;
-            Ok(meta_to_attr(&meta, &path))
+            if matches!(mode & super::S_IFMT, super::S_IFCHR | super::S_IFBLK) {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            let path = Self::resolve(rel)?;
+            make_node(self.parent(&path)?, mode, rdev)?;
+            let meta = self.root.symlink_metadata(&path)?;
+            Ok(meta_to_attr(&meta))
         }
 
         fn fallocate(&self, rel: &Path, offset: u64, length: u64, mode: u32) -> io::Result<()> {
-            let path = self.resolve(rel)?;
-            let file = OpenOptions::new().read(true).write(true).open(&path)?;
+            let path = Self::resolve(rel)?;
+            let file = self.open_file(&path, true)?;
             allocate(&file, offset, length, mode)
         }
 
         fn get_xattr(&self, rel: &Path, name: &str) -> io::Result<Vec<u8>> {
             check_xattr_name(name)?;
-            let path = self.resolve(rel)?;
-            read_xattr(&path, name)
+            let path = Self::resolve(rel)?;
+            read_xattr(&self.xattr_file(&path)?, name)
         }
 
         fn set_xattr(&self, rel: &Path, name: &str, value: &[u8], flags: u32) -> io::Result<()> {
             check_xattr_name(name)?;
-            let path = self.resolve(rel)?;
-            write_xattr(&path, name, value, flags)
+            let path = Self::resolve(rel)?;
+            write_xattr(&self.xattr_file(&path)?, name, value, flags)
         }
 
         fn list_xattr(&self, rel: &Path) -> io::Result<Vec<u8>> {
-            let path = self.resolve(rel)?;
-            list_xattrs(&path)
+            let path = Self::resolve(rel)?;
+            list_xattrs(&self.xattr_file(&path)?)
         }
 
         fn remove_xattr(&self, rel: &Path, name: &str) -> io::Result<()> {
             check_xattr_name(name)?;
-            let path = self.resolve(rel)?;
-            delete_xattr(&path, name)
+            let path = Self::resolve(rel)?;
+            delete_xattr(&self.xattr_file(&path)?, name)
         }
 
         fn lseek(&self, rel: &Path, offset: u64, whence: u32) -> io::Result<u64> {
-            let path = self.resolve(rel)?;
-            let file = File::open(&path)?;
-            seek_data_hole(&file, offset, whence)
+            let path = Self::resolve(rel)?;
+            let file = self.open_file(&path, false)?;
+            FileContent::from(file).seek(offset, whence)
         }
 
         fn copy_file_range(
@@ -742,73 +791,73 @@ mod passthrough {
             if flags != 0 {
                 return Err(io::Error::from(io::ErrorKind::InvalidInput));
             }
-            let src = self.resolve(src)?;
-            let dst = self.resolve(dst)?;
-            let src_file = File::open(&src)?;
-            let dst_file = OpenOptions::new().write(true).open(&dst)?;
-            copy_range(&src_file, src_off, &dst_file, dst_off, len)
+            let src = Self::resolve(src)?;
+            let dst = Self::resolve(dst)?;
+            let src_file = self.open_file(&src, false)?;
+            let dst_file = self.open_file(&dst, true)?;
+            FileContent::from(src_file).copy_to(src_off, &FileContent::from(dst_file), dst_off, len)
         }
 
         fn setattr(&self, rel: &Path, set: &SetAttr) -> io::Result<Attr> {
-            let path = self.resolve(rel)?;
+            let path = Self::resolve(rel)?;
 
             if let Some(size) = set.size {
-                OpenOptions::new().write(true).open(&path)?.set_len(size)?;
+                self.open_file(&path, true)?.set_len(size)?;
             }
 
             if let Some(mode) = set.mode {
-                set_mode(&path, mode)?;
+                set_mode(&self.root, &path, mode)?;
             }
 
             if set.atime.is_some() || set.mtime.is_some() {
                 // Times need an open handle; on a directory this may fail on some
                 // platforms — best-effort, don't fail the whole setattr.
-                if let Ok(file) = OpenOptions::new().write(true).open(&path) {
+                if let Ok(file) = self.open_file(&path, true) {
                     let _ = file.set_times(file_times(set.atime, set.mtime));
-                } else if let Ok(file) = File::open(&path) {
+                } else if let Ok(file) = self.root.open(&path).map(cap_std::fs::File::into_std) {
                     let _ = file.set_times(file_times(set.atime, set.mtime));
                 }
             }
 
-            let meta = fs::symlink_metadata(&path)?;
-            Ok(meta_to_attr(&meta, &path))
+            let meta = self.root.symlink_metadata(&path)?;
+            Ok(meta_to_attr(&meta))
         }
 
         fn symlink(&self, rel: &Path, target: &[u8]) -> io::Result<Attr> {
-            let path = self.resolve(rel)?;
-            symlink_at(&path, target)?;
-            let meta = fs::symlink_metadata(&path)?;
-            Ok(meta_to_attr(&meta, &path))
+            let path = Self::resolve(rel)?;
+            symlink_at(&self.root, &path, target)?;
+            let meta = self.root.symlink_metadata(&path)?;
+            Ok(meta_to_attr(&meta))
         }
     }
 
     /// Apply mode bits where the platform supports it.
-    fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    fn set_mode(root: &Dir, path: &Path, mode: u32) -> io::Result<()> {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o777))
+            use cap_std::fs::PermissionsExt;
+            root.set_permissions(path, Permissions::from_mode(mode & 0o777))
         }
         #[cfg(not(unix))]
         {
             // Map the owner-write bit to the read-only attribute.
-            let mut perms = fs::metadata(path)?.permissions();
+            let mut perms = root.metadata(path)?.permissions();
             perms.set_readonly(mode & 0o200 == 0);
-            fs::set_permissions(path, perms)
+            root.set_permissions(path, perms)
         }
     }
 
     /// Create a symlink. Supported on Unix; elsewhere reported unsupported.
-    fn symlink_at(path: &Path, target: &[u8]) -> io::Result<()> {
+    fn symlink_at(root: &Dir, path: &Path, target: &[u8]) -> io::Result<()> {
         #[cfg(unix)]
         {
             use std::ffi::OsStr;
             use std::os::unix::ffi::OsStrExt;
-            std::os::unix::fs::symlink(OsStr::from_bytes(target), path)
+            root.symlink_contents(OsStr::from_bytes(target), path)
         }
         #[cfg(not(unix))]
         {
-            let _ = (path, target);
+            let _ = (root, path, target);
             // No portable symlink creation off Unix.
             Err(io::Error::from(io::ErrorKind::Unsupported))
         }
@@ -827,7 +876,14 @@ mod passthrough {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     const XATTR_MAX: usize = 1 << 20;
 
-    fn rename_with(from: &Path, to: &Path, flags: u32) -> io::Result<()> {
+    fn rename_with(
+        root: &Dir,
+        source: (Dir, std::ffi::OsString),
+        target: (Dir, std::ffi::OsString),
+        from: &Path,
+        to: &Path,
+        flags: u32,
+    ) -> io::Result<()> {
         let known = RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT;
         if flags & !known != 0 || (flags & RENAME_NOREPLACE != 0 && flags & RENAME_EXCHANGE != 0) {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
@@ -846,10 +902,13 @@ mod passthrough {
             // Two names of one file stay in place. Win32 MoveFile would drop
             // the source name when the destination is another hard link.
             #[cfg(windows)]
-            if same_file(from, to) {
-                return Ok(());
+            if let (Ok(a), Ok(b)) = (root.symlink_metadata(from), root.symlink_metadata(to)) {
+                use cap_fs_ext::MetadataExt;
+                if a.dev() == b.dev() && a.ino() == b.ino() {
+                    return Ok(());
+                }
             }
-            return fs::rename(from, to);
+            return root.rename(from, root, to);
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
@@ -860,7 +919,7 @@ mod passthrough {
             if flags & RENAME_EXCHANGE != 0 {
                 host |= rustix::fs::RenameFlags::EXCHANGE;
             }
-            rustix::fs::renameat_with(rustix::fs::CWD, from, rustix::fs::CWD, to, host)
+            rustix::fs::renameat_with(&source.0, &source.1, &target.0, &target.1, host)
                 .map_err(from_rustix)
         }
         #[cfg(windows)]
@@ -868,12 +927,45 @@ mod passthrough {
             if flags & RENAME_EXCHANGE != 0 {
                 return Err(io::Error::from(io::ErrorKind::Unsupported));
             }
-            move_file(from, to, false)
+            move_file(
+                &directory_path(&source.0)?.join(&source.1),
+                &directory_path(&target.0)?.join(&target.1),
+                false,
+            )
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         {
             let _ = (from, to);
             Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+    }
+
+    #[cfg(windows)]
+    fn directory_path(dir: &Dir) -> io::Result<PathBuf> {
+        use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
+        use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+        let mut path = vec![0u16; 256];
+        loop {
+            // SAFETY: cap-std holds this directory without FILE_SHARE_DELETE,
+            // so the resolved parent cannot be renamed during the operation.
+            // The owning handle and output slice remain live for this call.
+            #[allow(unsafe_code)]
+            let count = unsafe {
+                GetFinalPathNameByHandleW(
+                    dir.as_raw_handle(),
+                    path.as_mut_ptr(),
+                    path.len() as u32,
+                    0,
+                )
+            } as usize;
+            if count == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if count < path.len() {
+                path.truncate(count);
+                return Ok(std::ffi::OsString::from_wide(&path).into());
+            }
+            path.resize(count + 1, 0);
         }
     }
 
@@ -898,12 +990,7 @@ mod passthrough {
         }
     }
 
-    fn make_node(path: &Path, mode: u32, rdev: u32) -> io::Result<()> {
-        // Device nodes can expose host devices, regardless of the share root.
-        // Reject them before dispatching to any host syscall implementation.
-        if matches!(mode & super::S_IFMT, super::S_IFCHR | super::S_IFBLK) {
-            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
-        }
+    fn make_node(parent: (Dir, std::ffi::OsString), mode: u32, rdev: u32) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         {
             let kind = rustix::fs::FileType::from_raw_mode(mode);
@@ -914,29 +1001,37 @@ mod passthrough {
             ) {
                 return Err(io::Error::from(io::ErrorKind::InvalidInput));
             }
-            rustix::fs::mknodat(rustix::fs::CWD, path, kind, perm, u64::from(rdev))
+            rustix::fs::mknodat(&parent.0, &parent.1, kind, perm, u64::from(rdev))
                 .map_err(from_rustix)
         }
         #[cfg(target_os = "macos")]
         {
-            make_node_macos(path, mode, rdev)
+            make_node_macos(&parent.0, &parent.1, mode, rdev)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (path, mode, rdev);
+            let _ = (parent, mode, rdev);
             Err(io::Error::from(io::ErrorKind::Unsupported))
         }
     }
 
     #[cfg(target_os = "macos")]
     #[allow(unsafe_code)]
-    fn make_node_macos(path: &Path, mode: u32, rdev: u32) -> io::Result<()> {
+    fn make_node_macos(dir: &Dir, path: &std::ffi::OsStr, mode: u32, rdev: u32) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
         use std::os::unix::ffi::OsStrExt;
-        let bytes = path.as_os_str().as_bytes();
+        let bytes = path.as_bytes();
         let c_path = std::ffi::CString::new(bytes)
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
         // SAFETY: `c_path` is a NUL-terminated path that outlives the call.
-        let rc = unsafe { libc::mknod(c_path.as_ptr(), mode as libc::mode_t, rdev as libc::dev_t) };
+        let rc = unsafe {
+            libc::mknodat(
+                dir.as_raw_fd(),
+                c_path.as_ptr(),
+                mode as libc::mode_t,
+                rdev as libc::dev_t,
+            )
+        };
         if rc == 0 {
             Ok(())
         } else {
@@ -1079,11 +1174,20 @@ mod passthrough {
             .collect()
     }
 
-    fn read_xattr(path: &Path, name: &str) -> io::Result<Vec<u8>> {
+    fn read_xattr(path: &XattrTarget, name: &str) -> io::Result<Vec<u8>> {
         check_xattr_name(name)?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            grow_xattr(|buf| rustix::fs::lgetxattr(path, name, rustix::buffer::spare_capacity(buf)))
+            grow_xattr(|buf| {
+                #[cfg(target_os = "linux")]
+                {
+                    rustix::fs::lgetxattr(&path.path, name, rustix::buffer::spare_capacity(buf))
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    rustix::fs::fgetxattr(path, name, rustix::buffer::spare_capacity(buf))
+                }
+            })
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -1092,7 +1196,7 @@ mod passthrough {
         }
     }
 
-    fn write_xattr(path: &Path, name: &str, value: &[u8], flags: u32) -> io::Result<()> {
+    fn write_xattr(path: &XattrTarget, name: &str, value: &[u8], flags: u32) -> io::Result<()> {
         check_xattr_name(name)?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
@@ -1102,7 +1206,11 @@ mod passthrough {
                 2 => rustix::fs::XattrFlags::REPLACE,
                 _ => return Err(io::Error::from(io::ErrorKind::InvalidInput)),
             };
-            rustix::fs::lsetxattr(path, name, value, host).map_err(from_rustix)
+            #[cfg(target_os = "linux")]
+            let result = rustix::fs::lsetxattr(&path.path, name, value, host);
+            #[cfg(target_os = "macos")]
+            let result = rustix::fs::fsetxattr(path, name, value, host);
+            result.map_err(from_rustix)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -1111,11 +1219,18 @@ mod passthrough {
         }
     }
 
-    fn list_xattrs(path: &Path) -> io::Result<Vec<u8>> {
+    fn list_xattrs(path: &XattrTarget) -> io::Result<Vec<u8>> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let names = grow_xattr(|buf| {
-                rustix::fs::llistxattr(path, rustix::buffer::spare_capacity(buf))
+                #[cfg(target_os = "linux")]
+                {
+                    rustix::fs::llistxattr(&path.path, rustix::buffer::spare_capacity(buf))
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    rustix::fs::flistxattr(path, rustix::buffer::spare_capacity(buf))
+                }
             })?;
             Ok(filter_xattr_names(&names))
         }
@@ -1126,11 +1241,15 @@ mod passthrough {
         }
     }
 
-    fn delete_xattr(path: &Path, name: &str) -> io::Result<()> {
+    fn delete_xattr(path: &XattrTarget, name: &str) -> io::Result<()> {
         check_xattr_name(name)?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            rustix::fs::lremovexattr(path, name).map_err(from_rustix)
+            #[cfg(target_os = "linux")]
+            let result = rustix::fs::lremovexattr(&path.path, name);
+            #[cfg(target_os = "macos")]
+            let result = rustix::fs::fremovexattr(path, name);
+            result.map_err(from_rustix)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -1168,7 +1287,7 @@ mod passthrough {
             ));
         }
         let next = buf.capacity().saturating_mul(2).clamp(64, XATTR_MAX);
-        buf.reserve(next - buf.capacity());
+        buf.reserve(next - buf.len());
         Ok(())
     }
 
@@ -1326,6 +1445,8 @@ mod passthrough {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[cfg(unix)]
+        use std::fs;
 
         const DISALLOWED_XATTR_NAMES: &[&str] = &[
             "security.capability",
@@ -1342,6 +1463,32 @@ mod passthrough {
             "\0user.foo",
         ];
 
+        #[cfg(unix)]
+        #[test]
+        fn directory_identity_and_symlink_scope_survive_path_changes() {
+            let temp = tempfile::tempdir().unwrap();
+            let share = temp.path().join("share");
+            fs::create_dir(&share).unwrap();
+            fs::write(share.join("file"), b"authorized").unwrap();
+            fs::write(temp.path().join("outside"), b"private").unwrap();
+            std::os::unix::fs::symlink("../outside", share.join("escape")).unwrap();
+            let backend = Passthrough::new(&share).unwrap();
+            assert!(backend.read(Path::new("escape"), 0, 20).is_err());
+            assert!(backend.write(Path::new("escape"), 0, b"bad").is_err());
+            let moved = temp.path().join("moved");
+            fs::rename(&share, &moved).unwrap();
+            fs::create_dir(&share).unwrap();
+            fs::write(share.join("file"), b"replacement").unwrap();
+            assert_eq!(
+                backend.read(Path::new("file"), 0, 20).unwrap(),
+                b"authorized"
+            );
+            backend.create(Path::new("new"), 0o600).unwrap();
+            assert!(moved.join("new").exists());
+            assert!(!share.join("new").exists());
+            assert_eq!(fs::read(temp.path().join("outside")).unwrap(), b"private");
+        }
+
         #[test]
         fn xattr_names_require_user_prefix_and_nonempty_suffix() {
             for name in DISALLOWED_XATTR_NAMES {
@@ -1357,12 +1504,8 @@ mod passthrough {
             let dir = tempfile::tempdir().unwrap();
             let backend = Passthrough::new(dir.path()).unwrap();
             let rel = Path::new("missing");
-            let path = dir.path().join(rel);
             for name in DISALLOWED_XATTR_NAMES {
                 for result in [
-                    read_xattr(&path, name).map(|_| ()),
-                    write_xattr(&path, name, b"value", 0),
-                    delete_xattr(&path, name),
                     backend.get_xattr(rel, name).map(|_| ()),
                     backend.set_xattr(rel, name, b"value", 0),
                     backend.remove_xattr(rel, name),
@@ -1374,7 +1517,7 @@ mod passthrough {
                     );
                 }
             }
-            assert!(!path.exists());
+            assert!(!dir.path().join(rel).exists());
         }
 
         #[test]
@@ -1399,7 +1542,10 @@ mod passthrough {
             backend.set_xattr(rel, "user.foo", b"first", 1).unwrap();
             assert_eq!(backend.get_xattr(rel, "user.foo").unwrap(), b"first");
             backend.set_xattr(rel, "user.foo", b"second", 2).unwrap();
-            assert_eq!(read_xattr(&path, "user.foo").unwrap(), b"second");
+            assert_eq!(
+                read_xattr(&backend.xattr_file(rel).unwrap(), "user.foo").unwrap(),
+                b"second"
+            );
             assert_eq!(backend.list_xattr(rel).unwrap(), b"user.foo\0");
             backend.remove_xattr(rel, "user.foo").unwrap();
             assert!(backend.list_xattr(rel).unwrap().is_empty());
@@ -1444,7 +1590,10 @@ mod passthrough {
                 Err(err) => panic!("failed to install host ACL: {err}"),
             }
             backend.set_xattr(rel, "user.foo", b"visible", 0).unwrap();
-            assert_eq!(list_xattrs(&path).unwrap(), b"user.foo\0");
+            assert_eq!(
+                list_xattrs(&backend.xattr_file(rel).unwrap()).unwrap(),
+                b"user.foo\0"
+            );
             assert_eq!(backend.list_xattr(rel).unwrap(), b"user.foo\0");
             for result in [
                 backend.get_xattr(rel, name).map(|_| ()),
@@ -1463,7 +1612,7 @@ mod passthrough {
     }
 }
 
-pub use passthrough::Passthrough;
+pub use passthrough::{FileContent, Passthrough};
 
 // ---------------------------------------------------------------------------
 // MapFs — an in-memory tree, for protocol unit tests on any platform.
@@ -1813,6 +1962,7 @@ mod tests {
 
     mod node_tests {
         use super::*;
+        #[cfg(unix)]
         use std::fs;
 
         #[test]

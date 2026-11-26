@@ -5,7 +5,7 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "In-process virtio-fs (FUSE) device for dillo (VirtioDevice transport-agnostic)"
+description = "Transport-independent virtio-fs (FUSE) backend for dillo"
 
 [dependencies]
 dillo-virtio.workspace = true
@@ -13,6 +13,9 @@ dillo-mmio.workspace = true
 vm-memory.workspace = true
 log.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
 
 # Safe host-syscall wrappers for the Unix passthrough (xattr, fallocate,
 # SEEK_DATA/HOLE, renameat2, mkfifo). Windows uses std plus a few Win32 calls.

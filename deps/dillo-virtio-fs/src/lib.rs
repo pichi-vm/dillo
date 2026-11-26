@@ -3,15 +3,14 @@
 
 // SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
 
-//! In-process virtio-fs device implementing [`VirtioDevice`].
+//! Transport-independent virtio-fs backend implementing [`VirtioDevice`].
 //!
 //! virtio-fs (virtio 1.2 §5.11) shares a host directory into the guest by
 //! speaking the Linux FUSE protocol over virtqueues. The guest mounts it with
 //! `mount -t virtiofs <tag> <dir>` where `<tag>` matches this device's config
-//! tag. This device is **read-only**: it serves files out of an [`FsBackend`]
-//! ([`Passthrough`] over a host directory) and rejects every mutating FUSE
-//! opcode with `EROFS`, mirroring the RO-by-construction stance of the
-//! `dillo-virtio-blk` synthesized backings.
+//! tag. It serves an [`FsBackend`] and rejects mutating FUSE opcodes with
+//! `EROFS` when configured read-only. Native resource authorization is
+//! independent of that protocol-level policy.
 //!
 //! Layout: one hiprio queue (queue 0) plus one request queue (queue 1). The
 //! FUSE dispatch is uniform, so a worker is spawned per queue and both drive
@@ -34,7 +33,9 @@ use vm_memory::GuestAddress;
 
 use crate::fuse::FsState;
 
-pub use crate::backend::{Attr, DirEntry, FsBackend, MapFs, Passthrough, SetAttr};
+pub use crate::backend::{
+    Attr, DirEntry, FileContent, FsBackend, LinuxErrno, MapFs, Passthrough, SetAttr,
+};
 
 /// VIRTIO_F_VERSION_1 from the virtio 1.x spec.
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
@@ -54,7 +55,7 @@ const QUEUE_SIZES: [u16; NUM_QUEUES] = [QUEUE_MAX; NUM_QUEUES];
 /// tiny (header + name + fixed args); this only needs to bound a hostile chain.
 const MAX_REQUEST: usize = (1 << 20) + 4096;
 
-/// In-process virtio-fs device serving one [`FsBackend`] under a mount tag.
+/// Virtio-fs backend serving one [`FsBackend`] under a mount tag.
 pub struct VirtioFs {
     /// Mount tag, NUL-padded to [`TAG_LEN`] for config space.
     tag: [u8; TAG_LEN],
