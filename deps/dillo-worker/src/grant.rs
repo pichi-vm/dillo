@@ -8,6 +8,11 @@ use std::io;
 use dillo_machine::worker::{Channel, Message};
 
 const MAGIC: u32 = u32::from_ne_bytes(*b"DGR1");
+const MORE: i32 = i32::MIN;
+const CHUNK: usize = dillo_machine::worker::MAX_MESSAGE - 12;
+// Bound namespace metadata and xattr values independently of native frames.
+// File contents and guest memory never travel through this service.
+const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
 
 fn header(status: i32, payload: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(12 + payload.len());
@@ -31,6 +36,45 @@ fn decode(message: &mut Message) -> io::Result<i32> {
     Ok(status)
 }
 
+fn send(
+    channel: &mut dyn Channel,
+    status: i32,
+    mut bytes: &[u8],
+    resources: &[dillo_machine::worker::BorrowedResource<'_>],
+) -> io::Result<()> {
+    if bytes.len() > MAX_PAYLOAD {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    while bytes.len() > CHUNK {
+        channel.send(&header(MORE, &bytes[..CHUNK]), &[])?;
+        bytes = &bytes[CHUNK..];
+    }
+    channel.send(&header(status, bytes), resources)
+}
+
+fn receive(channel: &mut dyn Channel) -> io::Result<(i32, Message)> {
+    let mut bytes = Vec::new();
+    loop {
+        let mut part = channel.receive()?;
+        let status = decode(&mut part)?;
+        if part.bytes.len() > MAX_PAYLOAD - bytes.len()
+            || (status == MORE && (part.bytes.is_empty() || !part.resources.is_empty()))
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        bytes.extend(part.bytes);
+        if status != MORE {
+            return Ok((
+                status,
+                Message {
+                    bytes,
+                    resources: part.resources,
+                },
+            ));
+        }
+    }
+}
+
 /// A single resource authority selected by the launcher. Requests carry no
 /// guest memory and cannot select a different service or native process.
 #[derive(Debug)]
@@ -47,9 +91,8 @@ impl Client {
         payload: &[u8],
         adopt: impl FnOnce(Message) -> io::Result<T>,
     ) -> io::Result<T> {
-        self.0.send(&header(0, payload), &[])?;
-        let mut message = self.0.receive()?;
-        let status = decode(&mut message)?;
+        send(self.0.as_mut(), 0, payload, &[])?;
+        let (status, message) = receive(self.0.as_mut())?;
         let result = if status == 0 {
             adopt(message)
         } else {
@@ -98,8 +141,8 @@ pub(crate) type Service = Box<dyn FnMut(&[u8], &dyn Channel) -> io::Result<Grant
 
 pub(crate) fn serve(mut channel: Box<dyn Channel>, mut service: Service) -> io::Result<()> {
     loop {
-        let mut request = channel.receive()?;
-        if decode(&mut request)? != 0 || !request.resources.is_empty() {
+        let (status, request) = receive(channel.as_mut())?;
+        if status != 0 || !request.resources.is_empty() {
             return Err(io::ErrorKind::InvalidData.into());
         }
         let (status, response) = match service(&request.bytes, channel.as_ref()) {
@@ -114,7 +157,12 @@ pub(crate) fn serve(mut channel: Box<dyn Channel>, mut service: Service) -> io::
             ),
         };
         let resources = super::parent::borrow_resources(&response.message.resources);
-        channel.send(&header(status, &response.message.bytes), &resources)?;
+        send(
+            channel.as_mut(),
+            status,
+            &response.message.bytes,
+            &resources,
+        )?;
         // Keep the grant alive until its receiver has adopted it. In particular,
         // Darwin may collect a Unix socket held only by in-flight SCM_RIGHTS.
         let mut ack = channel.receive()?;

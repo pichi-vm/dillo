@@ -34,6 +34,12 @@ pub(super) fn receive(mut client: Client) -> io::Result<()> {
     // Request 3 is processed after each import ack; every source socket is now
     // closed. Only the confined worker's owning imports retain these endpoints.
     client.request(&[3], |_| Ok(()))?;
+    let metadata = vec![42; 128 * 1024];
+    client.request(&metadata, |message| {
+        assert_eq!(message.bytes, metadata);
+        assert!(message.resources.is_empty());
+        Ok(())
+    })?;
     let (accepted, _) = retry(|| listener.accept())?;
     for mut stream in [tcp, accepted] {
         eprintln!("granted TCP peer {:?}", stream.peer_addr()?);
@@ -96,6 +102,13 @@ pub(super) fn exercise() -> io::Result<()> {
         Vec::new(),
     )?
     .with_grants(move |request, channel| {
+        if request.len() == 128 * 1024 && request.iter().all(|byte| *byte == 42) {
+            return Ok(dillo_machine::worker::Message {
+                bytes: request.to_vec(),
+                resources: Vec::new(),
+            }
+            .into());
+        }
         if request == [3] {
             return Ok(dillo_machine::worker::Message {
                 bytes: Vec::new(),
