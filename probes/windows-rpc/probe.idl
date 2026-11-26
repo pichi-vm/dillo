@@ -1,0 +1,45 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+import "wtypes.idl";
+
+[uuid(d93f1e6e-f7b5-4fb1-8833-caa75f1cf003), version(1.0), pointer_default(unique)]
+interface HandleProbe
+{
+    typedef [context_handle] void *Session;
+    typedef [system_handle(sh_event)] HANDLE EventHandle;
+    typedef [system_handle(sh_section)] HANDLE SectionHandle;
+    typedef [system_handle(sh_pipe)] HANDLE PipeHandle;
+    typedef [switch_type(unsigned long)] union {
+        [case(1)] EventHandle event;
+        [case(2)] SectionHandle section;
+        [case(3)] PipeHandle pipe_handle;
+    } Object;
+    typedef struct {
+        unsigned long kind;
+        [switch_is(kind)] Object object;
+    } Resource;
+    void Echo([in] handle_t binding, [in] Resource *input, [out] Resource *output);
+    unsigned long Signal([in] handle_t binding,
+                         [in, system_handle(sh_event)] HANDLE event);
+    void Retain([in] handle_t binding,
+                [in, system_handle(sh_event)] HANDLE input,
+                [out, system_handle(sh_event)] HANDLE *output);
+    void Release([in] handle_t binding);
+    void Reject([in] handle_t binding,
+                [in, system_handle(sh_event)] HANDLE input);
+    unsigned long ServerPid([in] handle_t binding);
+    void Hold([in] handle_t binding,
+              [in, system_handle(sh_event)] HANDLE input,
+              [in, system_handle(sh_event)] HANDLE entered,
+              [in, system_handle(sh_event)] HANDLE release,
+              [out, system_handle(sh_event)] HANDLE *output);
+    void Adopt([in] handle_t binding,
+               [in, system_handle(sh_event)] HANDLE input,
+               [out] Session *session);
+    void WaitForCancel([in] handle_t binding,
+                       [in, system_handle(sh_event)] HANDLE input,
+                       [in, system_handle(sh_event)] HANDLE entered,
+                       [out, system_handle(sh_event)] HANDLE *output);
+    void Stop([in] handle_t binding);
+}

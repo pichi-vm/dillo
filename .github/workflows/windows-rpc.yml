@@ -1,0 +1,27 @@
+name: Windows resource transfer probe
+
+on:
+  push:
+    branches: [milestone/vhost-user-windows-binding]
+  workflow_dispatch:
+
+concurrency:
+  group: windows-rpc-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rpc:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Native RPC resource ownership
+        shell: pwsh
+        run: ./probes/windows-rpc/run.ps1
+      - name: Retain probe evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: windows-rpc
+          path: |
+            target/windows-rpc
