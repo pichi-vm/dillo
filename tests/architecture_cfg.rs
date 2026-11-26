@@ -115,7 +115,7 @@ impl SourceScan {
                 .iter()
                 .any(|pattern| line.contains(pattern))
             {
-                if is_allowed_machine_selection_cfg(root, path, line) {
+                if is_allowed_native_composition_cfg(root, path, line) {
                     continue;
                 }
                 let rel = path.strip_prefix(root).unwrap_or(path);
@@ -138,9 +138,11 @@ impl SourceScan {
     }
 }
 
-fn is_allowed_machine_selection_cfg(root: &Path, path: &Path, line: &str) -> bool {
+fn is_allowed_native_composition_cfg(root: &Path, path: &Path, line: &str) -> bool {
+    // The executable selects the native Machine and the worker's host backing.
+    // Neither selection belongs in a portable transport or device protocol.
     path.strip_prefix(root)
-        .is_ok_and(|rel| rel == Path::new("main.rs"))
+        .is_ok_and(|rel| rel == Path::new("main.rs") || rel == Path::new("device_worker/mod.rs"))
         && matches!(
             line.trim(),
             "#[cfg(target_os = \"linux\")]"
