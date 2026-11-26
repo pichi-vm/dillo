@@ -17,6 +17,10 @@ on:
         description: Probe a socket granted by the parent
         type: boolean
         default: false
+      vmnet:
+        description: Exercise privileged native vmnet inside the confined worker
+        type: boolean
+        default: false
 
 jobs:
   worker:
@@ -35,3 +39,9 @@ jobs:
         run: cargo test --locked -p dillo-worker --test device_process -- --network-probe
       - if: inputs.socket_broker
         run: cargo test --locked -p dillo-worker --test device_process -- --socket-probe
+      - if: inputs.vmnet && runner.os == 'macOS'
+        shell: bash
+        run: |
+          test_bin=$(cargo test --locked -p dillo-worker --test device_process --no-run --message-format=json | python3 -c 'import sys,json; print(next(x["executable"] for x in map(json.loads,sys.stdin) if x.get("executable")))')
+          interface=$(route -n get default | awk '/interface:/{print $2}')
+          sudo "$test_bin" --vmnet-probe "$interface"

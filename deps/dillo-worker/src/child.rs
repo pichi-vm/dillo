@@ -540,6 +540,32 @@ pub unsafe fn run<H: WorkerHost>(
         Option<crate::grant::Client>,
     ) -> io::Result<Box<dyn VirtioDevice>>,
 ) -> io::Result<()> {
+    // SAFETY: this entry preserves the caller's dedicated process contract.
+    unsafe {
+        run_prepared::<H, ()>(
+            |_| Ok(()),
+            |(), value, files, grants| factory(value, files, grants),
+        )
+    }
+}
+
+/// Acquire non-transferable native resources from trusted launch configuration,
+/// then confine the process before constructing or running the guest device.
+/// `prepare` must not parse backing files, guest data, or vhost-user messages.
+///
+/// # Safety
+/// Requires [`run`]'s dedicated process contract. The preparation callback may
+/// use ambient authority only for the resources the launcher explicitly names.
+#[allow(unsafe_code)]
+pub unsafe fn run_prepared<H: WorkerHost, T>(
+    prepare: impl FnOnce(&serde_json::Value) -> io::Result<T>,
+    factory: impl FnOnce(
+        T,
+        serde_json::Value,
+        Vec<File>,
+        Option<crate::grant::Client>,
+    ) -> io::Result<Box<dyn VirtioDevice>>,
+) -> io::Result<()> {
     let mut bootstrap = unsafe { H::bootstrap() }?;
     let mut message = bootstrap
         .receive()
@@ -561,6 +587,7 @@ pub unsafe fn run<H: WorkerHost>(
         .into_iter()
         .map(File::from)
         .collect::<Vec<_>>();
+    let prepared = prepare(&init.backend)?;
     #[cfg(unix)]
     let borrowed = {
         use std::os::fd::AsFd;
@@ -572,7 +599,7 @@ pub unsafe fn run<H: WorkerHost>(
         files.iter().map(AsHandle::as_handle).collect::<Vec<_>>()
     };
     H::confine(&borrowed, init.policy)?;
-    let device = factory(init.backend, files, grants)?;
+    let device = factory(prepared, init.backend, files, grants)?;
     drop(bootstrap);
     let rings = device
         .queue_max_sizes()

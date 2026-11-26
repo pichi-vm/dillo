@@ -14,6 +14,11 @@ pub(crate) mod network;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Backing {
+    #[cfg(target_os = "macos")]
+    Vmnet {
+        mac: [u8; 6],
+        interface: String,
+    },
     #[cfg(target_os = "linux")]
     FrameNet {
         mac: [u8; 6],
@@ -58,13 +63,41 @@ pub(crate) struct Partition {
     pub attrs: u64,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_wraps))]
+pub(crate) fn prepare(
+    value: &serde_json::Value,
+) -> io::Result<Option<Arc<dyn dillo_virtio_net::NetBackend>>> {
+    #[cfg(target_os = "macos")]
+    if let Backing::Vmnet { interface, .. } =
+        serde_json::from_value(value.clone()).map_err(io::Error::other)?
+    {
+        return dillo_virtio_net::VmnetBackend::open(&interface)
+            .map(|backend| Some(Arc::new(backend) as Arc<dyn dillo_virtio_net::NetBackend>));
+    }
+    let _ = value;
+    Ok(None)
+}
+
 pub(crate) fn device<H: dillo_machine::worker::WorkerHost>(
+    prepared: Option<Arc<dyn dillo_virtio_net::NetBackend>>,
     value: serde_json::Value,
     mut files: Vec<File>,
     grants: Option<dillo_worker::grant::Client>,
 ) -> io::Result<Box<dyn VirtioDevice>> {
     let backing: Backing = serde_json::from_value(value).map_err(io::Error::other)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = prepared;
     let device = match backing {
+        #[cfg(target_os = "macos")]
+        Backing::Vmnet { mac, .. } => {
+            if !files.is_empty() {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            return Ok(Box::new(dillo_virtio_net::VirtioNet::new(
+                mac,
+                prepared.ok_or(io::ErrorKind::InvalidInput)?,
+            )));
+        }
         #[cfg(target_os = "linux")]
         Backing::FrameNet { mac } => {
             if files.len() != 1 {

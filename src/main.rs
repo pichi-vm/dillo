@@ -142,12 +142,13 @@ fn main() {
         // fresh process; native handles arrive on the private bootstrap channel.
         #[allow(unsafe_code)]
         let result = unsafe {
-            dillo_worker::run::<machine::worker::Worker>(
+            dillo_worker::run_prepared::<machine::worker::Worker, _>(
+                device_worker::prepare,
                 device_worker::device::<machine::worker::Worker>,
             )
         };
         if let Err(error) = result {
-            eprintln!("dillo block worker: {error}");
+            eprintln!("dillo device worker: {error}");
             std::process::exit(1);
         }
         return;
@@ -672,12 +673,18 @@ fn build_net_device(
         #[cfg(target_os = "macos")]
         NetBackendKind::Bridge => {
             let name = iface.context("net backend `bridge` requires iface=<physical-interface>")?;
-            let vmnet = dillo_virtio_net::VmnetBackend::open(name).with_context(|| {
-                format!("starting vmnet bridged mode on {name:?} (needs root/entitlement)")
-            })?;
-            Ok(device_worker::Device::Local(Box::new(
-                dillo_virtio_net::VirtioNet::new(mac, std::sync::Arc::new(vmnet)),
-            )))
+            Ok(Process(dillo_worker::Prepared::new(
+                dillo_worker::DeviceInfo {
+                    kind: 1,
+                    queues: vec![256; 2],
+                    config_len: 8,
+                },
+                &device_worker::Backing::Vmnet {
+                    mac,
+                    interface: name.to_owned(),
+                },
+                Vec::new(),
+            )?))
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         NetBackendKind::Bridge => {

@@ -244,6 +244,14 @@ impl VmnetBackend {
 }
 
 impl NetBackend for VmnetBackend {
+    fn reset(&self) -> io::Result<()> {
+        self.inbound
+            .0
+            .lock()
+            .expect("vmnet inbound poisoned")
+            .clear();
+        Ok(())
+    }
     fn send(&self, frame: &[u8]) -> io::Result<()> {
         // vmnet_write needs a mutable iovec base; copy into a local buffer.
         let mut buf = frame.to_vec();

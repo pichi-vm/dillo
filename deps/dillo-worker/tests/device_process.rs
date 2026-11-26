@@ -169,6 +169,9 @@ mod frames;
 mod queues;
 #[path = "cases/sockets.rs"]
 mod sockets;
+#[cfg(target_os = "macos")]
+#[path = "cases/vmnet.rs"]
+mod vmnet;
 #[cfg(unix)]
 #[path = "cases/vsock.rs"]
 mod vsock;
@@ -193,10 +196,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .is_some_and(|arg| arg == "--dillo-worker")
     {
-        let factory = |config: serde_json::Value,
+        let prepare = |config: &serde_json::Value| -> io::Result<Option<Arc<dyn dillo_virtio_net::NetBackend>>> {
+            #[cfg(target_os = "macos")]
+            if config["mode"] == "vmnet" {
+                return vmnet::prepare(config["interface"].as_str().unwrap()).map(Some);
+            }
+            let _ = config;
+            Ok(None)
+        };
+        let factory = |prepared: Option<Arc<dyn dillo_virtio_net::NetBackend>>,
+                       config: serde_json::Value,
                        mut files: Vec<File>,
                        grants: Option<dillo_worker::grant::Client>|
          -> io::Result<Box<dyn VirtioDevice>> {
+            if let Some(backend) = prepared {
+                return Ok(Box::new(dillo_virtio_net::VirtioNet::new(
+                    [2, 0, 0, 0, 0, 1],
+                    backend,
+                )));
+            }
             #[cfg(target_os = "linux")]
             if config["mode"] == "frames" {
                 return Ok(Box::new(dillo_virtio_net::VirtioNet::new(
@@ -287,7 +305,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // SAFETY: the fixture enters before creating threads or other owned
         // handles; its parent supplies fixed shared RAM to a fresh process.
         #[allow(unsafe_code)]
-        return unsafe { dillo_worker::run::<bad_peer::Host>(factory) }.map_err(Into::into);
+        return unsafe { dillo_worker::run_prepared::<bad_peer::Host, _>(prepare, factory) }
+            .map_err(Into::into);
+    }
+    #[cfg(target_os = "macos")]
+    if std::env::args().nth(1).as_deref() == Some("--vmnet-probe") {
+        return vmnet::exercise(&std::env::args().nth(2).expect("vmnet interface"))
+            .map_err(Into::into);
     }
     if std::env::args().any(|arg| arg == "--network-probe") {
         return exercise("network-grant").map_err(Into::into);
@@ -295,6 +319,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|arg| arg == "--socket-probe") {
         return sockets::exercise().map_err(Into::into);
     }
+
     for mode in [
         "normal",
         "qcow2",
