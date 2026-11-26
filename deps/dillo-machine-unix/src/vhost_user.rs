@@ -150,6 +150,21 @@ mod tests {
     }
 
     #[test]
+    fn oversized_header_does_not_wait_for_body() {
+        let (mut channel, remote) = pair().unwrap();
+        let mut peer = UnixStream::from(remote);
+        for value in [1u32, 1, u32::MAX] {
+            peer.write_all(&value.to_ne_bytes()).unwrap();
+        }
+        // Keep the peer open without sending a body: framing must reject the
+        // claimed size before allocating it or waiting for more input.
+        assert_eq!(
+            channel.receive().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
     fn resources_belong_to_their_frame() {
         let (mut channel, remote) = pair().unwrap();
         let mut peer = adopt(remote);
