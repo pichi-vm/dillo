@@ -1962,7 +1962,6 @@ mod tests {
 
     mod node_tests {
         use super::*;
-        #[cfg(unix)]
         use std::fs;
 
         #[test]
