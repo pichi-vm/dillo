@@ -147,6 +147,12 @@ impl VirtioDevice for VirtioFs {
         // virtio_fs_config is read-only from the guest.
     }
 
+    fn reset(&mut self) -> Result<(), ActivateError> {
+        self.state.lock().unwrap().reset();
+        self.activated = false;
+        Ok(())
+    }
+
     fn activate(
         &mut self,
         mut activation: VirtioActivate,

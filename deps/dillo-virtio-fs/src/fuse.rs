@@ -274,6 +274,10 @@ pub(crate) struct FsState {
 }
 
 impl FsState {
+    pub(crate) fn reset(&mut self) {
+        *self = Self::new(self.readonly);
+    }
+
     pub(crate) fn new(readonly: bool) -> Self {
         let mut nodes = HashMap::new();
         nodes.insert(
@@ -1560,6 +1564,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out_error(&reply), -ENOENT);
+    }
+
+    #[test]
+    fn reset_discards_guest_handles_and_preserves_share_policy() {
+        for readonly in [false, true] {
+            let fs = MapFs::new().with_file("hello", "contents");
+            let mut state = FsState::new(readonly);
+            let node = lookup_node(&mut state, &fs, FUSE_ROOT_ID, "hello");
+            let handle = open_node(&mut state, &fs, node);
+            state.reset();
+
+            let reply = dispatch(&mut state, &fs, &request(FUSE_GETATTR, 1, node, &[])).unwrap();
+            assert_eq!(out_error(&reply), -ENOENT);
+            let mut read = handle.to_le_bytes().to_vec();
+            read.extend(0u64.to_le_bytes());
+            read.extend(8u32.to_le_bytes());
+            read.resize(40, 0);
+            let reply = dispatch(&mut state, &fs, &request(FUSE_READ, 2, node, &read)).unwrap();
+            assert_eq!(out_error(&reply), -EBADF);
+
+            let node = lookup_node(&mut state, &fs, FUSE_ROOT_ID, "hello");
+            let handle = open_node(&mut state, &fs, node);
+            assert_read(&mut state, &fs, node, handle, b"contents");
+            let mut open = 1u32.to_le_bytes().to_vec(); // O_WRONLY
+            open.extend(0u32.to_le_bytes());
+            let reply = dispatch(&mut state, &fs, &request(FUSE_OPEN, 3, node, &open)).unwrap();
+            assert_eq!(out_error(&reply), if readonly { -EROFS } else { 0 });
+        }
     }
 
     #[test]
