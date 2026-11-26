@@ -31,6 +31,10 @@ impl UdsBackend {
 }
 
 impl VsockBackend for UdsBackend {
+    fn reset(&mut self) {
+        self.streams.clear();
+    }
+
     fn on_connection_request(&mut self, local_port: u32, peer_port: u32) -> bool {
         let sock_path = self.uds_dir.join(format!("{local_port}.sock"));
         match UnixStream::connect(&sock_path) {

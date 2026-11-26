@@ -38,6 +38,9 @@ pub(crate) enum ConnState {
 /// and sends data. The default `EchoBackend` reflects data back; `UdsBackend`
 /// bridges to Unix domain sockets on the host.
 pub(crate) trait VsockBackend: Send + Sync {
+    /// Discard all connections and buffered data after queue workers stop.
+    fn reset(&mut self);
+
     /// Called when guest initiates a connection to host port.
     /// Return true to accept, false to reject (RST sent).
     fn on_connection_request(&mut self, local_port: u32, peer_port: u32) -> bool;
@@ -201,6 +204,11 @@ pub(crate) struct ConnectionManager {
 }
 
 impl ConnectionManager {
+    pub(crate) fn reset(&mut self) {
+        self.backend.reset();
+        self.connections.clear();
+    }
+
     /// Create a new connection manager with the given guest CID and backend.
     // Only reached via `VirtioVsock::new_with_backend`, whose lone non-test
     // caller is unix-gated; on non-unix this is test-only.
@@ -391,6 +399,10 @@ mod tests {
     }
 
     impl VsockBackend for EchoBackend {
+        fn reset(&mut self) {
+            self.buffers.clear();
+        }
+
         fn on_connection_request(&mut self, local_port: u32, peer_port: u32) -> bool {
             self.buffers
                 .insert((local_port, peer_port), VecDeque::new());
@@ -673,6 +685,8 @@ mod tests {
         /// A backend that rejects all connections.
         struct RejectBackend;
         impl VsockBackend for RejectBackend {
+            fn reset(&mut self) {}
+
             fn on_connection_request(&mut self, _: u32, _: u32) -> bool {
                 false
             }

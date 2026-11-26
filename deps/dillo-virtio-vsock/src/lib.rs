@@ -90,6 +90,15 @@ impl VirtioVsock {
 }
 
 impl VirtioDevice for VirtioVsock {
+    fn reset(&mut self) -> Result<(), ActivateError> {
+        self.conn_mgr
+            .lock()
+            .expect("vsock connections poisoned")
+            .reset();
+        self.activated = false;
+        Ok(())
+    }
+
     fn device_type(&self) -> u32 {
         VIRTIO_ID_VSOCK
     }
@@ -452,6 +461,10 @@ mod tests {
     }
 
     impl VsockBackend for EchoBackend {
+        fn reset(&mut self) {
+            self.buffers.clear();
+        }
+
         fn on_connection_request(&mut self, local_port: u32, peer_port: u32) -> bool {
             self.buffers
                 .insert((local_port, peer_port), VecDeque::new());
@@ -489,6 +502,41 @@ mod tests {
         let mut cfg = [0u8; 8];
         dev.read_config(0, &mut cfg);
         assert_eq!(u64::from_le_bytes(cfg), 42);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_closes_host_stream_and_discards_pending_response() {
+        use std::io::Read;
+        use std::os::unix::net::UnixListener;
+
+        let root = tempfile::tempdir().unwrap();
+        let listener = UnixListener::bind(root.path().join("5678.sock")).unwrap();
+        let mut device = VirtioVsock::new(3, root.path().into());
+        let mut request = VsockPacket::new_reply(VSOCK_OP_REQUEST, 3, VSOCK_HOST_CID, 1234, 5678);
+        request.buf_alloc = 65536;
+        device
+            .conn_mgr
+            .lock()
+            .unwrap()
+            .process_tx_pkt(request.clone());
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        device.reset().unwrap();
+        assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        assert!(device.conn_mgr.lock().unwrap().produce_rx_pkt().is_none());
+        // The configured CID and endpoint remain available for a fresh session.
+        let mut config = [0; 8];
+        device.read_config(0, &mut config);
+        assert_eq!(u64::from_le_bytes(config), 3);
+        device.conn_mgr.lock().unwrap().process_tx_pkt(request);
+        let mut manager = device.conn_mgr.lock().unwrap();
+        assert_eq!(
+            manager.produce_rx_pkt().unwrap().op,
+            crate::packet::VSOCK_OP_RESPONSE
+        );
     }
 
     #[test]

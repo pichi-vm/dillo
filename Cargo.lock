@@ -803,6 +803,7 @@ dependencies = [
  "dillo-mmio",
  "dillo-virtio",
  "log",
+ "tempfile",
 ]
 
 [[package]]

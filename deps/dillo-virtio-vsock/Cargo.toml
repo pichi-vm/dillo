@@ -12,3 +12,6 @@ workspace = true
 dillo-virtio = { workspace = true }
 dillo-mmio = { workspace = true }
 log = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+tempfile.workspace = true
