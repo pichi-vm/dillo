@@ -3,12 +3,12 @@
 
 //! Standard vhost-user stream framing and SCM_RIGHTS ownership.
 
-use std::io::{self, IoSlice, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::io::{self, IoSlice, IoSliceMut, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 
 use dillo_machine::worker::{BorrowedResource, Channel, MAX_MESSAGE, Message};
-use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
+use nix::sys::socket::{ControlMessage, ControlMessageOwned, MsgFlags, recvmsg, sendmsg};
 
 const HEADER: usize = 12;
 const MAX_FDS: usize = 8;
@@ -31,50 +31,32 @@ impl Connection {
     fn read_exact(&mut self, mut bytes: &mut [u8], resources: &mut Vec<OwnedFd>) -> io::Result<()> {
         while !bytes.is_empty() {
             #[cfg(target_os = "linux")]
-            let flags = libc::MSG_CMSG_CLOEXEC;
+            let flags = MsgFlags::MSG_CMSG_CLOEXEC;
             #[cfg(not(target_os = "linux"))]
-            let flags = 0;
-            // nix's cmsgs iterator refuses MSG_CTRUNC before yielding the
-            // descriptors that were installed and still need closing.
-            let mut controls = [0usize; 32];
-            let mut iov = libc::iovec {
-                iov_base: bytes.as_mut_ptr().cast(),
-                iov_len: bytes.len(),
-            };
-            // SAFETY: all buffers are aligned, initialized and live for recvmsg.
-            // The kernel supplies ancillary headers within msg_control. Each
-            // installed descriptor is adopted once, including on truncation.
-            #[allow(unsafe_code)]
-            let (count, truncated) = unsafe {
-                let mut message: libc::msghdr = std::mem::zeroed();
-                message.msg_iov = &mut iov;
-                message.msg_iovlen = 1;
-                message.msg_control = controls.as_mut_ptr().cast();
-                message.msg_controllen = std::mem::size_of_val(&controls) as _;
-                let count = libc::recvmsg(self.0.as_raw_fd(), &mut message, flags);
-                if count < 0 {
-                    let error = io::Error::last_os_error();
-                    if error.kind() == io::ErrorKind::Interrupted {
-                        continue;
+            let flags = MsgFlags::empty();
+            // Receive the kernel maximum before enforcing the protocol's eight
+            // descriptors. Darwin externalizes all rights before truncating the
+            // ancillary buffer, so a smaller buffer can lose installed FDs.
+            // XNU bounds this to 512; Linux SCM_MAX_FD is 253.
+            let mut controls = nix::cmsg_space!([RawFd; 512]);
+            let mut iov = [IoSliceMut::new(bytes)];
+            let message =
+                match recvmsg::<()>(self.0.as_raw_fd(), &mut iov, Some(&mut controls), flags) {
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    result => result?,
+                };
+            let count = message.bytes;
+            for control in message.cmsgs()? {
+                if let ControlMessageOwned::ScmRights(fds) = control {
+                    for fd in fds {
+                        // SAFETY: recvmsg installed a new descriptor owned by
+                        // this message. Adopt it exactly once, also on refusal.
+                        #[allow(unsafe_code)]
+                        resources.push(unsafe { OwnedFd::from_raw_fd(fd) });
                     }
-                    return Err(error);
                 }
-                let mut control = libc::CMSG_FIRSTHDR(&message);
-                while !control.is_null() {
-                    if (*control).cmsg_level == libc::SOL_SOCKET
-                        && (*control).cmsg_type == libc::SCM_RIGHTS
-                    {
-                        let length = (*control).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
-                        let data = libc::CMSG_DATA(control).cast::<i32>();
-                        for index in 0..length / std::mem::size_of::<i32>() {
-                            resources.push(OwnedFd::from_raw_fd(data.add(index).read_unaligned()));
-                        }
-                    }
-                    control = libc::CMSG_NXTHDR(&message, control);
-                }
-                (count as usize, message.msg_flags & libc::MSG_CTRUNC != 0)
-            };
-            if truncated || resources.len() > MAX_FDS {
+            }
+            if resources.len() > MAX_FDS {
                 return Err(io::ErrorKind::InvalidData.into());
             }
             if count == 0 {
@@ -189,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn truncated_rights_are_closed() {
+    fn excess_rights_are_closed() {
         let (mut channel, remote) = pair().unwrap();
         let (read, write) = std::io::pipe().unwrap();
         let wire = [1u32, 1, 0]
@@ -209,8 +191,7 @@ mod tests {
             channel.receive().unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
-        // Every installed duplicate must be closed on rejection, including
-        // those preceding the truncated ancillary tail.
+        // Even a rejected message must close every installed duplicate.
         assert_eq!(
             nix::unistd::write(&write, b"x"),
             Err(nix::errno::Errno::EPIPE)
