@@ -56,15 +56,17 @@ pub(crate) fn device(
                 pipe::{Direction, PipeEnd},
             };
             if files.len()
-                != 2 + ports
-                    .iter()
-                    .map(|p| usize::from(p.rx) + usize::from(p.tx))
-                    .sum::<usize>()
+                != 2 + usize::from(resize)
+                    + ports
+                        .iter()
+                        .map(|p| usize::from(p.rx) + usize::from(p.tx))
+                        .sum::<usize>()
             {
                 return Err(io::ErrorKind::InvalidInput.into());
             }
             let mut files = files.into_iter();
             dillo_virtio_console::worker_stdio(files.next().unwrap(), files.next().unwrap());
+            let size_pipe = resize.then(|| files.next().unwrap());
             let ports = ports
                 .into_iter()
                 .map(|port| {
@@ -78,8 +80,8 @@ pub(crate) fn device(
                 })
                 .collect();
             let console = VirtioConsole::with_ports(ports);
-            return Ok(Box::new(if resize {
-                console.with_size_updates()
+            return Ok(Box::new(if let Some(pipe) = size_pipe {
+                console.with_size_pipe(pipe)
             } else {
                 console
             }));

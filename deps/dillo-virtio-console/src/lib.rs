@@ -243,7 +243,7 @@ pub fn flush_output() {
 /// virtio-console: thread-mode device.
 pub struct VirtioConsole {
     activated: bool,
-    resize: Option<resize::Receiver>,
+    resize: Option<Arc<Mutex<resize::Input>>>,
     size: Option<Arc<std::sync::atomic::AtomicU32>>,
     /// Named MULTIPORT ports (port 0 is implicit and not in here).
     ports: Vec<NamedPort>,
@@ -304,16 +304,23 @@ impl VirtioConsole {
     /// when the console has no named data ports. No guest agent is involved.
     pub fn with_resize(mut self, path: &std::path::Path) -> io::Result<Self> {
         let current = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        self.resize = Some(resize::Receiver::bind(path, Arc::clone(&current))?);
+        self.resize = Some(Arc::new(Mutex::new(resize::Input::Local(
+            resize::Receiver::bind(path, Arc::clone(&current))?,
+        ))));
         self.size = Some(current);
         self.queue_sizes.resize(4 + 2 * self.ports.len(), QUEUE_MAX);
         Ok(self)
     }
 
-    /// Accept terminal-size updates from the vhost-user frontend.
+    /// Accept terminal-size updates through a granted, nonblocking pipe.
     #[must_use]
-    pub fn with_size_updates(mut self) -> Self {
-        self.size = Some(Arc::new(std::sync::atomic::AtomicU32::new(0)));
+    pub fn with_size_pipe(mut self, file: std::fs::File) -> Self {
+        let current = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        self.resize = Some(Arc::new(Mutex::new(resize::Input::pipe(
+            file,
+            Arc::clone(&current),
+        ))));
+        self.size = Some(current);
         self.queue_sizes.resize(4 + 2 * self.ports.len(), QUEUE_MAX);
         self
     }
@@ -431,7 +438,7 @@ impl VirtioDevice for VirtioConsole {
                 control_tx_queue,
                 activation.queue_interrupt(CONTROL_RX_QUEUE),
                 activation.queue_interrupt(CONTROL_TX_QUEUE),
-                self.resize.take(),
+                self.resize.clone(),
                 self.size.clone(),
             )?);
 
@@ -552,20 +559,7 @@ impl VirtioDevice for VirtioConsole {
         }
     }
 
-    fn write_config(&mut self, offset: u64, data: &[u8]) {
-        if offset == 0
-            && data.len() == 4
-            && let Some(size) = &self.size
-        {
-            let bytes: [u8; 4] = data.try_into().unwrap();
-            if dillo_config::ConsoleSize::try_from(bytes).is_ok() {
-                size.store(
-                    u32::from_le_bytes(bytes),
-                    std::sync::atomic::Ordering::Release,
-                );
-            }
-        }
-    }
+    fn write_config(&mut self, _: u64, _: &[u8]) {}
 
     fn reset(&mut self) -> Result<(), ActivateError> {
         flush_output();
@@ -638,7 +632,7 @@ fn spawn_control_worker(
     tx_queue: Queue,
     rx_call_interrupt: Option<Interrupt>,
     tx_call_interrupt: Option<Interrupt>,
-    resize: Option<resize::Receiver>,
+    resize: Option<Arc<Mutex<resize::Input>>>,
     size: Option<Arc<std::sync::atomic::AtomicU32>>,
 ) -> Result<VirtioDeviceHandle, ActivateError> {
     host.spawn(Box::new(move |token| {
@@ -724,7 +718,7 @@ fn control_worker(
     rx_call_interrupt: Option<&Interrupt>,
     tx_call_interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
-    mut resize: Option<resize::Receiver>,
+    mut resize: Option<Arc<Mutex<resize::Input>>>,
     size: Option<Arc<std::sync::atomic::AtomicU32>>,
 ) {
     let mut previous_size = 0;
@@ -736,17 +730,11 @@ fn control_worker(
             return;
         }
         let mut progress = false;
-        if let Some(receiver) = &mut resize {
-            match receiver.poll() {
-                Ok(Some(size)) => {
-                    plane.resize(size);
-                    progress = true;
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    log::warn!("virtio-console: resize endpoint failed: {error}");
-                    resize = None;
-                }
+        if let Some(receiver) = &resize {
+            let result = receiver.lock().unwrap().poll();
+            if let Err(error) = result {
+                log::warn!("virtio-console: resize endpoint failed: {error}");
+                resize = None;
             }
         }
 

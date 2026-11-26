@@ -13,11 +13,12 @@ use dillo_virtio_console::{
 
 pub(super) fn device(mut files: Vec<File>) -> Box<dyn VirtioDevice> {
     dillo_virtio_console::worker_stdio(files.remove(0), files.remove(0));
+    let sizes = files.remove(0);
     let rx = PipeEnd::from_file("api", Direction::Rx, files.remove(0));
     let tx = PipeEnd::from_file("api", Direction::Tx, files.remove(0));
     Box::new(
         VirtioConsole::with_ports(vec![NamedPort::new("api".into(), Some(rx), Some(tx))])
-            .with_size_updates(),
+            .with_size_pipe(sizes),
     )
 }
 
@@ -80,7 +81,8 @@ pub(super) fn exercise() -> io::Result<()> {
     let rx = PipeEnd::nonblocking("api", Direction::Rx, File::from(Resource::from(rx)))?;
     let tx = PipeEnd::nonblocking("api", Direction::Tx, File::from(Resource::from(tx)))?;
     let host_rx = PipeEnd::nonblocking("api", Direction::Rx, File::from(Resource::from(host_rx)))?;
-    let (sizes, updates) = std::sync::mpsc::channel();
+    let (size_rx, mut sizes) = io::pipe()?;
+    let size_rx = PipeEnd::nonblocking("resize", Direction::Rx, Resource::from(size_rx).into())?;
     let prepared = dillo_worker::Prepared::new(
         dillo_worker::DeviceInfo {
             kind: 3,
@@ -91,11 +93,12 @@ pub(super) fn exercise() -> io::Result<()> {
         vec![
             tempfile::tempfile()?,
             output.try_clone()?,
+            size_rx.into_file(),
             rx.into_file(),
             tx.into_file(),
         ],
     )?
-    .with_config_updates(move || Ok(updates.try_recv().ok()));
+    .with_config_poll(|| Ok(()));
     let (mut proxy, control) = prepared.start::<Worker>(export, || {})?;
     for epoch in 0..2 {
         let mut queues = Vec::new();
@@ -163,7 +166,7 @@ pub(super) fn exercise() -> io::Result<()> {
             .read_slice(&mut received, GuestAddress(0x10_4000))
             .unwrap();
         assert_eq!(&received, b"rx!");
-        sizes.send(vec![80 + epoch, 0, 25, 0]).unwrap();
+        sizes.write_all(&[80 + epoch, 0, 25, 0])?;
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let mut config = [0; 4];

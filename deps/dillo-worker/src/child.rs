@@ -14,10 +14,9 @@ use dillo_ipc::vhost_user::{
     self as wire, Frame,
     request::{
         ADD_MEM_REG, GET_CONFIG, GET_FEATURES, GET_MAX_MEM_SLOTS, GET_PROTOCOL_FEATURES,
-        GET_QUEUE_NUM, GET_VRING_BASE, REM_MEM_REG, RESET_DEVICE, RESET_OWNER, SET_CONFIG,
-        SET_FEATURES, SET_MEM_TABLE, SET_OWNER, SET_PROTOCOL_FEATURES, SET_VRING_ADDR,
-        SET_VRING_BASE, SET_VRING_CALL, SET_VRING_ENABLE, SET_VRING_ERR, SET_VRING_KICK,
-        SET_VRING_NUM,
+        GET_QUEUE_NUM, GET_VRING_BASE, REM_MEM_REG, RESET_DEVICE, RESET_OWNER, SET_FEATURES,
+        SET_MEM_TABLE, SET_OWNER, SET_PROTOCOL_FEATURES, SET_VRING_ADDR, SET_VRING_BASE,
+        SET_VRING_CALL, SET_VRING_ENABLE, SET_VRING_ERR, SET_VRING_KICK, SET_VRING_NUM,
     },
 };
 use dillo_machine::worker::{
@@ -413,20 +412,16 @@ impl Backend {
                     .0;
                 self.regions.remove(index);
             }
-            GET_CONFIG | SET_CONFIG => {
+            GET_CONFIG => {
                 require(self.protocol & wire::CONFIG != 0)?;
                 let offset = wire::take_u32(&mut data)?;
                 let size = wire::take_u32(&mut data)? as usize;
                 let flags = wire::take_u32(&mut data)?;
                 require(size == data.len() && size <= 256 && flags <= 1)?;
-                if frame.request == GET_CONFIG {
-                    let mut config = frame.payload.clone();
-                    self.device
-                        .read_config(u64::from(offset), &mut config[12..]);
-                    reply = Some(config);
-                } else {
-                    self.device.write_config(u64::from(offset), data);
-                }
+                let mut config = frame.payload.clone();
+                self.device
+                    .read_config(u64::from(offset), &mut config[12..]);
+                reply = Some(config);
                 data = &[];
             }
             SET_VRING_NUM | SET_VRING_BASE | GET_VRING_BASE | SET_VRING_ENABLE => {

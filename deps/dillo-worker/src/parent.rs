@@ -16,9 +16,9 @@ use dillo_ipc::vhost_user::{
     self as wire, Frame,
     request::{
         ADD_MEM_REG, GET_CONFIG, GET_FEATURES, GET_MAX_MEM_SLOTS, GET_PROTOCOL_FEATURES,
-        GET_QUEUE_NUM, GET_VRING_BASE, RESET_DEVICE, SET_CONFIG, SET_FEATURES, SET_MEM_TABLE,
-        SET_OWNER, SET_PROTOCOL_FEATURES, SET_VRING_ADDR, SET_VRING_BASE, SET_VRING_CALL,
-        SET_VRING_ENABLE, SET_VRING_KICK, SET_VRING_NUM,
+        GET_QUEUE_NUM, GET_VRING_BASE, RESET_DEVICE, SET_FEATURES, SET_MEM_TABLE, SET_OWNER,
+        SET_PROTOCOL_FEATURES, SET_VRING_ADDR, SET_VRING_BASE, SET_VRING_CALL, SET_VRING_ENABLE,
+        SET_VRING_KICK, SET_VRING_NUM,
     },
 };
 use dillo_machine::worker::{
@@ -62,7 +62,7 @@ pub struct Prepared {
     info: DeviceInfo,
     backend: serde_json::Value,
     files: Vec<Resource>,
-    updates: Option<Box<dyn FnMut() -> io::Result<Option<Vec<u8>>> + Send>>,
+    config_poll: Option<Box<dyn FnMut() -> io::Result<()> + Send>>,
     retained: Vec<Box<dyn Send>>,
     policy: Policy,
 }
@@ -85,7 +85,7 @@ impl Prepared {
             info,
             backend: serde_json::to_value(backend).map_err(io::Error::other)?,
             files: files.into_iter().map(Into::into).collect(),
-            updates: None,
+            config_poll: None,
             retained: Vec::new(),
             policy: Policy::default(),
         })
@@ -106,13 +106,13 @@ impl Prepared {
         self
     }
 
-    /// Poll an explicit host configuration source, such as terminal size.
-    /// Updates are frontend-originated SET_CONFIG requests, never guest writes.
-    pub fn with_config_updates(
+    /// Refresh dynamic configuration with GET_CONFIG. Poll the native adapter
+    /// first, allowing terminal-size input to reach its granted worker pipe.
+    pub fn with_config_poll(
         mut self,
-        updates: impl FnMut() -> io::Result<Option<Vec<u8>>> + Send + 'static,
+        poll: impl FnMut() -> io::Result<()> + Send + 'static,
     ) -> Self {
-        self.updates = Some(Box::new(updates));
+        self.config_poll = Some(Box::new(poll));
         self
     }
 
@@ -245,7 +245,7 @@ impl Prepared {
             return Err(io::Error::other("invalid backend configuration reply"));
         }
         let config = Arc::new(Mutex::new(config[12..].to_vec()));
-        if let Some(mut updates) = self.updates {
+        if let Some(mut poll) = self.config_poll {
             let weak = Arc::downgrade(&session);
             let config = Arc::clone(&config);
             let thread = std::thread::Builder::new()
@@ -255,17 +255,16 @@ impl Prepared {
                         if session.shared.retiring.load(Ordering::Acquire) {
                             break;
                         }
-                        let result = updates().and_then(|update| {
-                            if let Some(bytes) = update {
-                                if bytes.len() > config.lock().unwrap().len() {
-                                    return Err(io::ErrorKind::InvalidInput.into());
-                                }
-                                let mut payload = wire::state(0, bytes.len() as u32);
-                                payload.extend(1u32.to_ne_bytes()); // frontend update
-                                payload.extend(&bytes);
-                                session.set(SET_CONFIG, payload, Vec::new())?;
-                                config.lock().unwrap()[..bytes.len()].copy_from_slice(&bytes);
+                        let result = poll().and_then(|()| {
+                            let reply = session.get(GET_CONFIG, config_request.clone())?;
+                            if reply.len() != config_request.len()
+                                || reply[..12] != config_request[..12]
+                            {
+                                return Err(io::Error::other(
+                                    "invalid backend configuration reply",
+                                ));
                             }
+                            config.lock().unwrap().copy_from_slice(&reply[12..]);
                             Ok(())
                         });
                         if let Err(error) = result {

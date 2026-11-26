@@ -465,6 +465,13 @@ fn build_console_device(
     use dillo_virtio_console::pipe::{Direction, PipeEnd};
     let (bridge, input, output) = dillo_virtio_console::stdio::Bridge::new()?;
     let mut files = vec![input, output];
+    let forwarder = if let Some(path) = resize {
+        let (forwarder, pipe) = dillo_virtio_console::resize::Forwarder::bind(path)?;
+        files.push(pipe);
+        Some(forwarder)
+    } else {
+        None
+    };
     let mut ports = Vec::with_capacity(console.ports.len());
     for port in &console.ports {
         for (direction, pipe) in [(Direction::Rx, port.rx), (Direction::Tx, port.tx)] {
@@ -493,18 +500,8 @@ fn build_console_device(
         files,
     )?
     .retain(bridge);
-    if let Some(path) = resize {
-        let mut receiver = dillo_virtio_console::resize::Receiver::bind(
-            path,
-            std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        )?;
-        prepared = prepared.with_config_updates(move || {
-            receiver.poll().map(|size| {
-                size.map(|size| {
-                    [size.cols.get().to_le_bytes(), size.rows.get().to_le_bytes()].concat()
-                })
-            })
-        });
+    if let Some(mut forwarder) = forwarder {
+        prepared = prepared.with_config_poll(move || forwarder.poll());
     }
     Ok(prepared)
 }

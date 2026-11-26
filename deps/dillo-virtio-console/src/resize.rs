@@ -10,6 +10,7 @@ use interprocess::local_socket::{
     GenericFilePath, Listener, ListenerNonblockingMode, ListenerOptions, Stream, prelude::*,
 };
 use std::{
+    fs::File,
     io::{self, Read},
     path::Path,
     sync::{
@@ -18,6 +19,105 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+use crate::pipe::{Direction, PipeEnd, Transfer};
+
+/// A granted pipe carries the same four-byte sizes as the public endpoint.
+#[derive(Debug)]
+pub(crate) enum Input {
+    Local(Receiver),
+    Pipe {
+        pipe: PipeEnd,
+        bytes: [u8; 4],
+        read: usize,
+        current: Arc<AtomicU32>,
+    },
+}
+
+impl Input {
+    pub(crate) fn pipe(file: File, current: Arc<AtomicU32>) -> Self {
+        Self::Pipe {
+            pipe: PipeEnd::from_file("resize", Direction::Rx, file),
+            bytes: [0; 4],
+            read: 0,
+            current,
+        }
+    }
+
+    pub(crate) fn poll(&mut self) -> io::Result<Option<ConsoleSize>> {
+        let (pipe, bytes, read, current) = match self {
+            Self::Local(receiver) => return receiver.poll(),
+            Self::Pipe {
+                pipe,
+                bytes,
+                read,
+                current,
+            } => (pipe, bytes, read, current),
+        };
+        match pipe.read(&mut bytes[*read..])? {
+            Transfer::Moved(count) => *read += count,
+            Transfer::WouldBlock => return Ok(None),
+            Transfer::Closed => return Err(io::ErrorKind::BrokenPipe.into()),
+        }
+        if *read != bytes.len() {
+            return Ok(None);
+        }
+        *read = 0;
+        let Ok(size) = ConsoleSize::try_from(*bytes) else {
+            return Ok(None);
+        };
+        let packed = u32::from_le_bytes(*bytes);
+        Ok((current.swap(packed, Ordering::AcqRel) != packed).then_some(size))
+    }
+}
+
+/// Forward the caller's local endpoint into an explicitly granted worker pipe.
+/// Both sides are nonblocking; backpressure retains at most one complete size.
+#[derive(Debug)]
+pub struct Forwarder {
+    receiver: Receiver,
+    pipe: PipeEnd,
+    bytes: [u8; 4],
+    written: usize,
+}
+
+impl Forwarder {
+    pub fn bind(path: &Path) -> io::Result<(Self, File)> {
+        #[cfg(unix)]
+        use std::os::fd::OwnedFd as Resource;
+        #[cfg(windows)]
+        use std::os::windows::io::OwnedHandle as Resource;
+        let (rx, tx) = io::pipe()?;
+        let rx = PipeEnd::nonblocking("resize", Direction::Rx, Resource::from(rx).into())?;
+        let pipe = PipeEnd::nonblocking("resize", Direction::Tx, Resource::from(tx).into())?;
+        Ok((
+            Self {
+                receiver: Receiver::bind(path, Arc::new(AtomicU32::new(0)))?,
+                pipe,
+                bytes: [0; 4],
+                written: 4,
+            },
+            rx.into_file(),
+        ))
+    }
+
+    pub fn poll(&mut self) -> io::Result<()> {
+        if self.written == self.bytes.len() {
+            let Some(size) = self.receiver.poll()? else {
+                return Ok(());
+            };
+            self.bytes[..2].copy_from_slice(&size.cols.get().to_le_bytes());
+            self.bytes[2..].copy_from_slice(&size.rows.get().to_le_bytes());
+            self.written = 0;
+        }
+        match self.pipe.write(&self.bytes[self.written..])? {
+            Transfer::Moved(count) => self.written += count,
+            Transfer::WouldBlock => {}
+            Transfer::Closed => return Err(io::ErrorKind::BrokenPipe.into()),
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 pub struct Receiver {
@@ -120,7 +220,7 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn fragmented_updates_and_stalled_clients_remain_bounded() -> io::Result<()> {
+    fn forwarded_updates_and_stalled_clients_remain_bounded() -> io::Result<()> {
         let root = tempfile::tempdir()?;
         #[cfg(unix)]
         let endpoint = root.path().join("resize.sock");
@@ -134,14 +234,19 @@ mod tests {
                 .to_string_lossy()
         ));
         let current = Arc::new(AtomicU32::new(0));
-        let mut receiver = Receiver::bind(&endpoint, Arc::clone(&current))?;
+        let (mut forwarder, pipe) = Forwarder::bind(&endpoint)?;
+        let mut input = Input::pipe(pipe, Arc::clone(&current));
+        let mut receive = move || {
+            forwarder.poll()?;
+            input.poll()
+        };
         let mut first = Stream::connect(endpoint.as_path().to_fs_name::<GenericFilePath>()?)?;
         first.write_all(&[44, 1])?; // 300 columns; rows have not arrived yet.
-        assert_eq!(receiver.poll()?, None);
+        assert_eq!(receive()?, None);
         first.write_all(&[77, 0])?;
         let deadline = Instant::now() + Duration::from_secs(3);
         let size = loop {
-            if let Some(size) = receiver.poll()? {
+            if let Some(size) = receive()? {
                 break size;
             }
             assert!(Instant::now() < deadline, "fragmented resize deadline");
@@ -153,12 +258,12 @@ mod tests {
         // An abandoned partial message cannot hold the next caller forever.
         let mut stalled = Stream::connect(endpoint.as_path().to_fs_name::<GenericFilePath>()?)?;
         stalled.write_all(&[1])?;
-        assert_eq!(receiver.poll()?, None);
+        assert_eq!(receive()?, None);
         let mut next = Stream::connect(endpoint.as_path().to_fs_name::<GenericFilePath>()?)?;
         next.write_all(&[120, 0, 41, 0])?;
         let deadline = Instant::now() + Duration::from_secs(3);
         let size = loop {
-            if let Some(size) = receiver.poll()? {
+            if let Some(size) = receive()? {
                 break size;
             }
             assert!(
@@ -172,7 +277,7 @@ mod tests {
             current.load(Ordering::Acquire).to_le_bytes(),
             [120, 0, 41, 0]
         );
-        drop((stalled, next, receiver));
+        drop((stalled, next, receive));
         #[cfg(unix)]
         assert!(!endpoint.exists(), "resize endpoint survived teardown");
         Ok(())
