@@ -175,6 +175,14 @@ impl Connection {
 }
 
 impl Channel for Connection {
+    fn share_socket(
+        &self,
+        socket: dillo_machine::worker::BorrowedSocket<'_>,
+    ) -> io::Result<Message> {
+        use std::os::windows::io::AsHandle;
+        let peer = self.backend.as_ref().ok_or(io::ErrorKind::Unsupported)?;
+        super::socket::export(socket, peer.as_handle())
+    }
     fn send(&mut self, bytes: &[u8], resources: &[BorrowedResource<'_>]) -> io::Result<()> {
         if !(HEADER..=MAX_MESSAGE).contains(&bytes.len())
             || resources.len() > MAX_HANDLES

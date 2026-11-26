@@ -49,7 +49,7 @@ use dillo_virtio::{
 };
 
 pub use backend::{MAX_FRAME_LEN, NetBackend, NullBackend, RECV_POLL};
-pub use user::{Forward, Proto, UserNetBackend};
+pub use user::{Forward, HostNetwork, NetworkResources, Proto, UserNetBackend};
 #[doc(hidden)]
 pub use user::{
     fuzz_inspect_frame, fuzz_parse_dhcp, fuzz_parse_dns_query, fuzz_parse_router_solicit,

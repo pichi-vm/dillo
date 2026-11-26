@@ -18,6 +18,7 @@ log = { workspace = true }
 # cross-platform, so they're unconditional.
 smoltcp = { workspace = true }
 mio = { workspace = true }
+serde.workspace = true
 
 [dev-dependencies]
 # The frontend's queue marshalling is unit-tested against a real guest-memory

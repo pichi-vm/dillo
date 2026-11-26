@@ -10,8 +10,14 @@ use std::sync::Arc;
 use dillo_virtio::VirtioDevice;
 use dillo_virtio_blk::{RawImageBacking, VirtioBlk};
 
+pub(crate) mod network;
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Backing {
+    UserNet {
+        mac: [u8; 6],
+        forwards: Vec<dillo_virtio_net::Forward>,
+    },
     #[cfg(unix)]
     Vsock {
         cid: u64,
@@ -48,15 +54,26 @@ pub(crate) struct Partition {
     pub attrs: u64,
 }
 
-pub(crate) fn device(
+pub(crate) fn device<H: dillo_machine::worker::WorkerHost>(
     value: serde_json::Value,
     mut files: Vec<File>,
     grants: Option<dillo_worker::grant::Client>,
 ) -> io::Result<Box<dyn VirtioDevice>> {
     let backing: Backing = serde_json::from_value(value).map_err(io::Error::other)?;
-    #[cfg(not(unix))]
-    let _ = grants;
     let device = match backing {
+        Backing::UserNet { mac, forwards } => {
+            if !files.is_empty() {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            let resources =
+                network::GrantedNetwork::new::<H>(grants.ok_or(io::ErrorKind::InvalidInput)?);
+            let backend =
+                dillo_virtio_net::UserNetBackend::with_resources(forwards, Arc::new(resources))?;
+            return Ok(Box::new(dillo_virtio_net::VirtioNet::new(
+                mac,
+                Arc::new(backend),
+            )));
+        }
         #[cfg(unix)]
         Backing::Vsock { cid } => {
             if !files.is_empty() {

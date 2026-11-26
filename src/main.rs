@@ -141,7 +141,11 @@ fn main() {
         // The parent grants only its retained ordinary-RAM backing to this
         // fresh process; native handles arrive on the private bootstrap channel.
         #[allow(unsafe_code)]
-        let result = unsafe { dillo_worker::run::<machine::worker::Worker>(device_worker::device) };
+        let result = unsafe {
+            dillo_worker::run::<machine::worker::Worker>(
+                device_worker::device::<machine::worker::Worker>,
+            )
+        };
         if let Err(error) = result {
             eprintln!("dillo block worker: {error}");
             std::process::exit(1);
@@ -401,7 +405,7 @@ fn build_placements(
                             &device_worker::Backing::Vsock { cid: *cid },
                             Vec::new(),
                         )?
-                        .with_grants(move |request| {
+                        .with_grants(move |request, _channel| {
                             let port = u32::from_ne_bytes(
                                 request
                                     .try_into()
@@ -411,7 +415,8 @@ fn build_placements(
                             Ok(dillo_machine::worker::Message {
                                 bytes: Vec::new(),
                                 resources: vec![stream.into()],
-                            })
+                            }
+                            .into())
                         })
                     }),
                 ));
@@ -438,8 +443,20 @@ fn build_placements(
                 forwards,
                 ..
             } => {
-                let net = build_net_device(*backend, iface.as_deref(), *mac, forwards)?;
-                built.push(("virtio-net", Local(Box::new(net))));
+                let device = if *backend == dillo_config::NetBackendKind::User {
+                    Process(device_worker::network::prepare(
+                        *mac,
+                        forwards.iter().map(translate_forward).collect(),
+                    )?)
+                } else {
+                    Local(Box::new(build_net_device(
+                        *backend,
+                        iface.as_deref(),
+                        *mac,
+                        forwards,
+                    )?))
+                };
+                built.push(("virtio-net", device));
             }
             other => {
                 let (name, blk) = build_block_device(other)?;

@@ -21,7 +21,7 @@ use mio::Token;
 use mio::net::{TcpListener, UdpSocket};
 
 /// Transport for a forward rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Proto {
     Tcp,
     Udp,
@@ -31,7 +31,7 @@ pub enum Proto {
 ///
 /// This is the backend's own type (not the config's `ForwardSpec`), so the net
 /// crate stays independent of `dillo-config`; `main.rs` translates between them.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Forward {
     pub proto: Proto,
     pub host_ip: IpAddr,

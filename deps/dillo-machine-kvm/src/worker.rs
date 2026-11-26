@@ -136,6 +136,14 @@ fn confine(files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<
         libc::SYS_recvfrom,
         libc::SYS_sendto,
         libc::SYS_shutdown,
+        libc::SYS_getsockname,
+        libc::SYS_getpeername,
+        libc::SYS_getsockopt,
+        libc::SYS_accept4,
+        libc::SYS_epoll_create1,
+        libc::SYS_epoll_ctl,
+        libc::SYS_epoll_pwait,
+        libc::SYS_eventfd2,
         libc::SYS_futex,
         libc::SYS_clock_gettime,
         libc::SYS_clock_nanosleep,
@@ -159,6 +167,8 @@ fn confine(files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<
     ] {
         rules.insert(syscall, Vec::new());
     }
+    #[cfg(target_arch = "x86_64")]
+    rules.insert(libc::SYS_epoll_wait, Vec::new());
     let condition = |index, mask, value| -> io::Result<SeccompRule> {
         SeccompRule::new(vec![
             SeccompCondition::new(
@@ -199,6 +209,7 @@ fn confine(files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<
         vec![
             condition(1, u32::MAX as u64, libc::F_GETFL as u64)?,
             condition(1, u32::MAX as u64, libc::F_GETFD as u64)?,
+            condition(1, u32::MAX as u64, libc::F_SETFL as u64)?,
         ],
     );
     let arch = std::env::consts::ARCH

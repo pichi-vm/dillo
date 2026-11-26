@@ -107,7 +107,7 @@ impl Prepared {
     /// it is joined after the worker has exited, including startup failures.
     pub fn with_grants(
         mut self,
-        service: impl FnMut(&[u8]) -> io::Result<dillo_machine::worker::Message> + Send + 'static,
+        service: impl FnMut(&[u8], &dyn Channel) -> io::Result<crate::grant::Grant> + Send + 'static,
     ) -> Self {
         self.grants = Some(Box::new(service));
         self

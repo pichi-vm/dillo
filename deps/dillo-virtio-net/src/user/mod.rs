@@ -37,6 +37,7 @@ mod dhcp;
 mod dns;
 mod forward;
 mod ndp;
+mod resources;
 mod stack;
 mod tcp;
 mod udp;
@@ -63,6 +64,7 @@ pub use dns::fuzz_parse_dns_query;
 pub use forward::{Forward, Proto};
 #[doc(hidden)]
 pub use ndp::fuzz_parse_router_solicit;
+pub use resources::{HostNetwork, NetworkResources};
 #[doc(hidden)]
 pub use stack::fuzz_inspect_frame;
 
@@ -164,6 +166,15 @@ impl UserNetBackend {
     /// start its stack thread. Fails only if a forward's host bind fails (e.g.
     /// the port is already taken) or a mio/poll resource can't be created.
     pub fn new(forwards: Vec<Forward>) -> io::Result<Self> {
+        Self::with_resources(forwards, Arc::new(HostNetwork))
+    }
+
+    /// Run the stack over an explicit host-resource provider. Device workers
+    /// use grants here while retaining packet parsing, NAT and I/O locally.
+    pub fn with_resources(
+        forwards: Vec<Forward>,
+        resources: Arc<dyn NetworkResources>,
+    ) -> io::Result<Self> {
         let poll = Poll::new()?;
         let waker = Arc::new(Waker::new(poll.registry(), WAKE_TOKEN)?);
 
@@ -180,6 +191,7 @@ impl UserNetBackend {
             Arc::clone(&outbound),
             Arc::clone(&stop),
             pending_resets,
+            resources,
         )?;
 
         let thread = std::thread::Builder::new()

@@ -164,14 +164,28 @@ mod console;
 mod filesystem;
 #[path = "cases/queues.rs"]
 mod queues;
+#[path = "cases/sockets.rs"]
+mod sockets;
 #[cfg(unix)]
 #[path = "cases/vsock.rs"]
 mod vsock;
-#[cfg(windows)]
-#[path = "cases/windows_sockets.rs"]
-mod windows_sockets;
+
+struct Stderr;
+impl log::Log for Stderr {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            eprintln!("{}: {}", record.target(), record.args());
+        }
+    }
+    fn flush(&self) {}
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    log::set_logger(&Stderr).unwrap();
+    log::set_max_level(log::LevelFilter::Info);
     if std::env::args_os()
         .nth(1)
         .is_some_and(|arg| arg == "--dillo-worker")
@@ -180,6 +194,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                        mut files: Vec<File>,
                        grants: Option<dillo_worker::grant::Client>|
          -> io::Result<Box<dyn VirtioDevice>> {
+            if config["mode"] == "sockets" {
+                sockets::receive(grants.unwrap())?;
+                return Ok(Box::new(dillo_virtio_console::VirtioConsole::new()));
+            }
             if config["mode"] == "console" {
                 return Ok(console::device(files));
             }
@@ -234,10 +252,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "worker created a descendant"
             );
             let mode = config["mode"].as_str().unwrap();
-            #[cfg(windows)]
-            if mode == "network-broker" {
-                windows_sockets::use_grant(&mut files)?;
-            }
             if bad_peer::configure(mode, &mut files) {
                 return Ok(Box::new(dillo_virtio_console::VirtioConsole::new()));
             }
@@ -268,9 +282,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|arg| arg == "--network-probe") {
         return exercise("network-grant").map_err(Into::into);
     }
-    #[cfg(windows)]
     if std::env::args().any(|arg| arg == "--socket-probe") {
-        return exercise("network-broker").map_err(Into::into);
+        return sockets::exercise().map_err(Into::into);
     }
     for mode in [
         "normal",
@@ -295,6 +308,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     console::exercise()?;
     filesystem::exercise()?;
+    sockets::exercise()?;
     #[cfg(unix)]
     vsock::exercise()?;
     println!(
@@ -449,10 +463,6 @@ fn exercise(mode: &str) -> io::Result<()> {
     let failed = Arc::new(AtomicBool::new(false));
     let signal = Arc::clone(&failed);
     let mut files = vec![disk.try_clone()?];
-    #[cfg(windows)]
-    let socket_probe = (mode == "network-broker")
-        .then(|| windows_sockets::serve(&mut files))
-        .transpose()?;
     let gate = if mode.starts_with("gated") {
         let (entered, notice) = std::io::pipe()?;
         let (release, proceed) = std::io::pipe()?;
@@ -484,10 +494,6 @@ fn exercise(mode: &str) -> io::Result<()> {
     };
     #[cfg(not(target_os = "macos"))]
     let result = start();
-    #[cfg(windows)]
-    if let Some(probe) = socket_probe {
-        probe.join().unwrap()?;
-    }
     if matches!(mode, "bad-flags" | "bad-request" | "reply-resource") {
         assert!(result.is_err(), "malformed worker was admitted");
         let error = result.err().unwrap().to_string();

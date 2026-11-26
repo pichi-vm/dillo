@@ -60,6 +60,7 @@ const DNS_PORT: u16 = 53;
 
 /// All state owned by the user-mode stack thread.
 pub(super) struct Stack {
+    resources: Arc<dyn super::NetworkResources>,
     poll: Poll,
     events: Events,
     device: ProxyDevice,
@@ -105,6 +106,7 @@ pub(super) struct Stack {
 impl Stack {
     /// Build the stack: the smoltcp interface over fresh queues, plus every
     /// inbound forward bound and registered with `poll`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         poll: Poll,
         waker: Arc<Waker>,
@@ -113,11 +115,12 @@ impl Stack {
         outbound: Arc<(Mutex<VecDeque<Vec<u8>>>, Condvar)>,
         stop: Arc<AtomicBool>,
         resets: Receiver<super::Reset>,
+        resources: Arc<dyn super::NetworkResources>,
     ) -> std::io::Result<Self> {
         let mut device = ProxyDevice::new();
         let iface = build_interface(&mut device);
         let (sockets, dns_socket, dhcp_socket) = service_sockets()?;
-        let dns = Resolver::new(waker);
+        let dns = Resolver::new(waker, Arc::clone(&resources));
 
         let mut next_token = FIRST_DYNAMIC_TOKEN;
         let mut bound = Vec::with_capacity(forwards.len());
@@ -127,7 +130,7 @@ impl Stack {
             next_token += 1;
             match f.proto {
                 Proto::Tcp => {
-                    let mut listener = TcpListener::bind(addr)?;
+                    let mut listener = TcpListener::from_std(resources.listen_tcp(addr)?);
                     poll.registry()
                         .register(&mut listener, token, Interest::READABLE)?;
                     bound.push(ForwardListener::Tcp {
@@ -137,7 +140,7 @@ impl Stack {
                     });
                 }
                 Proto::Udp => {
-                    let mut sock = UdpSocket::bind(addr)?;
+                    let mut sock = UdpSocket::from_std(resources.bind_udp(addr)?);
                     poll.registry()
                         .register(&mut sock, token, Interest::READABLE)?;
                     bound.push(ForwardListener::Udp {
@@ -152,6 +155,7 @@ impl Stack {
         }
 
         Ok(Self {
+            resources,
             poll,
             events: Events::with_capacity(256),
             device,
@@ -620,17 +624,10 @@ impl Stack {
             return;
         }
         let target = flow.target();
-        let bind = if target.is_ipv4() {
-            unspecified_v4()
-        } else {
-            unspecified_v6()
-        };
-        let Ok(mut host) = UdpSocket::bind(bind) else {
+        let Ok(host) = self.resources.connect_udp(target) else {
             return;
         };
-        if host.connect(target).is_err() {
-            return;
-        }
+        let mut host = UdpSocket::from_std(host);
         let token = self.alloc_token();
         if self
             .poll
@@ -742,7 +739,7 @@ impl Stack {
     }
 
     fn connect_host(&mut self, target: SocketAddr) -> Option<(TcpStream, Token)> {
-        let mut stream = TcpStream::connect(target).ok()?;
+        let mut stream = TcpStream::from_std(self.resources.connect_tcp(target).ok()?);
         let token = self.alloc_token();
         self.poll
             .registry()
@@ -916,10 +913,6 @@ fn make_udp_socket() -> udp::Socket<'static> {
     )
 }
 
-fn unspecified_v4() -> SocketAddr {
-    SocketAddr::from(([0, 0, 0, 0], 0))
-}
-
 /// Extract the IPv4 address from one of the v4 addressing constants. The stack's
 /// gateway/guest/DNS aliases are always v4; this is a convenience for the v4-only
 /// DHCP responder.
@@ -936,10 +929,6 @@ fn ipv6_of(addr: IpAddress) -> Ipv6Address {
         IpAddress::Ipv6(a) => a,
         IpAddress::Ipv4(_) => Ipv6Address::UNSPECIFIED,
     }
-}
-
-fn unspecified_v6() -> SocketAddr {
-    SocketAddr::from(([0u16; 8], 0))
 }
 
 /// smoltcp's optional `poll_delay`, clamped to [`MAX_POLL_WAIT`] so the loop

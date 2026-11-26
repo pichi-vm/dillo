@@ -12,6 +12,11 @@ pub use std::os::fd::{BorrowedFd as BorrowedResource, OwnedFd as Resource};
 #[cfg(windows)]
 pub use std::os::windows::io::{BorrowedHandle as BorrowedResource, OwnedHandle as Resource};
 
+#[cfg(unix)]
+pub use std::os::fd::{BorrowedFd as BorrowedSocket, OwnedFd as Socket};
+#[cfg(windows)]
+pub use std::os::windows::io::{BorrowedSocket, OwnedSocket as Socket};
+
 /// Bound allocations before decoding a control message. Guest buffers never
 /// travel in these messages.
 pub const MAX_MESSAGE: usize = 64 * 1024;
@@ -60,6 +65,24 @@ pub trait Channel: Send + std::fmt::Debug {
     fn receive(&mut self) -> io::Result<Message>;
     fn try_clone(&self) -> io::Result<Box<dyn Channel>>;
 
+    /// Export a socket to this channel's pinned peer. Keep the source alive
+    /// until the receiver has imported it; Windows uses Winsock protocol data,
+    /// not DuplicateHandle. This native grant is not a vhost-user message.
+    fn share_socket(&self, socket: BorrowedSocket<'_>) -> io::Result<Message> {
+        #[cfg(unix)]
+        {
+            Ok(Message {
+                bytes: Vec::new(),
+                resources: vec![socket.try_clone_to_owned()?],
+            })
+        }
+        #[cfg(windows)]
+        {
+            let _ = socket;
+            Err(io::ErrorKind::Unsupported.into())
+        }
+    }
+
     /// Create a vhost-user connection for this same peer. The returned resource
     /// is transferred through bootstrap (or SET_BACKEND_REQ_FD), never opened
     /// by name by the worker. Windows retains this connection's pinned peer.
@@ -97,6 +120,22 @@ pub enum NotificationRole {
 /// Facilities available to a device worker. This interface deliberately has no
 /// native VM, vCPU, debugger, or arbitrary process-handle operation.
 pub trait WorkerHost {
+    /// Import a socket granted by the parent, without creating a connection or
+    /// selecting a native process. The returned object owns its local socket.
+    fn import_socket(mut message: Message) -> io::Result<Socket> {
+        #[cfg(unix)]
+        {
+            if !message.bytes.is_empty() || message.resources.len() != 1 {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            Ok(message.resources.pop().unwrap())
+        }
+        #[cfg(windows)]
+        {
+            let _ = &mut message;
+            Err(io::ErrorKind::Unsupported.into())
+        }
+    }
     /// Start the same executable at its private worker entry point, returning a
     /// channel whose peer is that child. Startup is not a readiness report.
     fn spawn(executable: &Path, policy: Policy)

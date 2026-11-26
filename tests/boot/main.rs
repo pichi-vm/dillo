@@ -1110,8 +1110,8 @@ fn boots_with_net() {
 ///   3. host → guest TCP through an inbound `forward` into a listener snuffler
 ///      opens in the guest (the host harness connects and gets its bytes echoed).
 ///
-/// Cross-platform: the user backend runs in-process with no privilege, so this
-/// runs on every host lane (Linux/KVM, Windows/WHP, macOS/HVF).
+/// Cross-platform: the user backend runs in the device worker, with sockets
+/// granted by the parent, on Linux/KVM, Windows/WHP and macOS/HVF.
 #[test]
 fn boots_with_net_user() {
     use std::io::{Read, Write};

@@ -55,7 +55,7 @@ pub(super) fn exercise() -> io::Result<()> {
         &serde_json::json!({"mode":"vsock"}),
         Vec::new(),
     )?
-    .with_grants(|_| panic!("injected resource service failure"));
+    .with_grants(|_, _| panic!("injected resource service failure"));
     assert!(
         bad.start::<Worker>(export, move || observed
             .store(true, super::Ordering::Release))
@@ -101,7 +101,7 @@ pub(super) fn exercise() -> io::Result<()> {
         &serde_json::json!({"mode":"vsock"}),
         Vec::new(),
     )?
-    .with_grants(move |request| {
+    .with_grants(move |request, _channel| {
         let port = u32::from_ne_bytes(
             request
                 .try_into()
@@ -111,7 +111,8 @@ pub(super) fn exercise() -> io::Result<()> {
         Ok(dillo_machine::worker::Message {
             bytes: Vec::new(),
             resources: vec![stream.into()],
-        })
+        }
+        .into())
     });
     let (memory, export) = memory()?;
     let (mut proxy, control) = prepared.start::<Worker>(export, || {})?;
@@ -144,6 +145,7 @@ pub(super) fn exercise() -> io::Result<()> {
             )
             .map_err(io::Error::other)?;
         for (sequence, operation, data) in [(1, 1, &[][..]), (2, 5, &b"ping"[..])] {
+            eprintln!("vsock operation {operation}, sequence {sequence}");
             submit(&memory, 0, sequence, &[0; 128], true);
             kicks[0].write(1)?;
             submit(&memory, 1, sequence, &packet(operation, data), false);

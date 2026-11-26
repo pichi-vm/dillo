@@ -65,6 +65,9 @@ impl Channel for Peer {
 pub(super) struct Host;
 
 impl WorkerHost for Host {
+    fn import_socket(message: Message) -> io::Result<dillo_machine::worker::Socket> {
+        super::Worker::import_socket(message)
+    }
     fn spawn(_: &Path, _: Policy) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> {
         Err(io::ErrorKind::Unsupported.into())
     }

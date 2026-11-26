@@ -22,7 +22,7 @@
 //! [`DNS_IP`]: super::DNS_IP
 
 use std::collections::VecDeque;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::IpAddr;
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
@@ -211,7 +211,7 @@ pub(super) struct Resolver {
 }
 
 impl Resolver {
-    pub(super) fn new(waker: Arc<Waker>) -> Self {
+    pub(super) fn new(waker: Arc<Waker>, resources: Arc<dyn super::NetworkResources>) -> Self {
         let (tx, rx) = channel::<Job>();
         let rx = Arc::new(Mutex::new(rx));
         let results = Arc::new(Mutex::new(VecDeque::new()));
@@ -220,6 +220,7 @@ impl Resolver {
             let rx = Arc::clone(&rx);
             let results = Arc::clone(&results);
             let waker = Arc::clone(&waker);
+            let resources = Arc::clone(&resources);
             workers.push(std::thread::spawn(move || {
                 loop {
                     // Lock only to dequeue; release before the blocking resolve.
@@ -233,7 +234,7 @@ impl Resolver {
                     if job.session.upgrade().is_none() {
                         continue;
                     }
-                    let response = resolve(&job.query);
+                    let response = resolve(&job.query, resources.as_ref());
                     results
                         .lock()
                         .expect("dns results poisoned")
@@ -281,7 +282,7 @@ impl Resolver {
 }
 
 /// Resolve one query to a response datagram (runs on a worker thread).
-fn resolve(query: &DnsQuery) -> Vec<u8> {
+fn resolve(query: &DnsQuery, resources: &dyn super::NetworkResources) -> Vec<u8> {
     // Only A/AAAA are answerable via ToSocketAddrs; other types → empty NOERROR.
     if query.qtype != QTYPE_A && query.qtype != QTYPE_AAAA {
         return synthesize(query, &[], RCODE_NOERROR);
@@ -289,11 +290,8 @@ fn resolve(query: &DnsQuery) -> Vec<u8> {
     // Port is irrelevant; ToSocketAddrs needs one. Keep only the addresses.
     // `synthesize` filters to the requested family, so a name that resolves but
     // not in the requested family yields an empty NOERROR (the name exists).
-    match (query.name.as_str(), 0u16).to_socket_addrs() {
-        Ok(addrs) => {
-            let ips: Vec<IpAddr> = addrs.map(|s| s.ip()).collect();
-            synthesize(query, &ips, RCODE_NOERROR)
-        }
+    match resources.resolve(&query.name) {
+        Ok(ips) => synthesize(query, &ips, RCODE_NOERROR),
         // A failed lookup → NXDOMAIN so the guest gets a definitive answer.
         // (Platforms report this as NotFound/Other/Uncategorized inconsistently,
         // so we don't branch on the kind.)
@@ -316,7 +314,7 @@ mod tests {
     fn completed_lookup_from_old_session_is_discarded() {
         let poll = mio::Poll::new().unwrap();
         let waker = Arc::new(Waker::new(poll.registry(), mio::Token(0)).unwrap());
-        let mut resolver = Resolver::new(waker);
+        let mut resolver = Resolver::new(waker, Arc::new(super::super::HostNetwork));
         let old = Arc::downgrade(&resolver.session);
         resolver.reset();
         // Simulate an old native lookup finishing after the reset ack.

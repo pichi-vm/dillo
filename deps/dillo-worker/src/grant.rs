@@ -63,7 +63,38 @@ impl Client {
     }
 }
 
-pub(crate) type Service = Box<dyn FnMut(&[u8]) -> io::Result<Message> + Send>;
+/// Native state retained until the worker acknowledges successful import.
+pub struct Grant {
+    message: Message,
+    retained: Option<Box<dyn Send>>,
+}
+
+impl std::fmt::Debug for Grant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Grant")
+            .field("message", &self.message)
+            .finish_non_exhaustive()
+    }
+}
+
+impl From<Message> for Grant {
+    fn from(message: Message) -> Self {
+        Self {
+            message,
+            retained: None,
+        }
+    }
+}
+
+impl Grant {
+    #[must_use]
+    pub fn retain(mut self, resource: impl Send + 'static) -> Self {
+        self.retained = Some(Box::new(resource));
+        self
+    }
+}
+
+pub(crate) type Service = Box<dyn FnMut(&[u8], &dyn Channel) -> io::Result<Grant> + Send>;
 
 pub(crate) fn serve(mut channel: Box<dyn Channel>, mut service: Service) -> io::Result<()> {
     loop {
@@ -71,18 +102,19 @@ pub(crate) fn serve(mut channel: Box<dyn Channel>, mut service: Service) -> io::
         if decode(&mut request)? != 0 || !request.resources.is_empty() {
             return Err(io::ErrorKind::InvalidData.into());
         }
-        let (status, response) = match service(&request.bytes) {
+        let (status, response) = match service(&request.bytes, channel.as_ref()) {
             Ok(response) => (0, response),
             Err(error) => (
                 error.raw_os_error().unwrap_or(-1),
                 Message {
                     bytes: Vec::new(),
                     resources: Vec::new(),
-                },
+                }
+                .into(),
             ),
         };
-        let resources = super::parent::borrow_resources(&response.resources);
-        channel.send(&header(status, &response.bytes), &resources)?;
+        let resources = super::parent::borrow_resources(&response.message.resources);
+        channel.send(&header(status, &response.message.bytes), &resources)?;
         // Keep the grant alive until its receiver has adopted it. In particular,
         // Darwin may collect a Unix socket held only by in-flight SCM_RIGHTS.
         let mut ack = channel.receive()?;

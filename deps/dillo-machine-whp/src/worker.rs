@@ -27,12 +27,16 @@ use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::System::WindowsProgramming::*;
 
+mod socket;
 mod vhost_user;
 
 #[derive(Debug)]
 pub struct Worker;
 
 impl dillo_machine::worker::WorkerHost for Worker {
+    fn import_socket(message: Message) -> io::Result<dillo_machine::worker::Socket> {
+        socket::import(message)
+    }
     fn channel(resource: OwnedHandle) -> io::Result<Box<dyn Channel>> {
         vhost_user::adopt(resource)
     }
