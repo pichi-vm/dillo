@@ -272,6 +272,43 @@ pub unsafe fn bootstrap() -> io::Result<Box<dyn Channel>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::AsFd;
+
+    #[test]
+    fn transferred_socket_outlives_bootstrap() {
+        let (socket, peer) = UnixStream::pair().unwrap();
+        socket.shutdown(Shutdown::Read).unwrap();
+        peer.shutdown(Shutdown::Write).unwrap();
+        let (reader, writer) = std::io::pipe().unwrap();
+        let mut parent = Connection {
+            input: Endpoint::Bytes(File::from(OwnedFd::from(reader))),
+            output: Endpoint::Resources(socket),
+        };
+        let mut child = Connection {
+            input: Endpoint::Resources(peer),
+            output: Endpoint::Bytes(File::from(OwnedFd::from(writer))),
+        };
+        let (mut frontend, endpoint) = crate::vhost_user::pair().unwrap();
+        let mut replies = frontend.try_clone().unwrap();
+        let reader = std::thread::spawn(move || replies.receive());
+        parent.send(b"bootstrap", &[endpoint.as_fd()]).unwrap();
+        drop(parent);
+        // Give socket GC a chance to run while the transfer is in flight.
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let mut message = child.receive().unwrap();
+        assert_eq!(message.bytes, b"bootstrap");
+        let mut backend = crate::vhost_user::adopt(message.resources.pop().unwrap());
+        drop(child);
+        let request = [1u32, 1, 0]
+            .into_iter()
+            .flat_map(u32::to_ne_bytes)
+            .collect::<Vec<_>>();
+        frontend.send(&request, &[]).unwrap();
+        assert_eq!(backend.receive().unwrap().bytes, request);
+        backend.send(&request, &[]).unwrap();
+        assert_eq!(reader.join().unwrap().unwrap().bytes, request);
+        drop(endpoint);
+    }
 
     #[test]
     fn child_cannot_transfer_resources_to_parent() {

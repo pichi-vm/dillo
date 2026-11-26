@@ -9,7 +9,7 @@ use std::sync::{
     mpsc,
 };
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dillo_ipc::block::Init;
 use dillo_ipc::vhost_user::{
@@ -116,6 +116,7 @@ impl Prepared {
     ) -> io::Result<(Proxy, Control)> {
         let (process, mut bootstrap) = H::spawn(&std::env::current_exe()?)?;
         let (mut channel, endpoint) = bootstrap.pair()?;
+        let handoff = endpoint.try_clone()?;
         let input = channel.try_clone()?;
         let shared = Arc::new(Shared {
             failure: Mutex::new(None),
@@ -182,7 +183,13 @@ impl Prepared {
             _files: files,
             retained: Mutex::new(self.retained),
         });
-        let features = wire::scalar(&session.get(GET_FEATURES, Vec::new())?)?;
+        let features = session.get(GET_FEATURES, Vec::new());
+        // Keep the transferred socket reachable until the receiver has adopted
+        // it. Darwin's Unix-socket GC can flush a socket whose only remaining
+        // reference is an in-flight SCM_RIGHTS message. The first standard
+        // reply proves adoption; also release on failure before joining I/O.
+        drop(handoff);
+        let features = wire::scalar(&features?)?;
         if features & (wire::PROTOCOL_FEATURES | (1 << 32)) != wire::PROTOCOL_FEATURES | (1 << 32) {
             return Err(io::Error::other(
                 "backend lacks modern virtio/protocol negotiation",
@@ -400,21 +407,28 @@ impl Session {
                     .map_err(io::Error::other)?;
                 return Ok(Vec::new());
             }
-            let frame = self
-                .replies
-                .lock()
-                .unwrap()
-                .recv_timeout(CONTROL_TIMEOUT)
-                .map_err(|error| {
-                    io::Error::other(
-                        self.shared
-                            .failure
-                            .lock()
-                            .unwrap()
-                            .clone()
-                            .unwrap_or_else(|| error.to_string()),
-                    )
-                })?;
+            let deadline = Instant::now() + CONTROL_TIMEOUT;
+            let replies = self.replies.lock().unwrap();
+            let frame = loop {
+                match replies.recv_timeout(Duration::from_millis(50)) {
+                    Ok(frame) => break frame,
+                    Err(error) => {
+                        if let Some(failure) = &*self.shared.failure.lock().unwrap() {
+                            return Err(io::Error::other(failure.clone()));
+                        }
+                        // During the initial socket handoff, the parent's
+                        // retained descriptor deliberately prevents EOF.
+                        if let Some(status) = self.process.lock().unwrap().try_wait()? {
+                            return Err(io::Error::other(format!("worker exited: {status}")));
+                        }
+                        if Instant::now() >= deadline
+                            || error == mpsc::RecvTimeoutError::Disconnected
+                        {
+                            return Err(io::Error::other(error));
+                        }
+                    }
+                }
+            };
             if frame.request != request {
                 return Err(io::Error::other("unexpected vhost-user reply"));
             }
@@ -426,7 +440,8 @@ impl Session {
             Ok(frame.payload)
         })();
         if let Err(error) = &result {
-            self.shared.fail(error.to_string());
+            self.shared
+                .fail(format!("vhost-user request {request}: {error}"));
             let _ = self.process.lock().unwrap().terminate();
         }
         result
