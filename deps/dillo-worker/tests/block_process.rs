@@ -34,14 +34,20 @@ use dillo_machine_kvm::worker::Worker;
 use dillo_machine_whp::worker::Worker;
 
 #[derive(Debug)]
-struct Host(bool);
+struct Host(AtomicUsize);
 
 impl VirtioDeviceHost for Host {
     fn spawn(
         &self,
         run: Box<dyn FnOnce(VirtioRunToken) -> Result<(), DeviceJoinError> + Send>,
     ) -> Result<VirtioDeviceHandle, ActivateError> {
-        if self.0 {
+        if self
+            .0
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_err()
+        {
             return Err(io::Error::other("injected relay spawn failure").into());
         }
         let stop = Arc::new(AtomicBool::new(false));
@@ -369,7 +375,13 @@ fn activation(
         VirtioActivate::with_host_and_queue_interrupts(
             vec![queue],
             vec![kick.clone()],
-            Arc::new(Host(fail_spawn)),
+            // A native kick needs only the call-notification receiver. A
+            // second spawn would reveal an unintended kick relay.
+            Arc::new(Host(AtomicUsize::new(if fail_spawn {
+                usize::from(mode == "native")
+            } else {
+                usize::MAX
+            }))),
             vec![Some(interrupt)],
         )
         .with_negotiated_features((1 << 32) | (1 << 9)),
@@ -683,7 +695,7 @@ fn pci_interrupts(
         0x1000_1000,
         signals.clone(),
     );
-    pci.set_host(Arc::new(Host(false)));
+    pci.set_host(Arc::new(Host(AtomicUsize::new(usize::MAX))));
     let mut cap = pci.config_read(0x34 / 4) & 0xff;
     while cap != 0 && pci.config_read(cap as usize / 4) as u8 != dillo_pci::CAP_ID_MSIX {
         cap = (pci.config_read(cap as usize / 4) >> 8) & 0xff;

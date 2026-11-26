@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use dillo_ipc::block::{Geometry, QUEUE_MAX};
+use dillo_ipc::block::Geometry;
 use dillo_virtio::queue::Queue;
 use vm_memory::{Address, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
@@ -14,8 +14,12 @@ pub(crate) fn describe(queue: &Queue) -> Geometry {
     }
 }
 
-pub(crate) fn admit(geometry: Geometry, memory: &GuestMemoryMmap) -> std::io::Result<Queue> {
-    let mut queue = Queue::new(QUEUE_MAX);
+pub(crate) fn admit(
+    geometry: Geometry,
+    max: u16,
+    memory: &GuestMemoryMmap,
+) -> std::io::Result<Queue> {
+    let mut queue = Queue::new(max);
     queue.size = geometry.size;
     queue.ready = true;
     queue.desc_table = GuestAddress(geometry.desc);

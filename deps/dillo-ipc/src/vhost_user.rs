@@ -11,6 +11,69 @@ pub const VERSION: u32 = 1;
 pub const REPLY: u32 = 1 << 2;
 pub const NEED_REPLY: u32 = 1 << 3;
 
+pub const PROTOCOL_FEATURES: u64 = 1 << 30;
+pub const MQ: u64 = 1 << 0;
+pub const REPLY_ACK: u64 = 1 << 3;
+pub const CONFIG: u64 = 1 << 9;
+pub const RESET_DEVICE: u64 = 1 << 13;
+pub const CONFIGURE_MEM_SLOTS: u64 = 1 << 15;
+pub const GPA_ADDRESSES: u64 = 1 << 21;
+
+pub mod request {
+    pub const GET_FEATURES: u32 = 1;
+    pub const SET_FEATURES: u32 = 2;
+    pub const SET_OWNER: u32 = 3;
+    pub const RESET_OWNER: u32 = 4;
+    pub const SET_MEM_TABLE: u32 = 5;
+    pub const SET_VRING_NUM: u32 = 8;
+    pub const SET_VRING_ADDR: u32 = 9;
+    pub const SET_VRING_BASE: u32 = 10;
+    pub const GET_VRING_BASE: u32 = 11;
+    pub const SET_VRING_KICK: u32 = 12;
+    pub const SET_VRING_CALL: u32 = 13;
+    pub const SET_VRING_ERR: u32 = 14;
+    pub const GET_PROTOCOL_FEATURES: u32 = 15;
+    pub const SET_PROTOCOL_FEATURES: u32 = 16;
+    pub const GET_QUEUE_NUM: u32 = 17;
+    pub const SET_VRING_ENABLE: u32 = 18;
+    pub const GET_CONFIG: u32 = 24;
+    pub const SET_CONFIG: u32 = 25;
+    pub const RESET_DEVICE: u32 = 34;
+    pub const GET_MAX_MEM_SLOTS: u32 = 36;
+    pub const ADD_MEM_REG: u32 = 37;
+    pub const REM_MEM_REG: u32 = 38;
+}
+
+pub fn state(index: u32, value: u32) -> Vec<u8> {
+    [index, value]
+        .into_iter()
+        .flat_map(u32::to_ne_bytes)
+        .collect()
+}
+
+pub fn take_u32(bytes: &mut &[u8]) -> io::Result<u32> {
+    let (value, rest) = bytes
+        .split_at_checked(4)
+        .ok_or(io::ErrorKind::InvalidData)?;
+    *bytes = rest;
+    Ok(u32::from_ne_bytes(value.try_into().unwrap()))
+}
+
+pub fn take_u64(bytes: &mut &[u8]) -> io::Result<u64> {
+    let (value, rest) = bytes
+        .split_at_checked(8)
+        .ok_or(io::ErrorKind::InvalidData)?;
+    *bytes = rest;
+    Ok(u64::from_ne_bytes(value.try_into().unwrap()))
+}
+
+pub fn scalar(bytes: &[u8]) -> io::Result<u64> {
+    bytes
+        .try_into()
+        .map(u64::from_ne_bytes)
+        .map_err(|_| io::ErrorKind::InvalidData.into())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Frame {
     pub request: u32,

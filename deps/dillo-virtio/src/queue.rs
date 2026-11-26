@@ -220,6 +220,8 @@ pub struct Queue {
 
     /// Next available ring index to consume.
     pub next_avail: Wrapping<u16>,
+    /// Optional control-plane observation, sampled only after the queue stops.
+    progress: Option<Arc<std::sync::atomic::AtomicU16>>,
     /// Next used ring index to produce.
     pub next_used: Wrapping<u16>,
 
@@ -231,6 +233,15 @@ pub struct Queue {
 }
 
 impl Queue {
+    /// Observe the consumed available index after a worker's drain barrier.
+    pub fn track_progress(&mut self) -> Arc<std::sync::atomic::AtomicU16> {
+        Arc::clone(
+            self.progress.get_or_insert_with(|| {
+                Arc::new(std::sync::atomic::AtomicU16::new(self.next_avail.0))
+            }),
+        )
+    }
+
     /// Create a new queue with the given maximum size.
     pub fn new(max_size: u16) -> Self {
         Self {
@@ -241,6 +252,7 @@ impl Queue {
             avail_ring: GuestAddress(0),
             used_ring: GuestAddress(0),
             next_avail: Wrapping(0),
+            progress: None,
             next_used: Wrapping(0),
             uses_notif_suppression: false,
             msix_vector: 0xFFFF,
@@ -316,6 +328,9 @@ impl Queue {
         let next = mem.read_u16(desc_addr.unchecked_add(14))?;
 
         self.next_avail += Wrapping(1);
+        if let Some(progress) = &self.progress {
+            progress.store(self.next_avail.0, Ordering::Release);
+        }
 
         Some(DescriptorChain {
             index: desc_idx,

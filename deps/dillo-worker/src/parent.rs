@@ -11,29 +11,35 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use dillo_ipc::encode;
-use dillo_machine::worker::WorkerHost;
-use dillo_machine::worker::{Channel, MemoryExport, Process, Resource};
-use dillo_mmio::Interrupt;
-use dillo_virtio::{
-    ActivateError, DeviceJoinError, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
+use dillo_ipc::block::{CONFIG_LEN, Init, QUEUE_MAX};
+use dillo_ipc::vhost_user::{self as wire, Frame, request::*};
+use dillo_machine::worker::{
+    BorrowedResource, Channel, MemoryExport, NotificationRole, Process, Resource, WorkerHost,
+    WriteNotification,
 };
-
-use dillo_ipc::block::{CONFIG_LEN, Command, Init, QUEUE_MAX, Request, Response};
+use dillo_virtio::{
+    ActivateError, DeviceJoinError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
+};
 
 #[cfg(unix)]
 use std::os::fd::AsFd as AsResource;
 #[cfg(windows)]
 use std::os::windows::io::AsHandle as AsResource;
 
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+const PROTOCOL: u64 = wire::MQ
+    | wire::REPLY_ACK
+    | wire::CONFIG
+    | wire::RESET_DEVICE
+    | wire::CONFIGURE_MEM_SLOTS
+    | wire::GPA_ADDRESSES;
+
 struct Outgoing {
-    request: Request,
+    frame: Frame,
     resources: Vec<Resource>,
+    sent: Option<mpsc::SyncSender<()>>,
 }
 
-const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Authorized files and backend parameters, before a native Machine exists.
 #[derive(Debug)]
 pub struct Prepared {
     backend: serde_json::Value,
@@ -48,58 +54,61 @@ impl Prepared {
         })
     }
 
-    /// Bind to this Machine's RAM and admit the child only after its Ready
-    /// response. The callback wakes the Machine supervisor on a sticky failure.
     pub fn start<H: WorkerHost>(
         self,
         memory: MemoryExport,
         failed: impl Fn() + Send + Sync + 'static,
     ) -> io::Result<(Proxy, Control)> {
-        let (process, mut channel) = H::spawn(&std::env::current_exe()?)?;
+        let (process, mut bootstrap) = H::spawn(&std::env::current_exe()?)?;
+        let (mut channel, endpoint) = bootstrap.pair()?;
+        let input = channel.try_clone()?;
         let shared = Arc::new(Shared {
             failure: Mutex::new(None),
             failed: Box::new(failed),
             retiring: AtomicBool::new(false),
-            interrupt: Mutex::new(None),
             active: AtomicU64::new(0),
         });
-        let (responses, receiver) = mpsc::sync_channel(1);
-        let input = channel.try_clone()?;
+        let (responses, replies) = mpsc::sync_channel(1);
         let reader_shared = Arc::clone(&shared);
         let reader = std::thread::Builder::new()
-            .name("block-events".into())
+            .name("vhost-replies".into())
             .spawn(move || receive(input, &reader_shared, &responses))?;
-        let init = Init {
-            version: 1,
+        let init = dillo_ipc::encode(&Init {
+            version: 2,
             files: self.files.len(),
-            memory: memory.views,
             backend: self.backend,
-        };
-        let resources = Arc::new(
-            self.files
-                .into_iter()
-                .chain(memory.resources)
-                .collect::<Vec<_>>(),
-        );
+        })?;
+        let files = Arc::new(self.files);
+        let startup_files = Arc::clone(&files);
         let (commands, outgoing) = mpsc::sync_channel::<Outgoing>(1);
-        let init = encode(&init)?;
-        let startup_resources = Arc::clone(&resources);
         let writer_shared = Arc::clone(&shared);
         let writer = std::thread::Builder::new()
-            .name("block-controls".into())
+            .name("vhost-controls".into())
             .spawn(move || {
-                let borrowed = borrow_resources(&startup_resources);
-                if let Err(error) = channel.send(&init, &borrowed) {
+                let mut borrowed = borrow_resources(&startup_files);
+                borrowed.extend(borrow_resources(std::slice::from_ref(&endpoint)));
+                let result = bootstrap.send(&init, &borrowed);
+                // Keeping the peer endpoint here would prevent EOF after the child
+                // exits. Only backend file locks survive bootstrap in the parent.
+                drop(borrowed);
+                drop(endpoint);
+                drop(bootstrap);
+                if let Err(error) = result {
                     writer_shared.fail(error.to_string());
                     return;
                 }
                 while let Ok(outgoing) = outgoing.recv() {
                     let borrowed = borrow_resources(&outgoing.resources);
-                    if let Err(error) =
-                        encode(&outgoing.request).and_then(|bytes| channel.send(&bytes, &borrowed))
+                    if let Err(error) = outgoing
+                        .frame
+                        .encode()
+                        .and_then(|bytes| channel.send(&bytes, &borrowed))
                     {
                         writer_shared.fail(error.to_string());
                         break;
+                    }
+                    if let Some(sent) = outgoing.sent {
+                        let _ = sent.send(());
                     }
                 }
             })?;
@@ -107,50 +116,75 @@ impl Prepared {
             shared,
             process: Mutex::new(process),
             commands: Mutex::new(Some(commands)),
-            replies: Mutex::new(receiver),
+            replies: Mutex::new(replies),
             serial: Mutex::new(()),
-            next: AtomicU64::new(1),
+            lifecycle: Mutex::new(()),
             threads: Mutex::new(vec![reader, writer]),
             retired: AtomicBool::new(false),
-            _resources: resources,
+            kicks: Mutex::new(Vec::new()),
+            pair: H::notification_pair,
+            endpoint: H::notification_endpoint,
+            _files: files,
         });
-        let response = session.response().map_err(|error| {
-            // A failed child's last pipe may close before its process becomes
-            // signalled. Allow that short interval to retain the native exit
-            // status in the startup error, without an unbounded wait.
-            let mut status = session.process.lock().unwrap().try_wait();
-            for _ in 0..20 {
-                if !matches!(status, Ok(None)) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-                status = session.process.lock().unwrap().try_wait();
-            }
-            let failure = session.shared.failure.lock().unwrap().clone();
-            io::Error::other(format!(
-                "worker readiness: {error}; status={status:?}; failure={failure:?}"
-            ))
-        })?;
-        let Response::Ready { features, config } = response else {
-            return Err(io::Error::other("worker did not report readiness"));
-        };
-        if config.len() != CONFIG_LEN || features & (1 << 32) == 0 {
-            return Err(io::Error::other("invalid block worker capabilities"));
+        let features = wire::scalar(&session.get(GET_FEATURES, Vec::new())?)?;
+        if features & (wire::PROTOCOL_FEATURES | (1 << 32)) != wire::PROTOCOL_FEATURES | (1 << 32) {
+            return Err(io::Error::other(
+                "backend lacks modern virtio/protocol negotiation",
+            ));
         }
-        let control = Control(Arc::clone(&session));
+        let offered = wire::scalar(&session.get(GET_PROTOCOL_FEATURES, Vec::new())?)?;
+        if offered & PROTOCOL != PROTOCOL {
+            return Err(io::Error::other(
+                "backend lacks required vhost-user features",
+            ));
+        }
+        session.exchange(
+            SET_PROTOCOL_FEATURES,
+            PROTOCOL.to_ne_bytes().to_vec(),
+            Vec::new(),
+            Reply::None,
+        )?;
+        session.set(SET_OWNER, Vec::new(), Vec::new())?;
+        if wire::scalar(&session.get(GET_QUEUE_NUM, Vec::new())?)? != 1 {
+            return Err(io::Error::other("unexpected backend queue count"));
+        }
+        let slots = wire::scalar(&session.get(GET_MAX_MEM_SLOTS, Vec::new())?)?;
+        if memory.views.is_empty() || memory.views.len() as u64 > slots {
+            return Err(io::Error::other("backend cannot map this RAM layout"));
+        }
+        session.set(SET_MEM_TABLE, wire::state(0, 0), Vec::new())?;
+        for view in memory.views {
+            let resource = memory
+                .resources
+                .get(view.resource as usize)
+                .ok_or(io::ErrorKind::InvalidInput)?
+                .try_clone()?;
+            let payload = [0, view.gpa, view.len, view.gpa, view.offset]
+                .into_iter()
+                .flat_map(u64::to_ne_bytes)
+                .collect();
+            session.set(ADD_MEM_REG, payload, vec![resource])?;
+        }
+        let mut config_request = wire::state(0, CONFIG_LEN as u32);
+        config_request.extend(0u32.to_ne_bytes());
+        config_request.resize(12 + CONFIG_LEN, 0);
+        let config = session.get(GET_CONFIG, config_request.clone())?;
+        if config.len() != config_request.len() || config[..12] != config_request[..12] {
+            return Err(io::Error::other("invalid backend configuration reply"));
+        }
         Ok((
             Proxy {
-                session,
-                features,
-                config,
+                session: Arc::clone(&session),
+                features: features & !wire::PROTOCOL_FEATURES,
+                config: config[12..].to_vec(),
                 next_epoch: 1,
             },
-            control,
+            Control(session),
         ))
     }
 }
 
-fn borrow_resources(resources: &[Resource]) -> Vec<dillo_machine::worker::BorrowedResource<'_>> {
+fn borrow_resources(resources: &[Resource]) -> Vec<BorrowedResource<'_>> {
     resources
         .iter()
         .map(|resource| {
@@ -170,7 +204,6 @@ struct Shared {
     failure: Mutex<Option<String>>,
     failed: Box<dyn Fn() + Send + Sync>,
     retiring: AtomicBool,
-    interrupt: Mutex<Option<(u64, Interrupt)>>,
     active: AtomicU64,
 }
 
@@ -183,32 +216,18 @@ impl Shared {
     }
 }
 
-fn receive(mut input: Box<dyn Channel>, shared: &Shared, replies: &mpsc::SyncSender<Response>) {
+fn receive(mut channel: Box<dyn Channel>, shared: &Shared, replies: &mpsc::SyncSender<Frame>) {
     let result = (|| -> io::Result<()> {
         loop {
-            let frame = input.receive()?;
-            if !frame.resources.is_empty() {
-                return Err(io::Error::other("worker returned unauthorized resources"));
+            let message = channel.receive()?;
+            if !message.resources.is_empty() {
+                return Err(io::Error::other("unexpected backend reply resources"));
             }
-            let response: Response = dillo_ipc::decode(&frame)?;
-            match response {
-                Response::Used { epoch } => {
-                    let interrupt = shared
-                        .interrupt
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .filter(|(active, _)| *active == epoch)
-                        .map(|(_, interrupt)| interrupt.clone());
-                    // Never hold the session mutex while entering native IRQ
-                    // code. Reset and control replies cannot depend on it.
-                    if let Some(interrupt) = interrupt {
-                        interrupt.signal();
-                    }
-                }
-                Response::Failed(error) => return Err(io::Error::other(error)),
-                response => replies.try_send(response).map_err(io::Error::other)?,
+            let frame = Frame::decode(&message.bytes)?;
+            if frame.flags != wire::VERSION | wire::REPLY {
+                return Err(io::Error::other("invalid backend reply flags"));
             }
+            replies.try_send(frame).map_err(io::Error::other)?;
         }
     })();
     if let Err(error) = result {
@@ -216,60 +235,91 @@ fn receive(mut input: Box<dyn Channel>, shared: &Shared, replies: &mpsc::SyncSen
     }
 }
 
+#[derive(Clone, Copy)]
+enum Reply {
+    None,
+    Ack,
+    Data,
+}
+
+type NotificationPair = fn() -> io::Result<(Resource, Resource)>;
+type NotificationEndpoint =
+    fn(Resource, NotificationRole) -> io::Result<Arc<dyn WriteNotification>>;
+
 struct Session {
-    // Retain the parent's file locks until the child has retired.
-    _resources: Arc<Vec<Resource>>,
+    _files: Arc<Vec<Resource>>,
     shared: Arc<Shared>,
     process: Mutex<Box<dyn Process>>,
     commands: Mutex<Option<mpsc::SyncSender<Outgoing>>>,
-    replies: Mutex<mpsc::Receiver<Response>>,
+    replies: Mutex<mpsc::Receiver<Frame>>,
     serial: Mutex<()>,
-    next: AtomicU64,
+    lifecycle: Mutex<()>,
     retired: AtomicBool,
     threads: Mutex<Vec<JoinHandle<()>>>,
+    kicks: Mutex<Vec<Resource>>,
+    pair: NotificationPair,
+    endpoint: NotificationEndpoint,
 }
 
 impl Session {
-    fn response(&self) -> io::Result<Response> {
-        self.replies
-            .lock()
-            .unwrap()
-            .recv_timeout(CONTROL_TIMEOUT)
-            .map_err(io::Error::other)
+    fn get(&self, request: u32, payload: Vec<u8>) -> io::Result<Vec<u8>> {
+        self.exchange(request, payload, Vec::new(), Reply::Data)
     }
-
-    fn request(&self, command: Command) -> io::Result<()> {
-        self.request_with_resources(command, Vec::new())
+    fn set(&self, request: u32, payload: Vec<u8>, resources: Vec<Resource>) -> io::Result<()> {
+        self.exchange(request, payload, resources, Reply::Ack)
+            .map(|_| ())
     }
-
-    fn request_with_resources(&self, command: Command, resources: Vec<Resource>) -> io::Result<()> {
+    fn exchange(
+        &self,
+        request: u32,
+        payload: Vec<u8>,
+        resources: Vec<Resource>,
+        reply: Reply,
+    ) -> io::Result<Vec<u8>> {
         let _serial = self.serial.lock().unwrap();
-        if let Command::Kick { epoch } = &command
-            && self.shared.active.load(Ordering::Acquire) != *epoch
-        {
-            return Ok(());
-        }
         let result = (|| {
             if let Some(error) = &*self.shared.failure.lock().unwrap() {
                 return Err(io::Error::other(error.clone()));
             }
-            let id = self.next.fetch_add(1, Ordering::Relaxed);
+            let mut frame = Frame::request(request, payload);
+            if matches!(reply, Reply::Ack) {
+                frame.flags |= wire::NEED_REPLY;
+            }
+            let completion = matches!(reply, Reply::None).then(|| mpsc::sync_channel(1));
+            let (sent, completed) =
+                completion.map_or((None, None), |(send, receive)| (Some(send), Some(receive)));
             self.commands
                 .lock()
                 .unwrap()
                 .as_ref()
                 .ok_or(io::ErrorKind::BrokenPipe)?
                 .try_send(Outgoing {
-                    request: Request { id, command },
+                    frame,
                     resources,
+                    sent,
                 })
                 .map_err(io::Error::other)?;
-            match self.response()? {
-                Response::Reply { id: reply, error } if id == reply => {
-                    error.map_or(Ok(()), |error| Err(io::Error::other(error)))
-                }
-                _ => Err(io::Error::other("unexpected worker reply")),
+            if let Some(completed) = completed {
+                completed
+                    .recv_timeout(CONTROL_TIMEOUT)
+                    .map_err(io::Error::other)?;
+                return Ok(Vec::new());
             }
+            let frame = self
+                .replies
+                .lock()
+                .unwrap()
+                .recv_timeout(CONTROL_TIMEOUT)
+                .map_err(io::Error::other)?;
+            if frame.request != request {
+                return Err(io::Error::other("unexpected vhost-user reply"));
+            }
+            if matches!(reply, Reply::Ack) && wire::scalar(&frame.payload)? != 0 {
+                return Err(io::Error::other(format!(
+                    "backend rejected vhost-user request {request}"
+                )));
+            }
+            Ok(frame.payload)
         })();
         if let Err(error) = &result {
             self.shared.fail(error.to_string());
@@ -279,6 +329,7 @@ impl Session {
     }
 
     fn reset(&self, epoch: u64) -> io::Result<()> {
+        let _lifecycle = self.lifecycle.lock().unwrap();
         if self
             .shared
             .active
@@ -287,8 +338,8 @@ impl Session {
         {
             return Ok(());
         }
-        let result = self.request(Command::Reset { epoch });
-        self.shared.interrupt.lock().unwrap().take();
+        let result = self.set(RESET_DEVICE, Vec::new(), Vec::new());
+        self.kicks.lock().unwrap().clear();
         result
     }
 
@@ -316,12 +367,11 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         if let Err(error) = self.reap() {
-            log::error!("block worker retirement: {error}");
+            log::error!("virtio worker retirement: {error}");
         }
     }
 }
 
-/// Supervisor ownership is separate from the transport's proxy/activation.
 pub struct Control(Arc<Session>);
 
 impl std::fmt::Debug for Control {
@@ -340,7 +390,6 @@ impl Control {
             .as_ref()
             .map_or(Ok(()), |error| Err(io::Error::other(error.clone())))
     }
-
     pub fn reset(&self) -> io::Result<()> {
         let epoch = self.0.shared.active.load(Ordering::Acquire);
         if epoch == 0 {
@@ -349,33 +398,41 @@ impl Control {
             self.0.reset(epoch)
         }
     }
-
-    /// Cooperative device barrier; it does not revoke a malicious child's RAM
-    /// mapping. Only process retirement establishes that stronger boundary.
     pub fn quiesce(&self) -> io::Result<()> {
-        let epoch = self.0.shared.active.load(Ordering::Acquire);
-        if epoch == 0 {
-            Ok(())
-        } else {
-            self.0.request(Command::Quiesce { epoch })
+        let _lifecycle = self.0.lifecycle.lock().unwrap();
+        if self.0.shared.active.load(Ordering::Acquire) != 0 {
+            for index in 0..self.0.kicks.lock().unwrap().len() {
+                let reply = self.0.get(GET_VRING_BASE, wire::state(index as u32, 0))?;
+                let mut data = reply.as_slice();
+                if wire::take_u32(&mut data)? != index as u32
+                    || wire::take_u32(&mut data)? > u32::from(u16::MAX)
+                    || !data.is_empty()
+                {
+                    return Err(io::Error::other("invalid stopped queue index"));
+                }
+            }
         }
+        Ok(())
     }
-
     pub fn resume(&self) -> io::Result<()> {
-        let epoch = self.0.shared.active.load(Ordering::Acquire);
-        if epoch == 0 {
-            Ok(())
-        } else {
-            self.0.request(Command::Resume { epoch })
+        let _lifecycle = self.0.lifecycle.lock().unwrap();
+        if self.0.shared.active.load(Ordering::Acquire) != 0 {
+            for (index, kick) in self.0.kicks.lock().unwrap().iter().enumerate() {
+                self.0.set(
+                    SET_VRING_KICK,
+                    (index as u64).to_ne_bytes().to_vec(),
+                    vec![kick.try_clone()?],
+                )?;
+            }
         }
+        Ok(())
     }
-
     pub fn shutdown(&self) -> io::Result<()> {
         if self.0.retired.load(Ordering::Acquire) {
             return self.check();
         }
         self.0.shared.retiring.store(true, Ordering::Release);
-        let stopped = self.0.request(Command::Shutdown);
+        let stopped = self.reset();
         let reaped = self.0.reap();
         self.check().and(stopped).and(reaped)
     }
@@ -383,18 +440,14 @@ impl Control {
 
 impl Drop for Control {
     fn drop(&mut self) {
-        // Covers launch errors and unwinding before the explicit supervisor
-        // shutdown. This owner is created after the Machine and drops first.
         if !self.0.retired.load(Ordering::Acquire)
             && let Err(error) = self.shutdown()
         {
-            log::error!("block worker shutdown: {error}");
+            log::error!("virtio worker shutdown: {error}");
         }
     }
 }
 
-/// Cached block configuration plus the lifecycle connection. Guest register
-/// reads remain in the parent, independent of child scheduling.
 pub struct Proxy {
     session: Arc<Session>,
     features: u64,
@@ -439,96 +492,153 @@ impl VirtioDevice for Proxy {
         &mut self,
         mut activation: VirtioActivate,
     ) -> Result<VirtioDeviceHandle, ActivateError> {
+        let session = Arc::clone(&self.session);
+        let _lifecycle = session.lifecycle.lock().unwrap();
         let host = activation.host()?;
-        let mut queues = activation.take_queues();
-        let mut kicks = activation.take_queue_evts();
-        if queues.len() != 1
-            || kicks.len() != 1
-            || self.session.shared.active.load(Ordering::Acquire) != 0
+        let queues = activation.take_queues();
+        let kicks = activation.take_queue_evts();
+        if queues.len() != self.num_queues()
+            || kicks.len() != queues.len()
+            || session.shared.active.load(Ordering::Acquire) != 0
         {
             return Err(ActivateError::InvalidConfig(
-                "invalid block activation".into(),
+                "invalid backend activation".into(),
             ));
         }
         let epoch = self.next_epoch;
         self.next_epoch = epoch
             .checked_add(1)
             .ok_or_else(|| ActivateError::InvalidConfig("activation epoch exhausted".into()))?;
-        if let Some(interrupt) = activation.queue_interrupt(0) {
-            *self.session.shared.interrupt.lock().unwrap() = Some((epoch, interrupt));
-        }
-        let queue = queues.remove(0);
-        let kick = kicks.remove(0);
-        let resources = kick.export()?.into_iter().collect::<Vec<_>>();
-        let native_kick = !resources.is_empty();
-        self.session.shared.active.store(epoch, Ordering::Release);
-        if let Err(error) = self.session.request_with_resources(
-            Command::Activate {
-                epoch,
-                features: activation.negotiated_features(),
-                queue: crate::queue::describe(&queue),
-                native_kick,
-            },
-            resources,
-        ) {
-            self.session.shared.active.store(0, Ordering::Release);
-            self.session.shared.interrupt.lock().unwrap().take();
+        session.shared.active.store(epoch, Ordering::Release);
+        let mut relays = Vec::new();
+        let mut retained_kicks = Vec::new();
+        let result = (|| -> io::Result<()> {
+            session.set(
+                SET_FEATURES,
+                (activation.negotiated_features() | wire::PROTOCOL_FEATURES)
+                    .to_ne_bytes()
+                    .to_vec(),
+                Vec::new(),
+            )?;
+            for (index, (queue, kick)) in queues.into_iter().zip(kicks).enumerate() {
+                let index = index as u32;
+                let geometry = crate::queue::describe(&queue);
+                session.set(
+                    SET_VRING_NUM,
+                    wire::state(index, u32::from(geometry.size)),
+                    Vec::new(),
+                )?;
+                let mut address = wire::state(index, 0);
+                address.extend(
+                    [geometry.desc, geometry.used, geometry.avail, 0]
+                        .into_iter()
+                        .flat_map(u64::to_ne_bytes),
+                );
+                session.set(SET_VRING_ADDR, address, Vec::new())?;
+                session.set(
+                    SET_VRING_BASE,
+                    wire::state(index, u32::from(queue.next_avail.0)),
+                    Vec::new(),
+                )?;
+                let (read, write) = (session.pair)()?;
+                let call = (session.endpoint)(read, NotificationRole::Wait)?;
+                let wake = Kick::from_notification(Arc::clone(&call));
+                let shared = Arc::clone(&session.shared);
+                let interrupt = activation.queue_interrupt(index as usize);
+                let relay = host
+                    .spawn(Box::new(move |token| {
+                        loop {
+                            call.read()
+                                .map_err(|error| DeviceJoinError::Worker(error.to_string()))?;
+                            if token.is_shutdown_requested() {
+                                return Ok(());
+                            }
+                            if shared.active.load(Ordering::Acquire) == epoch
+                                && let Some(interrupt) = &interrupt
+                            {
+                                interrupt.signal();
+                            }
+                        }
+                    }))
+                    .map_err(io::Error::other)?
+                    .with_shutdown_wake(wake);
+                relays.push(relay);
+                session.set(
+                    SET_VRING_CALL,
+                    u64::from(index).to_ne_bytes().to_vec(),
+                    vec![write],
+                )?;
+                let resource = if let Some(resource) = kick.export()? {
+                    retained_kicks.push(kick);
+                    resource
+                } else {
+                    let (read, write) = (session.pair)()?;
+                    let signal = (session.endpoint)(write, NotificationRole::Signal)?;
+                    let wake = kick.clone();
+                    let relay = host
+                        .spawn(Box::new(move |token| {
+                            loop {
+                                kick.read()
+                                    .map_err(|error| DeviceJoinError::Worker(error.to_string()))?;
+                                if token.is_shutdown_requested() {
+                                    return Ok(());
+                                }
+                                signal
+                                    .write(1)
+                                    .map_err(|error| DeviceJoinError::Worker(error.to_string()))?;
+                            }
+                        }))
+                        .map_err(io::Error::other)?
+                        .with_shutdown_wake(wake);
+                    relays.push(relay);
+                    read
+                };
+                session.kicks.lock().unwrap().push(resource);
+                session.set(SET_VRING_ENABLE, wire::state(index, 1), Vec::new())?;
+            }
+            for (index, kick) in session.kicks.lock().unwrap().iter().enumerate() {
+                session.set(
+                    SET_VRING_KICK,
+                    (index as u64).to_ne_bytes().to_vec(),
+                    vec![kick.try_clone()?],
+                )?;
+            }
+            Ok(())
+        })();
+        drop(_lifecycle);
+        if let Err(error) = result {
+            for relay in &mut relays {
+                relay.shutdown();
+            }
+            let _ = session.reset(epoch);
+            for relay in relays {
+                let _ = relay.join();
+            }
             return Err(error.into());
         }
-        if native_kick {
-            let session = Arc::clone(&self.session);
-            return Ok(VirtioDeviceHandle::new(
-                move || {
-                    // The parent retains registration authority until the child
-                    // has stopped reading this activation's endpoint.
-                    if let Err(error) = session.reset(epoch) {
-                        session.shared.fail(error.to_string());
-                    }
-                },
-                move || {
-                    drop(kick);
-                    Ok(())
-                },
-            ));
-        }
-        let wake = kick.clone();
-        let session = Arc::clone(&self.session);
-        let relay = match host.spawn(Box::new(move |token| {
-            loop {
-                kick.read()
-                    .map_err(|error| DeviceJoinError::Worker(error.to_string()))?;
-                if token.is_shutdown_requested() {
-                    return Ok(());
-                }
-                session
-                    .request(Command::Kick { epoch })
-                    .map_err(|error| DeviceJoinError::Worker(error.to_string()))?;
-            }
-        })) {
-            Ok(relay) => relay.with_shutdown_wake(wake),
-            Err(error) => {
-                self.session.reset(epoch)?;
-                return Err(error);
-            }
-        };
-        let relay = Arc::new(Mutex::new(Some(relay)));
-        let stop_relay = Arc::clone(&relay);
-        let session = Arc::clone(&self.session);
+        let relays = Arc::new(Mutex::new(Some(relays)));
+        let stop_relays = Arc::clone(&relays);
         Ok(VirtioDeviceHandle::new(
             move || {
-                if let Some(relay) = stop_relay.lock().unwrap().as_mut() {
-                    relay.shutdown();
+                if let Some(relays) = stop_relays.lock().unwrap().as_mut() {
+                    for relay in relays {
+                        relay.shutdown();
+                    }
                 }
                 if let Err(error) = session.reset(epoch) {
                     session.shared.fail(error.to_string());
                 }
             },
             move || {
-                relay
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .map_or(Ok(()), VirtioDeviceHandle::join)
+                let mut result = Ok(());
+                for relay in relays.lock().unwrap().take().unwrap_or_default() {
+                    let joined = relay.join();
+                    if result.is_ok() {
+                        result = joined;
+                    }
+                }
+                drop(retained_kicks);
+                result
             },
         ))
     }
