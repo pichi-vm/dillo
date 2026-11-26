@@ -863,6 +863,7 @@ dependencies = [
 name = "dillo-worker"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "dillo-ipc",
  "dillo-machine",
  "dillo-machine-hvf",

@@ -23,7 +23,10 @@ use dillo_ipc::vhost_user::{
 use dillo_machine::worker::{
     MAX_RESOURCES, MemoryExport, NotificationRole, RamView, Resource, WorkerHost, WriteNotification,
 };
-use dillo_mmio::{Interrupt, MappedSharedMemory, SharedAccess, SharedMemory};
+use dillo_mmio::{
+    Interrupt, MappedSharedMemory, SharedAccess, SharedMemory, SharedMemoryError, SharedRange,
+    SharedRegion,
+};
 use dillo_virtio::queue::{Queue, QueueControl};
 use dillo_virtio::{
     ActivateError, DeviceJoinError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
@@ -37,6 +40,33 @@ const PROTOCOL: u64 = wire::MQ
     | wire::RESET_DEVICE
     | wire::CONFIGURE_MEM_SLOTS
     | wire::GPA_ADDRESSES;
+
+/// Publish a new map after draining in-flight requests. Region capabilities
+/// retain their old view until released; ordinary accesses take no update lock.
+struct Memory(arc_swap::ArcSwap<MappedSharedMemory>);
+
+impl Memory {
+    fn publish(&self, memory: GuestMemoryMmap) {
+        self.0.store(Arc::new(MappedSharedMemory::for_guest_memory(
+            memory,
+            SharedAccess::ReadWrite,
+        )));
+    }
+}
+
+impl Default for Memory {
+    fn default() -> Self {
+        Self(arc_swap::ArcSwap::from_pointee(
+            MappedSharedMemory::for_guest_memory(GuestMemoryMmap::new(), SharedAccess::ReadWrite),
+        ))
+    }
+}
+
+impl SharedMemory for Memory {
+    fn region(&self, range: SharedRange) -> Result<SharedRegion, SharedMemoryError> {
+        self.0.load().region(range)
+    }
+}
 
 struct Host {
     memory: Arc<dyn SharedMemory>,
@@ -141,6 +171,7 @@ struct Backend {
     device: Box<dyn VirtioDevice>,
     rings: Vec<Ring>,
     memory: GuestMemoryMmap,
+    shared: Arc<Memory>,
     regions: Vec<(RamView, u64)>,
     owner: bool,
     protocol: u64,
@@ -213,10 +244,7 @@ impl Backend {
             })));
         }
         let host: Arc<dyn VirtioDeviceHost> = Arc::new(Host {
-            memory: Arc::new(MappedSharedMemory::for_guest_memory(
-                self.memory.clone(),
-                SharedAccess::ReadWrite,
-            )),
+            memory: self.shared.clone(),
             pause: Arc::clone(&self.barrier),
         });
         self.active = Some(
@@ -305,7 +333,8 @@ impl Backend {
                 reply = Some((MAX_RESOURCES as u64).to_ne_bytes().to_vec());
             }
             SET_MEM_TABLE | ADD_MEM_REG => {
-                require(self.owner && self.active.is_none())?;
+                require(self.owner)?;
+                self.pause()?;
                 let count = if frame.request == SET_MEM_TABLE {
                     let count = wire::take_u32(&mut data)? as usize;
                     require(wire::take_u32(&mut data)? == 0 && count <= 8)?;
@@ -377,11 +406,12 @@ impl Backend {
                         .map_err(io::Error::other)?;
                     self.regions.push((region, user));
                 }
+                self.publish_memory()?;
             }
             REM_MEM_REG => {
                 require(
                     self.protocol & wire::CONFIGURE_MEM_SLOTS != 0
-                        && self.active.is_none()
+                        && self.owner
                         && wire::take_u64(&mut data)? == 0,
                 )?;
                 let gpa = wire::take_u64(&mut data)?;
@@ -395,12 +425,14 @@ impl Backend {
                         region.gpa == gpa && region.len == len && *base == user
                     })
                     .ok_or(io::ErrorKind::InvalidInput)?;
+                self.pause()?;
                 self.memory = self
                     .memory
                     .remove_region(GuestAddress(gpa), len)
                     .map_err(io::Error::other)?
                     .0;
                 self.regions.remove(index);
+                self.publish_memory()?;
             }
             GET_CONFIG => {
                 require(self.protocol & wire::CONFIG != 0)?;
@@ -523,6 +555,14 @@ impl Backend {
         self.start()?;
         Ok(reply)
     }
+
+    fn publish_memory(&self) -> io::Result<()> {
+        for ring in self.rings.iter().filter(|ring| ring.control.started()) {
+            crate::queue::admit(ring.geometry.clone(), ring.max, &self.memory)?;
+        }
+        self.shared.publish(self.memory.clone());
+        Ok(())
+    }
 }
 
 fn require(valid: bool) -> io::Result<()> {
@@ -618,6 +658,7 @@ pub unsafe fn run_prepared<H: WorkerHost, T>(
         device,
         rings,
         memory: GuestMemoryMmap::new(),
+        shared: Arc::default(),
         regions: Vec::new(),
         owner: false,
         protocol: 0,

@@ -7,13 +7,13 @@ use super::{Bytes, Duration, GuestAddress, Read, Worker, Write, io, memory};
 use dillo_ipc::vhost_user::{
     self as wire, Frame,
     request::{
-        GET_FEATURES, GET_PROTOCOL_FEATURES, GET_VRING_BASE, SET_FEATURES, SET_MEM_TABLE,
-        SET_OWNER, SET_PROTOCOL_FEATURES, SET_VRING_ADDR, SET_VRING_BASE, SET_VRING_ENABLE,
-        SET_VRING_KICK, SET_VRING_NUM,
+        ADD_MEM_REG, GET_FEATURES, GET_PROTOCOL_FEATURES, GET_VRING_BASE, REM_MEM_REG,
+        SET_FEATURES, SET_MEM_TABLE, SET_OWNER, SET_PROTOCOL_FEATURES, SET_VRING_ADDR,
+        SET_VRING_BASE, SET_VRING_ENABLE, SET_VRING_KICK, SET_VRING_NUM,
     },
 };
 use dillo_machine::worker::{
-    BorrowedResource, Channel, Message, Policy, Process, Resource, WorkerHost,
+    BorrowedResource, Channel, MemoryExport, Message, Policy, Process, Resource, WorkerHost,
 };
 use std::sync::mpsc;
 
@@ -95,6 +95,28 @@ impl Frontend {
         self.command(SET_VRING_ADDR, address, &[])
     }
 
+    fn map(&mut self, export: &MemoryExport) -> io::Result<()> {
+        let mut table = wire::state(export.views.len() as u32, 0);
+        for view in &export.views {
+            for value in [view.gpa, view.len, view.gpa, view.offset] {
+                table.extend(value.to_ne_bytes());
+            }
+        }
+        #[cfg(unix)]
+        let resources = export
+            .resources
+            .iter()
+            .map(|r| r.as_fd())
+            .collect::<Vec<_>>();
+        #[cfg(windows)]
+        let resources = export
+            .resources
+            .iter()
+            .map(|r| r.as_handle())
+            .collect::<Vec<_>>();
+        self.command(SET_MEM_TABLE, table, &resources)
+    }
+
     fn start(&mut self, index: u64) -> io::Result<()> {
         // An absent kick FD explicitly requests polling, not a stopped ring.
         self.command(SET_VRING_KICK, (0x100 | index).to_ne_bytes().to_vec(), &[])
@@ -162,7 +184,7 @@ pub(super) fn exercise() -> io::Result<()> {
     assert_ne!(features & wire::PROTOCOL_FEATURES, 0);
     peer.handoff.take();
     drop(bootstrap);
-    let protocols = wire::REPLY_ACK | wire::GPA_ADDRESSES;
+    let protocols = wire::REPLY_ACK | wire::GPA_ADDRESSES | wire::CONFIGURE_MEM_SLOTS;
     let available =
         u64::from_ne_bytes(peer.get(GET_PROTOCOL_FEATURES, vec![])?.try_into().unwrap());
     assert_eq!(available & protocols, protocols);
@@ -183,25 +205,7 @@ pub(super) fn exercise() -> io::Result<()> {
             .to_vec(),
         &[],
     )?;
-    let mut table = wire::state(export.views.len() as u32, 0);
-    for view in &export.views {
-        for value in [view.gpa, view.len, view.gpa, view.offset] {
-            table.extend(value.to_ne_bytes());
-        }
-    }
-    #[cfg(unix)]
-    let resources = export
-        .resources
-        .iter()
-        .map(|r| r.as_fd())
-        .collect::<Vec<_>>();
-    #[cfg(windows)]
-    let resources = export
-        .resources
-        .iter()
-        .map(|r| r.as_handle())
-        .collect::<Vec<_>>();
-    peer.command(SET_MEM_TABLE, table, &resources)?;
+    peer.map(&export)?;
 
     // TX can start while RX has never been configured. Initially disabled,
     // it consumes the request without producing host output.
@@ -235,12 +239,32 @@ pub(super) fn exercise() -> io::Result<()> {
         2
     );
 
+    // Replace RAM while RX is running. Preserve its queue state in the new
+    // backing, then add and remove an unused slot through the same live map.
+    let (replacement, new_export) = super::memory()?;
+    let mut ring_bytes = vec![0; 0x10_000];
+    memory.read_slice(&mut ring_bytes, GuestAddress(0)).unwrap();
+    replacement
+        .write_slice(&ring_bytes, GuestAddress(0))
+        .unwrap();
+    peer.map(&new_export)?;
+    #[cfg(unix)]
+    let resource = export.resources[0].as_fd();
+    #[cfg(windows)]
+    let resource = export.resources[0].as_handle();
+    let slot: Vec<_> = [0u64, 0x4000_0000, 2 << 20, 0x4000_0000, 0]
+        .into_iter()
+        .flat_map(u64::to_ne_bytes)
+        .collect();
+    peer.command(ADD_MEM_REG, slot.clone(), &[resource])?;
+    peer.command(REM_MEM_REG, slot, &[])?;
+
     // Reconfigure only the stopped TX ring, leaving RX and the console state
     // intact. Its old pending descriptor must never be consumed.
     peer.configure(1, 3)?;
     peer.start(1)?;
-    super::queues::submit(&memory, 3, 1, b"moved", false);
-    super::queues::wait_used(&memory, 3, 1)?;
+    super::queues::submit(&replacement, 3, 1, b"moved", false);
+    super::queues::wait_used(&replacement, 3, 1)?;
     peer.stop(1, 1)?;
     peer.stop(0, 1)?;
     assert_eq!(
