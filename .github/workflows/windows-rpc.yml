@@ -18,6 +18,12 @@ jobs:
       - name: Native RPC resource ownership
         shell: pwsh
         run: ./probes/windows-rpc/run.ps1
+      - name: Install Rust
+        shell: pwsh
+        run: rustup toolchain install nightly-2026-07-06 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Windows channel library
+        run: cargo +nightly-2026-07-06 test --locked -p dillo-windows-channel -- --nocapture
       - name: Retain probe evidence
         if: always()
         uses: actions/upload-artifact@v7.0.2
@@ -25,3 +31,5 @@ jobs:
           name: windows-rpc
           path: |
             target/windows-rpc
+            target/debug/build/dillo-windows-channel-*/out/wire*.h
+            target/debug/build/dillo-windows-channel-*/out/wire*.c

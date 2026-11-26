@@ -860,6 +860,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dillo-windows-channel"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "dillo-worker"
 version = "0.1.0"
 dependencies = [
