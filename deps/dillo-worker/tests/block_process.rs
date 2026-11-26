@@ -160,6 +160,9 @@ impl BlockBacking for ControlledBacking {
 mod bad_peer;
 #[path = "cases/console.rs"]
 mod console;
+#[cfg(windows)]
+#[path = "cases/windows_sockets.rs"]
+mod windows_sockets;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os()
@@ -214,6 +217,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "worker created a descendant"
             );
             let mode = config["mode"].as_str().unwrap();
+            #[cfg(windows)]
+            if mode == "network-broker" {
+                windows_sockets::use_grant(&mut files)?;
+            }
             if bad_peer::configure(mode, &mut files) {
                 return Ok(Box::new(dillo_virtio_console::VirtioConsole::new()));
             }
@@ -243,6 +250,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if std::env::args().any(|arg| arg == "--network-probe") {
         return exercise("network-grant").map_err(Into::into);
+    }
+    #[cfg(windows)]
+    if std::env::args().any(|arg| arg == "--socket-probe") {
+        return exercise("network-broker").map_err(Into::into);
     }
     for mode in [
         "normal",
@@ -418,6 +429,10 @@ fn exercise(mode: &str) -> io::Result<()> {
     let failed = Arc::new(AtomicBool::new(false));
     let signal = Arc::clone(&failed);
     let mut files = vec![disk.try_clone()?];
+    #[cfg(windows)]
+    let socket_probe = (mode == "network-broker")
+        .then(|| windows_sockets::serve(&mut files))
+        .transpose()?;
     let gate = if mode.starts_with("gated") {
         let (entered, notice) = std::io::pipe()?;
         let (release, proceed) = std::io::pipe()?;
@@ -449,6 +464,10 @@ fn exercise(mode: &str) -> io::Result<()> {
     };
     #[cfg(not(target_os = "macos"))]
     let result = start();
+    #[cfg(windows)]
+    if let Some(probe) = socket_probe {
+        probe.join().unwrap()?;
+    }
     if matches!(mode, "bad-flags" | "bad-request" | "reply-resource") {
         assert!(result.is_err(), "malformed worker was admitted");
         let error = result.err().unwrap().to_string();

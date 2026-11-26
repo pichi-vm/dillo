@@ -13,6 +13,10 @@ on:
         description: Probe direct host networking inside confinement
         type: boolean
         default: false
+      socket_broker:
+        description: Probe a socket granted by the parent
+        type: boolean
+        default: false
 
 jobs:
   worker:
@@ -29,3 +33,5 @@ jobs:
         run: cargo test --locked -p dillo-machine-whp worker::vhost_user
       - if: inputs.network
         run: cargo test --locked -p dillo-worker --test block_process -- --network-probe
+      - if: inputs.socket_broker
+        run: cargo test --locked -p dillo-worker --test block_process -- --socket-probe
