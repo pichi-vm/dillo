@@ -45,7 +45,20 @@ pub(crate) fn prepare(mac: [u8; 6], forwards: Vec<Forward>) -> io::Result<dillo_
 fn serve(bytes: &[u8], channel: &dyn Channel, forwards: &[Forward]) -> io::Result<Grant> {
     let request: Request = serde_json::from_slice(bytes).map_err(io::Error::other)?;
     let socket: Socket = match request {
-        Request::ConnectTcp(address) => HostNetwork.connect_tcp(address)?.into(),
+        Request::ConnectTcp(address) => {
+            #[cfg(windows)]
+            {
+                // Complete the connect in its initiating process. Closing the
+                // source socket must not cancel an outstanding native connect
+                // after the worker imports the shared socket description.
+                let socket =
+                    TcpStream::connect_timeout(&address, std::time::Duration::from_secs(3))?;
+                socket.set_nonblocking(true)?;
+                socket.into()
+            }
+            #[cfg(unix)]
+            HostNetwork.connect_tcp(address)?.into()
+        }
         Request::ConnectUdp(address) => HostNetwork.connect_udp(address)?.into(),
         Request::ListenTcp(address) => {
             require_forward(forwards, address, Proto::Tcp)?;
