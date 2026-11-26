@@ -958,7 +958,7 @@ fn boots_with_vgpt_disk() {
 
 /// A `--vsock` device gives the guest an AF_VSOCK transport. The guest probe
 /// (snuffler, when `dillo.vsock_port=N` is on the cmdline) connects to host
-/// CID 2 on port N; dillo's in-process device bridges that to the host Unix
+/// CID 2 on port N; dillo's device worker bridges that to the host Unix
 /// socket `<uds>/N.sock`, which this test serves with an echo. snuffler reports
 /// the round-trip in `Report.vsock`.
 ///

@@ -65,6 +65,7 @@ pub struct Prepared {
     config_poll: Option<Box<dyn FnMut() -> io::Result<()> + Send>>,
     retained: Vec<Box<dyn Send>>,
     policy: Policy,
+    grants: Option<crate::grant::Service>,
 }
 
 impl std::fmt::Debug for Prepared {
@@ -88,6 +89,7 @@ impl Prepared {
             config_poll: None,
             retained: Vec::new(),
             policy: Policy::default(),
+            grants: None,
         })
     }
 
@@ -97,6 +99,17 @@ impl Prepared {
 
     pub fn with_policy(mut self, policy: Policy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Grant native resources through a dedicated connection. The service must
+    /// restrict requests to its configured resources and bound native calls;
+    /// it is joined after the worker has exited, including startup failures.
+    pub fn with_grants(
+        mut self,
+        service: impl FnMut(&[u8]) -> io::Result<dillo_machine::worker::Message> + Send + 'static,
+    ) -> Self {
+        self.grants = Some(Box::new(service));
         self
     }
 
@@ -123,7 +136,18 @@ impl Prepared {
     ) -> io::Result<(Proxy, Control)> {
         let (process, mut bootstrap) = H::spawn(&std::env::current_exe()?, self.policy)?;
         let (mut channel, endpoint) = bootstrap.pair()?;
-        let handoff = endpoint.try_clone()?;
+        let grants = self
+            .grants
+            .map(|service| {
+                bootstrap
+                    .pair()
+                    .map(|(channel, endpoint)| (service, channel, endpoint))
+            })
+            .transpose()?;
+        let mut handoff = vec![endpoint.try_clone()?];
+        if let Some((_, _, endpoint)) = &grants {
+            handoff.push(endpoint.try_clone()?);
+        }
         let input = channel.try_clone()?;
         let shared = Arc::new(Shared {
             failure: Mutex::new(None),
@@ -137,8 +161,9 @@ impl Prepared {
             .name("vhost-replies".into())
             .spawn(move || receive(input, &reader_shared, &responses))?;
         let init = dillo_ipc::encode(&Init {
-            version: 2,
+            version: 3,
             files: self.files.len(),
+            grants: grants.is_some(),
             backend: self.backend,
             policy: self.policy,
         })?;
@@ -146,16 +171,24 @@ impl Prepared {
         let startup_files = Arc::clone(&files);
         let (commands, outgoing) = mpsc::sync_channel::<Outgoing>(1);
         let writer_shared = Arc::clone(&shared);
+        let (service, grant_endpoint) = match grants {
+            Some((service, channel, endpoint)) => (Some((service, channel)), Some(endpoint)),
+            None => (None, None),
+        };
         let writer = std::thread::Builder::new()
             .name("vhost-controls".into())
             .spawn(move || {
                 let mut borrowed = borrow_resources(&startup_files);
+                if let Some(endpoint) = &grant_endpoint {
+                    borrowed.extend(borrow_resources(std::slice::from_ref(endpoint)));
+                }
                 borrowed.extend(borrow_resources(std::slice::from_ref(&endpoint)));
                 let result = bootstrap.send(&init, &borrowed);
                 // Keeping the peer endpoint here would prevent EOF after the child
                 // exits. Only backend file locks survive bootstrap in the parent.
                 drop(borrowed);
                 drop(endpoint);
+                drop(grant_endpoint);
                 drop(bootstrap);
                 if let Err(error) = result {
                     writer_shared.fail(error.to_string());
@@ -191,6 +224,28 @@ impl Prepared {
             _files: files,
             retained: Mutex::new(self.retained),
         });
+        if let Some((service, channel)) = service {
+            let shared = Arc::clone(&session.shared);
+            let thread = std::thread::Builder::new()
+                .name("worker-grants".into())
+                .spawn(move || {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        crate::grant::serve(channel, service)
+                    }))
+                    .unwrap_or_else(|_| Err(io::Error::other("resource service panicked")));
+                    if let Err(error) = result {
+                        shared.fail(format!("worker resource grant: {error}"));
+                    }
+                });
+            let thread = match thread {
+                Ok(thread) => thread,
+                Err(error) => {
+                    drop(handoff);
+                    return Err(error);
+                }
+            };
+            session.threads.lock().unwrap().push(thread);
+        }
         let features = session.get(GET_FEATURES, Vec::new());
         // Keep the transferred socket reachable until the receiver has adopted
         // it. Darwin's Unix-socket GC can flush a socket whose only remaining
@@ -290,7 +345,7 @@ impl Prepared {
     }
 }
 
-fn borrow_resources(resources: &[Resource]) -> Vec<BorrowedResource<'_>> {
+pub(crate) fn borrow_resources(resources: &[Resource]) -> Vec<BorrowedResource<'_>> {
     resources
         .iter()
         .map(|resource| {

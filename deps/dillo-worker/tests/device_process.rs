@@ -162,6 +162,11 @@ mod bad_peer;
 mod console;
 #[path = "cases/filesystem.rs"]
 mod filesystem;
+#[path = "cases/queues.rs"]
+mod queues;
+#[cfg(unix)]
+#[path = "cases/vsock.rs"]
+mod vsock;
 #[cfg(windows)]
 #[path = "cases/windows_sockets.rs"]
 mod windows_sockets;
@@ -172,7 +177,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .is_some_and(|arg| arg == "--dillo-worker")
     {
         let factory = |config: serde_json::Value,
-                       mut files: Vec<File>|
+                       mut files: Vec<File>,
+                       grants: Option<dillo_worker::grant::Client>|
          -> io::Result<Box<dyn VirtioDevice>> {
             if config["mode"] == "console" {
                 return Ok(console::device(files));
@@ -180,6 +186,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if config["mode"] == "filesystem" {
                 return Ok(filesystem::device());
             }
+            #[cfg(unix)]
+            if config["mode"] == "vsock" {
+                return Ok(vsock::device(grants.unwrap()));
+            }
+            #[cfg(windows)]
+            let _ = grants;
             let forbidden = config["forbidden"].as_str().unwrap();
             assert!(
                 File::open(forbidden).is_err(),
@@ -283,6 +295,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     console::exercise()?;
     filesystem::exercise()?;
+    #[cfg(unix)]
+    vsock::exercise()?;
     println!(
         "block process: confinement, raw/qcow2 I/O, quiescence, reset, crash and deadline passed"
     );

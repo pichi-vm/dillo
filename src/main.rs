@@ -390,10 +390,30 @@ fn build_placements(
             dillo_config::ResolvedDevice::Vsock { cid, uds, .. } => {
                 built.push((
                     "virtio-vsock",
-                    Local(Box::new(dillo_virtio_vsock::VirtioVsock::new(
-                        *cid,
-                        uds.clone(),
-                    ))),
+                    Process({
+                        let directory = uds.clone();
+                        dillo_worker::Prepared::new(
+                            dillo_worker::DeviceInfo {
+                                kind: 19,
+                                queues: vec![128; 3],
+                                config_len: 8,
+                            },
+                            &device_worker::Backing::Vsock { cid: *cid },
+                            Vec::new(),
+                        )?
+                        .with_grants(move |request| {
+                            let port = u32::from_ne_bytes(
+                                request
+                                    .try_into()
+                                    .map_err(|_| std::io::ErrorKind::InvalidInput)?,
+                            );
+                            let stream = dillo_virtio_vsock::connect_port(&directory, port)?;
+                            Ok(dillo_machine::worker::Message {
+                                bytes: Vec::new(),
+                                resources: vec![stream.into()],
+                            })
+                        })
+                    }),
                 ));
             }
             #[cfg(not(unix))]

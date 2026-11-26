@@ -6,6 +6,7 @@
 pub struct Init {
     pub version: u32,
     pub files: usize,
+    pub grants: bool,
     pub backend: serde_json::Value,
     pub policy: dillo_machine::worker::Policy,
 }

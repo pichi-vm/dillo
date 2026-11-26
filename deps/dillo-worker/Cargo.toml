@@ -27,6 +27,7 @@ dillo-pci-virtio.workspace = true
 dillo-virtio-blk.workspace = true
 dillo-virtio-console.workspace = true
 dillo-virtio-fs.workspace = true
+dillo-virtio-vsock.workspace = true
 dillo-storage.workspace = true
 imago.workspace = true
 tempfile.workspace = true

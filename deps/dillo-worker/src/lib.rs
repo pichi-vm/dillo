@@ -4,6 +4,7 @@
 //! A parent keeps the transport; a confined child consumes its virtqueue.
 
 mod child;
+pub mod grant;
 mod parent;
 mod pause;
 mod queue;

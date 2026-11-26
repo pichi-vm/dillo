@@ -534,15 +534,28 @@ fn require(valid: bool) -> io::Result<()> {
 /// satisfying `WorkerHost::map_memory`. This fresh process has no other aliases.
 #[allow(unsafe_code)]
 pub unsafe fn run<H: WorkerHost>(
-    factory: impl FnOnce(serde_json::Value, Vec<File>) -> io::Result<Box<dyn VirtioDevice>>,
+    factory: impl FnOnce(
+        serde_json::Value,
+        Vec<File>,
+        Option<crate::grant::Client>,
+    ) -> io::Result<Box<dyn VirtioDevice>>,
 ) -> io::Result<()> {
     let mut bootstrap = unsafe { H::bootstrap() }?;
     let mut message = bootstrap
         .receive()
         .map_err(|e| io::Error::new(e.kind(), format!("worker bootstrap receive: {e}")))?;
     let init: Init = dillo_ipc::decode(&message)?;
-    require(init.version == 2 && message.resources.len() == init.files + 1)?;
+    require(
+        init.version == 3 && message.resources.len() == init.files + 1 + usize::from(init.grants),
+    )?;
     let mut channel = H::channel(message.resources.pop().unwrap())?;
+    let grants = if init.grants {
+        Some(crate::grant::Client::new(H::channel(
+            message.resources.pop().unwrap(),
+        )?))
+    } else {
+        None
+    };
     let files = message
         .resources
         .into_iter()
@@ -559,7 +572,7 @@ pub unsafe fn run<H: WorkerHost>(
         files.iter().map(AsHandle::as_handle).collect::<Vec<_>>()
     };
     H::confine(&borrowed, init.policy)?;
-    let device = factory(init.backend, files)?;
+    let device = factory(init.backend, files, grants)?;
     drop(bootstrap);
     let rings = device
         .queue_max_sizes()

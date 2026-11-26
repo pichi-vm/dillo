@@ -135,6 +135,7 @@ fn confine(files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<
         libc::SYS_sendmsg,
         libc::SYS_recvfrom,
         libc::SYS_sendto,
+        libc::SYS_shutdown,
         libc::SYS_futex,
         libc::SYS_clock_gettime,
         libc::SYS_clock_nanosleep,

@@ -12,6 +12,10 @@ use dillo_virtio_blk::{RawImageBacking, VirtioBlk};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Backing {
+    #[cfg(unix)]
+    Vsock {
+        cid: u64,
+    },
     Console {
         ports: Vec<Port>,
         resize: bool,
@@ -47,9 +51,30 @@ pub(crate) struct Partition {
 pub(crate) fn device(
     value: serde_json::Value,
     mut files: Vec<File>,
+    grants: Option<dillo_worker::grant::Client>,
 ) -> io::Result<Box<dyn VirtioDevice>> {
     let backing: Backing = serde_json::from_value(value).map_err(io::Error::other)?;
+    #[cfg(not(unix))]
+    let _ = grants;
     let device = match backing {
+        #[cfg(unix)]
+        Backing::Vsock { cid } => {
+            if !files.is_empty() {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            let mut grants = grants.ok_or(io::ErrorKind::InvalidInput)?;
+            return Ok(Box::new(dillo_virtio_vsock::VirtioVsock::with_connector(
+                cid,
+                move |port| {
+                    grants.request(&port.to_ne_bytes(), |mut message| {
+                        if !message.bytes.is_empty() || message.resources.len() != 1 {
+                            return Err(io::ErrorKind::InvalidData.into());
+                        }
+                        Ok(message.resources.pop().unwrap().into())
+                    })
+                },
+            )));
+        }
         Backing::Console { ports, resize } => {
             use dillo_virtio_console::{
                 NamedPort, VirtioConsole,
