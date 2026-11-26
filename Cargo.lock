@@ -685,6 +685,7 @@ dependencies = [
  "dillo-devtree",
  "dillo-machine",
  "dillo-mmio",
+ "dillo-windows-channel",
  "log",
  "pmi",
  "tempfile",
