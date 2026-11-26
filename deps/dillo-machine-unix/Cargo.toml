@@ -8,7 +8,7 @@ description = "Unix resource-transfer primitives shared by KVM and HVF."
 
 [target.'cfg(unix)'.dependencies]
 dillo-machine.workspace = true
-nix = { workspace = true, features = ["uio"] }
+nix = { workspace = true, features = ["poll", "uio"] }
 libc.workspace = true
 vm-memory.workspace = true
 

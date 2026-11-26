@@ -9,6 +9,20 @@ use std::io;
 pub struct Worker;
 
 impl dillo_machine::worker::WorkerHost for Worker {
+    fn notification_pair() -> io::Result<(
+        dillo_machine::worker::Resource,
+        dillo_machine::worker::Resource,
+    )> {
+        dillo_machine_unix::notification::pair()
+    }
+
+    fn notification_endpoint(
+        resource: dillo_machine::worker::Resource,
+        role: dillo_machine::worker::NotificationRole,
+    ) -> io::Result<std::sync::Arc<dyn dillo_machine::worker::WriteNotification>> {
+        dillo_machine_unix::notification::adopt(resource, role)
+    }
+
     fn channel(
         resource: dillo_machine::worker::Resource,
     ) -> io::Result<Box<dyn dillo_machine::worker::Channel>> {

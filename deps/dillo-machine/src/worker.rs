@@ -79,6 +79,12 @@ pub trait WriteNotification: Send + Sync + std::fmt::Debug {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum NotificationRole {
+    Wait,
+    Signal,
+}
+
 /// Facilities available to a device worker. This interface deliberately has no
 /// native VM, vCPU, debugger, or arbitrary process-handle operation.
 pub trait WorkerHost {
@@ -115,6 +121,19 @@ pub trait WorkerHost {
     /// Adopt a counter endpoint granted by the parent from this native family.
     fn notification(_resource: Resource) -> io::Result<std::sync::Arc<dyn WriteNotification>> {
         Err(io::ErrorKind::Unsupported.into())
+    }
+
+    /// Create native notification endpoints in wait/signal order. Both refer
+    /// to the same event; its count is a wake hint, not a request count.
+    fn notification_pair() -> io::Result<(Resource, Resource)> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    fn notification_endpoint(
+        resource: Resource,
+        _role: NotificationRole,
+    ) -> io::Result<std::sync::Arc<dyn WriteNotification>> {
+        Self::notification(resource)
     }
 
     /// Permanently remove ambient filesystem, network and process authority.

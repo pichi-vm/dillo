@@ -26,10 +26,37 @@ use windows_sys::Win32::System::JobObjects::*;
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::System::WindowsProgramming::*;
 
+mod vhost_user;
+
 #[derive(Debug)]
 pub struct Worker;
 
 impl dillo_machine::worker::WorkerHost for Worker {
+    fn channel(resource: OwnedHandle) -> io::Result<Box<dyn Channel>> {
+        vhost_user::adopt(resource)
+    }
+
+    fn notification_pair() -> io::Result<(OwnedHandle, OwnedHandle)> {
+        // SAFETY: no name or inherited security descriptor; this creates one
+        // owned auto-reset event shared only through explicit duplication.
+        #[allow(unsafe_code)]
+        let event = unsafe {
+            let event = CreateEventW(std::ptr::null(), 0, 0, std::ptr::null());
+            if event.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            OwnedHandle::from_raw_handle(event)
+        };
+        let signal = event.try_clone()?;
+        Ok((event, signal))
+    }
+
+    fn notification(
+        resource: OwnedHandle,
+    ) -> io::Result<Arc<dyn dillo_machine::worker::WriteNotification>> {
+        Ok(Arc::new(Event(resource)))
+    }
+
     fn spawn(executable: &Path) -> io::Result<(Box<dyn Process>, Box<dyn Channel>)> {
         spawn(executable)
     }
@@ -74,6 +101,33 @@ impl dillo_machine::worker::WorkerHost for Worker {
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct Event(OwnedHandle);
+
+impl dillo_machine::worker::WriteNotification for Event {
+    fn read(&self) -> io::Result<u64> {
+        // SAFETY: the owned event remains live throughout the wait.
+        #[allow(unsafe_code)]
+        match unsafe { WaitForSingleObject(self.0.as_raw_handle(), INFINITE) } {
+            WAIT_OBJECT_0 => Ok(1),
+            WAIT_FAILED => Err(io::Error::last_os_error()),
+            _ => Err(io::Error::other("unexpected notification wait result")),
+        }
+    }
+
+    fn write(&self, _: u64) -> io::Result<()> {
+        // SAFETY: this handle refers to a retained event with signal rights.
+        #[allow(unsafe_code)]
+        unsafe {
+            check(SetEvent(self.0.as_raw_handle()))
+        }
+    }
+
+    fn export(&self) -> io::Result<Option<OwnedHandle>> {
+        self.0.try_clone().map(Some)
     }
 }
 
@@ -296,6 +350,12 @@ struct Connection {
 }
 
 impl Channel for Connection {
+    fn pair(&self) -> io::Result<(Box<dyn Channel>, OwnedHandle)> {
+        vhost_user::pair(Arc::clone(
+            self.child.as_ref().ok_or(io::ErrorKind::Unsupported)?,
+        ))
+    }
+
     fn send(&mut self, bytes: &[u8], resources: &[BorrowedResource<'_>]) -> io::Result<()> {
         if bytes.len() > MAX_MESSAGE
             || resources.len() > MAX_RESOURCES

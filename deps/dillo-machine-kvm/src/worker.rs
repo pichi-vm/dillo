@@ -12,6 +12,16 @@ use std::sync::Arc;
 pub struct Worker;
 
 impl dillo_machine::worker::WorkerHost for Worker {
+    fn notification_pair() -> io::Result<(
+        dillo_machine::worker::Resource,
+        dillo_machine::worker::Resource,
+    )> {
+        let event = nix::sys::eventfd::EventFd::new()?;
+        use std::os::fd::AsFd;
+        let sender = event.as_fd().try_clone_to_owned()?;
+        Ok((event.into(), sender))
+    }
+
     fn channel(
         resource: dillo_machine::worker::Resource,
     ) -> io::Result<Box<dyn dillo_machine::worker::Channel>> {

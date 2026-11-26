@@ -7,6 +7,7 @@
 
 mod channel;
 mod memory;
+pub mod notification;
 pub mod vhost_user;
 
 pub use channel::{bootstrap, spawn};
