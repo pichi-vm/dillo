@@ -241,6 +241,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         #[allow(unsafe_code)]
         return unsafe { dillo_worker::run::<bad_peer::Host>(factory) }.map_err(Into::into);
     }
+    if std::env::args().any(|arg| arg == "--network-probe") {
+        return exercise("network-grant").map_err(Into::into);
+    }
     for mode in [
         "normal",
         "qcow2",
@@ -258,7 +261,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .into_iter()
     .chain(cfg!(target_os = "linux").then_some("native"))
     .chain(cfg!(target_os = "macos").then_some("inherited-fd"))
-    .chain(cfg!(target_os = "windows").then_some("network-grant"))
     {
         eprintln!("block process: {mode}");
         exercise(mode)?;
