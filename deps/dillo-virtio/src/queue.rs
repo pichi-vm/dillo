@@ -222,6 +222,7 @@ pub struct Queue {
     pub next_avail: Wrapping<u16>,
     /// Optional control-plane observation, sampled only after the queue stops.
     progress: Option<Arc<std::sync::atomic::AtomicU16>>,
+    pause: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Next used ring index to produce.
     pub next_used: Wrapping<u16>,
 
@@ -233,6 +234,11 @@ pub struct Queue {
 }
 
 impl Queue {
+    /// Stop new admissions while the host drains already consumed requests.
+    pub fn pause_with(&mut self, requested: Arc<std::sync::atomic::AtomicBool>) {
+        self.pause = Some(requested);
+    }
+
     /// Observe the consumed available index after a worker's drain barrier.
     pub fn track_progress(&mut self) -> Arc<std::sync::atomic::AtomicU16> {
         Arc::clone(
@@ -253,6 +259,7 @@ impl Queue {
             used_ring: GuestAddress(0),
             next_avail: Wrapping(0),
             progress: None,
+            pause: None,
             next_used: Wrapping(0),
             uses_notif_suppression: false,
             msix_vector: 0xFFFF,
@@ -301,6 +308,13 @@ impl Queue {
     ///
     /// Returns `None` if the available ring is empty (next_avail == avail_idx).
     pub fn pop<M: QueueMemory>(&mut self, mem: &M) -> Option<DescriptorChain> {
+        if self
+            .pause
+            .as_ref()
+            .is_some_and(|pause| pause.load(Ordering::Acquire))
+        {
+            return None;
+        }
         // Read avail_idx from avail ring (offset 2).
         let avail_idx = mem.read_u16(self.avail_ring.unchecked_add(2))?;
 

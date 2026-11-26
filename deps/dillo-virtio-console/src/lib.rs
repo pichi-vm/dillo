@@ -681,7 +681,11 @@ fn control_worker(
 ) {
     let rx_queue = Arc::new(Mutex::new(rx_queue));
     let tx_queue = Arc::new(Mutex::new(tx_queue));
-    while !token.is_shutdown_requested() {
+    loop {
+        token.checkpoint();
+        if token.is_shutdown_requested() {
+            return;
+        }
         let mut progress = false;
         if let Some(receiver) = &mut resize {
             match receiver.poll() {
@@ -747,7 +751,11 @@ fn port_rx_worker(
     let mut pending: VecDeque<u8> = VecDeque::new();
     let mut host_open = true;
     let mut buf = vec![0u8; PIPE_CHUNK];
-    while !token.is_shutdown_requested() {
+    loop {
+        token.checkpoint();
+        if token.is_shutdown_requested() {
+            return;
+        }
         let mut progress = false;
 
         // Read while the host end is alive and the guest is keeping up.
@@ -811,7 +819,11 @@ fn port_tx_worker(
     let queue = Arc::new(Mutex::new(queue));
     let mut backlog: VecDeque<u8> = VecDeque::new();
     let mut host_open = true;
-    while !token.is_shutdown_requested() {
+    loop {
+        token.checkpoint();
+        if token.is_shutdown_requested() {
+            return;
+        }
         let mut progress = false;
 
         // Only pull more from the guest while the backlog is bounded —
@@ -866,6 +878,7 @@ fn tx_worker(
 ) {
     let queue = Arc::new(Mutex::new(queue));
     loop {
+        token.checkpoint();
         if let Err(e) = kick.read() {
             log::error!("virtio-console TX: kick read error: {e}");
             return;
@@ -893,6 +906,7 @@ fn rx_worker(
     let queue = Arc::new(Mutex::new(queue));
     let mut pending = VecDeque::new();
     loop {
+        token.checkpoint();
         if token.is_shutdown_requested() {
             return;
         }
@@ -911,6 +925,7 @@ fn rx_worker(
         }
 
         while !pending.is_empty() {
+            token.checkpoint();
             if token.is_shutdown_requested() {
                 return;
             }

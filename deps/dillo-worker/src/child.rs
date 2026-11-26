@@ -28,7 +28,10 @@ const PROTOCOL: u64 = wire::MQ
     | wire::CONFIGURE_MEM_SLOTS
     | wire::GPA_ADDRESSES;
 
-struct Host(Arc<dyn SharedMemory>);
+struct Host {
+    memory: Arc<dyn SharedMemory>,
+    pause: Arc<crate::pause::Barrier>,
+}
 
 impl std::fmt::Debug for Host {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -38,7 +41,7 @@ impl std::fmt::Debug for Host {
 
 impl VirtioDeviceHost for Host {
     fn shared_memory(&self) -> Vec<Arc<dyn SharedMemory>> {
-        vec![Arc::clone(&self.0)]
+        vec![Arc::clone(&self.memory)]
     }
 
     fn spawn(
@@ -47,13 +50,17 @@ impl VirtioDeviceHost for Host {
     ) -> Result<VirtioDeviceHandle, ActivateError> {
         let stopping = Arc::new(AtomicBool::new(false));
         let token = Arc::clone(&stopping);
+        let paused_token = Arc::clone(&stopping);
+        let barrier = Arc::clone(&self.pause);
+        let participant = barrier.register();
         let thread = std::thread::Builder::new()
             .name("virtio-queue".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run(VirtioRunToken::from_fn(move || {
-                        token.load(Ordering::Acquire)
-                    }))
+                    run(
+                        VirtioRunToken::from_fn(move || token.load(Ordering::Acquire))
+                            .with_checkpoint(move || participant.checkpoint(&paused_token)),
+                    )
                 }))
                 .unwrap_or(Err(DeviceJoinError::Panicked));
                 if let Err(error) = &result {
@@ -65,7 +72,10 @@ impl VirtioDeviceHost for Host {
                 result
             })?;
         Ok(VirtioDeviceHandle::new(
-            move || stopping.store(true, Ordering::Release),
+            move || {
+                stopping.store(true, Ordering::Release);
+                barrier.wake();
+            },
             move || thread.join().unwrap_or(Err(DeviceJoinError::Panicked)),
         ))
     }
@@ -131,12 +141,17 @@ struct Backend {
     protocol: u64,
     features: u64,
     paused: bool,
+    barrier: Arc<crate::pause::Barrier>,
 }
 
 impl Backend {
     fn pause(&mut self) -> io::Result<()> {
         if self.active.is_some() && !self.paused {
-            self.device.quiesce().map_err(io::Error::other)?;
+            self.barrier.requested.store(true, Ordering::Release);
+            for ring in &self.rings {
+                ring.kick.write(1)?;
+            }
+            self.barrier.wait();
             self.paused = true;
         }
         Ok(())
@@ -147,6 +162,7 @@ impl Backend {
             active.join().map_err(io::Error::other)?;
         }
         self.device.reset().map_err(io::Error::other)?;
+        self.barrier.resume();
         self.rings = self
             .device
             .queue_max_sizes()
@@ -165,8 +181,11 @@ impl Backend {
         }
         if self.active.is_some() {
             if self.paused {
-                self.device.resume().map_err(io::Error::other)?;
+                self.barrier.resume();
                 self.paused = false;
+                for ring in &self.rings {
+                    ring.kick.write(1)?;
+                }
             }
             return Ok(());
         }
@@ -183,6 +202,7 @@ impl Backend {
                     .map_err(io::Error::other)?,
             ));
             ring.progress = Some(queue.track_progress());
+            queue.pause_with(Arc::clone(&self.barrier.requested));
             queues.push(queue);
             kicks.push(Kick::from_notification(ring.kick.clone()));
             let call = Arc::clone(&ring.call);
@@ -193,9 +213,13 @@ impl Backend {
                 }
             })));
         }
-        let host: Arc<dyn VirtioDeviceHost> = Arc::new(Host(Arc::new(
-            MappedSharedMemory::for_guest_memory(self.memory.clone(), SharedAccess::ReadWrite),
-        )));
+        let host: Arc<dyn VirtioDeviceHost> = Arc::new(Host {
+            memory: Arc::new(MappedSharedMemory::for_guest_memory(
+                self.memory.clone(),
+                SharedAccess::ReadWrite,
+            )),
+            pause: Arc::clone(&self.barrier),
+        });
         self.active = Some(
             self.device
                 .activate(
@@ -546,6 +570,7 @@ pub unsafe fn run<H: WorkerHost>(
         protocol: 0,
         features: 0,
         paused: false,
+        barrier: Arc::default(),
     };
     loop {
         let message = channel.receive()?;

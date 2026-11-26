@@ -514,6 +514,7 @@ fn request_worker(
 ) -> std::io::Result<()> {
     let queue = Arc::new(Mutex::new(queue));
     loop {
+        token.checkpoint();
         if let Err(e) = kick.read() {
             log::error!("virtio-blk: kick read error: {e}");
             return Err(e);

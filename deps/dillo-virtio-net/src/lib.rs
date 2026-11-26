@@ -328,6 +328,7 @@ fn tx_worker(
 ) {
     let queue = Mutex::new(queue);
     loop {
+        token.checkpoint();
         if let Err(e) = kick.read() {
             log::error!("virtio-net TX: kick read error: {e}");
             return;
@@ -409,6 +410,7 @@ fn rx_worker(
     let mut scratch = vec![0u8; MAX_FRAME_LEN];
     let mut pending: Option<Vec<u8>> = None;
     loop {
+        token.checkpoint();
         if token.is_shutdown_requested() {
             return;
         }

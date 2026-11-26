@@ -5,6 +5,7 @@
 
 mod child;
 mod parent;
+mod pause;
 mod queue;
 
 pub use child::run;

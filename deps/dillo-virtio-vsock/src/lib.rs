@@ -282,6 +282,7 @@ fn tx_worker(
 ) {
     let queue = Mutex::new(queue);
     loop {
+        token.checkpoint();
         if let Err(e) = kick.read() {
             log::error!("virtio-vsock TX: kick read error: {e}");
             return;
@@ -325,6 +326,7 @@ fn rx_worker(
     let queue = Mutex::new(queue);
     let mut pending: Option<VsockPacket> = None;
     loop {
+        token.checkpoint();
         if token.is_shutdown_requested() {
             return;
         }

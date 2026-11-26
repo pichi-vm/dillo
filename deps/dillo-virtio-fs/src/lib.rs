@@ -261,6 +261,7 @@ fn queue_worker(
 ) {
     let queue = Arc::new(Mutex::new(queue));
     loop {
+        token.checkpoint();
         if let Err(e) = kick.read() {
             log::error!("virtio-fs: kick read error: {e}");
             return;

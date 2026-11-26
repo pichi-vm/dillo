@@ -203,6 +203,7 @@ pub enum DeviceJoinError {
 #[derive(Clone)]
 pub struct VirtioRunToken {
     is_shutdown_requested: Arc<dyn Fn() -> bool + Send + Sync>,
+    checkpoint: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl std::fmt::Debug for VirtioRunToken {
@@ -215,11 +216,26 @@ impl VirtioRunToken {
     pub fn from_fn(is_shutdown_requested: impl Fn() -> bool + Send + Sync + 'static) -> Self {
         Self {
             is_shutdown_requested: Arc::new(is_shutdown_requested),
+            checkpoint: None,
         }
     }
 
     pub fn is_shutdown_requested(&self) -> bool {
         (self.is_shutdown_requested)()
+    }
+
+    /// Install the host's cooperative drain barrier for this worker.
+    pub fn with_checkpoint(mut self, checkpoint: impl Fn() + Send + Sync + 'static) -> Self {
+        self.checkpoint = Some(Arc::new(checkpoint));
+        self
+    }
+
+    /// Call between requests, after releasing queue/backend locks. A paused
+    /// host may wait here; an admitted request must finish before this call.
+    pub fn checkpoint(&self) {
+        if let Some(checkpoint) = &self.checkpoint {
+            checkpoint();
+        }
     }
 }
 
