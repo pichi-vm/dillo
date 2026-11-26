@@ -1,4 +1,0 @@
-interface HandleProbe
-{
-    [async] WaitForCancel();
-}

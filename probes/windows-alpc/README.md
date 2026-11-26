@@ -1,5 +1,9 @@
 # Windows kernel handle-transfer experiment
 
+This report records the standalone experiment at
+[`a16e4fd`](https://github.com/pichi-vm/dillo/tree/a16e4fd20586317f3806072b4da11666d0175108).
+For the subsequent Dillo integration, see the [Windows binding](../../VHOST_USER_WINDOWS.md).
+
 This standalone C experiment evaluates direct ALPC as a possible Windows
 transport binding for vhost-user. Its objective is message-associated kernel
 handle transfer without authority over another process's handle table. It does
