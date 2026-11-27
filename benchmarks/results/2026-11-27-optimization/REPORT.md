@@ -567,7 +567,7 @@ artifacts under `target/performance/windows-block-long-46062103549`.
 ## Interleaved mapping-owner follow-up
 
 All 88 boots completed: ten five-second measured pairs per variant and case,
-with both binary order and worker/control order rotated. Warm-ups remain in
+with binary order rotated. Warm-ups remain in
 the raw evidence. The frozen executables and guest assets match the preceding
 short comparison. [region-owner-interleaved.json.gz](region-owner-interleaved.json.gz)
 retains the predeclared order, provenance, paired results and confidence bounds.
@@ -576,8 +576,8 @@ For 64-KiB echo, candidate worker throughput improves 6.8% over the baseline
 worker, with a paired 95% interval of +5.9–8.1%; CPU/GiB falls 7.2%
 ([−8.1%, −6.3%]). The control improves too: throughput rises 5.9% and CPU/GiB
 falls 8.1%. Against that faster control, the candidate worker retains 99.0%
-throughput, uses 102.9% CPU/GiB, and has a 105.6% p99 bound. This supports the
-allocation reduction, but does not establish parity or a latency improvement.
+throughput, uses 102.9% CPU/GiB, and has a 105.6% p99 bound. These observations
+do not establish parity or a latency improvement.
 
 Block results remain inconclusive. The candidate worker's sequential-write
 throughput changes by −4.9%, with an interval spanning −13.9% to +2.8%, while
@@ -596,6 +596,13 @@ benefit above does not excuse that uncertainty.
 [region-owner-block-20.json.gz](region-owner-block-20.json.gz) retains the
 extension plan, both sets of paired observations, combined intervals and
 the comparison between revisions. No earlier observations were discarded.
+
+Schedule inspection found an additional limitation in both local runs:
+reversing revision order while choosing mode order from its position left
+each revision with a fixed worker/control order. The bootstrap intervals do
+not account for that possible ordering bias, including in the network result.
+The common harness now rotates these factors independently and checks that
+each revision/mode combination occupies every position over four pairs.
 
 ## Windows network measurements with the Hyper-V clock
 
