@@ -954,3 +954,20 @@ The added path has not demonstrated enough benefit to integrate. Pipe
 notification and native injection costs remain; no interrupt-count attribution
 is established by these rates. All observations and provenance are retained in
 [macos-mmio-call-coalescing-short.json.gz](macos-mmio-call-coalescing-short.json.gz).
+
+## Physical x86 suppression follow-up
+
+`d0c2412` completed 40 boots against `d13eadd`, with wake coalescing restored
+in both binaries. The four-pair/two-second schedule independently balances
+revision and execution mode on CPUs 24–27; frozen executables differ and guest
+assets match. No local compilation ran during measurement.
+
+Large-message MMIO throughput improves 10.9% for the worker and 11.6% for its
+control; worker/control remains 99.2%, with CPU/GiB at 101.2%. PCI large-message
+throughput is nearly unchanged. PCI small-message worker throughput falls
+6.5%, while its control improves 1.5%; worker CPU/GiB rises 9.5%. These short
+results therefore do not justify promoting suppression as a universal
+optimization. The next diagnostic counts actual queue completions and calls
+to distinguish notification savings from the added available-flag reads.
+[network-suppression-x86-short.json.gz](network-suppression-x86-short.json.gz)
+retains every paired observation, executable hash and boot-record digest.
