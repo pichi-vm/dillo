@@ -14,6 +14,9 @@ isolated, transports in the parent, and the existing vhost-user control plane.
 The target is at least the control's throughput, with no increase in CPU per
 operation or request latency. Evaluate each platform, transport and workload
 separately. A gain under load does not compensate for a queue-depth-one loss.
+PCI-free guests are a primary target. Their measured image must declare no
+PCI host bridge, and their console and workload devices must all use MMIO.
+PCI gains do not compensate for an MMIO regression.
 Keep startup, idle CPU, threads and private memory visible, but do not reopen
 the deferred image-loading/startup optimization project.
 
@@ -87,9 +90,19 @@ On Arm, retain the declared GICv2m SPI allocation and existing irqchip routing;
 do not add an ITS or change the tenant DTB to obtain acceleration. MMIO
 completion acceleration is a separate obligation: its ISR/acknowledgement and
 level semantics must remain correct. `IRQFD_RESAMPLE` can help implement level
-delivery, but does not maintain a virtio ISR. Keep the necessary relay until a
-complete state-preserving path is established. Do not count an edge-pulse
+delivery, but does not maintain a virtio ISR. Retain the current software path
+until a complete state-preserving fast path is established. Do not count an edge-pulse
 substitution as an optimization. [KVM IRQFD contract](https://docs.kernel.org/virt/kvm/api.html#kvm-irqfd)
+
+The relay is the current implementation, not a requirement of virtio or proof
+of an unavoidable MMIO performance loss. The specification constrains the
+guest-visible event latch, acknowledgement and reset behavior, not which host
+process updates it. Investigate publishing narrowly scoped completion state
+before native injection, with reads/acknowledgements handled by the parent
+transport. Any design must establish atomic ordering, concurrent ACK behavior,
+reset quiescence and revocation, and identify whether it fits existing
+vhost-user mechanisms or needs a negotiated extension. Do not assume a shared
+latch alone solves native level reassertion or macOS injection.
 
 ### Windows / WHP, native MSVC
 
@@ -274,6 +287,11 @@ Preserve the original report and source. Use two comparisons:
 Keep the original 4 KiB random and 64 KiB sequential read/write QD1 cases over
 PCI and MMIO for one device, four PCI devices, plus 64-byte and 64-KiB network echo. Diagnose
 the existing long network tails before claiming an improvement from them.
+The existing `block-mmio` case still uses a PCI console and a PCI-capable
+platform. Retain its identity for comparisons, but add separately labelled
+PCI-free block and network cases using `--pci-slots 0` at image construction
+and MMIO for every attached device. Verify the resulting platform has no PCI
+host bridge before treating those results as PCI-free qualification.
 Add a bounded snuffler QD8/QD32 block mode and concurrent-device case to measure
 batching/scaling, alongside QD1. Do not relabel the existing serial four-disk
 case as a saturation test or compare echo goodput to one-way network capacity.
