@@ -35,17 +35,21 @@ fn single_request() -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Latency {
     pub count: u64,
-    /// Histogram upper bounds: exact below 32 ns; at most 6.25% above a sample.
+    /// Histogram upper bounds: exact below 128 ns; at most 1.5625% above a sample.
     pub p50_upper_ns: u64,
     pub p95_upper_ns: u64,
     pub p99_upper_ns: u64,
     pub max_ns: u64,
 }
 
+const PRECISION_BITS: u32 = 6;
+const SUB_BUCKETS: usize = 1 << PRECISION_BITS;
+const BINS: usize = 64 * SUB_BUCKETS;
+
 /// Fixed storage: measurement memory does not grow with throughput.
 #[derive(Debug)]
 pub struct Histogram {
-    bins: [u64; 1024],
+    bins: [u64; BINS],
     count: u64,
     max: u64,
 }
@@ -53,7 +57,7 @@ pub struct Histogram {
 impl Default for Histogram {
     fn default() -> Self {
         Self {
-            bins: [0; 1024],
+            bins: [0; BINS],
             count: 0,
             max: 0,
         }
@@ -70,8 +74,11 @@ impl Histogram {
     }
 
     pub fn record(&mut self, ns: u64) {
-        let shift = ns.checked_ilog2().unwrap_or(0).saturating_sub(4);
-        self.bins[shift as usize * 16 + (ns >> shift) as usize] += 1;
+        let shift = ns
+            .checked_ilog2()
+            .unwrap_or(0)
+            .saturating_sub(PRECISION_BITS);
+        self.bins[shift as usize * SUB_BUCKETS + (ns >> shift) as usize] += 1;
         self.count += 1;
         self.max = self.max.max(ns);
     }
@@ -83,10 +90,11 @@ impl Histogram {
             for (index, n) in self.bins.iter().enumerate() {
                 count += n;
                 if rank != 0 && count >= rank {
-                    let upper = if index < 32 {
+                    let upper = if index < 2 * SUB_BUCKETS {
                         index as u64
                     } else {
-                        (((index % 16 + 17) as u128) << (index / 16 - 1))
+                        (((index % SUB_BUCKETS + SUB_BUCKETS + 1) as u128)
+                            << (index / SUB_BUCKETS - 1))
                             .saturating_sub(1)
                             .min(u64::MAX as u128) as u64
                     };
@@ -111,21 +119,21 @@ mod tests {
 
     #[test]
     fn percentile_bounds_cover_samples_without_growing_storage() {
-        for sample in [0, 1, 31, 32, 63, 64, 1_000, 1_000_000, u64::MAX] {
+        for sample in [0, 1, 127, 128, 255, 256, 1_000, 1_000_000, u64::MAX] {
             let mut histogram = Histogram::default();
             histogram.record(sample);
             let result = histogram.summary();
             assert_eq!(result.count, 1);
             assert_eq!(result.max_ns, sample);
             assert!(result.p99_upper_ns >= sample);
-            assert!((result.p99_upper_ns as u128) * 16 <= (sample as u128) * 17);
+            assert!((result.p99_upper_ns as u128) * 64 <= (sample as u128) * 65);
         }
         let mut histogram = Histogram::default();
         for sample in 1..=100 {
             histogram.record(sample);
         }
         let result = histogram.summary();
-        assert_eq!(result.p50_upper_ns, 51);
+        assert_eq!(result.p50_upper_ns, 50);
         assert_eq!(result.p95_upper_ns, 95);
         assert_eq!(result.p99_upper_ns, 99);
 

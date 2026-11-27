@@ -657,3 +657,14 @@ The comparison fixture now gives the baseline a separate Cargo target directory
 and refuses identical executables before timing. Source-level network checks
 passed before the affected comparison builds; they are separate from the invalid
 performance attribution. Fresh comparisons at `ecd59d6` are pending.
+
+## Latency measurement precision
+
+The existing histogram's upper bounds can exceed a sample by 6.25%, which is
+too coarse to resolve a close comparison at the plan's 5% decision band. The
+guest probe now uses 64 subdivisions instead of 16, bounding that excess at
+1.5625%. Storage remains fixed, increasing from 8 to 32 KiB per histogram;
+there is no allocation per observation or change to the report fields.
+The percentile, boundary and merge check passes with the finer bins. Earlier
+measurements retain their original precision; only results using the updated
+probe can support the finer bounds.
