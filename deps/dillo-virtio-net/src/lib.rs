@@ -418,7 +418,10 @@ fn rx_worker(
     interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
 ) {
-    let mut scratch = vec![0u8; MAX_FRAME_LEN];
+    let mut scratch = vec![0u8; NET_HDR_LEN + MAX_FRAME_LEN];
+    // No merged buffers or offloads: every frame uses this same header.
+    scratch[NET_HDR_NUM_BUFFERS_OFF..NET_HDR_NUM_BUFFERS_OFF + 2]
+        .copy_from_slice(&1u16.to_le_bytes());
     let mut pending = None;
     loop {
         token.checkpoint();
@@ -427,7 +430,7 @@ fn rx_worker(
         }
         let mut length = match pending.take() {
             Some(length) => length,
-            None => match backend.recv(&mut scratch) {
+            None => match backend.recv(&mut scratch[NET_HDR_LEN..]) {
                 Ok(Some(n)) => n,
                 // Timeout: loop to re-check shutdown, then poll again.
                 Ok(None) => continue,
@@ -439,7 +442,12 @@ fn rx_worker(
         };
         let mut completed = 0;
         loop {
-            if !write_rx_frame(queue_memory, buffer_memory, &mut queue, &scratch[..length]) {
+            if !write_rx_frame(
+                queue_memory,
+                buffer_memory,
+                &mut queue,
+                &scratch[..NET_HDR_LEN + length],
+            ) {
                 pending = Some(length);
                 break;
             }
@@ -447,7 +455,7 @@ fn rx_worker(
             if completed == RX_BATCH || token.is_shutdown_requested() {
                 break;
             }
-            match backend.try_recv(&mut scratch) {
+            match backend.try_recv(&mut scratch[NET_HDR_LEN..]) {
                 Ok(Some(n)) => length = n,
                 Ok(None) => break,
                 Err(e) => {
@@ -469,8 +477,8 @@ fn rx_worker(
     }
 }
 
-/// Write one inbound Ethernet frame (prefixed with a zeroed `virtio_net_hdr`,
-/// `num_buffers = 1`) into the next guest RX descriptor chain. Returns `false`
+/// Write one inbound frame, including its prepared virtio-net header, into
+/// the next guest RX descriptor chain. Returns `false`
 /// if no RX buffer is currently available (caller retains the frame to retry).
 fn write_rx_frame(
     queue_memory: &Arc<dyn QueueMemory>,
@@ -486,14 +494,7 @@ fn write_rx_frame(
     };
     let head_index = head.index;
 
-    let mut out = vec![0u8; NET_HDR_LEN];
-    // num_buffers = 1: this frame occupies exactly one descriptor chain (no
-    // VIRTIO_NET_F_MRG_RXBUF), as required by virtio 1.x even when the feature
-    // is not negotiated.
-    out[NET_HDR_NUM_BUFFERS_OFF..NET_HDR_NUM_BUFFERS_OFF + 2].copy_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(frame);
-
-    let mut remaining = out.as_slice();
+    let mut remaining = frame;
     let mut written: u32 = 0;
     let mut current = Some(head);
     while let Some(desc) = current {
@@ -676,7 +677,7 @@ mod tests {
     #[test]
     fn rx_prepends_header_into_guest_buffer() {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
-        let mut q = ready_queue(0x100, 0x1000, 0x2000);
+        let q = ready_queue(0x100, 0x1000, 0x2000);
 
         // One writable descriptor at 0x5000, 2048 bytes.
         mem.write_obj::<u64>(0x5000, q.desc_table).unwrap();
@@ -697,7 +698,15 @@ mod tests {
             Arc::new(SharedVirtioMemory::new(vec![shared(&mem, 0x5000, 0x1000)]));
 
         let payload = b"inbound-eth-frame";
-        assert!(write_rx_frame(&qmem, &bmem, &mut q, payload));
+        let backend = MockBackend::default();
+        backend.inbound.lock().unwrap().push_back(payload.to_vec());
+        let source: Arc<dyn NetBackend> = Arc::new(backend);
+        let done = Arc::clone(&qmem);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let token = VirtioRunToken::from_fn(move || {
+            done.read_u16(GuestAddress(0x2002)) == Some(1) || std::time::Instant::now() >= deadline
+        });
+        rx_worker(&source, &qmem, &bmem, q, None, &token);
 
         // Header is zeroed except num_buffers = 1, then the frame follows.
         let mut hdr = [0u8; NET_HDR_LEN];
