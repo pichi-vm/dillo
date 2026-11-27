@@ -11,7 +11,7 @@ on:
       cases:
         description: Workload selection
         type: choice
-        options: [all, block-pci, block-mmio, block4-pci, block4-concurrent-pci, net-pci]
+        options: [all, pci-free, block-pci, block-mmio, block4-pci, block4-concurrent-pci, net-pci, block-mmio-only, net-mmio-only]
         default: all
       pairs:
         description: Measured pairs after the retained warm-up
@@ -48,7 +48,7 @@ jobs:
         platform: ${{ fromJSON(inputs.platform != 'all' && format('["{0}"]', inputs.platform) || '["linux-x86","linux-arm","macos-arm","windows-msvc"]') }}
     name: ${{ matrix.platform }} paired measurements
     runs-on: ${{ fromJSON(matrix.platform == 'linux-arm' && '["self-hosted","Linux","ARM64","bare-metal","aarch64","kvm"]' || matrix.platform == 'macos-arm' && '["self-hosted","macOS","ARM64","bare-metal","m1","self-managed-seatbelt"]' || matrix.platform == 'windows-msvc' && '["windows-2025"]' || '["ubuntu-24.04"]') }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Use the writable job temporary directory
@@ -109,7 +109,7 @@ jobs:
       - name: Measure paired workloads
         shell: bash
         env:
-          BENCH_CASES: ${{ inputs.cases != 'all' && inputs.cases || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,net-pci' }}
+          BENCH_CASES: ${{ inputs.cases == 'pci-free' && 'block-mmio-only,net-mmio-only' || inputs.cases != 'all' && inputs.cases || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,net-pci,block-mmio-only,net-mmio-only' }}
           BENCH_SAMPLING: ${{ inputs.sampling || 'on' }}
           BENCH_PAIRS: ${{ inputs.pairs || 10 }}
           BENCH_DURATION_MS: ${{ inputs.duration_ms || 5000 }}

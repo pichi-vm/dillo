@@ -15,6 +15,7 @@ fn benchmark_assets() {
         &[
             "PCI",
             "VIRTIO_PCI",
+            "VIRTIO_MMIO",
             "VIRTIO_BLK",
             "VIRTIO_CONSOLE",
             "VIRTIO_NET",

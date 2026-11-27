@@ -83,17 +83,19 @@ def run_vm(args, assets, image, disks, case, mode, label):
                 stream.write(pattern)
             stream.flush()
             os.fsync(stream.fileno())
+    pci_free = case.endswith("-mmio-only")
+    bus = "mmio" if pci_free or case == "block-mmio" else "pci"
+    console_bus = "mmio" if pci_free else "pci"
     command = [assets["dillo"], "--pmi", str(image), "--memory", str(MEMORY_MIB),
-               "--cpus", "1", "--console", "endpoint=stdio,bus=pci"]
-    bus = "mmio" if case == "block-mmio" else "pci"
+               "--cpus", "1", "--console", f"endpoint=stdio,bus={console_bus}"]
     for disk in disks:
         command += ["--blk", f"path={disk},bus={bus}"]
-    if case == "net-pci":
-        command += ["--net", "bus=pci,backend=user"]
+    if case.startswith("net-"):
+        command += ["--net", f"bus={bus},backend=user"]
     env = os.environ.copy()
     env.pop("DILLO_BENCH_LOCAL", None)
     if mode == "local":
-        env["DILLO_BENCH_LOCAL"] = "net" if case == "net-pci" else "block"
+        env["DILLO_BENCH_LOCAL"] = "net" if case.startswith("net-") else "block"
     env["RUST_LOG"] = "warn,dillo::boot=trace"
     env["RUST_LOG_STYLE"] = "never"
     samples, phases, errors, known = [], [], [], {}
@@ -179,6 +181,8 @@ def run_vm(args, assets, image, disks, case, mode, label):
               "sampler_and_echo_cpu_s": time.process_time() - sampler_start}
     save(directory / "result.json", result)
     assert not failure and child.returncode == 0 and ready is not None and report, f"boot failed: {directory}"
+    if pci_free:
+        assert not report["pci"], f"PCI device present in PCI-free case: {directory}"
     perf = report["performance"]
     assert not perf["errors"] and perf["operations"], f"guest benchmark failed: {directory}"
     assert all(op["verified"] is not False and op["latency"]["count"] > 0
@@ -282,7 +286,8 @@ def main():
         threading.Thread(target=server.serve_forever, daemon=True).start()
         port = server.server_address[1]
         for case in args.cases.split(","):
-            assert case in ("block-pci", "block-mmio", "block4-pci", "block4-concurrent-pci", "net-pci")
+            assert case in ("block-pci", "block-mmio", "block4-pci", "block4-concurrent-pci",
+                            "net-pci", "block-mmio-only", "net-mmio-only")
             image = args.output / f"{case}.pmi"
             cmdline = (f"console=hvc0 dillo.uptime_ns dillo.panic_report "
                        f"dillo.bench_ms={args.duration_ms} dillo.bench_warmup_ms={args.warmup_ms} "
@@ -290,13 +295,17 @@ def main():
             cmdline += " " + args.extra_cmdline
             if case == "block4-concurrent-pci":
                 cmdline += " dillo.bench_concurrent"
-            if case == "net-pci":
+            if case.startswith("net-"):
                 cmdline += (f" ip=10.0.2.15::10.0.2.2:255.255.255.0::eth0:off"
                             f" dillo.net_echo=10.0.2.2:{port}")
-            subprocess.run([assets["arma"], "build", "--kernel", assets["kernel"], "--config", str(config),
-                            "--profile", assets["profile"], "--initrd", assets["snuffler"],
-                            "--cmdline", cmdline, str(image)], check=True)
-            count = 0 if case == "net-pci" else (4 if case.startswith("block4-") else 1)
+            build = [assets["arma"], "build", "--kernel", assets["kernel"], "--config", str(config),
+                     "--profile", assets["profile"], "--initrd", assets["snuffler"], "--cmdline", cmdline]
+            if case.endswith("-mmio-only"):
+                build += ["--pci-slots", "0", "--mmio-slots", "2"]
+            build.append(str(image))
+            subprocess.run(build, check=True)
+            save(args.output / f"{case}-image.json", {"command": build, "sha256": digest(image)})
+            count = 0 if case.startswith("net-") else (4 if case.startswith("block4-") else 1)
             disks = [backing / f"disk{i}.raw" for i in range(count)]
             for pair in range(-1, args.pairs):  # First pair warms the host and is retained but excluded.
                 order = ("local", "worker") if pair % 2 == 0 else ("worker", "local")

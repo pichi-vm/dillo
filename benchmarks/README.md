@@ -146,6 +146,15 @@ guest timing and logs. Native Windows uses `CARGO_BUILD_TARGET=x86_64-pc-windows
 The asset fixture signs the macOS executable with its existing HVF entitlement.
 Linux needs permission to use `/dev/kvm` and 128 free 2 MiB huge pages per VM.
 
+`--cases block-mmio-only,net-mmio-only` measures PCI-free guests. The producer
+declares zero PCI slots and two MMIO slots; both the console and the workload
+use MMIO. The harness rejects any PCI device in the guest report and retains
+the image build command and digest. These cases use the same kernel as the
+PCI comparisons, so PCI driver support may be compiled in but no PCI hardware
+is declared. The older `block-mmio` case retains its PCI console and platform
+for comparison with prior measurements. The CI workflow's `pci-free` selection
+runs just the two PCI-free cases; `all` includes them too.
+
 For the optimization milestone, `--queue-depth 8` or `--queue-depth 32` uses
 that many guest threads, with one blocking O_DIRECT request per thread and
 disjoint disk ranges. It bounds requests in flight; it does not assert that
