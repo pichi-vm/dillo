@@ -13,5 +13,8 @@ dillo-virtio.workspace = true
 vm-memory.workspace = true
 log.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

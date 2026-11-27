@@ -732,8 +732,10 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct TestDevice {
         fail: bool,
+        completions: Arc<Mutex<Vec<Interrupt>>>,
     }
 
     impl VirtioDevice for TestDevice {
@@ -753,6 +755,10 @@ mod tests {
             &mut self,
             mut activation: VirtioActivate,
         ) -> Result<VirtioDeviceHandle, ActivateError> {
+            self.completions
+                .lock()
+                .unwrap()
+                .push(activation.queue_interrupt(0).unwrap());
             if self.fail {
                 return Err(ActivateError::InvalidConfig("test failure".into()));
             }
@@ -785,7 +791,10 @@ mod tests {
                     base: 0x1000,
                     size: 0x1000,
                 },
-                Box::new(TestDevice { fail }),
+                Box::new(TestDevice {
+                    fail,
+                    ..Default::default()
+                }),
                 Arc::new(AtomicU32::new(0)),
                 WiredIrq::unresolved(1),
             );
@@ -828,7 +837,7 @@ mod tests {
                     base: 0x1000,
                     size: 0x1000,
                 },
-                Box::new(TestDevice { fail: false }),
+                Box::new(TestDevice::default()),
                 Arc::new(AtomicU32::new(0)),
                 WiredIrq::unresolved(1),
             );
@@ -842,6 +851,108 @@ mod tests {
             );
             transport.write(STATUS, &0u32.to_le_bytes()).unwrap();
             assert!(transport.inner.lock().unwrap().kicks.is_empty());
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct TestCompletion {
+        signals: AtomicU32,
+        retired: std::sync::atomic::AtomicBool,
+        bindings: Mutex<Vec<Arc<TestCompletion>>>,
+    }
+
+    impl dillo_mmio::InterruptLine for TestCompletion {
+        fn signal(&self) {
+            self.signals.fetch_add(1, Ordering::SeqCst);
+        }
+        fn set_level(&self, level: bool) -> Result<(), dillo_mmio::InterruptError> {
+            if level {
+                self.signal();
+            }
+            Ok(())
+        }
+        fn bind_status(
+            &self,
+            _: Arc<dillo_machine::worker::NotificationState>,
+        ) -> Result<Interrupt, dillo_mmio::InterruptError> {
+            let binding = Arc::new(Self::default());
+            self.bindings.lock().unwrap().push(Arc::clone(&binding));
+            Ok(Interrupt::new(binding))
+        }
+        fn retire(&self) -> Result<(), dillo_mmio::InterruptError> {
+            self.retired.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn shared_status_is_acknowledged_and_isolated_across_activations() {
+        use dillo_machine::worker::NotificationState;
+        fn state() -> std::io::Result<Arc<NotificationState>> {
+            let file = tempfile::tempfile()?;
+            file.set_len(4096)?;
+            // SAFETY: this private file is never resized; all aliases use
+            // NotificationState's aligned atomic accesses to its first word.
+            #[allow(unsafe_code)]
+            unsafe {
+                NotificationState::from_file(file).map(Arc::new)
+            }
+        }
+        for fail in [false, true] {
+            let completions = Arc::new(Mutex::new(Vec::<Interrupt>::new()));
+            let native = Arc::new(TestCompletion::default());
+            let transport = VirtioMmio::new(
+                MmioWindow {
+                    base: 0x1000,
+                    size: 0x1000,
+                },
+                Box::new(TestDevice {
+                    fail,
+                    completions: Arc::clone(&completions),
+                }),
+                Arc::new(AtomicU32::new(0)),
+                WiredIrq::new(1, Interrupt::new(native.clone())),
+            );
+            transport.set_attachment(Arc::new(TestAttachment::default()));
+            transport.set_notification_state_factory(state);
+            let status = || {
+                let mut bytes = [0; 4];
+                transport.read(INTERRUPT_STATUS, &mut bytes);
+                u32::from_le_bytes(bytes)
+            };
+            for generation in 0..2 {
+                transport
+                    .write(STATUS, &STATUS_DRIVER_OK.to_le_bytes())
+                    .unwrap();
+                for obsolete in completions.lock().unwrap().iter().take(generation) {
+                    obsolete.signal();
+                }
+                assert_eq!(status(), 0);
+                let binding = native.bindings.lock().unwrap()[generation].clone();
+                let completion = completions.lock().unwrap()[generation].clone();
+                if fail {
+                    assert!(binding.retired.load(Ordering::SeqCst));
+                } else {
+                    completion.signal();
+                    completion.signal();
+                    assert_eq!(status(), INT_VRING);
+                    assert_eq!(binding.signals.load(Ordering::SeqCst), 1);
+                    transport.write(INTERRUPT_ACK, &2u32.to_le_bytes()).unwrap();
+                    assert_eq!(status(), INT_VRING);
+                    transport
+                        .write(INTERRUPT_ACK, &INT_VRING.to_le_bytes())
+                        .unwrap();
+                    assert_eq!(status(), 0);
+                    completion.signal();
+                    assert_eq!(binding.signals.load(Ordering::SeqCst), 2);
+                }
+                transport.write(STATUS, &0u32.to_le_bytes()).unwrap();
+                assert!(binding.retired.load(Ordering::SeqCst));
+                for obsolete in completions.lock().unwrap().iter() {
+                    obsolete.signal();
+                }
+                assert_eq!(status(), 0);
+            }
         }
     }
 
