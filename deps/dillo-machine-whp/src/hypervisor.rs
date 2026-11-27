@@ -2548,21 +2548,30 @@ mod tests {
             let mut registration = Some(retained);
             for registered in [true, false] {
                 set_real_mode(&vcpu, code_base, 0);
-                vcpu.set_registers(vec![
+                let mut registers = vec![
                     (WHvX64RegisterCr0, WHV_REGISTER_VALUE { Reg64: 0x11 }),
-                    (
-                        WHvX64RegisterCs,
+                    (WHvX64RegisterRip, WHV_REGISTER_VALUE { Reg64: code_base }),
+                ];
+                for (name, selector, attributes) in [
+                    (WHvX64RegisterCs, 8, 0xc09b),
+                    (WHvX64RegisterDs, 16, 0xc093),
+                    (WHvX64RegisterSs, 16, 0xc093),
+                ] {
+                    registers.push((
+                        name,
                         WHV_REGISTER_VALUE {
                             Segment: WHV_X64_SEGMENT_REGISTER {
-                                Base: code_base,
-                                Limit: 0xffff,
-                                Selector: 0,
-                                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xc09b },
+                                Base: 0,
+                                Limit: u32::MAX,
+                                Selector: selector,
+                                Anonymous: WHV_X64_SEGMENT_REGISTER_0 {
+                                    Attributes: attributes,
+                                },
                             },
                         },
-                    ),
-                ])
-                .unwrap();
+                    ));
+                }
+                vcpu.set_registers(registers).unwrap();
                 for (address, width, byte) in writes {
                     if registered
                         && address == 0x2050
