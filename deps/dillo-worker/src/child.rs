@@ -308,7 +308,12 @@ impl Backend {
                         && self.protocol & wire::EXPERIMENT_SHARED_ISR != 0
                         && resources.len() == 1,
                 )?;
-                self.notification_state = Some(H::adopt_notification_state(resources.remove(0))?);
+                // SAFETY: the private launcher grants a host-only status page
+                // created by this WorkerHost. Both endpoints access its word
+                // through NotificationState, never through guest RAM access.
+                #[allow(unsafe_code)]
+                let state = unsafe { H::adopt_notification_state(resources.remove(0))? };
+                self.notification_state = Some(state);
             }
             GET_FEATURES => {
                 reply = Some(

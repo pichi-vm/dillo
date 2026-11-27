@@ -26,10 +26,15 @@ impl dillo_machine::worker::WorkerHost for Worker {
                 SealFlag::F_SEAL_GROW | SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_SEAL,
             ),
         )?;
-        Self::adopt_notification_state(fd)
+        // SAFETY: fresh sealed backing, with no other mappings or accessors.
+        #[allow(unsafe_code)]
+        unsafe {
+            Self::adopt_notification_state(fd)
+        }
     }
 
-    fn adopt_notification_state(
+    #[allow(unsafe_code)]
+    unsafe fn adopt_notification_state(
         resource: dillo_machine::worker::Resource,
     ) -> io::Result<Arc<dillo_machine::worker::NotificationState>> {
         use nix::fcntl::{FcntlArg, SealFlag, fcntl};
@@ -40,12 +45,9 @@ impl dillo_machine::worker::WorkerHost for Worker {
         {
             return Err(io::ErrorKind::InvalidData.into());
         }
-        // SAFETY: the sealed extent cannot change. This experiment's parent
-        // and child access the first word only with AtomicU32 operations.
-        #[allow(unsafe_code)]
-        unsafe {
-            dillo_machine::worker::NotificationState::from_file(file).map(Arc::new)
-        }
+        // SAFETY: the sealed extent cannot change; the caller guarantees
+        // that retained aliases use only aligned AtomicU32 accesses.
+        unsafe { dillo_machine::worker::NotificationState::from_file(file).map(Arc::new) }
     }
 
     fn notification_pair() -> io::Result<(

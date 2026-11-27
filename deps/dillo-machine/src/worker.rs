@@ -193,7 +193,12 @@ pub trait WorkerHost {
         Err(io::ErrorKind::Unsupported.into())
     }
 
-    fn adopt_notification_state(
+    /// # Safety
+    /// The resource must be created by this family's `create_notification_state`
+    /// or exported from that state. Retained aliases must follow the
+    /// NotificationState atomic-access contract; the resource is not guest RAM.
+    #[allow(unsafe_code)]
+    unsafe fn adopt_notification_state(
         _resource: Resource,
     ) -> io::Result<std::sync::Arc<NotificationState>> {
         Err(io::ErrorKind::Unsupported.into())
