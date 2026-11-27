@@ -2524,7 +2524,7 @@ mod tests {
         }
         let mut vm = Vm::new_x86_64_with_local_apic_count(1).unwrap();
         vm.add_memory(0x30000, 0x1000).unwrap();
-        vm.write_guest(0x30000, &[0xf4]).unwrap();
+        vm.write_guest(0x30000, &[0xc6, 0x06, 0x00, 0x20, 0xa5]).unwrap();
         let mut cpu = vm.create_vcpu(0, Profile::V1).unwrap();
         cpu.set_registers(vec![(
             WHvX64RegisterApicBase,
@@ -2584,9 +2584,11 @@ mod tests {
             // Let WHP apply the queued request to the APIC. IF stays clear,
             // so it remains in IRR instead of dispatching a guest handler.
             set_real_mode(&cpu, 0x30000, 0);
+            // With an emulated LAPIC, WHP may handle HLT internally. Exit on
+            // an unmapped store instead of waiting for an interrupt with IF=0.
             assert!(matches!(
                 cpu.run(|_, _| 0, |_, _| false).unwrap(),
-                VmExit::Halted
+                VmExit::MmioWrite { addr: 0x2000, .. }
             ));
             apic().0[0x220 / 4] & (1 << (vector - 64)) != 0
         };
@@ -2599,6 +2601,8 @@ mod tests {
         };
         let mut trigger = std::ptr::null_mut();
         let mut event = std::ptr::null_mut();
+        raw::request_fixed_interrupt(vm.inner.partition, 0, 0x40).unwrap();
+        wait(0x40, &mut pending);
         // SAFETY: the partition is live; the parameters and output slots are
         // initialized. A successful call grants ownership of the event handle.
         assert_eq!(
