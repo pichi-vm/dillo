@@ -740,3 +740,57 @@ claiming the large-message improvement applies everywhere.
 [network-rx-batch-local-short.json.gz](network-rx-batch-local-short.json.gz)
 contains the plan, absolute and paired observations, environments and hashes
 of all boot results; raw records remain under `target/performance/net-rx`.
+
+## Balanced native wake comparison
+
+The [macOS](https://github.com/pichi-vm/dillo/actions/runs/46072891282),
+[Linux Arm](https://github.com/pichi-vm/dillo/actions/runs/46072894382) and
+[Windows](https://github.com/pichi-vm/dillo/actions/runs/46072897621) runs each
+completed 104 boots: twelve five-second pairs per transport and revision,
+plus warm-ups. Revision and execution-mode order rotate independently, with
+each combination occupying every position three times. Baseline `3525c2d`
+and candidate `0adf801` have different executable hashes and identical guest
+assets on each host. Wake coalescing is their only Dillo runtime difference;
+the finer histogram runs in the common guest probe.
+
+macOS large-message worker throughput improves 5.4% on PCI and 5.1% on MMIO,
+while CPU/GiB falls 9.6% and 9.0%. Both improvements exclude no change in the
+paired 95% intervals. The control improves too; worker CPU/GiB still exceeds
+it by 27.2% and 26.4%. Small-message performance is essentially unchanged.
+
+Linux Arm PCI large-message worker throughput regresses 5.2%, with a paired
+95% interval of -7.9% to -2.0%; the control regresses 5.5%. Worker CPU/GiB
+rises 4.3% and p99 rises 8.3%, also excluding no change. The MMIO observations
+are mixed. Restore Linux's previous per-frame wake behavior rather than keep
+a regression because another platform benefits. This is a measured policy
+choice, not a demonstrated explanation of the scheduler or kernel mechanism.
+
+Windows MMIO large-message throughput improves 1.8% for the worker
+([0.7%, 2.3%]) and 1.0% for the control ([0.3%, 2.2%]). The earlier short-run
+PCI improvement does not reproduce: its worker throughput ratio is 99.7%
+([97.7%, 100.6%]). Worker/control large-message p99 remains 127.1% on PCI
+and 126.7% on MMIO. Neither these results nor the macOS improvements establish
+parity. Coalescing remains enabled on the non-Linux paths for further
+integrated qualification.
+
+[network-wake-native-balanced.json.gz](network-wake-native-balanced.json.gz)
+retains all comparisons, absolute results, confidence bounds, predeclared
+orders, environments, artifact digests and hashes of every boot record.
+
+## Receive-header reuse comparison
+
+Apollo completed another 40 boots, comparing `73201a6` with `9664cd2` using
+four independently balanced two-second pairs per case and identical guest
+assets. Both have RX scratch reuse and batching; the candidate also reserves
+the virtio header in that scratch, removing the remaining per-frame header
+allocation and copy. All 57 network unit tests and strict Clippy pass.
+
+The short observations do not establish a performance benefit. PCI large
+echo throughput rises 1.9% for the worker and 2.3% for the control, while
+MMIO is nearly unchanged. PCI small echo falls 5.8% for the worker and 2.0%
+for the control, with worker CPU/GiB rising 6.9%. Four pairs cannot establish
+confidence bounds, and fewer source-level copies do not prove faster I/O.
+The combined RX changes remain under native comparison before acceptance.
+[network-rx-header-local-short.json.gz](network-rx-header-local-short.json.gz)
+retains both favorable and unfavorable observations with their full schedule
+and source/binary provenance.
