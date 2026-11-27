@@ -220,15 +220,20 @@ impl NetBackend for UserNetBackend {
     }
 
     fn send(&self, frame: &[u8]) -> io::Result<()> {
-        {
+        let wake = {
             let mut q = self.inbound.lock().expect("user-net inbound poisoned");
+            let empty = q.is_empty();
             if q.len() < device::MAX_QUEUE_FRAMES {
                 q.push_back(frame.to_vec());
             }
             // Past the cap we drop, exactly as a NIC does on overrun.
+            empty
+        };
+        // The stack drains this queue under the same lock. Only its first
+        // queued frame needs a wake; later frames join the pending batch.
+        if wake {
+            let _ = self.waker.wake();
         }
-        // Nudge the stack thread to ingest it promptly.
-        let _ = self.waker.wake();
         Ok(())
     }
 
