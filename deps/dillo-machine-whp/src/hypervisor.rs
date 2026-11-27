@@ -2688,6 +2688,15 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         assert!(!pending(0x43));
 
+        // A signal accepted before deletion still requests its interrupt.
+        // Check without first running the guest or observing delivery.
+        for vector in 0x48..0x60 {
+            let (mut trigger, event) = vm.interrupt_controller().trigger(0, vector).unwrap();
+            dillo_machine::worker::WriteNotification::write(&event, 1).unwrap();
+            trigger.retire().unwrap();
+            wait(u32::from(vector), &mut pending);
+        }
+
         // Exercise the transport-facing owner, including replacement of the
         // exported handle while masked and a pending signal during unmask.
         use dillo_mmio::{MessageInterrupt, MessageInterruptDomain};

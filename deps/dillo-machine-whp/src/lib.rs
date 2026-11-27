@@ -625,12 +625,18 @@ mod imp {
             } else {
                 QueueBinding::software().map_err(delivery_error)?
             };
-            if let Some(trigger) = binding.trigger.as_mut() {
+            let pending = if let Some(trigger) = binding.trigger.as_mut() {
                 trigger.retire().map_err(delivery_error)?;
-            }
+                // Native signals request interrupts; their signal-only event
+                // cannot be waited on. Retirement removes future delivery,
+                // not an interrupt already requested from the controller.
+                false
+            } else {
+                binding.event.pending().map_err(delivery_error)?
+            };
             // Exported callers are paused; local signalers hold this mutex.
-            // Preserve an unconsumed signal across endpoint replacement.
-            if binding.event.pending().map_err(delivery_error)? {
+            // Preserve software pending state across endpoint replacement.
+            if pending {
                 replacement.event.write(1).map_err(delivery_error)?;
             }
             *binding = replacement;
