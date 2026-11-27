@@ -177,12 +177,26 @@ mod tests {
     use kvm_ioctls::{VcpuExit, VcpuFd};
     use std::time::{Duration, Instant};
 
+    #[cfg(target_arch = "x86_64")]
+    #[track_caller]
     fn wait(mut ready: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(1);
         while !ready() && Instant::now() < deadline {
             std::thread::yield_now();
         }
         assert!(ready());
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[track_caller]
+    fn wait_value(mut read: impl FnMut() -> u64, expected: u64) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut value = read();
+        while value != expected && Instant::now() < deadline {
+            std::thread::yield_now();
+            value = read();
+        }
+        assert_eq!(value, expected);
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -354,14 +368,15 @@ mod tests {
         let event = bind(vm.clone(), gsi, true, Arc::clone(&state)).unwrap();
         state.used();
         event.signal();
-        wait(|| command(&mut cpu, 1) == 48);
+        wait_value(|| command(&mut cpu, 1), 48);
         assert_eq!(command(&mut cpu, 2), 48);
         assert_eq!(command(&mut cpu, 3), 0x2222);
-        wait(|| event.resamples.load(Ordering::Acquire) == 1 && command(&mut cpu, 1) == 48);
+        wait_value(|| event.resamples.load(Ordering::Acquire), 1);
+        wait_value(|| command(&mut cpu, 1), 48);
         assert_eq!(command(&mut cpu, 2), 48);
         state.acknowledge(1);
         assert_eq!(command(&mut cpu, 3), 0x2222);
-        wait(|| event.resamples.load(Ordering::Acquire) == 2);
+        wait_value(|| event.resamples.load(Ordering::Acquire), 2);
         assert_eq!(command(&mut cpu, 1), 1023);
         let stale = crate::worker::Worker::notification(event.export().unwrap().unwrap()).unwrap();
         event.retire().unwrap();
@@ -374,7 +389,7 @@ mod tests {
         assert_eq!(command(&mut cpu, 1), 1023);
         replacement_state.used();
         replacement.signal();
-        wait(|| command(&mut cpu, 1) == 48);
+        wait_value(|| command(&mut cpu, 1), 48);
         replacement.retire().unwrap();
     }
 }
