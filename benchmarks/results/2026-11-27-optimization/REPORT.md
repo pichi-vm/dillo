@@ -260,3 +260,36 @@ isolated from the production branch: a prototype using an unassigned protocol
 extension cannot establish interoperability, reset/revocation correctness or
 native level reassertion. Its purpose is to measure the cost of the relay
 before selecting a complete mechanism.
+
+## Shared-status prototype on Linux x86
+
+The isolated [prototype branch](https://github.com/pichi-vm/dillo/tree/experiment/mmio-shared-status)
+has now completed an Apollo comparison: the same frozen binary with the
+shared latch disabled/enabled, unchanged guest assets, CPUs 24–27, three
+alternating pairs per case and two seconds per operation. Both console and
+workload use MMIO; every retained guest report has an empty PCI list. See
+[shared-isr-short.json.gz](shared-isr-short.json.gz) and the raw records under
+`target/performance/shared-isr-experiment`.
+
+Worker random-read throughput rises from 50.70 to 57.01 MiB/s, against an
+enabled-path control at 57.62 MiB/s. CPU/GiB falls from 28.65 to 23.83 seconds
+(control 23.49). Random-write throughput rises from 46.54 to 56.55 MiB/s.
+Two parent relay threads disappear, one for the console and one for the
+workload. The prototype adds a host-only 4-KiB status mapping per device.
+This is evidence that the current MMIO relay cost is removable, not a
+parity or correctness qualification.
+
+Immediate native signaling also exposes a network tradeoff: 64-KiB worker
+echo falls from 123.49 to 82.11 MiB/s. A follow-up candidate signals only when
+setting a previously clear used-buffer bit, coalescing until guest ACK. Its
+three-pair result reaches 143.72 MiB/s (control 145.00), with 14.31 CPU-s/GiB
+(control 14.19); both modes improve. The hypothesis is excessive notifications,
+not a measured interrupt-count attribution. Sequential block results vary
+substantially and some p99 bounds remain worse. All observations are retained.
+
+The first binary corresponds to `3605a64` source, with the recorded harness
+change and frozen hash; the coalescing variant has its own retained patch and
+binary. Both variants are excluded from the production optimization branch.
+Native Linux Arm comparison is pending. Neither the host-only latch nor
+successful guest I/O resolves per-activation capability revocation or native
+level reassertion; the experiment retains the existing KVM pulse behavior.
