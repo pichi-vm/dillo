@@ -273,46 +273,71 @@ pub(crate) fn timed_device(
         if ro && write {
             continue;
         }
-        let nblocks = size / len as u64;
-        let mut touched = vec![false; nblocks as usize];
-        let mut buffer = AlignedBuf::new(len);
-        buffer.as_mut_slice().fill(0x5a);
-        let mut rng = Rng::new(fnv1a(name.as_bytes()));
-        let mut index = 0;
-        let mut measuring = false;
-        let mut result =
-            super::timed::measure(config, name, operation, "o_direct", len, |warmup| {
-                if !warmup && !measuring {
-                    rng = Rng::new(fnv1a(name.as_bytes()));
-                    index = 0;
-                    measuring = true;
+        // Disjoint partitions keep concurrent writers from verifying each
+        // other's writes. Each thread has at most one synchronous I/O active.
+        let nblocks = size / len as u64 / config.queue_depth as u64;
+        if nblocks == 0 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let mut storage: Vec<_> = (0..config.queue_depth)
+            .map(|_| {
+                let mut buffer = AlignedBuf::new(len);
+                buffer.as_mut_slice().fill(0x5a);
+                (buffer, vec![false; nblocks as usize])
+            })
+            .collect();
+        let mut calls: Vec<_> = storage
+            .iter_mut()
+            .enumerate()
+            .map(|(worker, (buffer, touched))| {
+                let seed = fnv1a(name.as_bytes()) ^ worker as u64;
+                let mut rng = Rng::new(seed);
+                let mut index = 0;
+                let mut measuring = false;
+                let fd = &fd;
+                move |warmup: bool| {
+                    if !warmup && !measuring {
+                        rng = Rng::new(seed);
+                        index = 0;
+                        measuring = true;
+                    }
+                    let block = if random {
+                        rng.next_u64() % nblocks
+                    } else {
+                        index % nblocks
+                    };
+                    index += 1;
+                    let offset = (worker as u64 * nblocks + block) * len as u64;
+                    let ok = if write {
+                        touched[block as usize] = true;
+                        pwrite_full(fd, buffer.as_slice(), offset)
+                    } else {
+                        pread_full(fd, buffer.as_mut_slice(), offset)
+                    };
+                    if ok {
+                        Ok(())
+                    } else {
+                        Err(io::Error::other("short or failed block I/O"))
+                    }
                 }
-                let block = if random {
-                    rng.next_u64() % nblocks
-                } else {
-                    index % nblocks
-                };
-                index += 1;
-                let offset = block * len as u64;
-                let ok = if write {
-                    touched[block as usize] = true;
-                    pwrite_full(&fd, buffer.as_slice(), offset)
-                } else {
-                    pread_full(&fd, buffer.as_mut_slice(), offset)
-                };
-                if ok {
-                    Ok(())
-                } else {
-                    Err(io::Error::other("short or failed block I/O"))
-                }
-            })?;
+            })
+            .collect();
+        let mut result = if config.queue_depth == 1 {
+            super::timed::measure(config, name, operation, "o_direct", len, &mut calls[0])?
+        } else {
+            super::timed::measure_parallel(config, name, operation, len, &mut calls)?
+        };
+        drop(calls);
         if write {
-            for (block, touched) in touched.into_iter().enumerate() {
-                if touched
-                    && (!pread_full(&fd, buffer.as_mut_slice(), block as u64 * len as u64)
-                        || buffer.as_slice().iter().any(|byte| *byte != 0x5a))
-                {
-                    return Err(io::Error::other("block write verification failed"));
+            for (worker, (mut buffer, touched)) in storage.into_iter().enumerate() {
+                for (block, touched) in touched.into_iter().enumerate() {
+                    let offset = (worker as u64 * nblocks + block as u64) * len as u64;
+                    if touched
+                        && (!pread_full(&fd, buffer.as_mut_slice(), offset)
+                            || buffer.as_slice().iter().any(|byte| *byte != 0x5a))
+                    {
+                        return Err(io::Error::other("block write verification failed"));
+                    }
                 }
             }
             result.verified = Some(true);

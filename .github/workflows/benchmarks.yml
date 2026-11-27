@@ -21,6 +21,11 @@ on:
         description: Duration of each measured operation
         type: number
         default: 5000
+      queue_depth:
+        description: Maximum concurrent block requests per device
+        type: choice
+        options: ["1", "8", "32"]
+        default: "1"
       sampling:
         description: Compare instrumentation on the same host
         type: choice
@@ -106,6 +111,7 @@ jobs:
           BENCH_SAMPLING: ${{ inputs.sampling || 'on' }}
           BENCH_PAIRS: ${{ inputs.pairs || 10 }}
           BENCH_DURATION_MS: ${{ inputs.duration_ms || 5000 }}
+          BENCH_QUEUE_DEPTH: ${{ inputs.queue_depth || 1 }}
         run: |
           bench_modes="$BENCH_SAMPLING"
           if [ "$bench_modes" = both ]; then bench_modes='on off'; fi
@@ -114,7 +120,8 @@ jobs:
             if [ "$bench_mode" = off ]; then bench_options+=(--no-sample); fi
             python benchmarks/run.py --assets target/benchmarks/assets.json \
               --output "target/benchmark-results/$bench_mode" --pairs "$BENCH_PAIRS" \
-              --duration-ms "$BENCH_DURATION_MS" --cases "$BENCH_CASES" "${bench_options[@]}"
+              --duration-ms "$BENCH_DURATION_MS" --queue-depth "$BENCH_QUEUE_DEPTH" \
+              --cases "$BENCH_CASES" "${bench_options[@]}"
           done
       - name: Upload measurements and logs
         if: always()

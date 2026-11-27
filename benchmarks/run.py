@@ -243,6 +243,8 @@ def main():
     parser.add_argument("--cases", default="block-pci,block-mmio,block4-pci,net-pci")
     parser.add_argument("--pairs", type=int, default=5)
     parser.add_argument("--duration-ms", type=int, default=1000)
+    parser.add_argument("--queue-depth", type=int, choices=(1, 8, 32), default=1,
+                        help="maximum concurrent block requests, one per guest thread")
     parser.add_argument("--warmup-ms", type=int, default=250)
     parser.add_argument("--sample-ms", type=int, default=50)
     parser.add_argument("--timeout", type=int, default=180)
@@ -283,7 +285,8 @@ def main():
             assert case in ("block-pci", "block-mmio", "block4-pci", "net-pci")
             image = args.output / f"{case}.pmi"
             cmdline = (f"console=hvc0 dillo.uptime_ns dillo.panic_report "
-                       f"dillo.bench_ms={args.duration_ms} dillo.bench_warmup_ms={args.warmup_ms}")
+                       f"dillo.bench_ms={args.duration_ms} dillo.bench_warmup_ms={args.warmup_ms} "
+                       f"dillo.bench_qd={args.queue_depth}")
             cmdline += " " + args.extra_cmdline
             if case == "net-pci":
                 cmdline += (f" ip=10.0.2.15::10.0.2.2:255.255.255.0::eth0:off"

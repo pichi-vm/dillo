@@ -2,7 +2,7 @@
 
 Completed measurements: [2026-11-27 report](results/2026-11-27/REPORT.md).
 
-Proposed next milestone: [device performance optimization](OPTIMIZATION.md).
+Active milestone: [device performance optimization](OPTIMIZATION.md).
 
 ## Question and completion criteria
 
@@ -145,6 +145,15 @@ single workload; `--no-sample` checks instrumentation sensitivity while keeping
 guest timing and logs. Native Windows uses `CARGO_BUILD_TARGET=x86_64-pc-windows-msvc`.
 The asset fixture signs the macOS executable with its existing HVF entitlement.
 Linux needs permission to use `/dev/kvm` and 128 free 2 MiB huge pages per VM.
+
+For the optimization milestone, `--queue-depth 8` or `--queue-depth 32` uses
+that many guest threads, with one blocking O_DIRECT request per thread and
+disjoint disk ranges. It bounds requests in flight; it does not assert that
+the virtqueue stays full. Warm-up and measurement windows are synchronized,
+and merged latency samples cover individual requests, including final
+requests that finish after the deadline. Reported elapsed time includes those
+completions. Write verification happens afterward. The default remains the
+original single-thread path. Use separate output directories for each depth.
 
 `environment.json` records provenance. Every run directory retains the full
 console, stderr, guest report, observed phase timestamps, and native process
