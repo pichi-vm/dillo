@@ -2522,8 +2522,10 @@ mod tests {
         if !native_test_child("whp_trigger_retargets_and_revokes_exported_event") {
             return;
         }
-        let vm = Vm::new_x86_64_with_local_apic_count(1).unwrap();
-        let cpu = vm.create_vcpu_without_ram_check(0, Profile::V1).unwrap();
+        let mut vm = Vm::new_x86_64_with_local_apic_count(1).unwrap();
+        vm.add_memory(0x30000, 0x1000).unwrap();
+        vm.write_guest(0x30000, &[0xf4]).unwrap();
+        let mut cpu = vm.create_vcpu(0, Profile::V1).unwrap();
         cpu.set_registers(vec![(
             WHvX64RegisterApicBase,
             WHV_REGISTER_VALUE { Reg64: 0xfee0_0900 },
@@ -2578,8 +2580,17 @@ mod tests {
             },
             ..Default::default()
         };
-        let pending = |vector: u32| apic().0[0x220 / 4] & (1 << (vector - 64)) != 0;
-        let wait = |vector| {
+        let mut pending = |vector: u32| {
+            // Let WHP apply the queued request to the APIC. IF stays clear,
+            // so it remains in IRR instead of dispatching a guest handler.
+            set_real_mode(&cpu, 0x30000, 0);
+            assert!(matches!(
+                cpu.run(|_, _| 0, |_, _| false).unwrap(),
+                VmExit::Halted
+            ));
+            apic().0[0x220 / 4] & (1 << (vector - 64)) != 0
+        };
+        let wait = |vector, pending: &mut dyn FnMut(u32) -> bool| {
             let deadline = Instant::now() + Duration::from_secs(1);
             while !pending(vector) && Instant::now() < deadline {
                 std::thread::yield_now();
@@ -2605,13 +2616,13 @@ mod tests {
         let exported = event.try_clone().unwrap();
         // SAFETY: these are live event/trigger handles from this partition.
         assert_ne!(unsafe { SetEvent(exported.as_raw_handle()) }, 0);
-        wait(0x41);
+        wait(0x41, &mut pending);
         assert_eq!(
             unsafe { WHvUpdateTriggerParameters(vm.inner.partition, &parameters(0x42), trigger) },
             0
         );
         assert_ne!(unsafe { SetEvent(exported.as_raw_handle()) }, 0);
-        wait(0x42);
+        wait(0x42, &mut pending);
         assert_eq!(
             unsafe { WHvUpdateTriggerParameters(vm.inner.partition, &parameters(0x43), trigger) },
             0

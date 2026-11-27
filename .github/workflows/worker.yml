@@ -21,6 +21,10 @@ on:
         description: Exercise privileged native vmnet inside the confined worker
         type: boolean
         default: false
+      native_notifications:
+        description: Qualify WHP doorbell and interrupt trigger behavior
+        type: boolean
+        default: false
 
 jobs:
   worker:
@@ -35,6 +39,11 @@ jobs:
       - run: cargo test --locked -p dillo-worker -p dillo-machine-unix -p dillo-virtio-net
       - if: runner.os == 'Windows'
         run: cargo test --locked -p dillo-machine-whp worker::vhost_user
+      - if: inputs.native_notifications && runner.os == 'Windows'
+        run: |
+          cargo test --locked -p dillo-machine-whp whp_trigger_retargets_and_revokes_exported_event
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p dillo-machine-whp whp_doorbell_matches_and_unregisters
       - if: inputs.network
         run: cargo test --locked -p dillo-worker --test device_process -- --network-probe
       - if: inputs.socket_broker
