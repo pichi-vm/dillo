@@ -2524,17 +2524,49 @@ mod tests {
         }
         let vm = Vm::new_x86_64_with_local_apic_count(1).unwrap();
         let cpu = vm.create_vcpu_without_ram_check(0, Profile::V1).unwrap();
-        cpu.set_registers(vec![
-            (
-                WHvX64RegisterApicBase,
-                WHV_REGISTER_VALUE { Reg64: 0xfee0_0900 },
-            ),
-            (
-                WHvX64RegisterApicSpurious,
-                WHV_REGISTER_VALUE { Reg64: 0x1ff },
-            ),
-        ])
+        cpu.set_registers(vec![(
+            WHvX64RegisterApicBase,
+            WHV_REGISTER_VALUE { Reg64: 0xfee0_0900 },
+        )])
         .unwrap();
+        let apic = || {
+            // WHP's external APIC state uses the architectural MMIO offsets.
+            let mut state = [0u32; 1024];
+            let mut written = 0;
+            // SAFETY: the live, stopped vCPU owns the controller; the buffer
+            // is writable for the supplied size.
+            assert_eq!(
+                unsafe {
+                    WHvGetVirtualProcessorState(
+                        vm.inner.partition,
+                        0,
+                        WHvVirtualProcessorStateTypeInterruptControllerState2,
+                        state.as_mut_ptr().cast(),
+                        size_of_val(&state) as u32,
+                        &mut written,
+                    )
+                },
+                0
+            );
+            assert!((0x230..=4096).contains(&written));
+            (state, written)
+        };
+        let (mut state, size) = apic();
+        state[0xf0 / 4] = 0x1ff; // Software-enable the APIC.
+        // SAFETY: restore the same controller's returned state after changing
+        // only its architectural spurious-vector register.
+        assert_eq!(
+            unsafe {
+                WHvSetVirtualProcessorState(
+                    vm.inner.partition,
+                    0,
+                    WHvVirtualProcessorStateTypeInterruptControllerState2,
+                    state.as_ptr().cast(),
+                    size,
+                )
+            },
+            0
+        );
         let parameters = |vector| WHV_TRIGGER_PARAMETERS {
             TriggerType: WHvTriggerTypeInterrupt,
             Anonymous: WHV_TRIGGER_PARAMETERS_0 {
@@ -2546,12 +2578,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let pending = |vector: u32| {
-            raw::get_virtual_processor_register_words(vm.inner.partition, 0, WHvX64RegisterApicIrr2)
-                .unwrap()[0]
-                & (1 << (vector - 64))
-                != 0
-        };
+        let pending = |vector: u32| apic().0[0x220 / 4] & (1 << (vector - 64)) != 0;
         let wait = |vector| {
             let deadline = Instant::now() + Duration::from_secs(1);
             while !pending(vector) && Instant::now() < deadline {
