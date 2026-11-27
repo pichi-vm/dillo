@@ -29,6 +29,8 @@ use snuffler::{REPORT_BEGIN, REPORT_END, Report};
 use tempfile::TempDir;
 use wait_timeout::ChildExt;
 
+#[cfg(feature = "bench-in-process")]
+mod benchmark;
 mod bootconfig;
 mod console_input;
 mod console_lifetime;
