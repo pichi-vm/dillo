@@ -1,5 +1,14 @@
 # Device isolation benchmark milestone
 
+The branch workflow accepts an optional `baseline_ref` for a runtime comparison
+on one native host. It builds and freezes that executable in a separate Cargo
+target directory, then uses the candidate's producer, probe and kernel for both.
+It rejects identical executables before measurement. Each
+result records the harness revision, runtime revision and executable hash.
+Results are grouped by `baseline` or `candidate`; each still compares worker
+and in-process execution. The variants run sequentially, so short comparisons
+are diagnostic and cannot exclude temporal host variation.
+
 Completed measurements: [2026-11-27 report](results/2026-11-27/REPORT.md).
 
 Active milestone: [device performance optimization](OPTIMIZATION.md).

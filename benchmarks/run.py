@@ -278,6 +278,7 @@ def main():
                    "assets": assets, "hashes": {k: digest(assets[k]) for k in
                                                 ("dillo", "arma", "snuffler", "kernel")},
                    "options": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}}
+    environment["runtime_source"] = assets.get("runtime_source", environment["source"])
     environment["host_cpu"] = (Path("/proc/cpuinfo").read_text() if platform.system() == "Linux" else
         subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"], text=True)
         if platform.system() == "Darwin" else os.environ.get("PROCESSOR_IDENTIFIER"))
