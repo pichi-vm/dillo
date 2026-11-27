@@ -1,0 +1,301 @@
+platform,case,metric,pairs,local_median,worker_median,paired_delta_median,ratio_median,ratio_min,ratio_max
+Physical Linux x86,block-pci,device_attachment_ms,5,2.349,4.336,1.987,1.845892,1.728814,1.882558
+Physical Linux x86,block-pci,idle_private_excluding_hugetlb_bytes,5,1720320.0,1859584.0,176128.0,1.101176,1.029613,1.182065
+Physical Linux x86,block-pci,idle_processes,5,2,3,1,1.5,1.5,1.5
+Physical Linux x86,block-pci,idle_sum_pss_bytes,5,4173824.0,4560896.0,356352.0,1.083015,1.063515,1.121994
+Physical Linux x86,block-pci,idle_threads,5,20,25,5,1.25,1.25,1.25
+Physical Linux x86,block-pci,ready_s,5,0.13521,0.131084,-0.003973,0.970614,0.952245,1.062335
+Physical Linux x86,block-pci,sampler_and_echo_cpu_percent,5,2.279089,2.669046,0.341818,1.14454,1.120769,1.185839
+Physical Linux x86,block-pci,vda/rand_read/4096/MiBps,5,81.598049,59.136208,-22.149961,0.728945,0.72198,0.738909
+Physical Linux x86,block-pci,vda/rand_read/4096/cpu_s_per_GiB,5,17.473569,27.541791,10.055406,1.574756,1.52393,1.58306
+Physical Linux x86,block-pci,vda/rand_read/4096/p99_upper_ns,5,59391,81919,22528,1.379317,1.333339,1.379317
+Physical Linux x86,block-pci,vda/rand_write/4096/MiBps,5,71.444721,53.443921,-17.955742,0.748518,0.699278,0.799507
+Physical Linux x86,block-pci,vda/rand_write/4096/cpu_s_per_GiB,5,20.864347,30.807966,10.094487,1.483039,1.461289,1.625467
+Physical Linux x86,block-pci,vda/seq_read/65536/MiBps,5,439.992315,409.480139,-92.737532,0.815344,0.685876,1.286146
+Physical Linux x86,block-pci,vda/seq_write/65536/MiBps,5,327.961054,293.500643,-55.267879,0.845493,0.529488,1.655813
+Physical Linux x86,block-mmio,device_attachment_ms,5,2.351,4.406,1.954,1.831136,1.518787,1.903363
+Physical Linux x86,block-mmio,idle_private_excluding_hugetlb_bytes,5,1740800.0,1855488.0,106496.0,1.061466,0.905063,1.197044
+Physical Linux x86,block-mmio,idle_processes,5,2,3,1,1.5,1.5,1.5
+Physical Linux x86,block-mmio,idle_sum_pss_bytes,5,4231168.0,4620288.0,369664.0,1.086967,1.073008,1.118561
+Physical Linux x86,block-mmio,idle_threads,5,20,24,4,1.2,1.2,1.2
+Physical Linux x86,block-mmio,ready_s,5,0.129883,0.128938,-0.000195,0.998484,0.98481,1.049186
+Physical Linux x86,block-mmio,sampler_and_echo_cpu_percent,5,2.347322,2.641662,0.29434,1.125394,1.059811,1.203769
+Physical Linux x86,block-mmio,vda/rand_read/4096/MiBps,5,55.946966,49.520564,-6.370221,0.885808,0.791239,0.890419
+Physical Linux x86,block-mmio,vda/rand_read/4096/cpu_s_per_GiB,5,24.359189,29.687353,5.238638,1.215058,1.205976,1.426093
+Physical Linux x86,block-mmio,vda/rand_read/4096/p99_upper_ns,5,81919,94207,12288,1.150002,1.095239,1.263161
+Physical Linux x86,block-mmio,vda/rand_write/4096/MiBps,5,50.642987,45.433821,-5.224414,0.894325,0.808318,0.908139
+Physical Linux x86,block-mmio,vda/rand_write/4096/cpu_s_per_GiB,5,27.710932,33.161606,5.227285,1.188636,1.152136,1.426542
+Physical Linux x86,block-mmio,vda/seq_read/65536/MiBps,5,337.103995,304.63948,-15.972527,0.950181,0.709174,1.050854
+Physical Linux x86,block-mmio,vda/seq_write/65536/MiBps,5,165.680135,158.064116,-7.616019,0.954032,0.546938,0.966574
+Physical Linux x86,block4-pci,device_attachment_ms,5,2.333,10.335,8.05,4.462156,4.090498,4.522976
+Physical Linux x86,block4-pci,idle_private_excluding_hugetlb_bytes,5,1921024.0,2953216.0,999424.0,1.526201,1.508333,1.541578
+Physical Linux x86,block4-pci,idle_processes,5,2,6.0,4.0,3.0,3.0,3.0
+Physical Linux x86,block4-pci,idle_sum_pss_bytes,5,4341760.0,5878784.0,1536000.0,1.355619,1.330675,1.379729
+Physical Linux x86,block4-pci,idle_threads,5,23,43.0,20.0,1.869565,1.869565,1.869565
+Physical Linux x86,block4-pci,ready_s,5,0.13021,0.180947,0.049411,1.379469,1.364037,1.42394
+Physical Linux x86,block4-pci,sampler_and_echo_cpu_percent,5,1.728946,3.187623,1.465888,1.847851,1.802046,1.913417
+Physical Linux x86,block4-pci,vda/rand_read/4096/MiBps,5,81.084209,58.673222,-22.127719,0.726145,0.722515,0.757422
+Physical Linux x86,block4-pci,vda/rand_read/4096/cpu_s_per_GiB,5,17.58631,27.691434,10.136725,1.576399,1.469867,1.58726
+Physical Linux x86,block4-pci,vda/rand_read/4096/p99_upper_ns,5,59391,81919,22528,1.379317,1.333339,1.379317
+Physical Linux x86,block4-pci,vda/rand_write/4096/MiBps,5,71.075107,53.628673,-17.4085,0.754938,0.743699,0.791152
+Physical Linux x86,block4-pci,vda/rand_write/4096/cpu_s_per_GiB,5,20.970049,30.858721,9.726862,1.460294,1.3828,1.497977
+Physical Linux x86,block4-pci,vda/seq_read/65536/MiBps,5,391.05471,346.365197,-45.827319,0.883047,0.736231,0.930784
+Physical Linux x86,block4-pci,vda/seq_write/65536/MiBps,5,180.633411,177.001862,-10.837436,0.939539,0.522341,1.50795
+Physical Linux x86,net-pci,device_attachment_ms,5,3.27,5.064,1.927,1.619266,1.37903,1.918892
+Physical Linux x86,net-pci,idle_private_excluding_hugetlb_bytes,5,2666496.0,2768896.0,98304.0,1.036866,1.024242,1.175379
+Physical Linux x86,net-pci,idle_processes,5,2,3,1,1.5,1.5,1.5
+Physical Linux x86,net-pci,idle_sum_pss_bytes,5,5134336.0,5684224.0,553984.0,1.107898,1.074314,1.143357
+Physical Linux x86,net-pci,idle_threads,5,26,34,8,1.307692,1.307692,1.307692
+Physical Linux x86,net-pci,net/tcp_echo/64/MiBps,5,0.501524,0.459067,-0.042457,0.915344,0.866848,0.943335
+Physical Linux x86,net-pci,net/tcp_echo/65536/MiBps,5,97.306421,117.878879,20.572458,1.211419,1.063708,1.63598
+Physical Linux x86,net-pci,ready_s,5,0.139454,0.188019,0.048565,1.34825,1.003002,1.385208
+Physical Linux x86,net-pci,sampler_and_echo_cpu_percent,5,11.964549,12.535355,0.508521,1.041157,1.004645,1.122923
+Hosted Linux x86,block-pci,device_attachment_ms,5,1.644,3.005,1.305,1.795173,1.589207,1.984137
+Hosted Linux x86,block-pci,idle_private_excluding_hugetlb_bytes,5,1376256.0,1626112.0,172032.0,1.130841,0.987562,1.301242
+Hosted Linux x86,block-pci,idle_processes,5,2,3.0,1.0,1.5,1.5,1.5
+Hosted Linux x86,block-pci,idle_sum_pss_bytes,5,4726784.0,5274624.0,547840.0,1.115901,1.103441,1.116869
+Hosted Linux x86,block-pci,idle_threads,5,20,25.0,5.0,1.25,1.25,1.25
+Hosted Linux x86,block-pci,ready_s,5,0.103367,0.103462,-5.8e-05,0.999439,0.997817,1.002898
+Hosted Linux x86,block-pci,sampler_and_echo_cpu_percent,5,0.908184,0.984296,0.115624,1.124597,0.987441,1.245663
+Hosted Linux x86,block-pci,vda/rand_read/4096/MiBps,5,86.219749,75.565299,-11.238845,0.869649,0.730957,0.887153
+Hosted Linux x86,block-pci,vda/rand_read/4096/cpu_s_per_GiB,5,15.850906,19.382532,3.96631,1.250226,1.208868,1.494578
+Hosted Linux x86,block-pci,vda/rand_read/4096/p99_upper_ns,5,69631,77823,8192,1.117649,1.055556,1.117649
+Hosted Linux x86,block-pci,vda/rand_write/4096/MiBps,5,81.076548,67.505523,-14.693185,0.822353,0.765006,0.873678
+Hosted Linux x86,block-pci,vda/rand_write/4096/cpu_s_per_GiB,5,16.911399,21.385806,4.646004,1.278452,1.198209,1.439003
+Hosted Linux x86,block-pci,vda/seq_read/65536/MiBps,5,782.609014,671.418706,-111.190309,0.857924,0.844668,1.099703
+Hosted Linux x86,block-pci,vda/seq_write/65536/MiBps,5,569.246155,526.687058,-40.111907,0.929231,0.797853,1.005751
+Hosted Linux x86,block-mmio,device_attachment_ms,5,1.534,2.944,1.435,1.939374,1.7866,1.950961
+Hosted Linux x86,block-mmio,idle_private_excluding_hugetlb_bytes,5,1277952.0,1597440.0,204800.0,1.161812,1.080332,1.362179
+Hosted Linux x86,block-mmio,idle_processes,5,2,3.0,1.0,1.5,1.5,1.5
+Hosted Linux x86,block-mmio,idle_sum_pss_bytes,5,4730880.0,5253120.0,404480.0,1.085355,1.081508,1.11039
+Hosted Linux x86,block-mmio,idle_threads,5,20,24.0,4.0,1.2,1.2,1.2
+Hosted Linux x86,block-mmio,ready_s,5,0.103449,0.103666,0.000226,1.002183,0.996058,1.003685
+Hosted Linux x86,block-mmio,sampler_and_echo_cpu_percent,5,0.905693,1.042677,0.133386,1.158332,1.056848,1.221578
+Hosted Linux x86,block-mmio,vda/rand_read/4096/MiBps,5,48.973731,46.488263,-2.15298,0.95573,0.934513,1.006777
+Hosted Linux x86,block-mmio,vda/rand_read/4096/cpu_s_per_GiB,5,24.105138,26.439027,2.042115,1.083704,1.064679,1.115544
+Hosted Linux x86,block-mmio,vda/rand_read/4096/p99_upper_ns,5,102399,106495,4096,1.04,1.0,1.080001
+Hosted Linux x86,block-mmio,vda/rand_write/4096/MiBps,5,45.865191,43.533346,-2.438193,0.946649,0.90266,1.003864
+Hosted Linux x86,block-mmio,vda/rand_write/4096/cpu_s_per_GiB,5,26.701493,29.151655,2.488664,1.093203,1.028048,1.122882
+Hosted Linux x86,block-mmio,vda/seq_read/65536/MiBps,5,531.552196,493.989291,-53.440255,0.903852,0.886082,0.93983
+Hosted Linux x86,block-mmio,vda/seq_write/65536/MiBps,5,419.292987,388.184376,-31.108611,0.925807,0.88361,0.961863
+Hosted Linux x86,block4-pci,device_attachment_ms,5,1.664,6.845,5.068,3.965244,3.851998,4.167067
+Hosted Linux x86,block4-pci,idle_private_excluding_hugetlb_bytes,5,1540096.0,2809856.0,1150976.0,1.74734,1.649038,2.1875
+Hosted Linux x86,block4-pci,idle_processes,5,2,6.0,4.0,3.0,3.0,3.0
+Hosted Linux x86,block4-pci,idle_sum_pss_bytes,5,4915200.0,6612992.0,1696768.0,1.345208,1.321723,1.366751
+Hosted Linux x86,block4-pci,idle_threads,5,23,43.0,20.0,1.869565,1.869565,1.869565
+Hosted Linux x86,block4-pci,ready_s,5,0.154455,0.154326,2.2e-05,1.000145,0.998907,1.000298
+Hosted Linux x86,block4-pci,sampler_and_echo_cpu_percent,5,0.812781,1.409979,0.590595,1.745838,1.642334,1.841593
+Hosted Linux x86,block4-pci,vda/rand_read/4096/MiBps,5,88.397548,72.159096,-16.238452,0.816302,0.739703,0.854557
+Hosted Linux x86,block4-pci,vda/rand_read/4096/cpu_s_per_GiB,5,15.359464,19.901084,4.966705,1.32289,1.282332,1.430228
+Hosted Linux x86,block4-pci,vda/rand_read/4096/p99_upper_ns,5,69631,77823,8192,1.117649,1.055556,1.117649
+Hosted Linux x86,block4-pci,vda/rand_write/4096/MiBps,5,78.302884,66.793917,-13.292791,0.832608,0.811528,0.906019
+Hosted Linux x86,block4-pci,vda/rand_write/4096/cpu_s_per_GiB,5,17.68593,21.376389,4.161199,1.24857,1.146798,1.310017
+Hosted Linux x86,block4-pci,vda/seq_read/65536/MiBps,5,689.805106,627.8949,-59.647173,0.913246,0.777728,0.960198
+Hosted Linux x86,block4-pci,vda/seq_write/65536/MiBps,5,569.956157,499.581063,-70.375093,0.876525,0.826743,0.975628
+Hosted Linux x86,net-pci,device_attachment_ms,5,1.86,3.387,1.489,1.80443,1.487603,1.884946
+Hosted Linux x86,net-pci,idle_private_excluding_hugetlb_bytes,5,2183168.0,2310144.0,155648.0,1.068468,1.022514,1.091418
+Hosted Linux x86,net-pci,idle_processes,5,2,3,1,1.5,1.5,1.5
+Hosted Linux x86,net-pci,idle_sum_pss_bytes,5,5587968.0,6051840.0,487424.0,1.087597,1.050987,1.106438
+Hosted Linux x86,net-pci,idle_threads,5,26,34,8,1.307692,1.307692,1.307692
+Hosted Linux x86,net-pci,net/tcp_echo/64/MiBps,5,0.714687,0.73552,0.025776,1.036317,1.011525,1.047026
+Hosted Linux x86,net-pci,net/tcp_echo/65536/MiBps,5,15.871096,45.486072,30.380843,3.078638,2.424338,3.700448
+Hosted Linux x86,net-pci,ready_s,5,0.154214,0.153991,-0.000141,0.999085,0.996124,0.999924
+Hosted Linux x86,net-pci,sampler_and_echo_cpu_percent,5,4.193224,4.697205,0.544147,1.131023,1.052153,1.151858
+Physical Linux Arm,block-pci,device_attachment_ms,5,2.973,5.422,2.253,1.71095,1.525059,1.901762
+Physical Linux Arm,block-pci,idle_private_excluding_hugetlb_bytes,5,1282048.0,1626112.0,344064.0,1.268371,1.265176,1.272436
+Physical Linux Arm,block-pci,idle_processes,5,2,3.0,1.0,1.5,1.5,1.5
+Physical Linux Arm,block-pci,idle_sum_pss_bytes,5,3916800.0,4322304.0,405504.0,1.103529,1.102222,1.104685
+Physical Linux Arm,block-pci,idle_threads,5,19,24.0,5.0,1.263158,1.263158,1.263158
+Physical Linux Arm,block-pci,ready_s,5,0.103237,0.102917,-0.000106,0.998978,0.989613,1.006025
+Physical Linux Arm,block-pci,sampler_and_echo_cpu_percent,5,2.507801,3.365934,0.858133,1.342185,0.825312,1.461951
+Physical Linux Arm,block-pci,vda/rand_read/4096/MiBps,5,155.408678,79.809406,-78.84839,0.491492,0.370099,0.53065
+Physical Linux Arm,block-pci,vda/rand_read/4096/cpu_s_per_GiB,5,10.542169,21.518423,12.093668,2.147171,2.001287,3.039008
+Physical Linux Arm,block-pci,vda/rand_read/4096/p99_upper_ns,5,30719,63487,32768,2.066701,1.933364,2.583398
+Physical Linux Arm,block-pci,vda/rand_write/4096/MiBps,5,171.406097,70.263962,-101.142136,0.411351,0.3509,0.455016
+Physical Linux Arm,block-pci,vda/rand_write/4096/cpu_s_per_GiB,5,9.343011,24.7062,15.25799,2.644351,2.361284,3.278978
+Physical Linux Arm,block-pci,vda/seq_read/65536/MiBps,5,553.868354,391.636294,-167.633663,0.700263,0.636595,0.755508
+Physical Linux Arm,block-pci,vda/seq_write/65536/MiBps,5,532.930716,397.620968,-135.309748,0.746103,0.687478,0.837854
+Physical Linux Arm,block-mmio,device_attachment_ms,5,2.942,5.06,2.126,1.738432,1.624705,1.920462
+Physical Linux Arm,block-mmio,idle_private_excluding_hugetlb_bytes,5,1282048.0,1605632.0,323584.0,1.252396,1.252396,1.262821
+Physical Linux Arm,block-mmio,idle_processes,5,2,3,1,1.5,1.5,1.5
+Physical Linux Arm,block-mmio,idle_sum_pss_bytes,5,3916800.0,4300800.0,384000.0,1.098039,1.097778,1.101282
+Physical Linux Arm,block-mmio,idle_threads,5,19,23,4,1.210526,1.210526,1.210526
+Physical Linux Arm,block-mmio,ready_s,5,0.103204,0.102967,-3e-06,0.999967,0.994856,1.005149
+Physical Linux Arm,block-mmio,sampler_and_echo_cpu_percent,5,2.53761,3.314553,0.776943,1.302217,0.934547,1.484306
+Physical Linux Arm,block-mmio,vda/rand_read/4096/MiBps,5,126.475398,82.550455,-42.705179,0.658381,0.640895,0.69589
+Physical Linux Arm,block-mmio,vda/rand_read/4096/cpu_s_per_GiB,5,12.252338,19.898267,7.624533,1.621207,1.50943,1.667867
+Physical Linux Arm,block-mmio,vda/rand_read/4096/p99_upper_ns,5,38911,57343,20480,1.526329,1.40001,1.588252
+Physical Linux Arm,block-mmio,vda/rand_write/4096/MiBps,5,114.742366,74.681246,-40.06112,0.65086,0.607481,0.935557
+Physical Linux Arm,block-mmio,vda/rand_write/4096/cpu_s_per_GiB,5,13.809908,22.338417,8.645611,1.626125,1.074758,1.82068
+Physical Linux Arm,block-mmio,vda/seq_read/65536/MiBps,5,461.311997,391.859761,-64.76804,0.856911,0.830364,0.914224
+Physical Linux Arm,block-mmio,vda/seq_write/65536/MiBps,5,473.575426,381.17273,-95.311847,0.795525,0.775154,0.885642
+Physical Linux Arm,block4-pci,device_attachment_ms,5,3.076,11.869,8.986,3.922226,3.339072,5.320334
+Physical Linux Arm,block4-pci,idle_private_excluding_hugetlb_bytes,5,1380352.0,2781184.0,1400832.0,2.014837,2.008876,2.017804
+Physical Linux Arm,block4-pci,idle_processes,5,2,6.0,4.0,3.0,3.0,3.0
+Physical Linux Arm,block4-pci,idle_sum_pss_bytes,5,4015104.0,5626880.0,1611776.0,1.401428,1.39949,1.402193
+Physical Linux Arm,block4-pci,idle_threads,5,22,42.0,20.0,1.909091,1.909091,1.909091
+Physical Linux Arm,block4-pci,ready_s,5,0.103434,0.103403,0.000101,1.000983,0.997857,1.006521
+Physical Linux Arm,block4-pci,sampler_and_echo_cpu_percent,5,2.137628,4.866909,2.690881,2.258816,2.005559,2.734485
+Physical Linux Arm,block4-pci,vda/rand_read/4096/MiBps,5,150.882542,76.309097,-73.040054,0.508698,0.501748,0.594544
+Physical Linux Arm,block4-pci,vda/rand_read/4096/cpu_s_per_GiB,5,10.88065,22.44165,11.640603,2.062901,1.709432,2.088783
+Physical Linux Arm,block4-pci,vda/rand_read/4096/p99_upper_ns,5,30719,61439,31744,2.000032,1.866695,2.069002
+Physical Linux Arm,block4-pci,vda/rand_write/4096/MiBps,5,163.660068,78.476825,-91.532738,0.503881,0.381292,0.529294
+Physical Linux Arm,block4-pci,vda/rand_write/4096/cpu_s_per_GiB,5,9.778583,22.11825,11.590871,2.179177,1.989626,2.970857
+Physical Linux Arm,block4-pci,vda/seq_read/65536/MiBps,5,503.509747,377.582684,-124.706811,0.751723,0.652836,0.81288
+Physical Linux Arm,block4-pci,vda/seq_write/65536/MiBps,5,499.87644,358.085048,-133.388392,0.728595,0.688836,0.856363
+Physical Linux Arm,net-pci,device_attachment_ms,5,3.529,6.378,2.849,1.807311,1.070353,2.31223
+Physical Linux Arm,net-pci,idle_private_excluding_hugetlb_bytes,5,2285568.0,2691072.0,401408.0,1.175313,1.168157,1.192101
+Physical Linux Arm,net-pci,idle_processes,5,2,3,1,1.5,1.5,1.5
+Physical Linux Arm,net-pci,idle_sum_pss_bytes,5,4920320.0,5451776.0,527360.0,1.107091,1.103764,1.114768
+Physical Linux Arm,net-pci,idle_threads,5,25,33,8,1.32,1.32,1.32
+Physical Linux Arm,net-pci,net/tcp_echo/64/MiBps,5,0.626793,0.413606,-0.192214,0.693338,0.60073,0.839134
+Physical Linux Arm,net-pci,net/tcp_echo/65536/MiBps,5,8.318915,4.815635,-3.457673,0.582069,0.268986,0.766748
+Physical Linux Arm,net-pci,ready_s,5,0.103601,0.103602,0.000149,1.001443,0.995594,1.488561
+Physical Linux Arm,net-pci,sampler_and_echo_cpu_percent,5,7.31547,6.871893,-0.044269,0.993599,0.878746,1.075242
+Apple M1 / HVF,block-pci,device_attachment_ms,5,14.576,25.573,11.249,1.72072,1.615464,2.584054
+Apple M1 / HVF,block-pci,idle_processes,5,2.0,3,1.0,1.5,1.5,1.5
+Apple M1 / HVF,block-pci,idle_threads,5,19.0,24,5.0,1.263158,1.263158,1.263158
+Apple M1 / HVF,block-pci,ready_s,5,0.16498,0.141575,-0.003546,0.969943,0.71413,1.584873
+Apple M1 / HVF,block-pci,sampler_and_echo_cpu_percent,5,0.80045,0.86905,0.0686,1.085701,1.023899,1.271986
+Apple M1 / HVF,block-pci,vda/rand_read/4096/MiBps,5,228.311863,170.187472,-57.843935,0.743411,0.722095,0.755178
+Apple M1 / HVF,block-pci,vda/rand_read/4096/cpu_s_per_GiB,5,4.5553,6.08707,1.532366,1.336436,1.316434,1.375422
+Apple M1 / HVF,block-pci,vda/rand_read/4096/p99_upper_ns,5,24575,31743,7168,1.291679,1.17242,1.347841
+Apple M1 / HVF,block-pci,vda/rand_write/4096/MiBps,5,210.233499,152.895583,-58.333722,0.724659,0.721333,0.739329
+Apple M1 / HVF,block-pci,vda/rand_write/4096/cpu_s_per_GiB,5,4.938984,6.780988,1.848569,1.37728,1.343558,1.383022
+Apple M1 / HVF,block-pci,vda/seq_read/65536/MiBps,5,1127.878849,976.666867,-155.962868,0.8623,0.821412,0.889598
+Apple M1 / HVF,block-pci,vda/seq_write/65536/MiBps,5,916.040286,792.169709,-122.350239,0.864776,0.863888,0.885951
+Apple M1 / HVF,block-mmio,device_attachment_ms,5,14.898,25.613,11.313,1.791119,1.37808,1.879037
+Apple M1 / HVF,block-mmio,idle_processes,5,2.0,3.0,1.0,1.5,1.5,1.5
+Apple M1 / HVF,block-mmio,idle_threads,5,19.0,24.0,5.0,1.263158,1.263158,1.263158
+Apple M1 / HVF,block-mmio,ready_s,5,0.155546,0.190368,-0.007908,0.949157,0.610821,1.657214
+Apple M1 / HVF,block-mmio,sampler_and_echo_cpu_percent,5,0.824378,0.87374,0.037519,1.045986,1.007417,1.224303
+Apple M1 / HVF,block-mmio,vda/rand_read/4096/MiBps,5,202.957419,147.419872,-55.371136,0.726955,0.723286,0.727674
+Apple M1 / HVF,block-mmio,vda/rand_read/4096/cpu_s_per_GiB,5,5.146216,7.025081,1.87915,1.365331,1.364852,1.370137
+Apple M1 / HVF,block-mmio,vda/rand_read/4096/p99_upper_ns,5,26623,36863,10240,1.38463,1.307704,1.461556
+Apple M1 / HVF,block-mmio,vda/rand_write/4096/MiBps,5,184.310273,141.65665,-42.780481,0.768048,0.752282,0.781642
+Apple M1 / HVF,block-mmio,vda/rand_write/4096/cpu_s_per_GiB,5,5.696644,7.319271,1.630359,1.286585,1.264871,1.309241
+Apple M1 / HVF,block-mmio,vda/seq_read/65536/MiBps,5,1068.392805,927.954027,-140.561311,0.867772,0.864867,0.869573
+Apple M1 / HVF,block-mmio,vda/seq_write/65536/MiBps,5,881.442154,770.91267,-109.533395,0.875616,0.872099,0.880889
+Apple M1 / HVF,block4-pci,device_attachment_ms,5,12.849,49.639,36.844,3.984787,3.487253,4.684567
+Apple M1 / HVF,block4-pci,idle_processes,5,2.0,6.0,4.0,3.0,3.0,3.0
+Apple M1 / HVF,block4-pci,idle_threads,5,22.0,42.0,20.0,1.909091,1.909091,1.909091
+Apple M1 / HVF,block4-pci,ready_s,5,0.132004,0.181048,0.051849,1.401315,0.997882,1.626011
+Apple M1 / HVF,block4-pci,sampler_and_echo_cpu_percent,5,0.494958,0.59973,0.104772,1.211678,1.167745,1.449068
+Apple M1 / HVF,block4-pci,vda/rand_read/4096/MiBps,5,216.306052,168.492738,-49.098173,0.773015,0.7492,0.806074
+Apple M1 / HVF,block4-pci,vda/rand_read/4096/cpu_s_per_GiB,5,4.837349,6.147068,1.344723,1.277988,1.21644,1.315568
+Apple M1 / HVF,block4-pci,vda/rand_read/4096/p99_upper_ns,5,24575,31743,7168,1.291679,1.291679,1.666694
+Apple M1 / HVF,block4-pci,vda/rand_write/4096/MiBps,5,204.377254,151.995669,-52.630921,0.74416,0.725025,0.753685
+Apple M1 / HVF,block4-pci,vda/rand_write/4096/cpu_s_per_GiB,5,5.097907,6.822646,1.723428,1.337979,1.321292,1.368126
+Apple M1 / HVF,block4-pci,vda/seq_read/65536/MiBps,5,1034.302156,907.329406,-124.579349,0.880084,0.872587,0.881032
+Apple M1 / HVF,block4-pci,vda/seq_write/65536/MiBps,5,869.821868,774.795938,-96.60088,0.889807,0.872922,0.899542
+Apple M1 / HVF,net-pci,device_attachment_ms,5,15.453,26.634,11.148,1.71932,1.483478,1.754007
+Apple M1 / HVF,net-pci,idle_processes,5,2,3,1,1.5,1.5,1.5
+Apple M1 / HVF,net-pci,idle_threads,5,25,33,8,1.32,1.32,1.32
+Apple M1 / HVF,net-pci,net/tcp_echo/64/MiBps,5,1.029247,0.917773,-0.110494,0.892645,0.876196,0.898004
+Apple M1 / HVF,net-pci,net/tcp_echo/65536/MiBps,5,99.177814,79.042326,-30.203938,0.695457,0.539346,0.924021
+Apple M1 / HVF,net-pci,ready_s,5,0.240618,0.558395,0.331528,2.320668,1.517847,3.051799
+Apple M1 / HVF,net-pci,sampler_and_echo_cpu_percent,5,6.620158,5.781418,-0.603888,0.901922,0.778847,0.950253
+Hosted Windows / WHP,block-pci,device_attachment_ms,5,46.802,87.655,41.072,1.886452,1.599333,1.939146
+Hosted Windows / WHP,block-pci,idle_processes,5,2.0,3.0,1.0,1.5,1.5,1.5
+Hosted Windows / WHP,block-pci,idle_sum_private_bytes,5,5242880.0,7172096.0,1937408.0,1.369852,1.344961,1.373532
+Hosted Windows / WHP,block-pci,idle_threads,5,25.0,34.0,9.0,1.36,1.36,1.36
+Hosted Windows / WHP,block-pci,ready_s,5,2.328,2.406,0.063,1.027062,0.993263,1.047453
+Hosted Windows / WHP,block-pci,sampler_and_echo_cpu_percent,5,6.690867,8.939469,1.976501,1.299386,1.17054,1.399003
+Hosted Windows / WHP,block-pci,vda/rand_read/4096/MiBps,5,27.638898,19.662834,-7.964346,0.711843,0.702876,0.718274
+Hosted Windows / WHP,block-pci,vda/rand_read/4096/cpu_s_per_GiB,5,38.539527,52.105736,13.793205,1.360018,1.118814,1.525977
+Hosted Windows / WHP,block-pci,vda/rand_read/4096/p99_upper_ns,5,4063231,4063231,0,1.0,1.0,1.0
+Hosted Windows / WHP,block-pci,vda/rand_write/4096/MiBps,5,27.162365,19.155053,-7.839354,0.709593,0.693172,0.721528
+Hosted Windows / WHP,block-pci,vda/rand_write/4096/cpu_s_per_GiB,5,38.586594,53.992977,15.07825,1.359285,1.294739,1.59218
+Hosted Windows / WHP,block-pci,vda/seq_read/65536/MiBps,5,228.110743,184.863446,-42.434848,0.813531,0.804265,0.820106
+Hosted Windows / WHP,block-pci,vda/seq_write/65536/MiBps,5,230.673083,188.238235,-42.122367,0.817394,0.810447,0.84234
+Hosted Windows / WHP,block-mmio,device_attachment_ms,5,50.096,89.605,36.947,1.783005,1.316205,1.863975
+Hosted Windows / WHP,block-mmio,idle_processes,5,2,3.0,1.0,1.5,1.5,1.5
+Hosted Windows / WHP,block-mmio,idle_sum_private_bytes,5,5292032.0,7188480.0,1900544.0,1.359133,1.355039,1.366044
+Hosted Windows / WHP,block-mmio,idle_threads,5,25,34.0,9.0,1.36,1.36,1.36
+Hosted Windows / WHP,block-mmio,ready_s,5,2.344,2.406,0.047,1.020051,0.928325,1.202855
+Hosted Windows / WHP,block-mmio,sampler_and_echo_cpu_percent,5,6.324945,9.329037,1.894842,1.291363,1.021271,1.600313
+Hosted Windows / WHP,block-mmio,vda/rand_read/4096/MiBps,5,19.069121,14.596744,-4.589557,0.75932,0.755259,0.789838
+Hosted Windows / WHP,block-mmio,vda/rand_read/4096/cpu_s_per_GiB,5,57.208149,68.553029,11.569522,1.209221,1.113543,1.280469
+Hosted Windows / WHP,block-mmio,vda/rand_read/4096/p99_upper_ns,5,4063231,4063231,0,1.0,1.0,1.0
+Hosted Windows / WHP,block-mmio,vda/rand_write/4096/MiBps,5,19.006625,14.006937,-4.612993,0.75898,0.720963,0.786907
+Hosted Windows / WHP,block-mmio,vda/rand_write/4096/cpu_s_per_GiB,5,56.997996,71.792307,11.108112,1.194886,1.10378,1.432874
+Hosted Windows / WHP,block-mmio,vda/seq_read/65536/MiBps,5,183.988501,154.365352,-30.123117,0.836277,0.821138,0.84424
+Hosted Windows / WHP,block-mmio,vda/seq_write/65536/MiBps,5,191.175552,158.052622,-33.185426,0.826414,0.822876,0.858294
+Hosted Windows / WHP,block4-pci,device_attachment_ms,5,46.392,205.973,159.755,4.456554,3.960477,4.572057
+Hosted Windows / WHP,block4-pci,idle_processes,5,2,6,4,3.0,3.0,3.0
+Hosted Windows / WHP,block4-pci,idle_sum_private_bytes,5,5304320.0,13148160.0,7876608.0,2.48228,2.470679,2.495334
+Hosted Windows / WHP,block4-pci,idle_threads,5,24,48,24,2.0,2.0,2.0
+Hosted Windows / WHP,block4-pci,ready_s,5,2.359,2.516,0.172,1.073379,1.059368,1.099829
+Hosted Windows / WHP,block4-pci,sampler_and_echo_cpu_percent,5,6.966591,15.006956,8.010047,2.145197,2.086873,2.359776
+Hosted Windows / WHP,block4-pci,vda/rand_read/4096/MiBps,5,27.631086,19.565183,-8.046372,0.708793,0.699803,0.720719
+Hosted Windows / WHP,block4-pci,vda/rand_read/4096/cpu_s_per_GiB,5,37.989248,53.87888,16.268246,1.440461,1.197049,1.526559
+Hosted Windows / WHP,block4-pci,vda/rand_read/4096/p99_upper_ns,5,4063231,4063231,0,1.0,1.0,1.0
+Hosted Windows / WHP,block4-pci,vda/rand_write/4096/MiBps,5,27.092057,19.416755,-7.890132,0.711511,0.67971,0.748983
+Hosted Windows / WHP,block4-pci,vda/rand_write/4096/cpu_s_per_GiB,5,42.916262,52.628416,8.510755,1.19291,1.146789,1.495733
+Hosted Windows / WHP,block4-pci,vda/seq_read/65536/MiBps,5,229.798138,185.050934,-42.184863,0.814356,0.774804,0.841311
+Hosted Windows / WHP,block4-pci,vda/seq_write/65536/MiBps,5,231.610524,187.550778,-44.059746,0.809768,0.807216,0.816581
+Hosted Windows / WHP,net-pci,device_attachment_ms,5,46.627,85.959,37.54,1.787248,1.60477,1.963222
+Hosted Windows / WHP,net-pci,idle_processes,5,2,3.0,1.0,1.5,1.5,1.5
+Hosted Windows / WHP,net-pci,idle_sum_private_bytes,5,6148096.0,8273920.0,2162688.0,1.350598,1.333554,1.356615
+Hosted Windows / WHP,net-pci,idle_threads,5,32,45.0,13.0,1.40625,1.40625,1.40625
+Hosted Windows / WHP,net-pci,net/tcp_echo/64/MiBps,5,0.222398,0.171559,-0.051083,0.770307,0.763859,0.782368
+Hosted Windows / WHP,net-pci,net/tcp_echo/65536/MiBps,5,41.747391,50.871821,8.874445,1.210996,1.17515,1.268934
+Hosted Windows / WHP,net-pci,ready_s,5,2.344,2.609,0.265,1.113055,1.099195,1.113481
+Hosted Windows / WHP,net-pci,sampler_and_echo_cpu_percent,5,9.964478,10.32079,1.405876,1.138914,0.873958,1.318713
+Linux observer off,block-pci,device_attachment_ms,5,2.301,4.284,1.905,1.845539,1.583186,2.239774
+Linux observer off,block-pci,ready_s,5,0.128409,0.129687,0.00188,1.014713,0.972704,1.025569
+Linux observer off,block-pci,sampler_and_echo_cpu_percent,5,1.102087,1.062109,-0.073745,0.930676,0.840819,0.968959
+Linux observer off,block-pci,vda/rand_read/4096/MiBps,5,82.030927,61.030814,-21.275993,0.741504,0.725465,0.781908
+Linux observer off,block-pci,vda/rand_read/4096/p99_upper_ns,5,59391,81919,20480,1.333339,1.290327,1.379317
+Linux observer off,block-pci,vda/rand_write/4096/MiBps,5,71.576231,54.813837,-17.492837,0.755356,0.74909,0.810169
+Linux observer off,block-pci,vda/seq_read/65536/MiBps,5,470.884012,410.569519,-59.92227,0.872639,0.630935,0.927993
+Linux observer off,block-pci,vda/seq_write/65536/MiBps,5,337.300896,265.287443,-86.883955,0.742221,0.492106,1.044123
+Linux tmpfs,block-pci,device_attachment_ms,5,2.609,4.356,1.732,1.671058,1.39701,2.018781
+Linux tmpfs,block-pci,idle_private_excluding_hugetlb_bytes,5,1650688.0,1859584.0,208896.0,1.126551,1.046296,1.282123
+Linux tmpfs,block-pci,idle_processes,5,2,3,1,1.5,1.5,1.5
+Linux tmpfs,block-pci,idle_sum_pss_bytes,5,4188160.0,4589568.0,440320.0,1.105134,1.082019,1.137703
+Linux tmpfs,block-pci,idle_threads,5,20,25,5,1.25,1.25,1.25
+Linux tmpfs,block-pci,ready_s,5,0.12849,0.128602,0.000112,1.000873,0.996567,1.008653
+Linux tmpfs,block-pci,sampler_and_echo_cpu_percent,5,2.302971,2.63586,0.289083,1.125893,1.118951,1.202364
+Linux tmpfs,block-pci,vda/rand_read/4096/MiBps,5,81.338597,59.246658,-22.068687,0.726762,0.721304,0.747914
+Linux tmpfs,block-pci,vda/rand_read/4096/cpu_s_per_GiB,5,17.601709,27.424919,9.989481,1.56541,1.502843,1.603679
+Linux tmpfs,block-pci,vda/rand_read/4096/p99_upper_ns,5,61439,86015,24576,1.400007,1.333339,1.400007
+Linux tmpfs,block-pci,vda/rand_write/4096/MiBps,5,79.648222,58.751948,-21.54979,0.729438,0.715565,0.750268
+Linux tmpfs,block-pci,vda/rand_write/4096/cpu_s_per_GiB,5,17.923819,27.549556,10.114777,1.56432,1.492261,1.613343
+Linux tmpfs,block-pci,vda/seq_read/65536/MiBps,5,450.033627,391.096252,-61.34505,0.863688,0.56882,0.894115
+Linux tmpfs,block-pci,vda/seq_write/65536/MiBps,5,395.594432,332.714376,-60.619719,0.846902,0.739614,0.881494
+Linux tmpfs + nokaslr,block-pci,device_attachment_ms,5,2.52,4.891,2.263,1.861111,1.750802,2.006467
+Linux tmpfs + nokaslr,block-pci,idle_private_excluding_hugetlb_bytes,5,1748992.0,1802240.0,106496.0,1.060606,0.997732,1.132075
+Linux tmpfs + nokaslr,block-pci,idle_processes,5,2,3,1,1.5,1.5,1.5
+Linux tmpfs + nokaslr,block-pci,idle_sum_pss_bytes,5,4235264.0,4636672.0,354304.0,1.082736,1.068673,1.120432
+Linux tmpfs + nokaslr,block-pci,idle_threads,5,20,25,5,1.25,1.25,1.25
+Linux tmpfs + nokaslr,block-pci,ready_s,5,0.128378,0.128348,-0.000289,0.997749,0.990597,1.008675
+Linux tmpfs + nokaslr,block-pci,sampler_and_echo_cpu_percent,5,2.36057,2.613362,0.228036,1.097732,1.090174,1.142791
+Linux tmpfs + nokaslr,block-pci,vda/rand_read/4096/MiBps,5,81.638216,59.780982,-21.836316,0.732267,0.71751,0.78138
+Linux tmpfs + nokaslr,block-pci,vda/rand_read/4096/cpu_s_per_GiB,5,17.537898,27.060254,9.522356,1.542959,1.433418,1.586344
+Linux tmpfs + nokaslr,block-pci,vda/rand_read/4096/p99_upper_ns,5,59391,81919,22528,1.379317,1.333339,1.379317
+Linux tmpfs + nokaslr,block-pci,vda/rand_write/4096/MiBps,5,79.902713,58.994691,-21.102332,0.73654,0.72551,0.77046
+Linux tmpfs + nokaslr,block-pci,vda/rand_write/4096/cpu_s_per_GiB,5,17.942964,27.62009,9.751578,1.545741,1.439407,1.567846
+Linux tmpfs + nokaslr,block-pci,vda/seq_read/65536/MiBps,5,449.664217,369.945682,-62.755116,0.860829,0.656846,1.132153
+Linux tmpfs + nokaslr,block-pci,vda/seq_write/65536/MiBps,5,340.485526,303.99056,-43.554239,0.870828,0.813482,0.895305
+Windows observer on,block-pci,device_attachment_ms,5,49.472,85.724,33.394,1.675008,1.359533,2.058585
+Windows observer on,block-pci,idle_processes,5,2.0,3,1.0,1.5,1.5,1.5
+Windows observer on,block-pci,idle_sum_private_bytes,5,5267456.0,7135232.0,1884160.0,1.358417,1.352255,1.36685
+Windows observer on,block-pci,idle_threads,5,25.0,34,9.0,1.36,1.36,1.36
+Windows observer on,block-pci,ready_s,5,2.328,2.375,0.047,1.020189,1.006356,1.02032
+Windows observer on,block-pci,sampler_and_echo_cpu_percent,5,5.860749,6.68245,1.522803,1.296949,1.014899,1.612878
+Windows observer on,block-pci,vda/rand_read/4096/MiBps,5,28.224798,19.86204,-8.370571,0.703934,0.703294,0.717511
+Windows observer on,block-pci,vda/rand_read/4096/cpu_s_per_GiB,5,36.957801,51.542597,14.717369,1.399655,1.261865,1.490977
+Windows observer on,block-pci,vda/rand_read/4096/p99_upper_ns,5,4063231,4063231,0,1.0,1.0,1.0
+Windows observer on,block-pci,vda/rand_write/4096/MiBps,5,27.865446,19.701894,-8.27292,0.704438,0.690206,0.755609
+Windows observer on,block-pci,vda/rand_write/4096/cpu_s_per_GiB,5,39.367038,49.349645,9.982606,1.253578,1.228655,1.344643
+Windows observer on,block-pci,vda/seq_read/65536/MiBps,5,231.985501,189.800637,-41.497406,0.821121,0.814147,0.839414
+Windows observer on,block-pci,vda/seq_write/65536/MiBps,5,234.735329,190.988063,-42.997313,0.816386,0.805007,0.837031
+Windows observer off,block-pci,device_attachment_ms,5,48.304,92.507,44.542,1.928635,1.556835,2.183989
+Windows observer off,block-pci,ready_s,5,2.328,2.39,0.062,1.026632,1.020051,1.04121
+Windows observer off,block-pci,sampler_and_echo_cpu_percent,5,0.604589,0.716853,0.227846,1.3833,0.488683,1.968955
+Windows observer off,block-pci,vda/rand_read/4096/MiBps,5,28.404475,20.080776,-8.323699,0.706958,0.701964,0.729699
+Windows observer off,block-pci,vda/rand_read/4096/p99_upper_ns,5,4063231,4063231,0,1.0,1.0,1.0
+Windows observer off,block-pci,vda/rand_write/4096/MiBps,5,28.291201,19.858134,-8.460409,0.700953,0.679862,0.764856
+Windows observer off,block-pci,vda/seq_read/65536/MiBps,5,234.172864,191.67552,-42.497344,0.818521,0.805994,1.00065
+Windows observer off,block-pci,vda/seq_write/65536/MiBps,5,236.672708,193.362915,-41.997375,0.822551,0.799265,0.99131
