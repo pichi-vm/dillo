@@ -89,6 +89,9 @@ const NET_HDR_NUM_BUFFERS_OFF: usize = 10;
 const QUEUE_MAX: u16 = 256;
 const QUEUE_SIZES: [u16; 2] = [QUEUE_MAX, QUEUE_MAX];
 
+/// Bound receive work between completion signals and host drain checkpoints.
+const RX_BATCH: usize = 64;
+
 /// virtio-net: in-process, thread-mode device over a [`NetBackend`].
 pub struct VirtioNet {
     mac: [u8; 6],
@@ -411,11 +414,10 @@ fn rx_worker(
     backend: &Arc<dyn NetBackend>,
     queue_memory: &Arc<dyn QueueMemory>,
     buffer_memory: &Arc<dyn VirtioMemory>,
-    queue: Queue,
+    mut queue: Queue,
     interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
 ) {
-    let queue = Mutex::new(queue);
     let mut scratch = vec![0u8; MAX_FRAME_LEN];
     let mut pending = None;
     loop {
@@ -423,7 +425,7 @@ fn rx_worker(
         if token.is_shutdown_requested() {
             return;
         }
-        let length = match pending.take() {
+        let mut length = match pending.take() {
             Some(length) => length,
             None => match backend.recv(&mut scratch) {
                 Ok(Some(n)) => n,
@@ -435,16 +437,33 @@ fn rx_worker(
                 }
             },
         };
-        let mut q = queue.lock().expect("virtio-net RX queue mutex");
-        if write_rx_frame(queue_memory, buffer_memory, &mut q, &scratch[..length]) {
-            drop(q);
-            if let Some(intr) = interrupt {
-                intr.signal();
+        let mut completed = 0;
+        loop {
+            if !write_rx_frame(queue_memory, buffer_memory, &mut queue, &scratch[..length]) {
+                pending = Some(length);
+                break;
             }
-        } else {
-            // No guest RX buffer available; hold the frame and retry.
-            drop(q);
-            pending = Some(length);
+            completed += 1;
+            if completed == RX_BATCH || token.is_shutdown_requested() {
+                break;
+            }
+            match backend.try_recv(&mut scratch) {
+                Ok(Some(n)) => length = n,
+                Ok(None) => break,
+                Err(e) => {
+                    log::warn!("virtio-net RX: backend recv: {e}");
+                    break;
+                }
+            }
+        }
+        // Publish the batch before blocking for buffers, another frame, or a
+        // host drain checkpoint. Do not wait for a batch to fill.
+        if completed != 0
+            && let Some(intr) = interrupt
+        {
+            intr.signal();
+        }
+        if pending.is_some() {
             std::thread::sleep(RECV_POLL);
         }
     }
@@ -541,6 +560,10 @@ mod tests {
                 }
                 None => Ok(None),
             }
+        }
+
+        fn try_recv(&self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+            self.recv(buf)
         }
     }
 
@@ -746,10 +769,82 @@ mod tests {
             delivered.load(Ordering::Acquire),
             "held frame was not delivered"
         );
-        assert_eq!(backend.inbound.lock().unwrap().len(), 1);
         let mut frame = [0; 5];
         Bytes::read(&mem, &mut frame, GuestAddress(0x5000 + NET_HDR_LEN as u64)).unwrap();
         assert_eq!(&frame, b"first");
         assert_eq!(qmem.read_u16(GuestAddress(0x2002)), Some(1));
+    }
+
+    #[test]
+    fn rx_batches_ready_frames_and_signals_before_checkpoint() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+
+        // A single frame, a burst, a burst over the limit, and a starved ring.
+        for (count, available, signals) in [(1, 1, 1), (3, 3, 1), (65, 65, 2), (3, 1, 2)] {
+            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let mut q = ready_queue(0x100, 0x1000, 0x2000);
+            q.max_size = 128;
+            q.size = 128;
+            assert!(q.is_valid(0x10000));
+            for i in 0..count {
+                let desc = q.desc_table.unchecked_add(i as u64 * 16);
+                mem.write_obj::<u64>(0x5000 + i as u64 * 32, desc).unwrap();
+                mem.write_obj::<u32>(32, desc.unchecked_add(8)).unwrap();
+                mem.write_obj::<u16>(VIRTQ_DESC_F_WRITE, desc.unchecked_add(12))
+                    .unwrap();
+                mem.write_obj::<u16>(i as u16, q.avail_ring.unchecked_add(4 + i as u64 * 2))
+                    .unwrap();
+            }
+            mem.write_obj::<u16>(available as u16, q.avail_ring.unchecked_add(2))
+                .unwrap();
+            let qmem: Arc<dyn QueueMemory> =
+                Arc::new(SharedQueueMemory::new(vec![shared(&mem, 0, 0x4000)]));
+            let bmem: Arc<dyn VirtioMemory> =
+                Arc::new(SharedVirtioMemory::new(vec![shared(&mem, 0x5000, 0x3000)]));
+            let backend = Arc::new(MockBackend::default());
+            backend
+                .inbound
+                .lock()
+                .unwrap()
+                .extend((0..count).map(|i| vec![i as u8]));
+            let delivered = Arc::new(AtomicUsize::new(0));
+            let signal = Arc::clone(&delivered);
+            let interrupt = Interrupt::from_fn(move || {
+                signal.fetch_add(1, Ordering::Relaxed);
+            });
+            let done = Arc::clone(&qmem);
+            let observe = Arc::clone(&qmem);
+            let notifications = Arc::clone(&delivered);
+            let checkpoints = AtomicUsize::new(0);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let token = VirtioRunToken::from_fn(move || {
+                done.read_u16(GuestAddress(0x2002)) == Some(count as u16)
+                    || Instant::now() >= deadline
+            })
+            .with_checkpoint(move || {
+                if checkpoints.fetch_add(1, Ordering::Relaxed) == 1 {
+                    assert_eq!(notifications.load(Ordering::Relaxed), 1);
+                    assert_eq!(
+                        observe.read_u16(GuestAddress(0x2002)),
+                        Some(available.min(RX_BATCH) as u16)
+                    );
+                    observe
+                        .write_u16(GuestAddress(0x1002), count as u16)
+                        .unwrap();
+                }
+            });
+            let source: Arc<dyn NetBackend> = backend;
+            rx_worker(&source, &qmem, &bmem, q, Some(&interrupt), &token);
+            assert_eq!(delivered.load(Ordering::Relaxed), signals);
+            assert_eq!(qmem.read_u16(GuestAddress(0x2002)), Some(count as u16));
+            for i in 0..count {
+                assert_eq!(
+                    mem.read_obj::<u8>(GuestAddress(0x5000 + i as u64 * 32 + NET_HDR_LEN as u64))
+                        .unwrap(),
+                    i as u8
+                );
+            }
+        }
     }
 }

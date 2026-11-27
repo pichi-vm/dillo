@@ -238,22 +238,29 @@ impl NetBackend for UserNetBackend {
     }
 
     fn recv(&self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        Ok(self.recv_timeout(buf, RECV_POLL))
+    }
+
+    fn try_recv(&self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        Ok(self.recv_timeout(buf, Duration::ZERO))
+    }
+}
+
+impl UserNetBackend {
+    fn recv_timeout(&self, buf: &mut [u8], timeout: Duration) -> Option<usize> {
         let (lock, cvar) = &*self.outbound;
         let mut q = lock.lock().expect("user-net outbound poisoned");
-        if q.is_empty() {
+        if q.is_empty() && !timeout.is_zero() {
             let (g, _timeout) = cvar
-                .wait_timeout(q, RECV_POLL)
+                .wait_timeout(q, timeout)
                 .expect("user-net outbound poisoned");
             q = g;
         }
-        match q.pop_front() {
-            Some(frame) => {
-                let n = frame.len().min(buf.len());
-                buf[..n].copy_from_slice(&frame[..n]);
-                Ok(Some(n))
-            }
-            None => Ok(None),
-        }
+        q.pop_front().map(|frame| {
+            let n = frame.len().min(buf.len());
+            buf[..n].copy_from_slice(&frame[..n]);
+            n
+        })
     }
 }
 

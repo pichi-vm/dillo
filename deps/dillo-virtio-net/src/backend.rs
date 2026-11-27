@@ -48,6 +48,13 @@ pub trait NetBackend: Send + Sync + std::fmt::Debug {
     /// least [`MAX_FRAME_LEN`] bytes.
     fn recv(&self, buf: &mut [u8]) -> io::Result<Option<usize>>;
 
+    /// Receive another queued frame without waiting for one to arrive.
+    /// Buffer and return-value requirements are the same as [`Self::recv`].
+    /// Backends without nonblocking receive support may retain this default.
+    fn try_recv(&self, _buf: &mut [u8]) -> io::Result<Option<usize>> {
+        Ok(None)
+    }
+
     /// Whether the device should advertise link-up in its config status. The
     /// default is `true` (a freshly attached backend has a usable link).
     fn link_up(&self) -> bool {
