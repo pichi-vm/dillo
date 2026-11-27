@@ -246,6 +246,82 @@ fn pwrite_full(fd: &OwnedFd, buf: &[u8], off: u64) -> bool {
     }
 }
 
+/// Timed opt-in uses the same aligned buffers and I/O helpers as quick probes.
+pub(crate) fn timed_device(
+    name: &str,
+    size: u64,
+    ro: bool,
+    config: &super::timed::Config,
+) -> std::io::Result<Vec<snuffler::performance::Operation>> {
+    use std::io;
+    if size < SEQ_BLK as u64 || size > 1024 * 1024 * 1024 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    // Refuse cached guest I/O rather than silently changing the experiment.
+    let fd = rustix::fs::open(
+        format!("/dev/{name}"),
+        OFlags::DIRECT | if ro { OFlags::RDONLY } else { OFlags::RDWR },
+        Mode::empty(),
+    )?;
+    let mut results = Vec::new();
+    for (operation, len, random, write) in [
+        ("seq_read", SEQ_BLK, false, false),
+        ("rand_read", RAND_BLK, true, false),
+        ("seq_write", SEQ_BLK, false, true),
+        ("rand_write", RAND_BLK, true, true),
+    ] {
+        if ro && write {
+            continue;
+        }
+        let nblocks = size / len as u64;
+        let mut touched = vec![false; nblocks as usize];
+        let mut buffer = AlignedBuf::new(len);
+        buffer.as_mut_slice().fill(0x5a);
+        let mut rng = Rng::new(fnv1a(name.as_bytes()));
+        let mut index = 0;
+        let mut measuring = false;
+        let mut result =
+            super::timed::measure(config, name, operation, "o_direct", len, |warmup| {
+                if !warmup && !measuring {
+                    rng = Rng::new(fnv1a(name.as_bytes()));
+                    index = 0;
+                    measuring = true;
+                }
+                let block = if random {
+                    rng.next_u64() % nblocks
+                } else {
+                    index % nblocks
+                };
+                index += 1;
+                let offset = block * len as u64;
+                let ok = if write {
+                    touched[block as usize] = true;
+                    pwrite_full(&fd, buffer.as_slice(), offset)
+                } else {
+                    pread_full(&fd, buffer.as_mut_slice(), offset)
+                };
+                if ok {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("short or failed block I/O"))
+                }
+            })?;
+        if write {
+            for (block, touched) in touched.into_iter().enumerate() {
+                if touched
+                    && (!pread_full(&fd, buffer.as_mut_slice(), block as u64 * len as u64)
+                        || buffer.as_slice().iter().any(|byte| *byte != 0x5a))
+                {
+                    return Err(io::Error::other("block write verification failed"));
+                }
+            }
+            result.verified = Some(true);
+        }
+        results.push(result);
+    }
+    Ok(results)
+}
+
 fn err_bench(msg: String) -> BlkBench {
     let zero = BlkOp {
         bytes: 0,

@@ -23,6 +23,9 @@ pub const REPORT_END: &str = "<<<END>>>";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
+    /// Opt-in timed device measurements; absent from ordinary boot probes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performance: Option<performance::Performance>,
     pub arch: String,
     pub cmdline: String,
     /// Linux bootconfig as exposed by the running guest kernel.

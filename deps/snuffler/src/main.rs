@@ -38,6 +38,7 @@ use snuffler::{
 
 mod bench;
 mod memory;
+mod timed;
 mod virtiofs;
 
 #[cfg(not(test))]
@@ -75,7 +76,15 @@ fn run() {
             poweroff();
         }));
     }
+    let config = timed::Config::from_cmdline(&read_trim("/proc/cmdline"));
+    if config.is_some() {
+        timed::mark("ready");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
     let mut report = observe();
+    if let Some(config) = config {
+        report.performance = Some(timed::run(&report.cmdline, &report.block, &config));
+    }
     // Cmdline-gated diagnostics via /dev/kmsg: unlike snuffler's own console fd
     // (which can silently drop output on a slow/absent MMIO console), writing to
     // /dev/kmsg rides the *kernel* console path, which is reliable on serial. Emits
@@ -324,6 +333,7 @@ fn observe() -> Report {
     let net_bench = probe_net_io(&cmdline);
     let console_port = probe_console_port(&cmdline);
     Report {
+        performance: None,
         arch: uname_machine(),
         bootconfig: std::fs::read_to_string("/proc/bootconfig").ok(),
         uptime_secs: parse_uptime(),
