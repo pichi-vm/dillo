@@ -244,10 +244,16 @@ def main():
     parser.add_argument("--sample-ms", type=int, default=50)
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--no-sample", action="store_true")
+    parser.add_argument("--backing-dir", type=Path, help="optional disposable disk directory, e.g. tmpfs")
+    parser.add_argument("--extra-cmdline", default="", help="explicit guest settings for sensitivity runs")
     args = parser.parse_args()
     assert args.pairs > 0 and args.sample_ms > 0
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
+    backing = args.output
+    if args.backing_dir:
+        backing = args.backing_dir.resolve()
+        backing.mkdir(parents=True, exist_ok=False)
     assets = json.loads(args.assets.read_text())
     environment = {"platform": platform.platform(), "uname": platform.uname()._asdict(),
                    "cpu_count": psutil.cpu_count(), "psutil": psutil.__version__,
@@ -275,6 +281,7 @@ def main():
             image = args.output / f"{case}.pmi"
             cmdline = (f"console=hvc0 dillo.uptime_ns dillo.panic_report "
                        f"dillo.bench_ms={args.duration_ms} dillo.bench_warmup_ms={args.warmup_ms}")
+            cmdline += " " + args.extra_cmdline
             if case == "net-pci":
                 cmdline += (f" ip=10.0.2.15::10.0.2.2:255.255.255.0::eth0:off"
                             f" dillo.net_echo=10.0.2.2:{port}")
@@ -282,7 +289,7 @@ def main():
                             "--profile", assets["profile"], "--initrd", assets["snuffler"],
                             "--cmdline", cmdline, str(image)], check=True)
             count = 0 if case == "net-pci" else (4 if case == "block4-pci" else 1)
-            disks = [args.output / f"disk{i}.raw" for i in range(count)]
+            disks = [backing / f"disk{i}.raw" for i in range(count)]
             for pair in range(-1, args.pairs):  # First pair warms the host and is retained but excluded.
                 order = ("local", "worker") if pair % 2 == 0 else ("worker", "local")
                 for mode in order:
