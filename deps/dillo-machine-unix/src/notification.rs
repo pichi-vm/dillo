@@ -55,9 +55,25 @@ impl WriteNotification for Notification {
             }
             for (event, mut file) in events.iter().zip([&self.file, wake]) {
                 if event.revents().is_some_and(|flags| !flags.is_empty()) {
-                    let mut bytes = [0; 8];
-                    file.read_exact(&mut bytes)?;
-                    return Ok(u64::from_ne_bytes(bytes));
+                    // Drain ready counters together so a burst causes one
+                    // ring scan or interrupt, rather than one per pipe word.
+                    let mut bytes = [0; 256];
+                    let n = match file.read(&mut bytes) {
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        result => result?,
+                    };
+                    if n == 0 {
+                        return Err(io::ErrorKind::UnexpectedEof.into());
+                    }
+                    let end = n.div_ceil(8) * 8;
+                    file.read_exact(&mut bytes[n..end])?;
+                    return Ok(bytes[..end]
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .fold(0u64, |sum, word| {
+                            sum.saturating_add(u64::from_ne_bytes(*word))
+                        }));
                 }
             }
         }
@@ -91,5 +107,18 @@ mod tests {
             receiver.read().unwrap_err().kind(),
             io::ErrorKind::UnexpectedEof
         );
+    }
+
+    #[test]
+    fn queued_signals_share_one_wake() {
+        let (read, write) = pair().unwrap();
+        let receiver = adopt(read, NotificationRole::Wait).unwrap();
+        let sender = adopt(write, NotificationRole::Signal).unwrap();
+        for n in 1..=32 {
+            sender.write(n).unwrap();
+        }
+        assert_eq!(receiver.read().unwrap(), (1..=32).sum::<u64>());
+        receiver.write(1).unwrap();
+        assert_eq!(receiver.read().unwrap(), 1);
     }
 }
