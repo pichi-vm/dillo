@@ -417,16 +417,16 @@ fn rx_worker(
 ) {
     let queue = Mutex::new(queue);
     let mut scratch = vec![0u8; MAX_FRAME_LEN];
-    let mut pending: Option<Vec<u8>> = None;
+    let mut pending = None;
     loop {
         token.checkpoint();
         if token.is_shutdown_requested() {
             return;
         }
-        let frame = match pending.take() {
-            Some(frame) => frame,
+        let length = match pending.take() {
+            Some(length) => length,
             None => match backend.recv(&mut scratch) {
-                Ok(Some(n)) => scratch[..n].to_vec(),
+                Ok(Some(n)) => n,
                 // Timeout: loop to re-check shutdown, then poll again.
                 Ok(None) => continue,
                 Err(e) => {
@@ -436,7 +436,7 @@ fn rx_worker(
             },
         };
         let mut q = queue.lock().expect("virtio-net RX queue mutex");
-        if write_rx_frame(queue_memory, buffer_memory, &mut q, &frame) {
+        if write_rx_frame(queue_memory, buffer_memory, &mut q, &scratch[..length]) {
             drop(q);
             if let Some(intr) = interrupt {
                 intr.signal();
@@ -444,7 +444,7 @@ fn rx_worker(
         } else {
             // No guest RX buffer available; hold the frame and retry.
             drop(q);
-            pending = Some(frame);
+            pending = Some(length);
             std::thread::sleep(RECV_POLL);
         }
     }
@@ -697,12 +697,19 @@ mod tests {
         assert_eq!(used_len as usize, NET_HDR_LEN + payload.len());
     }
 
-    /// RX with no available guest buffer reports "not delivered" so the caller
-    /// retains the frame.
+    /// Keep the received frame in scratch until a guest buffer becomes available.
     #[test]
     fn rx_without_buffer_is_held() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
-        let mut q = ready_queue(0x100, 0x1000, 0x2000);
+        let q = ready_queue(0x100, 0x1000, 0x2000);
+        mem.write_obj::<u64>(0x5000, q.desc_table).unwrap();
+        mem.write_obj::<u32>(2048, q.desc_table.unchecked_add(8))
+            .unwrap();
+        mem.write_obj::<u16>(VIRTQ_DESC_F_WRITE, q.desc_table.unchecked_add(12))
+            .unwrap();
         // avail_idx == next_avail (0) → empty ring.
         mem.write_obj::<u16>(0, q.avail_ring.unchecked_add(2))
             .unwrap();
@@ -710,6 +717,39 @@ mod tests {
             Arc::new(SharedQueueMemory::new(vec![shared(&mem, 0, 0x4000)]));
         let bmem: Arc<dyn VirtioMemory> =
             Arc::new(SharedVirtioMemory::new(vec![shared(&mem, 0x5000, 0x1000)]));
-        assert!(!write_rx_frame(&qmem, &bmem, &mut q, b"x"));
+        let backend = Arc::new(MockBackend::default());
+        backend
+            .inbound
+            .lock()
+            .unwrap()
+            .extend([b"first".to_vec(), b"second".to_vec()]);
+        let delivered = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&delivered);
+        let interrupt = Interrupt::from_fn(move || signal.store(true, Ordering::Release));
+        let done = Arc::clone(&delivered);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let publish = Arc::clone(&qmem);
+        let source = Arc::clone(&backend);
+        let checkpoints = AtomicUsize::new(0);
+        let token = VirtioRunToken::from_fn(move || {
+            done.load(Ordering::Acquire) || Instant::now() >= deadline
+        })
+        .with_checkpoint(move || {
+            if checkpoints.fetch_add(1, Ordering::Relaxed) == 1 {
+                assert_eq!(source.inbound.lock().unwrap().len(), 1);
+                publish.write_u16(GuestAddress(0x1002), 1).unwrap();
+            }
+        });
+        let source: Arc<dyn NetBackend> = backend.clone();
+        rx_worker(&source, &qmem, &bmem, q, Some(&interrupt), &token);
+        assert!(
+            delivered.load(Ordering::Acquire),
+            "held frame was not delivered"
+        );
+        assert_eq!(backend.inbound.lock().unwrap().len(), 1);
+        let mut frame = [0; 5];
+        Bytes::read(&mem, &mut frame, GuestAddress(0x5000 + NET_HDR_LEN as u64)).unwrap();
+        assert_eq!(&frame, b"first");
+        assert_eq!(qmem.read_u16(GuestAddress(0x2002)), Some(1));
     }
 }
