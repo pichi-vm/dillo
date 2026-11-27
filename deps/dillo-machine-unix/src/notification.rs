@@ -30,7 +30,12 @@ pub fn pair() -> io::Result<(OwnedFd, OwnedFd)> {
 struct Notification {
     file: File,
     wake: Option<(File, File)>,
-    counters: Mutex<[Counter; 2]>,
+    reader: Mutex<Reader>,
+}
+
+#[derive(Debug, Default)]
+struct Reader {
+    counters: [Counter; 2],
     #[cfg(target_os = "macos")]
     ready: Option<Kqueue>,
 }
@@ -44,38 +49,10 @@ pub fn adopt(resource: OwnedFd, role: NotificationRole) -> io::Result<Arc<dyn Wr
         }
         NotificationRole::Signal => None,
     };
-    #[cfg(target_os = "macos")]
-    let ready = if let Some((wake, _)) = &wake {
-        let ready = Kqueue::new()?;
-        fcntl(&ready, FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC))?;
-        let changes = [&file, wake].map(|file| {
-            KEvent::new(
-                file.as_raw_fd() as usize,
-                EventFilter::EVFILT_READ,
-                EvFlags::EV_ADD,
-                FilterFlag::empty(),
-                0,
-                0,
-            )
-        });
-        ready.kevent(
-            &changes,
-            &mut [],
-            Some(libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            }),
-        )?;
-        Some(ready)
-    } else {
-        None
-    };
     Ok(Arc::new(Notification {
         file,
         wake,
-        counters: Mutex::default(),
-        #[cfg(target_os = "macos")]
-        ready,
+        reader: Mutex::default(),
     }))
 }
 
@@ -105,7 +82,7 @@ impl Counter {
 
 impl Notification {
     #[cfg(not(target_os = "macos"))]
-    fn readable(&self, wake: &File) -> io::Result<[bool; 2]> {
+    fn readable(&self, wake: &File, _reader: &mut Reader) -> io::Result<[bool; 2]> {
         let mut events = [
             PollFd::new(self.file.as_fd(), PollFlags::POLLIN),
             PollFd::new(wake.as_fd(), PollFlags::POLLIN),
@@ -122,8 +99,34 @@ impl Notification {
     }
 
     #[cfg(target_os = "macos")]
-    fn readable(&self, wake: &File) -> io::Result<[bool; 2]> {
-        let ready = self.ready.as_ref().ok_or(io::ErrorKind::Unsupported)?;
+    fn readable(&self, wake: &File, reader: &mut Reader) -> io::Result<[bool; 2]> {
+        if reader.ready.is_none() {
+            // An exported queue keeps an unused parent receiver. Register
+            // only in the process that actually waits on the pipe, so writes
+            // do not also notify an idle parent's kqueue.
+            let ready = Kqueue::new()?;
+            fcntl(&ready, FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC))?;
+            let changes = [&self.file, wake].map(|file| {
+                KEvent::new(
+                    file.as_raw_fd() as usize,
+                    EventFilter::EVFILT_READ,
+                    EvFlags::EV_ADD,
+                    FilterFlag::empty(),
+                    0,
+                    0,
+                )
+            });
+            ready.kevent(
+                &changes,
+                &mut [],
+                Some(libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                }),
+            )?;
+            reader.ready = Some(ready);
+        }
+        let ready = reader.ready.as_ref().unwrap();
         let empty = KEvent::new(
             0,
             EventFilter::EVFILT_READ,
@@ -157,13 +160,13 @@ impl Notification {
 impl WriteNotification for Notification {
     fn read(&self) -> io::Result<u64> {
         let (wake, _) = self.wake.as_ref().ok_or(io::ErrorKind::Unsupported)?;
-        let mut counters = self.counters.lock().unwrap();
+        let mut reader = self.reader.lock().unwrap();
         loop {
             for ((ready, mut file), counter) in self
-                .readable(wake)?
+                .readable(wake, &mut reader)?
                 .into_iter()
                 .zip([&self.file, wake])
-                .zip(counters.iter_mut())
+                .zip(reader.counters.iter_mut())
             {
                 if ready {
                     // Drain ready counters together so a burst causes one
