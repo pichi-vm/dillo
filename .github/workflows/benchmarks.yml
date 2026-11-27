@@ -3,10 +3,11 @@ name: Device isolation benchmarks
 on:
   workflow_dispatch:
     inputs:
-      native_only:
-        description: Run only the physical Arm hosts
-        type: boolean
-        default: false
+      platform:
+        description: Select a platform or run the full matrix
+        type: choice
+        options: [all, linux-x86, linux-arm, macos-arm, windows-msvc]
+        default: all
 
 permissions:
   contents: read
@@ -21,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: ${{ fromJSON(inputs.native_only && '["linux-arm","macos-arm"]' || '["linux-x86","linux-arm","macos-arm","windows-msvc"]') }}
+        platform: ${{ fromJSON(inputs.platform != 'all' && format('["{0}"]', inputs.platform) || '["linux-x86","linux-arm","macos-arm","windows-msvc"]') }}
     name: ${{ matrix.platform }} paired measurements
     runs-on: ${{ fromJSON(matrix.platform == 'linux-arm' && '["self-hosted","Linux","ARM64","bare-metal","aarch64","kvm"]' || matrix.platform == 'macos-arm' && '["self-hosted","macOS","ARM64","bare-metal","m1","self-managed-seatbelt"]' || matrix.platform == 'windows-msvc' && '["windows-2025"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 60
@@ -37,6 +38,10 @@ jobs:
       - name: Install measurement tools
         shell: bash
         run: |
+          if ! command -v python3 >/dev/null; then
+            bench_python=$(nix build --no-link --print-out-paths nixpkgs#python312)
+            export PATH="$bench_python/bin:$PATH"
+          fi
           python3 -m venv "$RUNNER_TEMP/dillo-bench-python"
           if [ "$RUNNER_OS" = Windows ]; then
             bench_bin="$RUNNER_TEMP/dillo-bench-python/Scripts"
