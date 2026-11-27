@@ -708,3 +708,35 @@ there is no allocation per observation or change to the report fields.
 The percentile, boundary and merge check passes with the finer bins. Earlier
 measurements retain their original precision; only results using the updated
 probe can support the finer bounds.
+
+## Bounded receive batches on physical x86
+
+Candidate `9664cd2` retains a pending RX frame in its existing scratch buffer
+and drains up to 64 immediately available user-network frames per interrupt.
+It signals completed work before waiting for guest buffers or reaching the
+host pause checkpoint; a single frame does not wait for a batch to fill.
+Other backends retain their existing receive behavior. The focused fixture
+checks a lone frame, a burst, the batch limit and a temporarily starved ring.
+All 57 network unit tests and strict Clippy pass; four external-network cases
+remain ignored as before. Both execution modes use the same implementation.
+
+Apollo completed 40 boots against `0adf801`: four measured two-second pairs
+per case/revision, plus warm-ups, on CPUs 24–27. The predeclared schedule
+balances binary and execution-mode order independently. Executables are
+frozen from separate build directories and share identical guest assets,
+including the finer latency histogram. Both transports have separate images;
+the MMIO image has no PCI bridge.
+
+Large-echo worker throughput increases 37.8% over PCI and 13.2% over MMIO;
+CPU/GiB falls 24.2% and 9.0%, and p99 bounds fall 24.5% and 16.4%. The control
+also improves: its throughput rises 38.9% and 12.5%. Candidate worker/control
+throughput is 99.1%/99.4%, CPU/GiB 101.5%/101.3%, and p99 103.9%/101.8%.
+These short results support further native measurement, not a parity claim.
+
+Small-echo worker throughput changes by −1.4% on PCI and −0.6% on MMIO;
+the control changes by +12.7% and +0.9%. The MMIO candidate still uses 4.4%
+more CPU/GiB than its control. Retain these mixed observations rather than
+claiming the large-message improvement applies everywhere.
+[network-rx-batch-local-short.json.gz](network-rx-batch-local-short.json.gz)
+contains the plan, absolute and paired observations, environments and hashes
+of all boot results; raw records remain under `target/performance/net-rx`.
