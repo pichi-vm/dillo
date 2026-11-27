@@ -850,3 +850,22 @@ run does not establish equivalence or a latency benefit. The correctness fix
 is retained on its own merits. Source identities, hashes, raw-record digests,
 full ratios and the schedule are in
 [notification-cancellation-macos-short.json.gz](notification-cancellation-macos-short.json.gz).
+
+## Linux Arm wake restoration and cancellation follow-up
+
+[Run 46079569774](https://github.com/pichi-vm/dillo/actions/runs/46079569774)
+compares `4c13db5` with `73201a6`: the Linux per-frame wake restoration and
+cancellable notification reader together. Native lifecycle, notification and
+network checks passed, followed by 40 successful boots. Four two-second pairs
+per case/revision balance binary and execution-mode order independently.
+Executable hashes differ and guest assets match.
+
+The latest worker/control PCI throughput is 96.2% for small echo and 93.5%
+for large echo; CPU/GiB is 105.9%/106.7%, and p99 is 106.4%/109.9%. MMIO
+throughput is 106.1%/95.6%, CPU/GiB 94.0%/109.2%, and p99 101.2%/107.1%.
+Large-message worker throughput changes by +0.5%/+1.1% against the previous
+binary, while its control changes by +1.0%/+2.7%. These short, mixed results
+do not establish equivalence or isolate either change's effect. They remain
+part of qualification rather than being replaced by the more favorable
+earlier snapshot. Full observations, schedule and provenance are retained in
+[notification-cancellation-arm-short.json.gz](notification-cancellation-arm-short.json.gz).
