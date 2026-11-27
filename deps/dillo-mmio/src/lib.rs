@@ -538,11 +538,19 @@ pub struct MessageInterrupt {
     pub masked: bool,
 }
 
-/// A stable queue event with a revocable native message-interrupt binding.
+/// A synchronized queue event with a revocable native message-interrupt binding.
 /// The transport retains the owner through worker shutdown. Removing a
 /// binding preserves pending events; dropping the owner revokes delivery
 /// even if a receiver retains an exported signaling endpoint.
 pub trait MessageInterruptEvent: InterruptLine {
+    /// Whether configuration can replace the exported endpoint. Such owners
+    /// require exported users to stop signaling before configuration and to
+    /// receive the replacement before resuming. Local `signal` is synchronized
+    /// by the owner itself. Stable endpoints can be configured in place.
+    fn requires_quiescence(&self) -> bool {
+        false
+    }
+
     fn configure(&self, message: Option<MessageInterrupt>) -> Result<(), InterruptError>;
 
     /// Drain events while unbound. Bound events belong to the native route.

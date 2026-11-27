@@ -438,13 +438,9 @@ impl VirtioPciDevice {
             let write_end = offset as usize + data.len();
             if write_end > 2 {
                 let msg_ctl = (self.config.read_reg(self.msix_cap_reg) >> 16) as u16;
-                let mut state = self.completion.lock().expect("completion mutex");
-                state.suspend()?;
-                let CompletionState {
-                    table, notifier, ..
-                } = &mut *state;
-                table.write_msg_ctl(msg_ctl, &**notifier);
-                state.resume()?;
+                self.update_completion(|state| {
+                    state.table.write_msg_ctl(msg_ctl, &*state.notifier);
+                })?;
             }
         }
         Ok(())
@@ -481,16 +477,43 @@ impl VirtioPciDevice {
                 Ok(true)
             }
             2 => {
-                let mut state = self.completion.lock().expect("completion mutex");
-                state.suspend()?;
-                let CompletionState {
-                    table, notifier, ..
-                } = &mut *state;
-                let handled = table.bar_write(2, offset, data, &**notifier);
-                state.resume()?;
+                let mut handled = false;
+                self.update_completion(|state| {
+                    handled = state.table.bar_write(2, offset, data, &*state.notifier);
+                })?;
                 Ok(handled)
             }
             _ => Ok(false),
+        }
+    }
+
+    fn update_completion(
+        &self,
+        mut change: impl FnMut(&mut CompletionState),
+    ) -> Result<(), PciError> {
+        let refresh = self
+            .completion
+            .lock()
+            .expect("completion mutex")
+            .events
+            .iter()
+            .flatten()
+            .any(|event| event.requires_quiescence());
+        let mut update = || {
+            let mut state = self.completion.lock().expect("completion mutex");
+            state.suspend()?;
+            change(&mut state);
+            state.resume()
+        };
+        if refresh {
+            // Do not hold completion while waiting for the backend to drain.
+            self.device
+                .lock()
+                .expect("device mutex")
+                .update_interrupts(&mut || update().map_err(std::io::Error::other))
+                .map_err(|error| PciError::Device(error.to_string()))
+        } else {
+            update()
         }
     }
 
@@ -655,14 +678,13 @@ impl VirtioPciDevice {
             CC_QUEUE_SIZE => qc.queue.size = val as u16,
             CC_QUEUE_MSIX_VECTOR => {
                 let vector = val as u16;
-                let mut state = self.completion.lock().expect("completion mutex");
-                state.suspend()?;
-                state.vectors[qi] = if vector < state.table.num_vectors() {
-                    vector
-                } else {
-                    0xFFFF // VIRTIO_MSI_NO_VECTOR
-                };
-                state.resume()?;
+                self.update_completion(|state| {
+                    state.vectors[qi] = if vector < state.table.num_vectors() {
+                        vector
+                    } else {
+                        0xFFFF // VIRTIO_MSI_NO_VECTOR
+                    };
+                })?;
             }
             CC_QUEUE_ENABLE if val != 0 => {
                 qc.enabled = true;

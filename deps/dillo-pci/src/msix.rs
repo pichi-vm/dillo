@@ -97,7 +97,7 @@ impl MsixTableEntry {
 /// dillo-pci never touches a machine backend directly. Instead, the VMM implements this trait
 /// to receive notifications when vectors change or MSI-X enable state changes.
 pub trait MsixNotifier: Send + Sync {
-    /// Stable native completion endpoint, when the backend supports one.
+    /// Native completion endpoint, when the backend supports one.
     fn event(
         &self,
     ) -> Result<

@@ -406,6 +406,21 @@ pub(crate) struct InterruptController {
 }
 
 impl InterruptController {
+    pub(crate) fn trigger(
+        &self,
+        destination: u32,
+        vector: u8,
+    ) -> Result<(Trigger, crate::worker::Event), HResult> {
+        let (handle, event) = raw::create_trigger(self.inner.partition, destination, vector)?;
+        Ok((
+            Trigger {
+                controller: self.clone(),
+                handle: Some(handle),
+            },
+            crate::worker::Event(event),
+        ))
+    }
+
     pub(crate) fn request_fixed_interrupt(
         &self,
         destination: u32,
@@ -414,6 +429,30 @@ impl InterruptController {
         self.inner.memory().ready()?;
         raw::request_fixed_interrupt(self.inner.partition, destination, vector)
             .map_err(|hr| Error::RequestInterrupt(status(hr)))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Trigger {
+    controller: InterruptController,
+    handle: Option<usize>,
+}
+
+impl Trigger {
+    pub(crate) fn retire(&mut self) -> Result<(), HResult> {
+        if let Some(handle) = self.handle {
+            raw::delete_trigger(self.controller.inner.partition, handle)?;
+            self.handle = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Trigger {
+    fn drop(&mut self) {
+        if let Err(error) = self.retire() {
+            log::error!("delete WHP interrupt trigger: {error}");
+        }
     }
 }
 
@@ -901,6 +940,46 @@ mod raw {
     use super::{HResult, failed, hyperv_leaf1_cpuid};
 
     pub(super) type PartitionHandle = WHV_PARTITION_HANDLE;
+
+    pub(super) fn create_trigger(
+        partition: PartitionHandle,
+        destination: u32,
+        vector: u8,
+    ) -> Result<(usize, std::os::windows::io::OwnedHandle), HResult> {
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::System::Hypervisor::*;
+        let parameters = WHV_TRIGGER_PARAMETERS {
+            TriggerType: WHvTriggerTypeInterrupt,
+            Anonymous: WHV_TRIGGER_PARAMETERS_0 {
+                Interrupt: WHV_INTERRUPT_CONTROL {
+                    _bitfield: 0, // Fixed, physical destination, edge-triggered.
+                    Destination: destination,
+                    Vector: u32::from(vector),
+                },
+            },
+            ..Default::default()
+        };
+        let mut trigger = ptr::null_mut();
+        let mut event = ptr::null_mut();
+        // SAFETY: the retained partition is live; parameters and output slots
+        // are initialized. Success transfers ownership of the event handle.
+        let hr = unsafe { WHvCreateTrigger(partition, &parameters, &mut trigger, &mut event) };
+        if failed(hr) {
+            return Err(HResult(hr));
+        }
+        Ok((trigger as usize, unsafe {
+            OwnedHandle::from_raw_handle(event)
+        }))
+    }
+
+    pub(super) fn delete_trigger(partition: PartitionHandle, handle: usize) -> Result<(), HResult> {
+        // SAFETY: the trigger belongs to the retained partition. Its owner
+        // forgets the handle only after successful revocation.
+        let hr = unsafe {
+            windows_sys::Win32::System::Hypervisor::WHvDeleteTrigger(partition, handle as _)
+        };
+        if failed(hr) { Err(HResult(hr)) } else { Ok(()) }
+    }
 
     pub(super) fn create_notification_port(
         partition: PartitionHandle,
@@ -2524,51 +2603,19 @@ mod tests {
         }
         let mut vm = Vm::new_x86_64_with_local_apic_count(1).unwrap();
         vm.add_memory(0x30000, 0x1000).unwrap();
-        vm.write_guest(0x30000, &[0xc6, 0x06, 0x00, 0x20, 0xa5]).unwrap();
-        let mut cpu = vm.create_vcpu(0, Profile::V1).unwrap();
-        cpu.set_registers(vec![(
-            WHvX64RegisterApicBase,
-            WHV_REGISTER_VALUE { Reg64: 0xfee0_0900 },
-        )])
+        vm.write_guest(
+            0x30000,
+            &[
+                0xb8, 0xff, 0x01, 0, 0, // mov eax, 0x1ff
+                0xbb, 0xf0, 0, 0xe0, 0xfe, 0x89, 0x03, // enable LAPIC via SVR
+                0xbb, 0x20, 0x02, 0xe0, 0xfe, 0x8b, 0x03, // read IRR[64..96]
+                0xa3, 0, 0x08, 0x03, 0, // save at 0x30800
+                0xb0, 0xa5, 0xe6, 0x42, 0x0f, 0x0b, // completion exit; ud2
+            ],
+        )
         .unwrap();
-        let apic = || {
-            // WHP's external APIC state uses the architectural MMIO offsets.
-            let mut state = [0u32; 1024];
-            let mut written = 0;
-            // SAFETY: the live, stopped vCPU owns the controller; the buffer
-            // is writable for the supplied size.
-            assert_eq!(
-                unsafe {
-                    WHvGetVirtualProcessorState(
-                        vm.inner.partition,
-                        0,
-                        WHvVirtualProcessorStateTypeInterruptControllerState2,
-                        state.as_mut_ptr().cast(),
-                        size_of_val(&state) as u32,
-                        &mut written,
-                    )
-                },
-                0
-            );
-            assert!((0x230..=4096).contains(&written));
-            (state, written)
-        };
-        let (mut state, size) = apic();
-        state[0xf0 / 4] = 0x1ff; // Software-enable the APIC.
-        // SAFETY: restore the same controller's returned state after changing
-        // only its architectural spurious-vector register.
-        assert_eq!(
-            unsafe {
-                WHvSetVirtualProcessorState(
-                    vm.inner.partition,
-                    0,
-                    WHvVirtualProcessorStateTypeInterruptControllerState2,
-                    state.as_ptr().cast(),
-                    size,
-                )
-            },
-            0
-        );
+        let memory = vm.guest_memory().unwrap();
+        let mut cpu = vm.create_vcpu(0, Profile::V1).unwrap();
         let parameters = |vector| WHV_TRIGGER_PARAMETERS {
             TriggerType: WHvTriggerTypeInterrupt,
             Anonymous: WHV_TRIGGER_PARAMETERS_0 {
@@ -2581,17 +2628,20 @@ mod tests {
             ..Default::default()
         };
         let mut pending = |vector: u32| {
-            // Let WHP apply the queued request to the APIC. IF stays clear,
-            // so it remains in IRR instead of dispatching a guest handler.
-            set_real_mode(&cpu, 0x30000, 0);
-            // With an emulated LAPIC, WHP may handle HLT internally. Exit on
-            // an unmapped store instead of waiting for an interrupt with IF=0.
+            // Read the actual guest-visible APIC with IF clear. With LAPIC
+            // emulation WHP handles HLT internally, so use an explicit exit.
+            set_protected_mode(&cpu, 0x30000);
             assert!(matches!(
                 cpu.run(|_, _| 0, |_, _| false).unwrap(),
-                VmExit::MmioWrite { addr: 0x2000, .. }
+                VmExit::PioWrite {
+                    port: 0x42,
+                    data: [0xa5, ..],
+                    ..
+                }
             ));
-            apic().0[0x220 / 4] & (1 << (vector - 64)) != 0
+            memory.read_obj::<u32>(GuestAddress(0x30800)).unwrap() & (1 << (vector - 64)) != 0
         };
+        assert!(!pending(0x40));
         let wait = |vector, pending: &mut dyn FnMut(u32) -> bool| {
             let deadline = Instant::now() + Duration::from_secs(1);
             while !pending(vector) && Instant::now() < deadline {
@@ -2673,31 +2723,7 @@ mod tests {
             let event = retained.export().unwrap().unwrap();
             let mut registration = Some(retained);
             for registered in [true, false] {
-                set_real_mode(&vcpu, code_base, 0);
-                let mut registers = vec![
-                    (WHvX64RegisterCr0, WHV_REGISTER_VALUE { Reg64: 0x11 }),
-                    (WHvX64RegisterRip, WHV_REGISTER_VALUE { Reg64: code_base }),
-                ];
-                for (name, selector, attributes) in [
-                    (WHvX64RegisterCs, 8, 0xc09b),
-                    (WHvX64RegisterDs, 16, 0xc093),
-                    (WHvX64RegisterSs, 16, 0xc093),
-                ] {
-                    registers.push((
-                        name,
-                        WHV_REGISTER_VALUE {
-                            Segment: WHV_X64_SEGMENT_REGISTER {
-                                Base: 0,
-                                Limit: u32::MAX,
-                                Selector: selector,
-                                Anonymous: WHV_X64_SEGMENT_REGISTER_0 {
-                                    Attributes: attributes,
-                                },
-                            },
-                        },
-                    ));
-                }
-                vcpu.set_registers(registers).unwrap();
+                set_protected_mode(&vcpu, code_base);
                 for (address, width, byte) in writes {
                     if registered
                         && address == 0x2050
@@ -2725,6 +2751,34 @@ mod tests {
             }
             drop(event); // Exported event lifetime does not retain the port.
         }
+    }
+
+    fn set_protected_mode(vcpu: &super::Vcpu, code_base: u64) {
+        set_real_mode(vcpu, code_base, 0);
+        let mut registers = vec![
+            (WHvX64RegisterCr0, WHV_REGISTER_VALUE { Reg64: 0x11 }),
+            (WHvX64RegisterRip, WHV_REGISTER_VALUE { Reg64: code_base }),
+        ];
+        for (name, selector, attributes) in [
+            (WHvX64RegisterCs, 8, 0xc09b),
+            (WHvX64RegisterDs, 16, 0xc093),
+            (WHvX64RegisterSs, 16, 0xc093),
+        ] {
+            registers.push((
+                name,
+                WHV_REGISTER_VALUE {
+                    Segment: WHV_X64_SEGMENT_REGISTER {
+                        Base: 0,
+                        Limit: u32::MAX,
+                        Selector: selector,
+                        Anonymous: WHV_X64_SEGMENT_REGISTER_0 {
+                            Attributes: attributes,
+                        },
+                    },
+                },
+            ));
+        }
+        vcpu.set_registers(registers).unwrap();
     }
 
     fn set_real_mode(vcpu: &super::Vcpu, code_base: u64, rax: u64) {

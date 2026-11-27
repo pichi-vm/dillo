@@ -113,7 +113,21 @@ impl dillo_machine::worker::WorkerHost for Worker {
 }
 
 #[derive(Debug)]
-struct Event(OwnedHandle);
+pub(crate) struct Event(pub(crate) OwnedHandle);
+
+impl Event {
+    pub(crate) fn pending(&self) -> io::Result<bool> {
+        // SAFETY: this retained event is polled without blocking. Software
+        // queue events are auto-reset; only the transport drains them.
+        #[allow(unsafe_code)]
+        match unsafe { WaitForSingleObject(self.0.as_raw_handle(), 0) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            WAIT_FAILED => Err(io::Error::last_os_error()),
+            _ => Err(io::Error::other("unexpected notification poll result")),
+        }
+    }
+}
 
 impl dillo_machine::worker::WriteNotification for Event {
     fn read(&self) -> io::Result<u64> {

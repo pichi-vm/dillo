@@ -31,12 +31,13 @@ mod imp {
         devtree::{OwnedTree, Tree},
         platform::Machine as PlatformMachine,
     };
+    use dillo_machine::worker::{WorkerHost, WriteNotification};
     use dillo_machine::{CpuProfile, Host, HostArchitecture, LaunchConfig, RamRange, VcpuStop};
     use dillo_mmio::{
         Attach, Interrupt, InterruptError, InterruptLine, MessageInterrupt, MessageInterruptDomain,
-        MmioAttachment, MmioBus, MmioDevice, MmioDeviceHandle, MmioInterrupt,
-        MmioInterruptRequirement, MmioRunToken, MmioSpawnError, MmioWindow, MmioWriteOutcome,
-        SharedMemory,
+        MessageInterruptEvent, MmioAttachment, MmioBus, MmioDevice, MmioDeviceHandle,
+        MmioInterrupt, MmioInterruptRequirement, MmioRunToken, MmioSpawnError, MmioWindow,
+        MmioWriteOutcome, SharedMemory,
     };
     use vm_memory::{GuestAddress, GuestMemoryMmap};
 
@@ -523,6 +524,13 @@ mod imp {
     }
 
     impl MessageInterruptDomain for FixedMessageInterruptDomain {
+        fn event(&self) -> Result<Option<Arc<dyn MessageInterruptEvent>>, InterruptError> {
+            Ok(Some(Arc::new(QueueEvent {
+                controller: self.inner.fixed_interrupts.interrupt_controller.clone(),
+                binding: Mutex::new(QueueBinding::software().map_err(delivery_error)?),
+            })))
+        }
+
         fn update(&self, vector: u16, msg: MessageInterrupt) -> Result<(), InterruptError> {
             self.inner.vectors.update(vector, msg);
             Ok(())
@@ -550,6 +558,110 @@ mod imp {
                     );
                 }
             }))
+        }
+    }
+
+    fn delivery_error(error: impl std::fmt::Display) -> InterruptError {
+        InterruptError::Delivery(error.to_string())
+    }
+
+    #[derive(Debug)]
+    struct QueueBinding {
+        // Revoke the native action before closing its event.
+        trigger: Option<crate::hypervisor::Trigger>,
+        event: crate::worker::Event,
+    }
+
+    impl QueueBinding {
+        fn software() -> std::io::Result<Self> {
+            let (event, _) = crate::worker::Worker::notification_pair()?;
+            Ok(Self {
+                trigger: None,
+                event: crate::worker::Event(event),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct QueueEvent {
+        controller: InterruptController,
+        binding: Mutex<QueueBinding>,
+    }
+
+    impl InterruptLine for QueueEvent {
+        fn signal(&self) {
+            if let Err(error) = self.binding.lock().unwrap().event.write(1) {
+                log::error!("WHP queue interrupt: {error}");
+            }
+        }
+
+        fn set_level(&self, level: bool) -> Result<(), InterruptError> {
+            if !level {
+                return Err(InterruptError::UnsupportedDeassert);
+            }
+            self.binding
+                .lock()
+                .unwrap()
+                .event
+                .write(1)
+                .map_err(delivery_error)
+        }
+
+        fn export(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
+            self.binding.lock().unwrap().event.export()
+        }
+    }
+
+    impl MessageInterruptEvent for QueueEvent {
+        fn requires_quiescence(&self) -> bool {
+            true
+        }
+
+        fn configure(&self, message: Option<MessageInterrupt>) -> Result<(), InterruptError> {
+            let message = message
+                .filter(|message| !message.masked)
+                .and_then(|message| {
+                    decode_fixed_msi(FixedMessage {
+                        address: message.address,
+                        data: message.data,
+                        ..Default::default()
+                    })
+                });
+            let mut binding = self.binding.lock().unwrap();
+            if message.is_none() && binding.trigger.is_none() {
+                return Ok(());
+            }
+            let replacement = if let Some(message) = message {
+                let (trigger, event) = self
+                    .controller
+                    .trigger(message.destination, message.vector)
+                    .map_err(delivery_error)?;
+                QueueBinding {
+                    trigger: Some(trigger),
+                    event,
+                }
+            } else {
+                QueueBinding::software().map_err(delivery_error)?
+            };
+            if let Some(trigger) = binding.trigger.as_mut() {
+                trigger.retire().map_err(delivery_error)?;
+            }
+            // Exported callers are paused; local signalers hold this mutex.
+            // Preserve an unconsumed signal across endpoint replacement.
+            if binding.event.pending().map_err(delivery_error)? {
+                replacement.event.write(1).map_err(delivery_error)?;
+            }
+            *binding = replacement;
+            Ok(())
+        }
+
+        fn pending(&self) -> Result<bool, InterruptError> {
+            let binding = self.binding.lock().unwrap();
+            if binding.trigger.is_some() {
+                Ok(false)
+            } else {
+                binding.event.pending().map_err(delivery_error)
+            }
         }
     }
 
