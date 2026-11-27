@@ -9,7 +9,7 @@ use std::io::{self, Read, Write};
 #[cfg(not(target_os = "macos"))]
 use std::os::fd::AsFd;
 use std::os::fd::OwnedFd;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dillo_machine::worker::{NotificationRole, WriteNotification};
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
@@ -30,6 +30,7 @@ pub fn pair() -> io::Result<(OwnedFd, OwnedFd)> {
 struct Notification {
     file: File,
     wake: Option<(File, File)>,
+    counters: Mutex<[Counter; 2]>,
     #[cfg(target_os = "macos")]
     ready: Option<Kqueue>,
 }
@@ -72,9 +73,34 @@ pub fn adopt(resource: OwnedFd, role: NotificationRole) -> io::Result<Arc<dyn Wr
     Ok(Arc::new(Notification {
         file,
         wake,
+        counters: Mutex::default(),
         #[cfg(target_os = "macos")]
         ready,
     }))
+}
+
+#[derive(Debug, Default)]
+struct Counter {
+    bytes: [u8; 8],
+    filled: usize,
+}
+
+impl Counter {
+    fn append(&mut self, bytes: &[u8]) -> Option<u64> {
+        let mut sum: Option<u64> = None;
+        for byte in bytes {
+            self.bytes[self.filled] = *byte;
+            self.filled += 1;
+            if self.filled == self.bytes.len() {
+                sum = Some(
+                    sum.unwrap_or(0)
+                        .saturating_add(u64::from_ne_bytes(self.bytes)),
+                );
+                self.filled = 0;
+            }
+        }
+        sum
+    }
 }
 
 impl Notification {
@@ -131,8 +157,14 @@ impl Notification {
 impl WriteNotification for Notification {
     fn read(&self) -> io::Result<u64> {
         let (wake, _) = self.wake.as_ref().ok_or(io::ErrorKind::Unsupported)?;
+        let mut counters = self.counters.lock().unwrap();
         loop {
-            for (ready, mut file) in self.readable(wake)?.into_iter().zip([&self.file, wake]) {
+            for ((ready, mut file), counter) in self
+                .readable(wake)?
+                .into_iter()
+                .zip([&self.file, wake])
+                .zip(counters.iter_mut())
+            {
                 if ready {
                     // Drain ready counters together so a burst causes one
                     // ring scan or interrupt, rather than one per pipe word.
@@ -144,15 +176,11 @@ impl WriteNotification for Notification {
                     if n == 0 {
                         return Err(io::ErrorKind::UnexpectedEof.into());
                     }
-                    let end = n.div_ceil(8) * 8;
-                    file.read_exact(&mut bytes[n..end])?;
-                    return Ok(bytes[..end]
-                        .as_chunks::<8>()
-                        .0
-                        .iter()
-                        .fold(0u64, |sum, word| {
-                            sum.saturating_add(u64::from_ne_bytes(*word))
-                        }));
+                    // Keep fragments across waits and cancellation. Completing
+                    // a word must not block outside the cancellable wait.
+                    if let Some(sum) = counter.append(&bytes[..n]) {
+                        return Ok(sum);
+                    }
                 }
             }
         }
@@ -200,5 +228,34 @@ mod tests {
         assert_eq!(receiver.read().unwrap(), (33..=64).sum::<u64>());
         receiver.write(1).unwrap();
         assert_eq!(receiver.read().unwrap(), 1);
+    }
+
+    #[test]
+    fn cancellation_preserves_a_partial_counter() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (read, write) = pair().unwrap();
+        let receiver = adopt(read, NotificationRole::Wait).unwrap();
+        let mut write = File::from(write);
+        let bytes = 5u64.to_ne_bytes();
+        write.write_all(&bytes[..3]).unwrap();
+        let waiting = Arc::clone(&receiver);
+        let (done, completed) = mpsc::channel();
+        let thread = std::thread::spawn(move || done.send(waiting.read()).unwrap());
+        receiver.write(1).unwrap();
+        let result = completed.recv_timeout(Duration::from_secs(1));
+        // Closing the external writer also releases the old, uncancellable
+        // read_exact path if this regression fails, so cleanup cannot hang.
+        if result.is_err() {
+            drop(write);
+            thread.join().unwrap();
+            panic!("partial notification blocked cancellation: {result:?}");
+        }
+        thread.join().unwrap();
+        assert_eq!(result.unwrap().unwrap(), 1);
+        write.write_all(&bytes[3..]).unwrap();
+        drop(write);
+        assert_eq!(receiver.read().unwrap(), 5);
     }
 }
