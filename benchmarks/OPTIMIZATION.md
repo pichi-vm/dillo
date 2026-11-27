@@ -14,9 +14,11 @@ isolated, transports in the parent, and the existing vhost-user control plane.
 The target is at least the control's throughput, with no increase in CPU per
 operation or request latency. Evaluate each platform, transport and workload
 separately. A gain under load does not compensate for a queue-depth-one loss.
-PCI-free guests are a primary target. Their measured image must declare no
-PCI host bridge, and their console and workload devices must all use MMIO.
-PCI gains do not compensate for an MMIO regression.
+PCI and MMIO are equally first-class targets, with the same correctness and
+performance requirements. Qualify both independently; gains in one transport
+do not compensate for a regression in the other. Include PCI-free guests:
+their measured image must declare no PCI host bridge, and their console and
+workload devices must all use MMIO.
 Keep startup, idle CPU, threads and private memory visible, but do not reopen
 the deferred image-loading/startup optimization project.
 
