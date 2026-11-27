@@ -2744,18 +2744,19 @@ mod machine_select {
                         );
                         bus.register_device(device);
                         assert_eq!(
-                            bus.write(register.base, &register.value.to_le_bytes()),
+                            bus.write(register.base, &register.value.to_le_bytes())
+                                .unwrap(),
                             Some(outcome)
                         );
                     }
                     let mut data = [0xff; 4];
-                    assert!(bus.read(BASE + size - 4, &mut data));
+                    assert!(bus.read(BASE + size - 4, &mut data).unwrap());
                     assert_eq!(data, [0; 4]);
-                    assert!(!bus.read(BASE + size - 1, &mut [0; 2]));
-                    assert_eq!(bus.write(BASE + size - 1, &[0; 2]), None);
-                    assert!(!bus.read(BASE + 2 * size, &mut [0; 1]));
-                    assert_eq!(bus.write(BASE + 2 * size, &[0; 1]), None);
-                    assert!(!bus.read(BASE - 1, &mut [0; 1]));
+                    assert!(!bus.read(BASE + size - 1, &mut [0; 2]).unwrap());
+                    assert_eq!(bus.write(BASE + size - 1, &[0; 2]).unwrap(), None);
+                    assert!(!bus.read(BASE + 2 * size, &mut [0; 1]).unwrap());
+                    assert_eq!(bus.write(BASE + 2 * size, &[0; 1]).unwrap(), None);
+                    assert!(!bus.read(BASE - 1, &mut [0; 1]).unwrap());
                 }
             }
         }

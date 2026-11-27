@@ -160,6 +160,9 @@ pub enum MmioInterruptRequirement {
 pub enum MmioError {
     #[error("MMIO access is unsupported by the routed device")]
     Unsupported,
+
+    #[error("MMIO device failed: {0}")]
+    Device(String),
 }
 
 /// Device-visible outcome of one guest MMIO write.
@@ -762,20 +765,28 @@ impl MmioBus {
         }
     }
 
-    /// Dispatch a guest MMIO read.
-    pub fn read(&self, addr: u64, data: &mut [u8]) -> bool {
-        if let Some(r) = self.find(addr, data.len() as u64) {
-            return r.device.read(r.window, addr - r.window.base, data).is_ok();
+    /// Dispatch a guest MMIO read, preserving failures from a routed device.
+    pub fn read(&self, addr: u64, data: &mut [u8]) -> Result<bool, MmioError> {
+        let Some(r) = self.find(addr, data.len() as u64) else {
+            return Ok(false);
+        };
+        match r.device.read(r.window, addr - r.window.base, data) {
+            Ok(()) => Ok(true),
+            Err(MmioError::Unsupported) => Ok(false),
+            Err(error) => Err(error),
         }
-        false
     }
 
-    /// Dispatch a guest MMIO write.
-    pub fn write(&self, addr: u64, data: &[u8]) -> Option<MmioWriteOutcome> {
-        if let Some(r) = self.find(addr, data.len() as u64) {
-            return r.device.write(r.window, addr - r.window.base, data).ok();
+    /// Dispatch a guest MMIO write, preserving failures from a routed device.
+    pub fn write(&self, addr: u64, data: &[u8]) -> Result<Option<MmioWriteOutcome>, MmioError> {
+        let Some(r) = self.find(addr, data.len() as u64) else {
+            return Ok(None);
+        };
+        match r.device.write(r.window, addr - r.window.base, data) {
+            Ok(outcome) => Ok(Some(outcome)),
+            Err(MmioError::Unsupported) => Ok(None),
+            Err(error) => Err(error),
         }
-        None
     }
 
     fn find(&self, addr: u64, len: u64) -> Option<&Range> {
@@ -836,9 +847,45 @@ mod tests {
         let mut bus = MmioBus::new();
         bus.register_device(Arc::new(TestDevice::new(0x1000, 0x100)));
         let mut buf = [0u8; 4];
-        assert!(bus.read(0x1042, &mut buf));
+        assert!(bus.read(0x1042, &mut buf).unwrap());
         assert_eq!(buf, [0x42; 4]);
-        assert!(!bus.read(0x900, &mut buf));
+        assert!(!bus.read(0x900, &mut buf).unwrap());
+    }
+
+    #[test]
+    fn routed_failure_is_not_an_unmapped_access() {
+        struct FailedDevice([MmioWindow; 1]);
+        impl MmioDevice for FailedDevice {
+            fn windows(&self) -> &[MmioWindow] {
+                &self.0
+            }
+            fn read(&self, _: MmioWindow, _: u64, _: &mut [u8]) -> Result<(), MmioError> {
+                Err(MmioError::Device("native route failed".into()))
+            }
+            fn write(
+                &self,
+                _: MmioWindow,
+                _: u64,
+                _: &[u8],
+            ) -> Result<MmioWriteOutcome, MmioError> {
+                Err(MmioError::Device("native route failed".into()))
+            }
+        }
+        let mut bus = MmioBus::new();
+        bus.register_device(Arc::new(FailedDevice([MmioWindow {
+            base: 0x1000,
+            size: 4,
+        }])));
+        assert!(matches!(
+            bus.read(0x1000, &mut [0; 4]),
+            Err(MmioError::Device(_))
+        ));
+        assert!(matches!(
+            bus.write(0x1000, &[0; 4]),
+            Err(MmioError::Device(_))
+        ));
+        assert!(!bus.read(0x2000, &mut [0; 4]).unwrap());
+        assert_eq!(bus.write(0x2000, &[0; 4]).unwrap(), None);
     }
 
     #[test]
@@ -847,7 +894,7 @@ mod tests {
         let mut bus = MmioBus::new();
         bus.register_device(Arc::clone(&device));
         assert_eq!(
-            bus.write(0x2080, &[0xAA, 0xBB]),
+            bus.write(0x2080, &[0xAA, 0xBB]).unwrap(),
             Some(MmioWriteOutcome::Continue)
         );
         assert_eq!(device.written.load(Ordering::SeqCst) & 0xFFFF_FFFF, 0x80);
@@ -859,9 +906,9 @@ mod tests {
         bus.register_device(Arc::new(TestDevice::new(0x3000, 0x100)));
 
         let mut buf = [0u8; 4];
-        assert!(bus.read(0x3042, &mut buf));
+        assert!(bus.read(0x3042, &mut buf).unwrap());
         assert_eq!(buf, [0x42; 4]);
-        assert!(!bus.read(0x2fff, &mut buf));
+        assert!(!bus.read(0x2fff, &mut buf).unwrap());
     }
 
     #[test]
@@ -871,7 +918,7 @@ mod tests {
         bus.register_device(Arc::clone(&device));
 
         assert_eq!(
-            bus.write(0x4080, &[0xAA, 0xBB]),
+            bus.write(0x4080, &[0xAA, 0xBB]).unwrap(),
             Some(MmioWriteOutcome::Continue)
         );
         assert_eq!(device.written.load(Ordering::SeqCst) & 0xFFFF_FFFF, 0x80);

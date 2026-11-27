@@ -49,17 +49,28 @@ pub struct BarRegion {
 #[derive(Debug)]
 pub enum PciError {
     Unsupported,
+    Device(String),
 }
 
 impl std::fmt::Display for PciError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unsupported => f.write_str("PCI access is unsupported by the routed endpoint"),
+            Self::Device(error) => write!(f, "PCI device failed: {error}"),
         }
     }
 }
 
 impl std::error::Error for PciError {}
+
+impl From<PciError> for MmioError {
+    fn from(error: PciError) -> Self {
+        match error {
+            PciError::Unsupported => Self::Unsupported,
+            PciError::Device(error) => Self::Device(error),
+        }
+    }
+}
 
 /// PCI device attached to the bus. One per slot.
 pub trait PciDevice: Send + Sync + std::fmt::Debug {
@@ -312,13 +323,14 @@ impl PciBus {
         reg_idx: usize,
         offset: u64,
         data: &[u8],
-    ) {
+    ) -> Result<(), PciError> {
         if bus != 0 || function != 0 || (device as usize) >= NUM_SLOTS {
-            return;
+            return Ok(());
         }
         if let Some(device) = &self.slots[device as usize] {
-            let _ = device.config_write(reg_idx, offset, data);
+            device.config_write(reg_idx, offset, data)?;
         }
+        Ok(())
     }
 
     /// Walk every populated slot and return each BAR's `(slot, region)`.
@@ -433,9 +445,9 @@ impl PciRoot {
         reg_idx: usize,
         offset: u64,
         data: &[u8],
-    ) {
+    ) -> Result<(), PciError> {
         self.bus
-            .config_write(bus, device, function, reg_idx, offset, data);
+            .config_write(bus, device, function, reg_idx, offset, data)
     }
 
     pub fn enumerate_bars(&self) -> Vec<(u8, BarRegion)> {
@@ -662,7 +674,7 @@ impl MmioDevice for PciRoot {
         if let Some((slot, bar_idx)) = self.bar_route(window) {
             return self
                 .bar_read(slot, bar_idx, offset, data)
-                .map_err(|_| MmioError::Unsupported);
+                .map_err(MmioError::from);
         }
 
         Err(MmioError::Unsupported)
@@ -677,14 +689,14 @@ impl MmioDevice for PciRoot {
         if window.base == self.window.base && window.size == self.window.size {
             let (bus, device, function, reg_idx, in_dword) = Self::decode_ecam(offset);
             if offset < 1 << 20 {
-                self.config_write(bus, device, function, reg_idx, in_dword as u64, data);
+                self.config_write(bus, device, function, reg_idx, in_dword as u64, data)?;
             }
             return Ok(MmioWriteOutcome::Continue);
         }
 
         if let Some((slot, bar_idx)) = self.bar_route(window) {
             self.bar_write(slot, bar_idx, offset, data)
-                .map_err(|_| MmioError::Unsupported)?;
+                .map_err(MmioError::from)?;
             return Ok(MmioWriteOutcome::Continue);
         }
 
@@ -807,20 +819,24 @@ mod tests {
         let mut mmio = dillo_mmio::MmioBus::new();
         mmio.register_device(Arc::clone(&root));
         let mut data = [0u8; 4];
-        assert!(mmio.read(window.base, &mut data));
+        assert!(mmio.read(window.base, &mut data).unwrap());
         assert_eq!(data, [0x86, 0x80, 0x37, 0x12]);
-        assert!(mmio.write(window.base + 4, &[7, 0]).is_some());
+        assert!(mmio.write(window.base + 4, &[7, 0]).unwrap().is_some());
         assert_eq!(root.config_read(0, 0, 0, 1), 7);
 
         for offset in [0x10_0000, 0xff0_0000, 0x1000_0000, 0x1ff0_0000] {
-            assert!(mmio.read(window.base + offset, &mut data));
+            assert!(mmio.read(window.base + offset, &mut data).unwrap());
             assert_eq!(data, [0xff; 4], "offset {offset:#x}");
-            assert!(mmio.write(window.base + offset + 4, &[0, 0]).is_some());
+            assert!(
+                mmio.write(window.base + offset + 4, &[0, 0])
+                    .unwrap()
+                    .is_some()
+            );
             assert_eq!(root.config_read(0, 0, 0, 1), 7, "offset {offset:#x}");
         }
         for address in [window.base - 4, window.base + window.size] {
-            assert!(!mmio.read(address, &mut data));
-            assert!(mmio.write(address, &[0, 0]).is_none());
+            assert!(!mmio.read(address, &mut data).unwrap());
+            assert!(mmio.write(address, &[0, 0]).unwrap().is_none());
         }
     }
 

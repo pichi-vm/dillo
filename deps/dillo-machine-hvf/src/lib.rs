@@ -737,7 +737,8 @@ mod imp {
                         self.mmio_bus
                             .lock()
                             .expect("MMIO bus lock poisoned")
-                            .read(addr, &mut data[..size]);
+                            .read(addr, &mut data[..size])
+                            .map_err(|error| Error::Hv(error.to_string()))?;
                         self.inner.complete_mmio_read(u64::from_le_bytes(data))?;
                     }
                     VmExit::MmioWrite { addr, data, size } => {
@@ -746,7 +747,8 @@ mod imp {
                             .mmio_bus
                             .lock()
                             .expect("MMIO bus lock poisoned")
-                            .write(addr, &data[..size]);
+                            .write(addr, &data[..size])
+                            .map_err(|error| Error::Hv(error.to_string()))?;
                         let Some(outcome) = outcome else {
                             log::warn!(
                                 "HVF MMIO write to unmapped {:#x} (size {}, data {:02x?})",

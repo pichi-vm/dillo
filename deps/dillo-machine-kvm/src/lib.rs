@@ -1038,10 +1038,18 @@ mod imp {
         fn run(&mut self) -> Result<VcpuExit, Error> {
             loop {
                 let bus = Arc::clone(&self.mmio_bus);
+                let failure = std::cell::Cell::new(None);
                 let exit = self.inner.run(
                     |_port, _size| u32::MAX,
-                    move |addr, data| {
-                        let handled = bus.lock().expect("MMIO bus lock poisoned").read(addr, data);
+                    |addr, data| {
+                        let handled =
+                            match bus.lock().expect("MMIO bus lock poisoned").read(addr, data) {
+                                Ok(handled) => handled,
+                                Err(error) => {
+                                    failure.set(Some(error));
+                                    return false;
+                                }
+                            };
                         if !handled {
                             log::debug!(
                                 "MMIO read from unmapped {:#x} (size {}); returning zeros",
@@ -1052,6 +1060,9 @@ mod imp {
                         handled
                     },
                 )?;
+                if let Some(error) = failure.take() {
+                    return Err(Error::UnhandledExit(error.to_string()));
+                }
                 match exit {
                     VmExit::MmioRead { addr, size } => {
                         let _ = (addr, size);
@@ -1069,7 +1080,8 @@ mod imp {
                             .mmio_bus
                             .lock()
                             .expect("MMIO bus lock poisoned")
-                            .write(addr, &data[..size as usize]);
+                            .write(addr, &data[..size as usize])
+                            .map_err(|error| Error::UnhandledExit(error.to_string()))?;
                         let Some(outcome) = outcome else {
                             // Unmapped probes are non-fatal, like reads above.
                             // Keep their details available in diagnostic logs.

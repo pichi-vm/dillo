@@ -153,7 +153,8 @@ fn queue_vectors_stay_within_each_function_on_activation() {
             while cap != 0 {
                 let value = root.config_read(0, slot, 0, cap as usize / 4);
                 if value as u8 == dillo_pci::CAP_ID_MSIX {
-                    root.config_write(0, slot, 0, cap as usize / 4, 2, &0x8000u16.to_le_bytes());
+                    root.config_write(0, slot, 0, cap as usize / 4, 2, &0x8000u16.to_le_bytes())
+                        .unwrap();
                     break;
                 }
                 cap = (value >> 8) & 0xff;

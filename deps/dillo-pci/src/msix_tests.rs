@@ -166,7 +166,8 @@ fn shared_domain_keeps_function_enable_and_masks_independent() {
     assert_delivery(&domain, &handles, &[]);
     let control = |slot, value: u16| {
         root.bus
-            .config_write(0, slot, 0, 0, 0, &value.to_le_bytes());
+            .config_write(0, slot, 0, 0, 0, &value.to_le_bytes())
+            .unwrap();
     };
     control(1, 0x8000);
     control(2, 0x8000);
