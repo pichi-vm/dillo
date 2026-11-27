@@ -363,6 +363,17 @@ pub trait VirtioDevice: Send {
     /// Write device-specific configuration space.
     fn write_config(&mut self, offset: u64, data: &[u8]);
 
+    /// Reconfigure queue interrupt owners and refresh any exported endpoints.
+    /// Local devices signal the synchronized owners directly. A frontend that
+    /// exports their handles must drain in-flight calls before invoking `update`,
+    /// then replace those handles before resuming. Failure leaves it stopped.
+    fn update_interrupts(
+        &mut self,
+        update: &mut dyn FnMut() -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        update()
+    }
+
     /// Stop guest-memory access and publication after admitted work completes,
     /// preserving queue progress and negotiation for resume.
     fn quiesce(&mut self) -> Result<(), ActivateError> {

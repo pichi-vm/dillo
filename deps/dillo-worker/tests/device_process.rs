@@ -800,7 +800,7 @@ fn without_inherited_reader<T>(start: impl FnOnce() -> io::Result<T>) -> io::Res
 // This endpoint deliberately cannot deliver through a parent callback.
 // Both queue directions must be transferred without spawning a relay.
 #[derive(Debug)]
-struct DirectCall(dillo_machine::worker::Resource);
+struct DirectCall(Mutex<dillo_machine::worker::Resource>);
 impl dillo_mmio::InterruptLine for DirectCall {
     fn signal(&self) {
         panic!("exported call used a parent relay");
@@ -809,7 +809,7 @@ impl dillo_mmio::InterruptLine for DirectCall {
         panic!("exported call used a parent relay");
     }
     fn export(&self) -> io::Result<Option<dillo_machine::worker::Resource>> {
-        self.0.try_clone().map(Some)
+        self.0.lock().unwrap().try_clone().map(Some)
     }
 }
 
@@ -820,32 +820,46 @@ fn direct_calls(
 ) -> io::Result<()> {
     for _ in 0..2 {
         let (read, write) = Worker::notification_pair()?;
-        let read =
-            Worker::notification_endpoint(read, dillo_machine::worker::NotificationRole::Wait)?;
-        let rescue = Worker::notification_endpoint(
-            write.try_clone()?,
-            dillo_machine::worker::NotificationRole::Signal,
-        )?;
+        let interrupt = Arc::new(DirectCall(Mutex::new(write)));
         let (mut params, kick) = activation(Arc::new(AtomicUsize::new(0)), false, "native");
         let params = VirtioActivate::with_host_and_queue_interrupts(
             params.take_queues(),
             params.take_queue_evts(),
             Arc::new(Host(AtomicUsize::new(0))),
-            vec![Some(Interrupt::new(Arc::new(DirectCall(write))))],
+            vec![Some(Interrupt::new(interrupt.clone()))],
         )
         .with_negotiated_features(1 << 32);
         let active = proxy.activate(params).map_err(io::Error::other)?;
-        let (send, receive) = std::sync::mpsc::channel();
-        let receiver = Arc::clone(&read);
-        let waiter = std::thread::spawn(move || send.send(receiver.read()));
-        request(memory, 1, 1, 0x3a);
-        kick.write(1)?;
-        let result = receive.recv_timeout(Duration::from_secs(5));
-        // Bound failed cleanup without turning the rescue into a passing result.
-        rescue.write(1)?;
-        waiter.join().unwrap().map_err(io::Error::other)?;
-        assert!(result.map_err(io::Error::other)?? > 0);
-        complete(memory, 1)?;
+        let mut read = read;
+        for index in 1..=2 {
+            if index == 2 {
+                let (new_read, write) = Worker::notification_pair()?;
+                proxy.update_interrupts(&mut || {
+                    *interrupt.0.lock().unwrap() = write.try_clone()?;
+                    Ok(())
+                })?;
+                read = new_read;
+            }
+            let receiver = Worker::notification_endpoint(
+                read.try_clone()?,
+                dillo_machine::worker::NotificationRole::Wait,
+            )?;
+            let rescue = Worker::notification_endpoint(
+                interrupt.0.lock().unwrap().try_clone()?,
+                dillo_machine::worker::NotificationRole::Signal,
+            )?;
+            let (send, receive) = std::sync::mpsc::channel();
+            let waiter = std::thread::spawn(move || send.send(receiver.read()));
+            request(memory, index, 1, 0x3a);
+            kick.write(1)?;
+            let result = receive.recv_timeout(Duration::from_secs(5));
+            // Keep the read handle alive through cleanup, including on Darwin.
+            // Capture the result before the rescue so a lost call still fails.
+            rescue.write(1)?;
+            waiter.join().unwrap().map_err(io::Error::other)?;
+            assert!(result.map_err(io::Error::other)?? > 0);
+            complete(memory, index)?;
+        }
         active.join().map_err(io::Error::other)?;
         memory.write_slice(&[0; 64], GuestAddress(0x2000)).unwrap();
         memory.write_slice(&[0; 256], GuestAddress(0x3000)).unwrap();

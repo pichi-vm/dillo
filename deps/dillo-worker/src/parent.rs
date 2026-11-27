@@ -361,6 +361,7 @@ impl Prepared {
                 features: features & !wire::PROTOCOL_FEATURES,
                 config,
                 next_epoch: 1,
+                interrupts: Vec::new(),
             },
             Control(session),
         ))
@@ -448,6 +449,32 @@ struct Session {
 }
 
 impl Session {
+    // The caller holds lifecycle across pause, reconfiguration and resume.
+    fn pause_queues(&self) -> io::Result<()> {
+        for index in 0..self.kicks.lock().unwrap().len() {
+            let reply = self.get(GET_VRING_BASE, wire::state(index as u32, 0))?;
+            let mut data = reply.as_slice();
+            if wire::take_u32(&mut data)? != index as u32
+                || wire::take_u32(&mut data)? > u32::from(u16::MAX)
+                || !data.is_empty()
+            {
+                return Err(io::Error::other("invalid stopped queue index"));
+            }
+        }
+        Ok(())
+    }
+
+    fn resume_queues(&self) -> io::Result<()> {
+        for (index, kick) in self.kicks.lock().unwrap().iter().enumerate() {
+            self.set(
+                SET_VRING_KICK,
+                (index as u64).to_ne_bytes().to_vec(),
+                vec![kick.try_clone()?],
+            )?;
+        }
+        Ok(())
+    }
+
     fn get(&self, request: u32, payload: Vec<u8>) -> io::Result<Vec<u8>> {
         self.exchange(request, payload, Vec::new(), Reply::Data)
     }
@@ -606,29 +633,14 @@ impl Control {
     pub fn quiesce(&self) -> io::Result<()> {
         let _lifecycle = self.0.lifecycle.lock().unwrap();
         if self.0.shared.active.load(Ordering::Acquire) != 0 {
-            for index in 0..self.0.kicks.lock().unwrap().len() {
-                let reply = self.0.get(GET_VRING_BASE, wire::state(index as u32, 0))?;
-                let mut data = reply.as_slice();
-                if wire::take_u32(&mut data)? != index as u32
-                    || wire::take_u32(&mut data)? > u32::from(u16::MAX)
-                    || !data.is_empty()
-                {
-                    return Err(io::Error::other("invalid stopped queue index"));
-                }
-            }
+            self.0.pause_queues()?;
         }
         Ok(())
     }
     pub fn resume(&self) -> io::Result<()> {
         let _lifecycle = self.0.lifecycle.lock().unwrap();
         if self.0.shared.active.load(Ordering::Acquire) != 0 {
-            for (index, kick) in self.0.kicks.lock().unwrap().iter().enumerate() {
-                self.0.set(
-                    SET_VRING_KICK,
-                    (index as u64).to_ne_bytes().to_vec(),
-                    vec![kick.try_clone()?],
-                )?;
-            }
+            self.0.resume_queues()?;
         }
         Ok(())
     }
@@ -659,6 +671,7 @@ pub struct Proxy {
     features: u64,
     config: Arc<Mutex<Vec<u8>>>,
     next_epoch: u64,
+    interrupts: Vec<(u32, dillo_mmio::Interrupt)>,
 }
 
 impl std::fmt::Debug for Proxy {
@@ -695,6 +708,26 @@ impl VirtioDevice for Proxy {
     }
     fn write_config(&mut self, _: u64, _: &[u8]) {}
 
+    fn update_interrupts(&mut self, update: &mut dyn FnMut() -> io::Result<()>) -> io::Result<()> {
+        let _lifecycle = self.session.lifecycle.lock().unwrap();
+        if self.session.shared.active.load(Ordering::Acquire) == 0 {
+            return update();
+        }
+        self.session.pause_queues()?;
+        update()?;
+        for (index, interrupt) in &self.interrupts {
+            let resource = interrupt
+                .export()?
+                .ok_or_else(|| io::Error::other("interrupt endpoint no longer exportable"))?;
+            self.session.set(
+                SET_VRING_CALL,
+                u64::from(*index).to_ne_bytes().to_vec(),
+                vec![resource],
+            )?;
+        }
+        self.session.resume_queues()
+    }
+
     fn activate(
         &mut self,
         mut activation: VirtioActivate,
@@ -717,6 +750,7 @@ impl VirtioDevice for Proxy {
             .checked_add(1)
             .ok_or_else(|| ActivateError::InvalidConfig("activation epoch exhausted".into()))?;
         session.shared.active.store(epoch, Ordering::Release);
+        self.interrupts.clear();
         let mut relays = Vec::new();
         let mut retained_kicks = Vec::new();
         let mut retained_interrupts = Vec::new();
@@ -757,7 +791,7 @@ impl VirtioDevice for Proxy {
                 {
                     // Retain the binding until reset has stopped the backend.
                     // The transferred resource is only its signaling endpoint.
-                    retained_interrupts.extend(interrupt);
+                    retained_interrupts.extend(interrupt.map(|interrupt| (index, interrupt)));
                     resource
                 } else {
                     let (read, write) = (session.pair)()?;
@@ -850,6 +884,7 @@ impl VirtioDevice for Proxy {
             return Err(error.into());
         }
         let relays = Arc::new(Mutex::new(Some(relays)));
+        self.interrupts.clone_from(&retained_interrupts);
         let stop_relays = Arc::clone(&relays);
         Ok(VirtioDeviceHandle::new(
             move || {
