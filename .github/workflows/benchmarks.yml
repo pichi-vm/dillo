@@ -1,0 +1,88 @@
+name: Device isolation benchmarks
+
+on:
+  push:
+    branches: [milestone/device-benchmarks]
+    paths: [.github/workflows/benchmarks.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  NIGHTLY: nightly-2026-07-06
+
+jobs:
+  paired:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86
+            runner: '["ubuntu-24.04"]'
+            guest: x86_64-unknown-linux-musl
+          - name: linux-arm
+            runner: '["self-hosted","Linux","ARM64","bare-metal","aarch64","kvm"]'
+            guest: aarch64-unknown-linux-musl
+          - name: macos-arm
+            runner: '["self-hosted","macOS","ARM64","bare-metal","m1","self-managed-seatbelt"]'
+            guest: aarch64-unknown-linux-musl
+          - name: windows-msvc
+            runner: '["windows-2025"]'
+            guest: x86_64-unknown-linux-musl
+    name: ${{ matrix.name }} paired measurements
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install measurement tools
+        shell: bash
+        run: python -m pip install psutil==7.2.2
+      - name: Install toolchain
+        shell: bash
+        run: |
+          rustup toolchain install "$NIGHTLY" --profile minimal --component rust-src
+          rustup default "$NIGHTLY"
+          rustup target add x86_64-unknown-none aarch64-unknown-none "${{ matrix.guest }}"
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo 'CARGO_BUILD_TARGET=x86_64-pc-windows-msvc' >> "$GITHUB_ENV"
+          fi
+      - uses: Swatinem/rust-cache@master
+        with:
+          save-if: ${{ runner.environment == 'github-hosted' }}
+      - name: Provide native KVM RAM
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo chmod 666 /dev/kvm
+          if [ "$(sysctl -n vm.nr_hugepages)" -lt 256 ]; then
+            sudo sysctl -w vm.nr_hugepages=256
+          fi
+          test "$(awk '/HugePages_Free/{print $2}' /proc/meminfo)" -ge 128
+      - name: Build matched release assets
+        shell: bash
+        env:
+          DILLO_BENCH_DIR: ${{ github.workspace }}/target/benchmarks
+        run: >-
+          cargo --config .copr/cargo-config.toml test --locked --release
+          -p dillo --features vm-tests,bench-in-process --test boot
+          benchmark::benchmark_assets -- --ignored --exact --nocapture
+      - name: Measure paired workloads
+        shell: bash
+        run: >-
+          python benchmarks/run.py --assets target/benchmarks/assets.json
+          --output target/benchmark-results --pairs 5 --duration-ms 1000
+      - name: Upload measurements and logs
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: device-benchmarks-${{ matrix.name }}
+          path: |
+            target/benchmark-results/**/*.json
+            target/benchmark-results/**/*.txt
+          if-no-files-found: warn
