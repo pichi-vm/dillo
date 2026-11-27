@@ -23,7 +23,10 @@ pub struct HostNetwork;
 
 impl NetworkResources for HostNetwork {
     fn connect_tcp(&self, address: SocketAddr) -> io::Result<TcpStream> {
-        mio::net::TcpStream::connect(address).map(Into::into)
+        let stream = mio::net::TcpStream::connect(address)?;
+        // Configure before granting the socket to a confined worker.
+        stream.set_nodelay(true)?;
+        Ok(stream.into())
     }
 
     fn connect_udp(&self, address: SocketAddr) -> io::Result<UdpSocket> {

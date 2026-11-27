@@ -894,10 +894,14 @@ fn service_sockets() -> std::io::Result<(SocketSet<'static>, SocketHandle, Socke
 }
 
 fn make_tcp_socket() -> tcp::Socket<'static> {
-    tcp::Socket::new(
+    let mut socket = tcp::Socket::new(
         tcp::SocketBuffer::new(vec![0u8; TCP_BUFFER]),
         tcp::SocketBuffer::new(vec![0u8; TCP_BUFFER]),
-    )
+    );
+    // Forward bytes promptly; an extra Nagle stage can wait for the guest's
+    // delayed ACK even when the original application chose TCP_NODELAY.
+    socket.set_nagle_enabled(false);
+    socket
 }
 
 fn make_udp_socket() -> udp::Socket<'static> {
