@@ -665,6 +665,11 @@ mod imp {
     }
 
     impl MmioAttachment for MachineMmioAttachment {
+        fn notification(&self) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
+            <crate::worker::Worker as dillo_machine::worker::WorkerHost>::queue_notification()
+                .map(Some)
+        }
+
         fn interrupts(&self) -> &[MmioInterrupt] {
             &self.interrupts
         }

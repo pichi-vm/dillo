@@ -118,6 +118,27 @@ pub enum NotificationRole {
     Signal,
 }
 
+#[derive(Debug)]
+struct QueueNotification {
+    wait: std::sync::Arc<dyn WriteNotification>,
+    signal: std::sync::Arc<dyn WriteNotification>,
+    receiver: Resource,
+}
+
+impl WriteNotification for QueueNotification {
+    fn read(&self) -> io::Result<u64> {
+        self.wait.read()
+    }
+
+    fn write(&self, count: u64) -> io::Result<()> {
+        self.signal.write(count)
+    }
+
+    fn export(&self) -> io::Result<Option<Resource>> {
+        self.receiver.try_clone().map(Some)
+    }
+}
+
 /// Facilities available to a device worker. This interface deliberately has no
 /// native VM, vCPU, debugger, or arbitrary process-handle operation.
 pub trait WorkerHost {
@@ -177,6 +198,17 @@ pub trait WorkerHost {
     /// to the same event; its count is a wake hint, not a request count.
     fn notification_pair() -> io::Result<(Resource, Resource)> {
         Err(io::ErrorKind::Unsupported.into())
+    }
+
+    /// One queue wake usable locally or by an exported worker receiver.
+    /// Software notify dispatch signals the same object in either case.
+    fn queue_notification() -> io::Result<std::sync::Arc<dyn WriteNotification>> {
+        let (receiver, signal) = Self::notification_pair()?;
+        Ok(std::sync::Arc::new(QueueNotification {
+            wait: Self::notification_endpoint(receiver.try_clone()?, NotificationRole::Wait)?,
+            signal: Self::notification_endpoint(signal, NotificationRole::Signal)?,
+            receiver,
+        }))
     }
 
     fn notification_endpoint(

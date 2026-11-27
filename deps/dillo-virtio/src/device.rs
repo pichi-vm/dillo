@@ -242,6 +242,10 @@ impl VirtioRunToken {
 
 /// Host-side execution service for virtio device workers.
 pub trait VirtioDeviceHost: Send + Sync + std::fmt::Debug {
+    fn notification(&self) -> std::io::Result<Kick> {
+        Kick::new()
+    }
+
     fn shared_memory(&self) -> Vec<Arc<dyn SharedMemory>> {
         Vec::new()
     }

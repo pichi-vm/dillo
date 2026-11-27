@@ -644,6 +644,11 @@ pub trait MmioAttachment: Send + Sync + std::fmt::Debug {
 
     fn shared_memory(&self) -> &[Arc<dyn SharedMemory>];
 
+    /// A software-signaled queue wake exportable to a native device worker.
+    fn notification(&self) -> std::io::Result<Option<Arc<dyn WriteNotification>>> {
+        Ok(None)
+    }
+
     /// Optionally accelerate an exact four-byte write in this device's window.
     /// Unsupported backends retain ordinary MMIO dispatch.
     fn write_notification(

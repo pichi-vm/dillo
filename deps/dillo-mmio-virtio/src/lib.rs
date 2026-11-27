@@ -496,7 +496,7 @@ fn maybe_activate(g: &mut Inner, window: MmioWindow, interrupt: Interrupt) {
                 .write_notification(window, QUEUE_NOTIFY, value)?
             {
                 Some(notification) => Ok(Kick::from_notification(notification)),
-                None => Kick::new(),
+                None => host.notification(),
             }
         })
         .collect::<std::io::Result<Vec<_>>>()
@@ -532,6 +532,12 @@ struct MmioVirtioHost {
 }
 
 impl VirtioDeviceHost for MmioVirtioHost {
+    fn notification(&self) -> std::io::Result<Kick> {
+        self.attachment
+            .notification()?
+            .map_or_else(Kick::new, |wake| Ok(Kick::from_notification(wake)))
+    }
+
     fn shared_memory(&self) -> Vec<Arc<dyn SharedMemory>> {
         self.attachment.shared_memory().to_vec()
     }

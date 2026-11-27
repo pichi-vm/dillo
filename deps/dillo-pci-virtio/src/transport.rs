@@ -668,6 +668,10 @@ impl VirtioPciDevice {
             self.bar0_gpa,
             self.bar2_gpa
         );
+        let Some(host) = self.host.as_ref().map(Arc::clone) else {
+            log::error!("virtio-pci: activate failed: no PCI attachment host");
+            return;
+        };
         let mut queues = Vec::new();
         let mut queue_interrupts = Vec::new();
         for (index, config) in self.queues.iter().enumerate().filter(|(_, qc)| qc.enabled) {
@@ -687,7 +691,7 @@ impl VirtioPciDevice {
 
         let mut kicks: Vec<Kick> = Vec::new();
         for _ in &queues {
-            match Kick::new() {
+            match host.notification() {
                 Ok(k) => kicks.push(k),
                 Err(e) => {
                     log::error!("virtio-pci: failed to create kick: {e}");
@@ -702,11 +706,6 @@ impl VirtioPciDevice {
                 self.queue_kicks.push(clone);
             }
         }
-
-        let Some(host) = self.host.as_ref().map(Arc::clone) else {
-            log::error!("virtio-pci: activate failed: no PCI attachment host");
-            return;
-        };
 
         let handle = match self.device.lock().expect("device mutex").activate(
             VirtioActivate::with_host_and_queue_interrupts(queues, kicks, host, queue_interrupts)
@@ -777,6 +776,12 @@ impl PciVirtioHost {
 }
 
 impl VirtioDeviceHost for PciVirtioHost {
+    fn notification(&self) -> std::io::Result<Kick> {
+        self.host
+            .notification()?
+            .map_or_else(Kick::new, |wake| Ok(Kick::from_notification(wake)))
+    }
+
     fn shared_memory(&self) -> Vec<Arc<dyn SharedMemory>> {
         self.host.shared_memory().to_vec()
     }

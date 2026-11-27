@@ -108,6 +108,10 @@ pub trait PciDevice: Send + Sync + std::fmt::Debug {
 pub trait PciDeviceHost: Send + Sync + std::fmt::Debug {
     fn shared_memory(&self) -> &[Arc<dyn SharedMemory>];
 
+    fn notification(&self) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
+        Ok(None)
+    }
+
     fn msix_notifier(&self) -> Option<Arc<dyn MsixNotifier>> {
         None
     }
@@ -490,6 +494,10 @@ struct PciRootHost {
 }
 
 impl PciDeviceHost for PciRootHost {
+    fn notification(&self) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
+        self.attachment.notification()
+    }
+
     fn shared_memory(&self) -> &[Arc<dyn SharedMemory>] {
         self.attachment.shared_memory()
     }
@@ -527,6 +535,10 @@ struct OffsetPciDeviceHost {
 }
 
 impl PciDeviceHost for OffsetPciDeviceHost {
+    fn notification(&self) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
+        self.inner.notification()
+    }
+
     fn shared_memory(&self) -> &[Arc<dyn SharedMemory>] {
         self.inner.shared_memory()
     }

@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 use dillo_machine::worker::MemoryExport;
 #[cfg(not(target_os = "macos"))]
 use dillo_machine::worker::RamView;
-#[cfg(not(target_os = "macos"))]
 use dillo_machine::worker::WorkerHost;
 use dillo_mmio::Interrupt;
 use dillo_storage::{BlockBacking, Qcow2Backing, WritableBlockBacking};
@@ -335,6 +334,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for mode in [
         "normal",
+        "native",
         "qcow2",
         "gated",
         "gated-reset",
@@ -348,7 +348,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "reply-resource",
     ]
     .into_iter()
-    .chain(cfg!(target_os = "linux").then_some("native"))
     .chain(cfg!(target_os = "macos").then_some("inherited-fd"))
     {
         eprintln!("block process: {mode}");
@@ -455,14 +454,7 @@ fn activation(
     mode: &str,
 ) -> (VirtioActivate, Kick) {
     let kick = if mode == "native" {
-        #[cfg(target_os = "linux")]
-        {
-            use nix::sys::eventfd::{EfdFlags, EventFd};
-            let counter = EventFd::from_flags(EfdFlags::EFD_CLOEXEC).unwrap();
-            Kick::from_notification(Worker::notification(counter.into()).unwrap())
-        }
-        #[cfg(not(target_os = "linux"))]
-        unreachable!("native counter fixture is Linux-only")
+        Kick::from_notification(Worker::queue_notification().unwrap())
     } else {
         Kick::new().unwrap()
     };
