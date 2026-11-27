@@ -502,6 +502,11 @@ impl Interrupt {
         self.0.signal();
     }
 
+    /// Whether both handles refer to the same interrupt owner.
+    pub fn same_source(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     pub fn set_level(&self, level: bool) -> Result<(), InterruptError> {
         self.0.set_level(level)
     }

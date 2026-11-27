@@ -765,6 +765,7 @@ impl VirtioDevice for Proxy {
         *paused = false;
         self.interrupts.clear();
         let mut relays = Vec::new();
+        let mut shared_calls: Vec<(dillo_mmio::Interrupt, Resource)> = Vec::new();
         let mut retained_kicks = Vec::new();
         let mut retained_interrupts = Vec::new();
         let result = (|| -> io::Result<()> {
@@ -806,8 +807,19 @@ impl VirtioDevice for Proxy {
                     // The transferred resource is only its signaling endpoint.
                     retained_interrupts.extend(interrupt.map(|interrupt| (index, interrupt)));
                     resource
+                } else if let Some((_, resource)) = shared_calls.iter().find(|(owner, _)| {
+                    interrupt
+                        .as_ref()
+                        .is_some_and(|interrupt| owner.same_source(interrupt))
+                }) {
+                    resource.try_clone()?
                 } else {
                     let (read, write) = (session.pair)()?;
+                    // Queues sharing one status/line owner need one receiver.
+                    // Keep its endpoint while wiring the remaining queues.
+                    if let Some(interrupt) = &interrupt {
+                        shared_calls.push((interrupt.clone(), write.try_clone()?));
+                    }
                     let call = (session.endpoint)(read, NotificationRole::Wait)?;
                     let wake = Kick::from_notification(Arc::clone(&call));
                     let shared = Arc::clone(&session.shared);

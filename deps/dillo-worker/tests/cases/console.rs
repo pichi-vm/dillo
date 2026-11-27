@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    Arc, AtomicUsize, Bytes, Duration, File, GuestAddress, Host, Instant, Kick, Queue,
-    VirtioActivate, VirtioDevice, Worker, Write, io, memory, read_at,
+    Arc, AtomicUsize, Bytes, Duration, File, GuestAddress, Host, Instant, Interrupt, Kick,
+    Ordering, Queue, VirtioActivate, VirtioDevice, Worker, WorkerHost, Write, io, memory, read_at,
 };
 use dillo_machine::worker::Resource;
 use dillo_virtio_console::{
@@ -53,6 +53,13 @@ pub(super) fn exercise() -> io::Result<()> {
     .with_config_poll(|| Ok(()));
     let (mut proxy, control) = prepared.start::<Worker>(export, || {})?;
     for epoch in 0..2 {
+        let delivered = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
+        let interrupts = delivered.each_ref().map(|count| {
+            let count = Arc::clone(count);
+            Interrupt::from_fn(move || {
+                count.fetch_add(1, Ordering::Release);
+            })
+        });
         let mut queues = Vec::new();
         let mut kicks = Vec::new();
         for index in 0..6 {
@@ -69,25 +76,36 @@ pub(super) fn exercise() -> io::Result<()> {
             queue.avail_ring = GuestAddress(base(index) + 0x1000);
             queue.used_ring = GuestAddress(base(index) + 0x2000);
             queues.push(queue);
-            kicks.push(Kick::new()?);
+            kicks.push(Kick::from_notification(Worker::queue_notification()?));
         }
         let active = proxy
             .activate(
                 VirtioActivate::with_host_and_queue_interrupts(
                     queues,
                     kicks.clone(),
-                    Arc::new(Host(AtomicUsize::new(usize::MAX))),
-                    vec![None; 6],
+                    // Six queues share two interrupt owners. Native kicks need
+                    // no relays, leaving exactly one receiver per owner.
+                    Arc::new(Host(AtomicUsize::new(2))),
+                    (0..6)
+                        .map(|index| Some(interrupts[index / 3].clone()))
+                        .collect(),
                 )
                 .with_negotiated_features(proxy.features()),
             )
             .map_err(io::Error::other)?;
-        submit(&memory, 1, 1, b"stdio", false);
-        kicks[1].write(1)?;
-        wait_used(&memory, 1, 1)?;
-        submit(&memory, 5, 1, b"api", false);
-        kicks[5].write(1)?;
-        wait_used(&memory, 5, 1)?;
+        for (queue, bytes) in [(1, b"stdio".as_slice()), (5, b"api".as_slice())] {
+            submit(&memory, queue, 1, bytes, false);
+            kicks[queue as usize].write(1)?;
+            wait_used(&memory, queue, 1)?;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while delivered[queue as usize / 3].load(Ordering::Acquire) == 0 {
+                assert!(
+                    Instant::now() < deadline,
+                    "completion notification deadline"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut received = [0; 3];
         loop {
