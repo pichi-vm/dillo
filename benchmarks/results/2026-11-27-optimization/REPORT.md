@@ -309,9 +309,24 @@ two-second design. Worker random reads rise from 94.94 to 135.07 MiB/s and
 random writes from 83.29 to 121.96 MiB/s. The corresponding shared-path control
 medians are 117.49 and 118.09 MiB/s. Worker CPU/GiB falls from 16.81 to 11.26
 seconds for reads and 19.75 to 12.82 for writes. The 64-KiB network case still
-has a worse p99 bound; the coalescing follow-up is being measured separately.
+has a worse p99 bound; the coalescing follow-up below measures that separately.
 [shared-isr-arm-short.json.gz](shared-isr-arm-short.json.gz) retains the paired
 observations, and raw artifacts are in `target/performance/shared-isr-arm-46045365585`.
 Neither the host-only latch nor successful guest I/O resolves per-activation
 capability revocation or native level reassertion; the experiment retains the
 existing KVM pulse behavior.
+
+[The Arm coalescing run](https://github.com/pichi-vm/dillo/actions/runs/46046812309)
+completed all 32 PCI-free boots at `690dbd6`. It compares relay and coalesced
+shared status in the same binary, with three pairs of two-second operations
+per case. Worker random reads increase from 89.41 to 145.43 MiB/s and random
+writes from 80.07 to 123.46 MiB/s; the shared-path control medians are 117.37
+and 123.81 MiB/s. Worker CPU/GiB falls from 17.91 to 10.14 seconds for reads
+and from 20.64 to 12.50 for writes. The 64-KiB echo rate rises from 107.16 to
+123.57 MiB/s, but its optimized control reaches 140.32 MiB/s: paired worker
+throughput retains 92.2%, and CPU/GiB is 17.1% higher. Its p99 bound improves
+to 589823 ns, versus 622591 ns for control. This mixed result does not
+establish parity. [shared-isr-arm-coalesced-short.json.gz](shared-isr-arm-coalesced-short.json.gz)
+retains all paired metrics; the raw artifact and its verified digest are
+recorded with the data. The level-delivery and revocation limits above still
+apply. Coalescing is not merged into the production branch.
