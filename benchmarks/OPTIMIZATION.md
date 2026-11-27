@@ -122,11 +122,66 @@ receiver's local cancellation wake and the existing coalescing behavior.
 
 Keep the necessary Machine-side completion injection via the native GIC APIs.
 No documented event-to-interrupt binding equivalent to irqfd was identified
-in this inspection; do not promise a nonexistent fast path. Measure whether
+in this inspection; do not promise a nonexistent fast path. This requires a
+call in the VM-owning process, not a dedicated relay thread for every queue.
+Measure whether
 draining several ready calls per wake or a small `kqueue` dispatcher improves
 CPU/latency and reduces idle relay threads. Keep the simpler existing relay if
 multiplexing adds latency. The vCPU must never wait for device processing.
 [HVF GIC APIs](https://developer.apple.com/documentation/hypervisor/gic-functions)
+
+## Cross-VMM check of the remaining constraints
+
+Source inspection on 2026-11-27 distinguishes required state from the current
+threading choice. These are implementation precedents, not comparative
+performance measurements. No code from these projects is imported.
+
+- QEMU's [MMIO guest notifier setup](https://github.com/qemu/qemu/blob/9751c62358073580cbf330a4df22077a7c6a407c/hw/virtio/virtio-mmio.c#L684)
+  explicitly disables irqfd. Its notifier callback updates the ISR and raises
+  the device interrupt through the existing event loop. That supports keeping
+  exact status, but does not justify one Dillo relay thread per queue.
+- Crosvm's [vhost-user frontend](https://github.com/google/crosvm/blob/4cfcb4055c6227cfbe57d7002858de58524ba02f/devices/src/virtio/vhost_user_frontend/worker.rs#L90)
+  uses a shared non-MSI-X event to update interrupt status. The same worker
+  handles backend requests and disconnects. Its inspected activation path
+  requires MSI-X configuration; this is evidence about the non-MSI-X fallback,
+  not a claim that its external backend supports MMIO. Its separate jailed
+  device model can keep transport and backend together, at the cost of
+  [forwarding register accesses](https://github.com/google/crosvm/blob/4cfcb4055c6227cfbe57d7002858de58524ba02f/devices/src/proxy.rs#L569).
+- Firecracker [passes the MMIO call event to irqfd](https://github.com/firecracker-microvm/firecracker/blob/e9783a0434caff3137159bc7206c76c8b06057d9/src/vmm/src/device_manager/mmio.rs#L226)
+  and [synthesizes queue status for vhost-user](https://github.com/firecracker-microvm/firecracker/blob/e9783a0434caff3137159bc7206c76c8b06057d9/src/vmm/src/devices/virtio/transport/mmio.rs#L263)
+  whenever config status is absent. This removes the relay, but loses exact
+  event/ack/reset status. Do not copy that shortcut:
+  [virtio 1.3 section 4.2.2.1](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html)
+  requires unset bits for events that have not occurred and all-zero status
+  after reset. Tolerance of spurious notifications is not the same rule.
+- Libkrun [shares one call event across its backend queues](https://github.com/libkrun/libkrun/blob/0fe2a5834879030d210037670c903d7383248207/src/devices/src/virtio/vhost_user/device.rs#L519)
+  and handles it through its EventManager. Its
+  [MMIO interrupt owner](https://github.com/libkrun/libkrun/blob/0fe2a5834879030d210037670c903d7383248207/src/devices/src/virtio/mmio.rs#L117)
+  serializes status and line updates.
+  [QEMU](https://github.com/qemu/qemu/blob/9751c62358073580cbf330a4df22077a7c6a407c/hw/intc/arm_gicv3_hvf.c#L600)
+  and [libkrun](https://github.com/libkrun/libkrun/blob/0fe2a5834879030d210037670c903d7383248207/src/devices/src/legacy/hvfgicv3.rs#L130)
+  both call `hv_gic_set_spi` for their native macOS GIC; neither inspected path supplies
+  an exportable event-to-GIC binding. Local backends avoid completion IPC by
+  running in the VM process, which is a different containment choice.
+- Cloud Hypervisor [exports native interrupt notifiers through SET_VRING_CALL](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/9b7eabd8436173aaa1dfa1fa79d1b00b130b18ed/virtio-devices/src/vhost_user/vu_common_ctrl.rs#L390)
+  and manages irqfd routing/masks in the VMM. This supports Dillo's direct PCI
+  completion path, not a transport-independent bypass of interrupt state.
+- Crosvm's [Windows IRQ dispatcher](https://github.com/google/crosvm/blob/4cfcb4055c6227cfbe57d7002858de58524ba02f/src/sys/windows/irq_wait.rs#L247)
+  groups events into wait threads, adding another when the Windows wait-set
+  capacity is reached. Its [WHP interrupt implementation](https://github.com/google/crosvm/blob/4cfcb4055c6227cfbe57d7002858de58524ba02f/devices/src/irqchip/whpx.rs#L319)
+  consumes the event and handles the PIC, IOAPIC or MSI route in software;
+  MSI delivery calls the partition's interrupt API. This is a precedent for
+  bounded shared dispatch, not evidence that native WHP triggers are unusable.
+  Dillo's directly bound PCI trigger path already has native qualification;
+  retain it and measure aggregation only for the remaining software paths.
+
+Next compare a shared call event for queues with the same interrupt owner,
+then a bounded shared dispatcher where distinct owners need software handling.
+Preserve coherent status/ack/line updates and retirement. Neither experiment
+requires moving transports or changing vhost-user. A shared-status mechanism
+would require its own publication/reset contract and interoperability analysis;
+it is not equivalent to exporting the existing call event. The survey does
+not establish a performance floor or prove that QD1 parity is impossible.
 
 ## Execution order and evidence at each step
 
