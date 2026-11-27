@@ -582,9 +582,20 @@ allocation reduction, but does not establish parity or a latency improvement.
 Block results remain inconclusive. The candidate worker's sequential-write
 throughput changes by −4.9%, with an interval spanning −13.9% to +2.8%, while
 the control becomes faster. Random-write and sequential-read worker intervals
-also cross no change. The predeclared extension to twenty block pairs is
-running with the same frozen executables; all original observations are kept.
-The candidate remains experimental pending that result.
+also cross no change. The predeclared extension uses the same frozen
+executables and retains all original observations.
+
+All 44 extension boots completed, giving twenty block pairs per variant.
+Worker random-read throughput increases 0.8% ([0.3%, 1.1%]), with CPU/GiB
+falling 1.1% ([0.5%, 1.6%]). Sequential-write throughput remains uncertain:
+95.1% of the prior worker, with a 95% interval [88.6%, 101.3%]; CPU/GiB is
+106.9% ([98.8%, 115.8%]). The corresponding control throughput ratio is
+99.6% ([96.2%, 106.5%]). The twenty-pair extension does not rule out a worker
+regression, so the mapping-owner candidate remains separate. The network
+benefit above does not excuse that uncertainty.
+[region-owner-block-20.json.gz](region-owner-block-20.json.gz) retains the
+extension plan, both sets of paired observations, combined intervals and
+the comparison between revisions. No earlier observations were discarded.
 
 ## Windows network measurements with the Hyper-V clock
 
@@ -656,7 +667,29 @@ change. Mac retry `46069476195` was cancelled after this flaw was identified.
 The comparison fixture now gives the baseline a separate Cargo target directory
 and refuses identical executables before timing. Source-level network checks
 passed before the affected comparison builds; they are separate from the invalid
-performance attribution. Fresh comparisons at `ecd59d6` are pending.
+performance attribution.
+
+The corrected [macOS](https://github.com/pichi-vm/dillo/actions/runs/46070400880),
+[Arm](https://github.com/pichi-vm/dillo/actions/runs/46070402572) and
+[Windows](https://github.com/pichi-vm/dillo/actions/runs/46070548856)
+comparisons at `ecd59d6` all completed. Each ran 32 boots, with three
+two-second measured pairs per transport and revision. The retained environment
+records verify different Dillo executable hashes and identical guest assets
+within each host. Native network checks passed before measurement.
+
+On macOS, coalescing stack wakes improves large-echo worker throughput by
+4.6% on PCI and 7.4% on MMIO; CPU/GiB falls 8.4% and 12.3%. The control also
+improves, leaving worker CPU/GiB at 129.0% and 126.6% of control. Windows PCI
+large-echo worker throughput rises 10.2%, with CPU/GiB falling 6.4%; its MMIO
+throughput is nearly unchanged. Arm observations are mixed, including a
+4.3% small-echo PCI throughput decrease. None establishes parity.
+
+The baseline revision ran before the candidate, so these short observations
+still include temporal host variation. A longer comparison will rotate both
+revision and execution-mode order before deciding whether to keep the change.
+[network-wake-native-short.json.gz](network-wake-native-short.json.gz) retains
+all paired results, revision comparisons, executable and guest hashes, and
+artifact provenance, including the unfavorable observations.
 
 ## Latency measurement precision
 
