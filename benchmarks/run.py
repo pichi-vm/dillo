@@ -255,6 +255,7 @@ def main():
     parser.add_argument("--no-sample", action="store_true")
     parser.add_argument("--backing-dir", type=Path, help="optional disposable disk directory, e.g. tmpfs")
     parser.add_argument("--extra-cmdline", default="", help="explicit guest settings for sensitivity runs")
+    parser.add_argument("--serial", action="store_true", help="retain early boot diagnostics through SPCR")
     args = parser.parse_args()
     assert args.pairs > 0 and args.sample_ms > 0
     args.output = args.output.resolve()
@@ -301,6 +302,8 @@ def main():
                             f" dillo.net_echo=10.0.2.2:{port}")
             build = [assets["arma"], "build", "--kernel", assets["kernel"], "--config", str(config),
                      "--profile", assets["profile"], "--initrd", assets["snuffler"], "--cmdline", cmdline]
+            if args.serial:
+                build.append("--serial")
             if case.endswith("-mmio-only"):
                 build += ["--pci-slots", "0", "--mmio-slots", "2"]
             build.append(str(image))

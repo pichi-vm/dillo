@@ -31,6 +31,11 @@ on:
         type: choice
         options: ["on", "off", both]
         default: "on"
+      kernel:
+        description: Existing fixture or prebuilt Hyper-V clock diagnostic (x86 block only)
+        type: choice
+        options: [fixture, wsl-clock]
+        default: fixture
 
 permissions:
   contents: read
@@ -118,6 +123,14 @@ jobs:
           cargo --config .copr/cargo-config.toml test --locked --release
           -p dillo --features vm-tests,bench-in-process --test boot
           benchmark::benchmark_assets -- --ignored --exact --nocapture
+      - name: Select the prebuilt clock diagnostic kernel
+        if: inputs.kernel == 'wsl-clock'
+        shell: bash
+        env:
+          BENCH_CASES: ${{ inputs.cases }}
+        run: >-
+          python benchmarks/wsl_kernel.py target/benchmarks/assets.json
+          --cache "$RUNNER_TEMP/dillo-wsl-kernel" --cases "$BENCH_CASES"
       - name: Measure paired workloads
         shell: bash
         env:
@@ -126,6 +139,7 @@ jobs:
           BENCH_PAIRS: ${{ inputs.pairs || 10 }}
           BENCH_DURATION_MS: ${{ inputs.duration_ms || 5000 }}
           BENCH_QUEUE_DEPTH: ${{ inputs.queue_depth || 1 }}
+          BENCH_KERNEL: ${{ inputs.kernel }}
         run: |
           bench_modes="$BENCH_SAMPLING"
           if [ "$bench_modes" = both ]; then bench_modes='on off'; fi
@@ -135,6 +149,7 @@ jobs:
           for bench_mode in $bench_modes; do
             bench_options=()
             if [ "$bench_mode" = off ]; then bench_options+=(--no-sample); fi
+            if [ "$BENCH_KERNEL" = wsl-clock ]; then bench_options+=(--serial); fi
             python benchmarks/run.py --assets target/benchmarks/assets.json \
               --output "$BENCH_RESULTS/$bench_latch/$bench_mode" --pairs "$BENCH_PAIRS" \
               --duration-ms "$BENCH_DURATION_MS" --queue-depth "$BENCH_QUEUE_DEPTH" \
