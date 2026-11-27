@@ -1,4 +1,4 @@
-name: Device isolation benchmarks
+name: Notification wait comparison experiment
 
 on:
   workflow_dispatch:
@@ -106,6 +106,20 @@ jobs:
           cargo --config .copr/cargo-config.toml test --locked --release
           -p dillo --features vm-tests,bench-in-process --test boot
           benchmark::benchmark_assets -- --ignored --exact --nocapture
+      - name: Freeze kqueue and poll binaries with identical guest assets
+        shell: bash
+        env:
+          DILLO_BENCH_DIR: ${{ github.workspace }}/target/benchmarks
+        run: |
+          test "$RUNNER_OS" = macOS
+          python benchmarks/freeze_wait_candidate.py kqueue
+          git fetch --no-tags --depth=1 origin 5f6c1eb1c43c539800f3fcb97d21783d549fc895
+          git show 5f6c1eb:deps/dillo-machine-unix/src/notification.rs > deps/dillo-machine-unix/src/notification.rs
+          cargo --config .copr/cargo-config.toml test --locked --release \
+            -p dillo --features vm-tests,bench-in-process --test boot \
+            benchmark::benchmark_assets -- --ignored --exact --nocapture
+          python benchmarks/freeze_wait_candidate.py poll
+          git restore --source=HEAD -- deps/dillo-machine-unix/src/notification.rs
       - name: Measure paired workloads
         shell: bash
         env:
@@ -117,13 +131,15 @@ jobs:
         run: |
           bench_modes="$BENCH_SAMPLING"
           if [ "$bench_modes" = both ]; then bench_modes='on off'; fi
+          for bench_waiter in poll kqueue; do
           for bench_mode in $bench_modes; do
             bench_options=()
             if [ "$bench_mode" = off ]; then bench_options+=(--no-sample); fi
-            python benchmarks/run.py --assets target/benchmarks/assets.json \
-              --output "$BENCH_RESULTS/$bench_mode" --pairs "$BENCH_PAIRS" \
+            python benchmarks/run.py --assets "target/benchmarks/$bench_waiter.json" \
+              --output "$BENCH_RESULTS/$bench_waiter/$bench_mode" --pairs "$BENCH_PAIRS" \
               --duration-ms "$BENCH_DURATION_MS" --queue-depth "$BENCH_QUEUE_DEPTH" \
               --cases "$BENCH_CASES" "${bench_options[@]}"
+          done
           done
       - name: Upload measurements and logs
         if: always()
