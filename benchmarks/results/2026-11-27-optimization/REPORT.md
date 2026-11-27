@@ -460,3 +460,24 @@ the paired data and artifact digest. The complete logs remain under
 explicitly selects its disposable virtio disks and checks the resulting device
 set before longer PCI and PCI-free comparisons. This kernel lacks built-in
 IP autoconfiguration, so it does not yet qualify the network measurements.
+
+## macOS direct completion-read experiment
+
+[Run 46060898814](https://github.com/pichi-vm/dillo/actions/runs/46060898814)
+completed 64 boots at `4cc749a`, including PCI and PCI-free block/network cases.
+The same binary and guest assets compare the existing kqueue receiver with a
+blocking pipe read that retains its own cancellation writer. Native receiver
+and confined-worker lifecycle checks passed before measurement. Each mode
+uses three alternating worker/control pairs of two seconds after a retained
+warm-up; the existing mode runs before the candidate.
+
+The candidate does not consistently improve the measured workloads. Most
+worker throughput changes are within roughly 1%; MMIO random writes improve
+3.2%, while the PCI 64-KiB network case falls 1.3%. Tail bounds do not improve
+consistently either. The candidate still uses 21% more CPU/GiB for MMIO 64-KiB
+echo than its same-revision control. These short observations do not justify
+adding a notification factory and separate cancellation/lifetime path, so the
+candidate remains outside the production optimization branch. The existing
+kqueue implementation remains in place. All metrics, including the mixed
+results, are retained in [macos-call-read-short.json.gz](macos-call-read-short.json.gz)
+and `target/performance/macos-call-read-46060898814`.
