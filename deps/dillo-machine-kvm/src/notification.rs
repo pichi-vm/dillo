@@ -4,7 +4,7 @@
 use std::io;
 use std::sync::Arc;
 
-use dillo_mmio::{MmioWindow, WriteNotification};
+use dillo_mmio::{MmioWindow, WriteNotification, WriteValue};
 use kvm_ioctls::IoEventAddress;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -25,17 +25,19 @@ impl Notifications {
         &self,
         window: MmioWindow,
         offset: u64,
-        value: u32,
+        value: WriteValue,
     ) -> io::Result<Option<Arc<dyn WriteNotification>>> {
         if !self.windows.contains(&window)
-            || offset.checked_add(4).is_none_or(|end| end > window.size)
+            || offset
+                .checked_add(value.size())
+                .is_none_or(|end| end > window.size)
         {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         let address = window
             .base
             .checked_add(offset)
-            .filter(|address| address.checked_add(4).is_some())
+            .filter(|address| address.checked_add(value.size()).is_some())
             .ok_or(io::ErrorKind::InvalidInput)?;
         if self
             .vm
@@ -47,10 +49,11 @@ impl Notifications {
         }
         let event = EventFd::new(libc::EFD_CLOEXEC)?;
         let address = IoEventAddress::Mmio(address);
-        self.vm
-            .fd()
-            .register_ioevent(&event, &address, value)
-            .map_err(|error| io::Error::from_raw_os_error(error.errno()))?;
+        match value {
+            WriteValue::U16(value) => self.vm.fd().register_ioevent(&event, &address, value),
+            WriteValue::U32(value) => self.vm.fd().register_ioevent(&event, &address, value),
+        }
+        .map_err(|error| io::Error::from_raw_os_error(error.errno()))?;
         Ok(Some(Arc::new(Notification {
             vm: self.vm.clone(),
             event,
@@ -65,7 +68,7 @@ struct Notification {
     vm: Vm,
     event: EventFd,
     address: IoEventAddress,
-    value: u32,
+    value: WriteValue,
 }
 
 impl WriteNotification for Notification {
@@ -98,11 +101,19 @@ impl WriteNotification for Notification {
 
 impl Drop for Notification {
     fn drop(&mut self) {
-        if let Err(error) = self
-            .vm
-            .fd()
-            .unregister_ioevent(&self.event, &self.address, self.value)
-        {
+        let result = match self.value {
+            WriteValue::U16(value) => {
+                self.vm
+                    .fd()
+                    .unregister_ioevent(&self.event, &self.address, value)
+            }
+            WriteValue::U32(value) => {
+                self.vm
+                    .fd()
+                    .unregister_ioevent(&self.event, &self.address, value)
+            }
+        };
+        if let Err(error) = result {
             log::error!("KVM write-notification unregister failed: {error}");
         }
     }
@@ -135,7 +146,10 @@ mod tests {
             (window, u64::MAX),
         ] {
             assert_eq!(
-                owner.register(requested, offset, 0).unwrap_err().kind(),
+                owner
+                    .register(requested, offset, WriteValue::U32(0))
+                    .unwrap_err()
+                    .kind(),
                 io::ErrorKind::InvalidInput
             );
         }
@@ -145,7 +159,7 @@ mod tests {
         };
         assert_eq!(
             authority(overflowing)
-                .register(overflowing, 0, 0)
+                .register(overflowing, 0, WriteValue::U32(0))
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
@@ -160,24 +174,30 @@ mod tests {
         };
         let owner = authority(window);
         let notification = owner
-            .register(window, 0x50, 0)
+            .register(window, 0x50, WriteValue::U32(0))
             .unwrap()
             .expect("ioeventfd supported");
         let clone = Arc::clone(&notification);
-        assert!(owner.register(window, 0x50, 0).is_err());
+        assert!(owner.register(window, 0x50, WriteValue::U32(0)).is_err());
         // Different queue values may share the same notify address.
-        let other = owner.register(window, 0x50, 1).unwrap().unwrap();
+        let other = owner
+            .register(window, 0x50, WriteValue::U32(1))
+            .unwrap()
+            .unwrap();
         notification.write(2).unwrap();
         notification.write(3).unwrap();
         assert_eq!(clone.read().unwrap(), 5);
         drop(notification);
-        assert!(owner.register(window, 0x50, 0).is_err());
+        assert!(owner.register(window, 0x50, WriteValue::U32(0)).is_err());
         let reader = Arc::clone(&clone);
         let waiting = std::thread::spawn(move || reader.read().unwrap());
         clone.write(1).unwrap();
         assert_eq!(waiting.join().unwrap(), 1);
         drop(clone);
-        let replacement = owner.register(window, 0x50, 0).unwrap().unwrap();
+        let replacement = owner
+            .register(window, 0x50, WriteValue::U32(0))
+            .unwrap()
+            .unwrap();
         replacement.write(1).unwrap();
         assert_eq!(replacement.read().unwrap(), 1);
         drop(other);
@@ -196,7 +216,7 @@ mod tests {
         };
         let owner = authority(window);
         let notification = owner
-            .register(window, 0x50, 0)
+            .register(window, 0x50, WriteValue::U32(0))
             .unwrap()
             .expect("native ioeventfd required");
         let (entered, wait) = mpsc::channel();
@@ -233,10 +253,17 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn guest_writes_match_address_width_and_queue_value() {
+        for value in [WriteValue::U16(1), WriteValue::U32(1)] {
+            check_guest_notification(value);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn check_guest_notification(value: WriteValue) {
         let backing = Arc::new(crate::memory::MappedMemory::test_backing(&[(0, 0x1000)]).unwrap());
-        // Real-mode stores: matched dword, wrong value, wrong width,
-        // wrong address, then OUT to signal completion. Only the matched
-        // store may bypass userspace.
+        // Real-mode stores: dword 1, dword 2, word 1, wrong address,
+        // then OUT to signal completion. Only the exact-width write of
+        // value 1 may bypass userspace in either registration.
         let code = [
             0x66, 0xc7, 0x06, 0x50, 0x10, 0x01, 0x00, 0x00, 0x00, 0x66, 0xc7, 0x06, 0x50, 0x10,
             0x02, 0x00, 0x00, 0x00, 0xc7, 0x06, 0x50, 0x10, 0x01, 0x00, 0x66, 0xc7, 0x06, 0x54,
@@ -249,7 +276,7 @@ mod tests {
         };
         let owner = authority(window);
         owner.vm.attach_memory(backing).unwrap();
-        let notification = owner.register(window, 0x50, 1).unwrap().unwrap();
+        let notification = owner.register(window, 0x50, value).unwrap().unwrap();
         let mut vcpu = owner.vm.fd().create_vcpu(0).unwrap();
         let mut sregs = vcpu.get_sregs().unwrap();
         sregs.cs.base = 0;
@@ -262,8 +289,22 @@ mod tests {
         })
         .unwrap();
         for (address, expected) in [
-            (0x1050, &[2, 0, 0, 0][..]),
-            (0x1050, &[1, 0][..]),
+            (
+                0x1050,
+                if value == WriteValue::U16(1) {
+                    &[1, 0, 0, 0][..]
+                } else {
+                    &[2, 0, 0, 0][..]
+                },
+            ),
+            (
+                0x1050,
+                if value == WriteValue::U16(1) {
+                    &[2, 0, 0, 0][..]
+                } else {
+                    &[1, 0][..]
+                },
+            ),
             (0x1054, &[1, 0, 0, 0][..]),
         ] {
             match vcpu.run().unwrap() {

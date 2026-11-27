@@ -1489,7 +1489,10 @@ mod memory_registration_tests {
             size,
         };
         let registrar = crate::notification::Notifications::new(vm.clone(), vec![window]);
-        let notification = registrar.register(window, 0x50, 0).unwrap().unwrap();
+        let notification = registrar
+            .register(window, 0x50, dillo_mmio::WriteValue::U32(0))
+            .unwrap()
+            .unwrap();
         drop(registrar);
 
         // Slot zero maps successfully. The kernel rejects slot one's unaligned GPA.

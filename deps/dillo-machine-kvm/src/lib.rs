@@ -777,7 +777,7 @@ mod imp {
             &self,
             window: dillo_mmio::MmioWindow,
             offset: u64,
-            value: u32,
+            value: dillo_mmio::WriteValue,
         ) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
             self.notifications.register(window, offset, value)
         }

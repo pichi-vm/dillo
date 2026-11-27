@@ -491,10 +491,11 @@ fn maybe_activate(g: &mut Inner, window: MmioWindow, interrupt: Interrupt) {
     let kicks: Vec<Kick> = match (0..queues.len())
         .map(|index| {
             let value = u32::try_from(index).map_err(|_| std::io::ErrorKind::InvalidInput)?;
-            match host
-                .attachment
-                .write_notification(window, QUEUE_NOTIFY, value)?
-            {
+            match host.attachment.write_notification(
+                window,
+                QUEUE_NOTIFY,
+                dillo_mmio::WriteValue::U32(value),
+            )? {
                 Some(notification) => Ok(Kick::from_notification(notification)),
                 None => host.notification(),
             }
@@ -619,7 +620,7 @@ mod tests {
             &self,
             window: MmioWindow,
             offset: u64,
-            value: u32,
+            value: dillo_mmio::WriteValue,
         ) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
             if self.registration_error {
                 return Err(std::io::ErrorKind::OutOfMemory.into());
@@ -629,7 +630,7 @@ mod tests {
             }
             assert_eq!(window.base, 0x1000);
             assert_eq!(offset, QUEUE_NOTIFY);
-            assert_eq!(value, 0);
+            assert_eq!(value, dillo_mmio::WriteValue::U32(0));
             let mut registrations = self.notifications.lock().unwrap();
             assert!(registrations.iter().all(|weak| weak.strong_count() == 0));
             let notification = Arc::new(TestNotification(Kick::new()?));

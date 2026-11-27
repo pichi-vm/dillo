@@ -23,6 +23,22 @@ pub struct MmioWindow {
     pub size: u64,
 }
 
+/// Exact width and value of an accelerated guest notification write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteValue {
+    U16(u16),
+    U32(u32),
+}
+
+impl WriteValue {
+    pub fn size(self) -> u64 {
+        match self {
+            Self::U16(_) => 2,
+            Self::U32(_) => 4,
+        }
+    }
+}
+
 /// A guest-physical address range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddressRange {
@@ -649,13 +665,13 @@ pub trait MmioAttachment: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
-    /// Optionally accelerate an exact four-byte write in this device's window.
+    /// Optionally accelerate an exact write in this device's window.
     /// Unsupported backends retain ordinary MMIO dispatch.
     fn write_notification(
         &self,
         _window: MmioWindow,
         _offset: u64,
-        _value: u32,
+        _value: WriteValue,
     ) -> std::io::Result<Option<Arc<dyn WriteNotification>>> {
         Ok(None)
     }
