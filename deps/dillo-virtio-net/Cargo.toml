@@ -9,6 +9,10 @@ description = "In-process virtio-net device for dillo: cross-platform frontend, 
 [lints]
 workspace = true
 
+[features]
+# Diagnostic builds only; emits one aggregate per queue when its worker exits.
+bench-counters = []
+
 [dependencies]
 dillo-virtio = { workspace = true }
 dillo-mmio = { workspace = true }

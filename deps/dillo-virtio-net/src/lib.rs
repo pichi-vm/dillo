@@ -325,6 +325,27 @@ fn spawn_rx_worker(
     }))
 }
 
+#[cfg(feature = "bench-counters")]
+#[derive(Default)]
+struct QueueCounters {
+    queue: &'static str,
+    frames: u64,
+    batches: u64,
+    calls: u64,
+    suppressed: u64,
+    no_buffer: u64,
+}
+
+#[cfg(feature = "bench-counters")]
+impl Drop for QueueCounters {
+    fn drop(&mut self) {
+        eprintln!(
+            "DILLO_NET_COUNTERS queue={} frames={} batches={} calls={} suppressed={} no_buffer={}",
+            self.queue, self.frames, self.batches, self.calls, self.suppressed, self.no_buffer
+        );
+    }
+}
+
 /// TX worker: blocks on the queue kick, drains guest → host frames, hands each
 /// (minus its virtio-net header) to the backend, and returns the consumed
 /// descriptors to the guest.
@@ -338,6 +359,11 @@ fn tx_worker(
     token: &VirtioRunToken,
 ) {
     let queue = Mutex::new(queue);
+    #[cfg(feature = "bench-counters")]
+    let mut counters = QueueCounters {
+        queue: "tx",
+        ..QueueCounters::default()
+    };
     loop {
         token.checkpoint();
         if let Err(e) = kick.read() {
@@ -347,7 +373,15 @@ fn tx_worker(
         if token.is_shutdown_requested() {
             return;
         }
-        drain_tx(backend, queue_memory, buffer_memory, &queue, interrupt);
+        drain_tx(
+            backend,
+            queue_memory,
+            buffer_memory,
+            &queue,
+            interrupt,
+            #[cfg(feature = "bench-counters")]
+            &mut counters,
+        );
     }
 }
 
@@ -358,8 +392,13 @@ fn drain_tx(
     buffer_memory: &Arc<dyn VirtioMemory>,
     queue: &Mutex<Queue>,
     interrupt: Option<&Interrupt>,
+    #[cfg(feature = "bench-counters")] counters: &mut QueueCounters,
 ) {
     let mut q = queue.lock().expect("virtio-net TX queue mutex");
+    #[cfg(feature = "bench-counters")]
+    {
+        counters.batches += 1;
+    }
     let mut signaled = false;
     while let Some(head) = q.pop(queue_memory) {
         let head_index = head.index;
@@ -371,11 +410,23 @@ fn drain_tx(
         }
         // TX descriptors are device-readable; nothing is written back.
         q.add_used(queue_memory, head_index, 0);
+        #[cfg(feature = "bench-counters")]
+        {
+            counters.frames += 1;
+        }
         signaled = true;
     }
-    signaled = signaled && q.needs_notification(queue_memory);
+    let notify = signaled && q.needs_notification(queue_memory);
+    #[cfg(feature = "bench-counters")]
+    {
+        counters.suppressed += u64::from(signaled && !notify);
+    }
     drop(q);
-    if signaled && let Some(intr) = interrupt {
+    if notify && let Some(intr) = interrupt {
+        #[cfg(feature = "bench-counters")]
+        {
+            counters.calls += 1;
+        }
         intr.signal();
     }
 }
@@ -424,6 +475,11 @@ fn rx_worker(
     scratch[NET_HDR_NUM_BUFFERS_OFF..NET_HDR_NUM_BUFFERS_OFF + 2]
         .copy_from_slice(&1u16.to_le_bytes());
     let mut pending = None;
+    #[cfg(feature = "bench-counters")]
+    let mut counters = QueueCounters {
+        queue: "rx",
+        ..QueueCounters::default()
+    };
     loop {
         token.checkpoint();
         if token.is_shutdown_requested() {
@@ -467,10 +523,19 @@ fn rx_worker(
         }
         // Publish the batch before blocking for buffers, another frame, or a
         // host drain checkpoint. Do not wait for a batch to fill.
-        if completed != 0
-            && queue.needs_notification(queue_memory)
-            && let Some(intr) = interrupt
+        let notify = completed != 0 && queue.needs_notification(queue_memory);
+        #[cfg(feature = "bench-counters")]
         {
+            counters.frames += completed as u64;
+            counters.batches += 1;
+            counters.suppressed += u64::from(completed != 0 && !notify);
+            counters.no_buffer += u64::from(pending.is_some());
+        }
+        if notify && let Some(intr) = interrupt {
+            #[cfg(feature = "bench-counters")]
+            {
+                counters.calls += 1;
+            }
             intr.signal();
         }
         if pending.is_some() {
@@ -655,16 +720,37 @@ mod tests {
             signal.fetch_add(1, Ordering::Relaxed);
         });
         let queue = Mutex::new(q);
+        #[cfg(feature = "bench-counters")]
+        let mut counters = QueueCounters {
+            queue: "tx-test",
+            ..QueueCounters::default()
+        };
         // The guest can suppress callbacks without suppressing completion.
         for (i, (flags, signals)) in [(1, 0), (0, 1), (1, 1), (0, 2)].into_iter().enumerate() {
             qmem.write_u16(GuestAddress(0x1000), flags).unwrap();
             qmem.write_u16(GuestAddress(0x1002), i as u16 + 1).unwrap();
-            drain_tx(&source, &qmem, &bmem, &queue, Some(&interrupt));
+            drain_tx(
+                &source,
+                &qmem,
+                &bmem,
+                &queue,
+                Some(&interrupt),
+                #[cfg(feature = "bench-counters")]
+                &mut counters,
+            );
             assert_eq!(qmem.read_u16(GuestAddress(0x2002)), Some(i as u16 + 1));
             assert_eq!(backend.sent.lock().unwrap()[i], payload);
             assert_eq!(delivered.load(Ordering::Relaxed), signals);
         }
-        drain_tx(&source, &qmem, &bmem, &queue, Some(&interrupt));
+        drain_tx(
+            &source,
+            &qmem,
+            &bmem,
+            &queue,
+            Some(&interrupt),
+            #[cfg(feature = "bench-counters")]
+            &mut counters,
+        );
         assert_eq!(delivered.load(Ordering::Relaxed), 2);
     }
 

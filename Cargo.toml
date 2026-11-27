@@ -191,7 +191,7 @@ default = []
 # CI's hardware lane runs `cargo test -p dillo --features vm-tests`.
 vm-tests = []
 # Measurement control only; normal builds always use confined workers.
-bench-in-process = ["dillo-worker/bench-in-process"]
+bench-in-process = ["dillo-worker/bench-in-process", "dillo-virtio-net/bench-counters"]
 
 [dependencies]
 uuid.workspace = true
