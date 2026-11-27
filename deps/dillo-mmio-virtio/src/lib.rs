@@ -164,7 +164,10 @@ struct QueueCfg {
 
 struct Inner {
     device: Box<dyn VirtioDevice>,
+    new_notification_state:
+        Option<fn() -> std::io::Result<Arc<dillo_machine::worker::NotificationState>>>,
     notification_state: Option<Arc<dillo_machine::worker::NotificationState>>,
+    completion: Option<Interrupt>,
     device_id: u32,
     device_features: u64,
     driver_features: u64,
@@ -245,7 +248,9 @@ impl VirtioMmio {
             interrupts,
             inner: Mutex::new(Inner {
                 device,
+                new_notification_state: None,
                 notification_state: None,
+                completion: None,
                 device_id,
                 device_features,
                 driver_features: 0,
@@ -275,11 +280,14 @@ impl VirtioMmio {
             .replace(Arc::new(MmioVirtioHost { attachment }));
     }
 
-    pub fn set_notification_state(&self, state: Arc<dillo_machine::worker::NotificationState>) {
+    pub fn set_notification_state_factory(
+        &self,
+        factory: fn() -> std::io::Result<Arc<dillo_machine::worker::NotificationState>>,
+    ) {
         self.inner
             .lock()
             .expect("virtio-mmio poisoned")
-            .notification_state = Some(state);
+            .new_notification_state = Some(factory);
     }
 
     pub fn read(&self, offset: u64, data: &mut [u8]) -> bool {
@@ -324,11 +332,11 @@ impl VirtioMmio {
         true
     }
 
-    pub fn write(&self, offset: u64, data: &[u8]) -> bool {
+    pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), MmioError> {
         let mut g = self.inner.lock().expect("virtio-mmio poisoned");
         if offset >= CONFIG {
             g.device.write_config(offset - CONFIG, data);
-            return true;
+            return Ok(());
         }
         let mut le = [0u8; 4];
         for (i, b) in data.iter().take(4).enumerate() {
@@ -387,6 +395,13 @@ impl VirtioMmio {
                     // Stop and join before clearing state used by callbacks or
                     // allowing a replacement activation to reuse the queues.
                     g.activation.take();
+                    if let Some(completion) = &g.completion {
+                        completion
+                            .retire()
+                            .map_err(|e| MmioError::Device(e.to_string()))?;
+                    }
+                    g.completion = None;
+                    g.notification_state = None;
                     g.kicks.clear();
                     g.activated = false;
                     g.status = 0;
@@ -402,28 +417,48 @@ impl VirtioMmio {
                         };
                     }
                     self.int_status.store(0, Ordering::SeqCst);
-                    if let Some(state) = &g.notification_state {
-                        state.clear();
-                    }
                     self.irq.set(false);
-                } else {
-                    let interrupt = if let Some(state) = &g.notification_state {
-                        Interrupt::new(Arc::new(SharedCompletion {
-                            state: Arc::clone(state),
-                            irq: self.irq.clone(),
-                        }))
+                } else if !g.activated
+                    && g.status & STATUS_DRIVER_OK != 0
+                    && g.status & STATUS_DEVICE_NEEDS_RESET == 0
+                {
+                    let interrupt = if let Some(factory) = g.new_notification_state {
+                        let state = factory().map_err(|e| MmioError::Device(e.to_string()))?;
+                        let native = self
+                            .irq
+                            .interrupt
+                            .read()
+                            .unwrap()
+                            .as_ref()
+                            .ok_or_else(|| MmioError::Device("unresolved wired interrupt".into()))?
+                            .bind_status(Arc::clone(&state))
+                            .map_err(|e| MmioError::Device(e.to_string()))?;
+                        let interrupt = Interrupt::new(Arc::new(SharedCompletion {
+                            state: Arc::clone(&state),
+                            native,
+                        }));
+                        g.notification_state = Some(state);
+                        g.completion = Some(interrupt.clone());
+                        interrupt
                     } else {
                         Self::interrupt(Arc::clone(&self.int_status), self.irq.clone())
                     };
                     maybe_activate(&mut g, self.window, interrupt);
                     if g.status & STATUS_DRIVER_OK != 0 && !g.activated {
                         g.status |= STATUS_DEVICE_NEEDS_RESET;
+                        if let Some(completion) = &g.completion {
+                            completion
+                                .retire()
+                                .map_err(|e| MmioError::Device(e.to_string()))?;
+                        }
+                        g.completion = None;
+                        g.notification_state = None;
                     }
                 }
             }
             _ => {}
         }
-        true
+        Ok(())
     }
 
     /// An interrupt closure for the backing device: sets the used-buffer status
@@ -443,13 +478,13 @@ impl VirtioMmio {
 #[derive(Debug)]
 struct SharedCompletion {
     state: Arc<dillo_machine::worker::NotificationState>,
-    irq: WiredIrq,
+    native: Interrupt,
 }
 
 impl dillo_mmio::InterruptLine for SharedCompletion {
     fn signal(&self) {
         if self.state.used() {
-            self.irq.set(true);
+            self.native.signal();
         }
     }
 
@@ -461,27 +496,27 @@ impl dillo_mmio::InterruptLine for SharedCompletion {
     }
 
     fn export(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
-        self.irq
-            .interrupt
-            .read()
-            .unwrap()
-            .as_ref()
-            .ok_or(std::io::ErrorKind::NotConnected)?
-            .export()
+        self.native.export()
     }
 
     fn export_status(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
         self.state.export().map(Some)
     }
+
+    fn retire(&self) -> Result<(), dillo_mmio::InterruptError> {
+        self.native.retire()
+    }
 }
 
 impl Drop for VirtioMmio {
     fn drop(&mut self) {
-        self.inner
-            .lock()
-            .expect("virtio-mmio poisoned")
-            .activation
-            .take();
+        let mut inner = self.inner.lock().expect("virtio-mmio poisoned");
+        inner.activation.take();
+        if let Some(completion) = &inner.completion
+            && let Err(error) = completion.retire()
+        {
+            log::error!("retire virtio-mmio completion: {error}");
+        }
     }
 }
 
@@ -506,9 +541,7 @@ impl MmioDevice for VirtioMmio {
         offset: u64,
         data: &[u8],
     ) -> Result<MmioWriteOutcome, MmioError> {
-        Self::write(self, offset, data)
-            .then_some(MmioWriteOutcome::Continue)
-            .ok_or(MmioError::Unsupported)
+        Self::write(self, offset, data).map(|()| MmioWriteOutcome::Continue)
     }
 }
 
@@ -758,7 +791,9 @@ mod tests {
             );
             transport.set_attachment(attachment.clone());
             for _ in 0..2 {
-                transport.write(STATUS, &STATUS_DRIVER_OK.to_le_bytes());
+                transport
+                    .write(STATUS, &STATUS_DRIVER_OK.to_le_bytes())
+                    .unwrap();
                 let weak = attachment
                     .notifications
                     .lock()
@@ -773,7 +808,7 @@ mod tests {
                     u32::from_le_bytes(status) & STATUS_DEVICE_NEEDS_RESET != 0,
                     fail
                 );
-                transport.write(STATUS, &0u32.to_le_bytes());
+                transport.write(STATUS, &0u32.to_le_bytes()).unwrap();
                 assert_eq!(weak.strong_count(), 0);
                 transport.read(STATUS, &mut status);
                 assert_eq!(status, [0; 4]);
@@ -798,12 +833,14 @@ mod tests {
                 WiredIrq::unresolved(1),
             );
             transport.set_attachment(attachment);
-            transport.write(STATUS, &STATUS_DRIVER_OK.to_le_bytes());
+            transport
+                .write(STATUS, &STATUS_DRIVER_OK.to_le_bytes())
+                .unwrap();
             assert_eq!(
                 transport.inner.lock().unwrap().activated,
                 !registration_error
             );
-            transport.write(STATUS, &0u32.to_le_bytes());
+            transport.write(STATUS, &0u32.to_le_bytes()).unwrap();
             assert!(transport.inner.lock().unwrap().kicks.is_empty());
         }
     }

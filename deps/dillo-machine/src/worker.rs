@@ -148,10 +148,6 @@ impl NotificationState {
             .fetch_and(!(bits & 3), std::sync::atomic::Ordering::SeqCst);
     }
 
-    pub fn clear(&self) {
-        self.word().store(0, std::sync::atomic::Ordering::SeqCst);
-    }
-
     pub fn export(&self) -> io::Result<Resource> {
         Ok(self
             .0

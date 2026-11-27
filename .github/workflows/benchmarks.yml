@@ -98,6 +98,12 @@ jobs:
             sudo sysctl -w vm.nr_hugepages=256
           fi
           test "$(awk '/HugePages_Free/{print $2}' /proc/meminfo)" -ge 128
+      - name: Check native wired completion lifecycle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: >-
+          cargo --config .copr/cargo-config.toml test --locked
+          -p dillo-machine-kvm wired_completion::tests -- --nocapture
       - name: Build matched release assets
         shell: bash
         env:

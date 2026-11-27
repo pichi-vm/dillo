@@ -518,6 +518,17 @@ impl Interrupt {
     pub fn export_status(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
         self.0.export_status()
     }
+
+    pub fn bind_status(
+        &self,
+        state: Arc<dillo_machine::worker::NotificationState>,
+    ) -> Result<Interrupt, InterruptError> {
+        self.0.bind_status(state)
+    }
+
+    pub fn retire(&self) -> Result<(), InterruptError> {
+        self.0.retire()
+    }
 }
 
 struct FnInterruptLine {
@@ -556,6 +567,20 @@ pub trait InterruptLine: Send + Sync + std::fmt::Debug {
 
     fn export_status(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
         Ok(None)
+    }
+
+    /// Experimental activation-scoped completion binding; no default export.
+    fn bind_status(
+        &self,
+        _state: Arc<dillo_machine::worker::NotificationState>,
+    ) -> Result<Interrupt, InterruptError> {
+        Err(InterruptError::Delivery(
+            "shared status is unsupported".into(),
+        ))
+    }
+
+    fn retire(&self) -> Result<(), InterruptError> {
+        Ok(())
     }
 }
 

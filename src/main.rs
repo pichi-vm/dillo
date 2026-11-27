@@ -2468,9 +2468,8 @@ mod machine_select {
                 transport.set_attachment(attachment);
                 #[cfg(all(target_os = "linux", feature = "bench-in-process"))]
                 if std::env::var_os("DILLO_BENCH_SHARED_ISR").is_some() {
-                    transport.set_notification_state(
-                        <M::Worker as dillo_machine::worker::WorkerHost>::create_notification_state()
-                            .map_err(RunError::machine)?,
+                    transport.set_notification_state_factory(
+                        <M::Worker as dillo_machine::worker::WorkerHost>::create_notification_state,
                     );
                 }
                 log::debug!(

@@ -21,21 +21,34 @@ interface with explicit ordering and lifecycle semantics.
 
 The child maps the exact sealed extent after checking its size and seals.
 Confinement permits the read-only F_GET_SEALS query; it gains no VM capability.
-The page is not included in guest RAM. Only the existing, device-specific KVM
+The page is not included in guest RAM. Only a device-specific KVM
 eventfd is exported. The measurement therefore removes the completion relay
 and preserves guest-visible ISR publication for ordinary active operation.
 
 The follow-up candidate signals only when setting a previously clear used
 bit. It coalesces notifications until the guest acknowledges that bit. This
-is also experimental: successful Linux boots do not establish the missing
-level-triggered contract below.
+is also experimental: successful Linux boots alone do not establish the
+interrupt and lifecycle contracts below.
+
+The activation-scoped follow-up gives each activation a fresh page and irqfd.
+Reset stops the backend, explicitly deassigns its irqfd, and discards the old
+status mapping. Retained old handles remain valid but cannot signal the new
+binding. Level-triggered declarations use IRQFD_RESAMPLE and a sleeping
+resampler which reasserts while status remains pending. This adds a parent
+wake after EOI; it removes the completion relay from the delivery path, not
+all parent activity or CPU cost. Edge declarations retain edge delivery.
+
+The local x86 native fixture performs an actual guest LAPIC EOI, checks
+reassertion before transport acknowledgement and no reassertion after it,
+then checks an obsolete export against a replacement binding. An analogous
+Arm fixture uses guest GIC system-register reads and EOI. Native Arm execution
+and the follow-up performance comparison are pending.
 
 The following remain unqualified and prevent merging this prototype:
 
-- Per-activation revocation of exported native events and old status mappings.
-  The current binding belongs to the VM, so this is a single-activation probe.
-- Native level-triggered reassertion and ACK/EOI races. It retains the existing
-  KVM pulse implementation and does not establish level semantics for Arm.
+- The integrated transport reset/restart and concurrent ACK/EOI paths, beyond
+  the native binding fixture. Asynchronous resampler failure supervision also
+  needs integration; the current helper reports its failure at retirement.
 - Windows and macOS realization, arbitrary backend interoperability, and a
   full failure/reset/concurrent-acknowledgement qualification.
 
