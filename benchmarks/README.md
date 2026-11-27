@@ -1,5 +1,7 @@
 # Device isolation benchmark milestone
 
+Completed measurements: [2026-11-27 report](results/2026-11-27/REPORT.md).
+
 ## Question and completion criteria
 
 Measure the cost of Dillo's out-of-process virtio devices, starting from
@@ -157,3 +159,18 @@ main thread); they are not an aggregate of all device threads. Huge-page
 private residency is removed from the Linux private-overhead metric and kept
 separate. Native PSS omits hugetlb pages. Do not interpret either as total
 guest-plus-host physical residency.
+
+Run `python benchmarks/analyze.py RESULTS --output RESULTS/comparison.json`
+to export absolute medians and every paired ratio as JSON and CSV. The report
+includes compressed copies of these comparisons; raw console/process samples
+are retained separately. `benchmarks/plot.py RESULTS` regenerates its chart
+with matplotlib 3.10.8. `benchmarks/footprint.py OLD NEW` inventories source
+with tree-sitter 0.25.2 and tree-sitter-rust 0.24.0; these are analysis-only
+dependencies, not Dillo build or measurement dependencies.
+
+Timing and memory availability must be checked per run. The initial Windows
+guest used `refined-jiffies`, which cannot resolve individual fast requests;
+its latency percentiles are not usable as microsecond measurements. The
+macOS runner could not supply detailed memory queries. Neither limitation is a zero
+cost result. The guest's `boot_to_userspace_ns` captures entry before probes;
+`uptime_secs` is read later and must not be used as boot latency.
