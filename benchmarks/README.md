@@ -2,6 +2,8 @@
 
 Completed measurements: [2026-11-27 report](results/2026-11-27/REPORT.md).
 
+Proposed next milestone: [device performance optimization](OPTIMIZATION.md).
+
 ## Question and completion criteria
 
 Measure the cost of Dillo's out-of-process virtio devices, starting from
