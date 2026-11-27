@@ -129,6 +129,19 @@ impl IrqManager {
         addr_hi: u32,
         data: u32,
     ) -> Result<(u32, EventFd), IrqError> {
+        let event = EventFd::new(libc::EFD_CLOEXEC).map_err(IrqError::EventFdCreate)?;
+        let gsi = self.bind_irqfd(&event, addr_lo, addr_hi, data)?;
+        Ok((gsi, event))
+    }
+
+    pub(crate) fn bind_irqfd(
+        &mut self,
+        event: &EventFd,
+        addr_lo: u32,
+        addr_hi: u32,
+        data: u32,
+    ) -> Result<u32, IrqError> {
+        let owned = event.try_clone().map_err(IrqError::EventFdClone)?;
         let gsi = if let Some(Reverse(g)) = self.free_gsis.pop() {
             g
         } else {
@@ -149,21 +162,22 @@ impl IrqManager {
             let _ = (addr_lo, addr_hi);
             self.routes.push(make_spi_irqchip_entry(gsi, data - 32));
         }
-        self.commit_routes()?;
-
-        // Create eventfd with EFD_CLOEXEC so it does not leak across exec()
-        // boundaries (prerequisite for exec-based reboot, ISOL-06).
-        let eventfd = EventFd::new(libc::EFD_CLOEXEC).map_err(IrqError::EventFdCreate)?;
-        self.vm
-            .fd()
-            .register_irqfd(&eventfd, gsi)
-            .map_err(IrqError::KvmIrqfd)?;
-
-        // Store a clone for teardown
-        let device_fd = eventfd.try_clone().map_err(IrqError::EventFdClone)?;
-        self.irqfds.push((gsi, eventfd));
-
-        Ok((gsi, device_fd))
+        let result = self.commit_routes().and_then(|()| {
+            self.vm
+                .fd()
+                .register_irqfd(event, gsi)
+                .map_err(IrqError::KvmIrqfd)
+        });
+        if let Err(error) = result {
+            self.routes.retain(|entry| entry.gsi != gsi);
+            // Do not reuse the GSI until the kernel has accepted its removal.
+            if self.commit_routes().is_ok() {
+                self.free_gsis.push(Reverse(gsi));
+            }
+            return Err(error);
+        }
+        self.irqfds.push((gsi, owned));
+        Ok(gsi)
     }
 
     /// aarch64: record a wired SPI `pin` (INTID = `pin` + 32) for deferred irqfd
@@ -283,17 +297,17 @@ impl IrqManager {
     /// (1) unregister irqfd → (2) remove routing entry → (3) commit routes →
     /// (4) push to free-list. The free-list push is last to ensure the GSI is
     /// only reusable after the kernel has fully torn down the old routing.
-    #[cfg(all(test, target_arch = "x86_64"))]
-    fn release_irqfd(&mut self, gsi: u32) -> Result<(), IrqError> {
+    pub(crate) fn release_irqfd(&mut self, gsi: u32) -> Result<(), IrqError> {
         // Find the irqfd entry for this GSI.
         let pos = self.irqfds.iter().position(|(g, _)| *g == gsi);
         if let Some(idx) = pos {
-            let (_, fd) = self.irqfds.remove(idx);
+            let (_, fd) = &self.irqfds[idx];
             // (1) Unregister irqfd with KVM.
             self.vm
                 .fd()
-                .unregister_irqfd(&fd, gsi)
+                .unregister_irqfd(fd, gsi)
                 .map_err(IrqError::KvmIrqfd)?;
+            self.irqfds.remove(idx);
         } else {
             // Idempotent: unknown GSI — log and return Ok.
             log::warn!(
@@ -303,8 +317,7 @@ impl IrqManager {
             return Ok(());
         }
         // (2) Remove the MSI routing entry.
-        self.routes
-            .retain(|e| !(e.gsi == gsi && e.type_ == KVM_IRQ_ROUTING_MSI));
+        self.routes.retain(|e| e.gsi != gsi);
         // (3) Commit the updated routing table.
         self.commit_routes()?;
         // (4) Return GSI to the free-list (min-heap via Reverse wrapper).

@@ -476,6 +476,10 @@ impl Interrupt {
     pub fn set_level(&self, level: bool) -> Result<(), InterruptError> {
         self.0.set_level(level)
     }
+
+    pub fn export(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
+        self.0.export()
+    }
 }
 
 struct FnInterruptLine {
@@ -506,6 +510,11 @@ pub trait InterruptLine: Send + Sync + std::fmt::Debug {
     fn signal(&self);
 
     fn set_level(&self, level: bool) -> Result<(), InterruptError>;
+
+    /// Export a signaling endpoint whose owner retains delivery policy.
+    fn export(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
+        Ok(None)
+    }
 }
 
 /// Error from interrupt delivery.
@@ -526,8 +535,23 @@ pub struct MessageInterrupt {
     pub masked: bool,
 }
 
+/// A stable queue event with a revocable native message-interrupt binding.
+/// The transport retains the owner through worker shutdown. Removing a
+/// binding preserves pending events; dropping the owner revokes delivery
+/// even if a receiver retains an exported signaling endpoint.
+pub trait MessageInterruptEvent: InterruptLine {
+    fn configure(&self, message: Option<MessageInterrupt>) -> Result<(), InterruptError>;
+
+    /// Drain events while unbound. Bound events belong to the native route.
+    fn pending(&self) -> Result<bool, InterruptError>;
+}
+
 /// Backend-resolved message-interrupt domain.
 pub trait MessageInterruptDomain: Send + Sync {
+    fn event(&self) -> Result<Option<Arc<dyn MessageInterruptEvent>>, InterruptError> {
+        Ok(None)
+    }
+
     fn update(&self, vector: u16, msg: MessageInterrupt) -> Result<(), InterruptError>;
 
     /// Set the effective enable state for one vector independently of its mask.
