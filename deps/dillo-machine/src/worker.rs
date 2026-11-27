@@ -139,8 +139,8 @@ impl NotificationState {
         self.word().load(std::sync::atomic::Ordering::SeqCst) & 3
     }
 
-    pub fn used(&self) {
-        self.word().fetch_or(1, std::sync::atomic::Ordering::SeqCst);
+    pub fn used(&self) -> bool {
+        self.word().fetch_or(1, std::sync::atomic::Ordering::SeqCst) & 1 == 0
     }
 
     pub fn acknowledge(&self, bits: u32) {

@@ -241,10 +241,9 @@ impl Backend {
             let call = Arc::clone(&ring.call);
             let state = self.notification_state.clone();
             interrupts.push(Some(Interrupt::from_fn(move || {
-                if let Some(state) = &state {
-                    state.used();
-                }
-                if let Err(error) = call.write(1) {
+                if state.as_ref().is_none_or(|state| state.used())
+                    && let Err(error) = call.write(1)
+                {
                     log::error!("virtio call notification: {error}");
                     std::process::exit(1);
                 }

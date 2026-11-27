@@ -448,8 +448,9 @@ struct SharedCompletion {
 
 impl dillo_mmio::InterruptLine for SharedCompletion {
     fn signal(&self) {
-        self.state.used();
-        self.irq.set(true);
+        if self.state.used() {
+            self.irq.set(true);
+        }
     }
 
     fn set_level(&self, level: bool) -> Result<(), dillo_mmio::InterruptError> {

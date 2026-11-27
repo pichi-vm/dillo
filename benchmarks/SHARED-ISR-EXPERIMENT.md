@@ -25,6 +25,11 @@ The page is not included in guest RAM. Only the existing, device-specific KVM
 eventfd is exported. The measurement therefore removes the completion relay
 and preserves guest-visible ISR publication for ordinary active operation.
 
+The follow-up candidate signals only when setting a previously clear used
+bit. It coalesces notifications until the guest acknowledges that bit. This
+is also experimental: successful Linux boots do not establish the missing
+level-triggered contract below.
+
 The following remain unqualified and prevent merging this prototype:
 
 - Per-activation revocation of exported native events and old status mappings.
