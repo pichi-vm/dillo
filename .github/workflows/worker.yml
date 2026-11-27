@@ -37,6 +37,8 @@ jobs:
         run: rustup toolchain install nightly-2026-07-06 --profile minimal --component rust-src
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked -p dillo-worker -p dillo-machine-unix -p dillo-virtio-net
+        env:
+          DILLO_BENCH_SHARED_ISR: "1"
       - if: runner.os == 'Windows'
         run: cargo test --locked -p dillo-machine-whp worker::vhost_user
       - if: inputs.native_notifications && runner.os == 'Windows'

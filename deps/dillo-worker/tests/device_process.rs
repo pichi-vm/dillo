@@ -375,6 +375,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "reply-resource",
     ]
     .into_iter()
+    .chain(
+        (cfg!(any(target_os = "linux", target_os = "windows"))
+            && std::env::var_os("DILLO_BENCH_SHARED_ISR").is_some())
+        .then_some("shared-call"),
+    )
     .chain(cfg!(target_os = "macos").then_some("inherited-fd"))
     {
         eprintln!("block process: {mode}");
@@ -585,8 +590,8 @@ fn exercise(mode: &str) -> io::Result<()> {
     if mode == "pci" {
         return pci_interrupts(proxy, control, &memory);
     }
-    if mode == "direct-call" {
-        return direct_calls(proxy, control, &memory);
+    if matches!(mode, "direct-call" | "shared-call") {
+        return direct_calls(proxy, control, &memory, mode == "shared-call");
     }
     let control = Arc::new(control);
     let interrupts = Arc::new(AtomicUsize::new(0));
@@ -800,7 +805,10 @@ fn without_inherited_reader<T>(start: impl FnOnce() -> io::Result<T>) -> io::Res
 // This endpoint deliberately cannot deliver through a parent callback.
 // Both queue directions must be transferred without spawning a relay.
 #[derive(Debug)]
-struct DirectCall(Mutex<dillo_machine::worker::Resource>);
+struct DirectCall {
+    endpoint: Mutex<dillo_machine::worker::Resource>,
+    status: Option<Arc<dillo_machine::worker::NotificationState>>,
+}
 impl dillo_mmio::InterruptLine for DirectCall {
     fn signal(&self) {
         panic!("exported call used a parent relay");
@@ -809,7 +817,13 @@ impl dillo_mmio::InterruptLine for DirectCall {
         panic!("exported call used a parent relay");
     }
     fn export(&self) -> io::Result<Option<dillo_machine::worker::Resource>> {
-        self.0.lock().unwrap().try_clone().map(Some)
+        self.endpoint.lock().unwrap().try_clone().map(Some)
+    }
+    fn export_status(&self) -> io::Result<Option<dillo_machine::worker::Resource>> {
+        self.status
+            .as_ref()
+            .map(|status| status.export())
+            .transpose()
     }
 }
 
@@ -817,10 +831,26 @@ fn direct_calls(
     mut proxy: dillo_worker::Proxy,
     control: dillo_worker::Control,
     memory: &GuestMemoryMmap,
+    shared_status: bool,
 ) -> io::Result<()> {
+    let mut retired: Option<Arc<dillo_machine::worker::NotificationState>> = None;
     for _ in 0..2 {
         let (read, write) = Worker::notification_pair()?;
-        let interrupt = Arc::new(DirectCall(Mutex::new(write)));
+        let status = shared_status
+            .then(Worker::create_notification_state)
+            .transpose()?;
+        if let Some(old) = retired.take() {
+            assert!(old.used());
+            assert_eq!(
+                status.as_ref().unwrap().load(),
+                0,
+                "activation reused old status"
+            );
+        }
+        let interrupt = Arc::new(DirectCall {
+            endpoint: Mutex::new(write),
+            status: status.clone(),
+        });
         let (mut params, kick) = activation(Arc::new(AtomicUsize::new(0)), false, "native");
         let params = VirtioActivate::with_host_and_queue_interrupts(
             params.take_queues(),
@@ -836,7 +866,7 @@ fn direct_calls(
                 control.quiesce()?;
                 let (new_read, write) = Worker::notification_pair()?;
                 proxy.update_interrupts(&mut || {
-                    *interrupt.0.lock().unwrap() = write.try_clone()?;
+                    *interrupt.endpoint.lock().unwrap() = write.try_clone()?;
                     Ok(())
                 })?;
                 read = new_read;
@@ -846,7 +876,7 @@ fn direct_calls(
                 dillo_machine::worker::NotificationRole::Wait,
             )?;
             let rescue = Worker::notification_endpoint(
-                interrupt.0.lock().unwrap().try_clone()?,
+                interrupt.endpoint.lock().unwrap().try_clone()?,
                 dillo_machine::worker::NotificationRole::Signal,
             )?;
             let (send, receive) = std::sync::mpsc::channel();
@@ -866,8 +896,16 @@ fn direct_calls(
             waiter.join().unwrap().map_err(io::Error::other)?;
             assert!(result.map_err(io::Error::other)?? > 0);
             complete(memory, index)?;
+            if let Some(status) = &status {
+                assert_eq!(status.load(), 1, "call arrived before status publication");
+                status.acknowledge(2);
+                assert_eq!(status.load(), 1, "ACK cleared an unrelated status bit");
+                status.acknowledge(1);
+                assert_eq!(status.load(), 0);
+            }
         }
         active.join().map_err(io::Error::other)?;
+        retired = status;
         memory.write_slice(&[0; 64], GuestAddress(0x2000)).unwrap();
         memory.write_slice(&[0; 256], GuestAddress(0x3000)).unwrap();
     }

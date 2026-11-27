@@ -115,7 +115,11 @@ pub trait WriteNotification: Send + Sync + std::fmt::Debug {
 /// Experimental host-only notification latch. Never mapped into the guest.
 /// This is a measurement aid, not an assigned vhost-user interface.
 #[derive(Debug)]
-pub struct NotificationState(vm_memory::MmapRegion<()>);
+pub struct NotificationState {
+    mapping: vm_memory::MmapRegion<()>,
+    #[cfg(windows)]
+    section: Option<Resource>,
+}
 
 impl NotificationState {
     /// # Safety
@@ -125,12 +129,34 @@ impl NotificationState {
     pub unsafe fn from_file(file: std::fs::File) -> io::Result<Self> {
         let mapping = vm_memory::MmapRegion::from_file(vm_memory::FileOffset::new(file, 0), 4096)
             .map_err(io::Error::other)?;
-        Ok(Self(mapping))
+        Ok(Self {
+            mapping,
+            #[cfg(windows)]
+            section: None,
+        })
+    }
+
+    /// # Safety
+    /// The handle must name a committed, cacheable, writable pagefile section
+    /// of at least 4096 bytes. Every alias of its first word must use aligned
+    /// AtomicU32 accesses only. The returned view retains the backing.
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    pub unsafe fn from_section(section: Resource) -> io::Result<Self> {
+        use std::os::windows::io::AsHandle;
+        // SAFETY: the caller supplies the section's backing/aliasing contract.
+        let mapping =
+            unsafe { vm_memory::MmapRegion::from_mapping_handle(section.as_handle(), 0, 4096) }
+                .map_err(io::Error::other)?;
+        Ok(Self {
+            mapping,
+            section: Some(section),
+        })
     }
 
     fn word(&self) -> &std::sync::atomic::AtomicU32 {
         use vm_memory::VolatileMemory;
-        self.0
+        self.mapping
             .get_atomic_ref(0)
             .expect("aligned mapped status word")
     }
@@ -149,8 +175,12 @@ impl NotificationState {
     }
 
     pub fn export(&self) -> io::Result<Resource> {
+        #[cfg(windows)]
+        if let Some(section) = &self.section {
+            return section.try_clone();
+        }
         Ok(self
-            .0
+            .mapping
             .file_offset()
             .expect("file-backed status")
             .file()
