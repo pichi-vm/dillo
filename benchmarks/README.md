@@ -1,0 +1,123 @@
+# Device isolation benchmark milestone
+
+## Question and completion criteria
+
+Measure the cost of Dillo's out-of-process virtio devices, starting from
+`ba7fafc7a1598dab86e1afc61c250a55673deb48`. Use snuffler for guest workloads.
+Produce reproducible raw results, paired comparisons, and an explanation of
+the costs before choosing optimizations. Keep this work on a benchmark branch;
+it does not authorize an upstream submission or change DESIGN.md.
+
+The milestone completes with native Linux/KVM, macOS/HVF, and Windows/MSVC/WHP
+measurements, or an explicit reproducible platform limitation. Correctness
+failures are investigated before using a sample. After reporting, pause for
+reflection. A throughput improvement is not required for completion.
+
+## Controlled comparison
+
+- Build one release executable with a benchmark-only opt-in for direct device
+  execution. The default remains the production confined worker path.
+- Run the same current block or user-network implementation directly in the
+  parent for the control. Keep the guest image, backend, queue sizes, transport,
+  compiler, and host settings identical within each pair. Do not compare old
+  whole-source revisions and attribute all differences to process isolation.
+- Keep the console in its production worker in both modes. Change only the
+  device under measurement; record and verify the expected process counts.
+- Block uses the same raw backing and device factory. User networking uses the
+  same stack, with direct host resource creation in the control. Report the
+  latter's omitted resource broker as part of Dillo's isolation implementation,
+  rather than an intrinsic cost imposed by vhost-user.
+- This comparison includes the proxy, memory-access boundary, notifications,
+  process lifecycle, and confinement. It is not a measurement of ALPC alone.
+  The earlier RPC revision already used workers and is not an in-process control.
+- The control is deliberately unsuitable for production. Compile it only with
+  the benchmark feature, make mode selection explicit, and reject unsupported
+  device kinds. Do not duplicate device protocol implementations.
+
+## Workloads
+
+1. One raw virtio-block device over PCI: sequential 64 KiB and random 4 KiB
+   reads/writes, queue depth one. Use a fully initialized disposable 64 MiB
+   backing, guest O_DIRECT, deterministic offsets and data verification.
+2. Repeat block over MMIO to expose notification-path differences.
+3. Four block devices: measure idle footprint/startup scaling and repeat the
+   same workload. Report serial per-device execution; do not call it a
+   multi-queue saturation test.
+4. One user-network device over PCI: repeated verified local TCP exchanges,
+   small messages for round-trip latency and bulk messages for useful rate.
+   Exclude the public Internet and DNS variability. Clearly distinguish echo
+   round-trip goodput from one-way network capacity.
+
+Extend snuffler's existing probes with an opt-in timed mode, bounded warm-up,
+bounded latency histograms, and recorded workload parameters. Preserve the
+existing quick boot-test defaults. Use a guest idle interval for host sampling
+and an explicit ready marker before workloads. Writes use disposable disks;
+they measure completion through the host cache, not persistence or fsync rate.
+
+Filesystem, console, and vsock remain correctness-tested production devices.
+This milestone makes no performance claim about them, multi-queue saturation,
+native bridging/vmnet, external vhost-user servers, or confidential computing.
+Add a further workload only if the first results show it answers a distinct
+architectural question.
+
+## Experiment procedure
+
+- First run correctness and a short pilot on the available physical Linux
+  host. Use the pilot only to check the harness, never as the final result.
+- Use at least five measured pairs per workload/platform, plus an unmeasured
+  warm-up pair. Alternate execution order AB/BA. Use at least one second per
+  operation; use longer runs for the principal physical-host comparison.
+- Run both modes within the same CI job/host allocation. Record host identity,
+  CPU/OS, virtualization context, toolchain, source SHA, binary/image hashes,
+  guest RAM/vCPUs, transport, disk preparation, and workload configuration.
+- Native macOS and Arm Linux runners provide physical-host evidence. Hosted
+  Windows/Linux results are paired within a job but remain virtualized-runner
+  evidence, not universal hardware performance claims. Dillo uses native
+  Windows MSVC, not MinGW.
+- Keep disk files warm and identically initialized; do not flush global host
+  caches or change host power/CPU policies. Record competing host load.
+- Bound each VM by a timeout, retain stdout/stderr and host samples, and reap
+  the whole process tree after failure. Never silently discard a failed run.
+- Report every pair and median paired ratios with spread. Repeat only when
+  failures or noise make a result inconclusive; preserve initial samples.
+  A small difference within run-to-run variation is inconclusive.
+
+## Measurements and attribution
+
+- Guest: bytes, operations, elapsed time, throughput/IOPS, bounded-histogram
+  p50/p95/p99/max latency, I/O mode, verification/errors, kernel-to-init time.
+  Histogram percentile bounds and synchronous queue depth are explicit.
+- Host startup: process spawn to guest-ready marker, plus existing Dillo boot
+  trace stages separating setup and device attachment. This is not firmware
+  time inferred from the timestamp of the final report.
+- Host: parent and every descendant's CPU time, thread/process counts, context
+  switches where supported, and idle/active memory. Sample with stable PID and
+  creation-time identities; report collection errors and missed short-lived
+  processes as limits. Keep the echo server outside the measured process tree.
+- Memory: never sum RSS and call it physical footprint. Preserve per-process
+  RSS for diagnosis; use summed proportional memory on Linux where available,
+  recording huge-page accounting separately. Report private residency or
+  private commit under its actual OS definition on other systems. List the
+  single guest backing allocation separately; do not add it to a metric which
+  already includes those pages. Do not invent a cross-OS total when the native
+  counters cannot deduplicate shared mappings.
+- Measure sampler cost separately from the VM. Use sparse memory snapshots
+  and cheap CPU sampling during timed I/O; heavy mapping walks must not run
+  per request. Run a sampler-disabled control if instrumentation is material.
+- Code: count production, tests, benchmark code, dependencies, and unsafe
+  sites separately. Identify the pre-isolation revision for a historical
+  footprint comparison, and enumerate unrelated changes in that history.
+  Historical code growth is context, not a clean causal experiment.
+
+## Deliverables
+
+- Plan, scripts, minimal snuffler extensions, and explicitly isolated control.
+- Exact source/build/CI provenance; raw guest reports, console logs, host
+  samples, and environment manifests for every run.
+- A concise report of absolute results and paired overhead, including failures
+  and uncertainty, followed by a short ranked list of evidenced bottlenecks.
+- A separation between protocol requirements and Dillo-specific choices such
+  as helper threads, broker requests, polling, and confinement setup.
+- No optimization or security weakening justified solely by noisy timings.
+
+Memory metric definitions follow [psutil's API documentation](https://psutil.readthedocs.io/stable/index.html#psutil.Process.memory_full_info).
