@@ -11,7 +11,7 @@ on:
       cases:
         description: Workload selection
         type: choice
-        options: [all, block-transports, pci-free, block-pci, block-mmio, block4-pci, block4-concurrent-pci, net-pci, block-mmio-only, net-mmio-only]
+        options: [all, block-transports, net-transports, pci-free, block-pci, block-mmio, block4-pci, block4-concurrent-pci, net-pci, block-mmio-only, net-mmio-only]
         default: all
       pairs:
         description: Measured pairs after the retained warm-up
@@ -32,7 +32,7 @@ on:
         options: ["on", "off", both]
         default: "on"
       kernel:
-        description: Existing fixture or prebuilt Hyper-V clock diagnostic (x86 block only)
+        description: Existing fixture or prebuilt Hyper-V clock diagnostic (x86 only)
         type: choice
         options: [fixture, wsl-clock]
         default: fixture
@@ -131,15 +131,13 @@ jobs:
       - name: Select the prebuilt clock diagnostic kernel
         if: inputs.kernel == 'wsl-clock'
         shell: bash
-        env:
-          BENCH_CASES: ${{ inputs.cases }}
         run: >-
           python benchmarks/wsl_kernel.py target/benchmarks/assets.json
-          --cache "$RUNNER_TEMP/dillo-wsl-kernel" --cases "$BENCH_CASES"
+          --cache "$RUNNER_TEMP/dillo-wsl-kernel"
       - name: Measure paired workloads
         shell: bash
         env:
-          BENCH_CASES: ${{ inputs.cases == 'block-transports' && 'block-pci,block-mmio-only' || inputs.cases == 'pci-free' && 'block-mmio-only,net-mmio-only' || inputs.cases != 'all' && inputs.cases || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,net-pci,block-mmio-only,net-mmio-only' }}
+          BENCH_CASES: ${{ inputs.cases == 'block-transports' && 'block-pci,block-mmio-only' || inputs.cases == 'net-transports' && 'net-pci,net-mmio-only' || inputs.cases == 'pci-free' && 'block-mmio-only,net-mmio-only' || inputs.cases != 'all' && inputs.cases || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,net-pci,block-mmio-only,net-mmio-only' }}
           BENCH_SAMPLING: ${{ inputs.sampling || 'on' }}
           BENCH_PAIRS: ${{ inputs.pairs || 10 }}
           BENCH_DURATION_MS: ${{ inputs.duration_ms || 5000 }}

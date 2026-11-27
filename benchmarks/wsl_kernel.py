@@ -4,8 +4,8 @@
 
 """Select Microsoft's unmodified prebuilt kernel for clock diagnostics.
 
-This kernel includes Hyper-V clocks and the block/console transports. It lacks
-IP autoconfiguration, so this experiment accepts block cases only.
+This kernel includes Hyper-V clocks and virtio transports. The guest probe
+configures benchmark IPv4 when the kernel lacks IP autoconfiguration.
 """
 
 import argparse
@@ -41,11 +41,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("assets", type=Path)
     parser.add_argument("--cache", type=Path, required=True)
-    parser.add_argument("--cases", required=True)
     args = parser.parse_args()
     assets = json.loads(args.assets.read_text())
     assert assets["arch"] == "x86_64"
-    assert all(case.startswith("block") for case in args.cases.split(","))
     args.cache.mkdir(parents=True, exist_ok=True)
     archive = args.cache / URL.rsplit("/", 1)[1]
     if not archive.exists():
@@ -64,7 +62,7 @@ def main():
     assert hashlib.sha256(content).hexdigest() == KERNEL_SHA256
     config = embedded_config(content)
     for feature in ("HYPERV", "HYPERV_TIMER", "VIRTIO_PCI", "VIRTIO_MMIO",
-                    "VIRTIO_BLK", "VIRTIO_CONSOLE"):
+                    "VIRTIO_BLK", "VIRTIO_CONSOLE", "VIRTIO_NET"):
         assert f"CONFIG_{feature}=y" in config.splitlines(), feature
     (args.cache / "kernel.config").write_text(config)
     assets.update(kernel=str(kernel.resolve()), config=config,

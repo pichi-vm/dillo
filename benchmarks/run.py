@@ -306,6 +306,8 @@ def main():
             if case.startswith("net-"):
                 cmdline += (f" ip=10.0.2.15::10.0.2.2:255.255.255.0::eth0:off"
                             f" dillo.net_echo=10.0.2.2:{port}")
+                if "CONFIG_IP_PNP=y" not in assets["config"].splitlines():
+                    cmdline += " dillo.net_config=eth0,10.0.2.15/24"
             build = [assets["arma"], "build", "--kernel", assets["kernel"], "--config", str(config),
                      "--profile", assets["profile"], "--initrd", assets["snuffler"], "--cmdline", cmdline]
             if args.serial:
