@@ -373,6 +373,7 @@ fn drain_tx(
         q.add_used(queue_memory, head_index, 0);
         signaled = true;
     }
+    signaled = signaled && q.needs_notification(queue_memory);
     drop(q);
     if signaled && let Some(intr) = interrupt {
         intr.signal();
@@ -467,6 +468,7 @@ fn rx_worker(
         // Publish the batch before blocking for buffers, another frame, or a
         // host drain checkpoint. Do not wait for a batch to fill.
         if completed != 0
+            && queue.needs_notification(queue_memory)
             && let Some(intr) = interrupt
         {
             intr.signal();
@@ -617,8 +619,10 @@ mod tests {
     /// with the 12-byte header stripped.
     #[test]
     fn tx_strips_header_and_forwards_frame() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
-        let mut q = ready_queue(0x100, 0x1000, 0x2000);
+        let q = ready_queue(0x100, 0x1000, 0x2000);
 
         // One readable descriptor at 0x5000 carrying hdr(12) + "hello-frame".
         let payload = b"hello-frame";
@@ -643,16 +647,25 @@ mod tests {
         let bmem: Arc<dyn VirtioMemory> =
             Arc::new(SharedVirtioMemory::new(vec![shared(&mem, 0x5000, 0x1000)]));
 
-        let out = read_tx_frame(&qmem, &bmem, q.pop(&qmem).expect("pop")).expect("frame");
-        assert_eq!(
-            out, payload,
-            "TX must deliver the Ethernet payload sans header"
-        );
-
-        // And the backend records exactly that payload when drained.
-        let backend = MockBackend::default();
-        backend.send(&out).unwrap();
-        assert_eq!(backend.sent.lock().unwrap()[0], payload);
+        let backend = Arc::new(MockBackend::default());
+        let source: Arc<dyn NetBackend> = backend.clone();
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let signal = Arc::clone(&delivered);
+        let interrupt = Interrupt::from_fn(move || {
+            signal.fetch_add(1, Ordering::Relaxed);
+        });
+        let queue = Mutex::new(q);
+        // The guest can suppress callbacks without suppressing completion.
+        for (i, (flags, signals)) in [(1, 0), (0, 1), (1, 1), (0, 2)].into_iter().enumerate() {
+            qmem.write_u16(GuestAddress(0x1000), flags).unwrap();
+            qmem.write_u16(GuestAddress(0x1002), i as u16 + 1).unwrap();
+            drain_tx(&source, &qmem, &bmem, &queue, Some(&interrupt));
+            assert_eq!(qmem.read_u16(GuestAddress(0x2002)), Some(i as u16 + 1));
+            assert_eq!(backend.sent.lock().unwrap()[i], payload);
+            assert_eq!(delivered.load(Ordering::Relaxed), signals);
+        }
+        drain_tx(&source, &qmem, &bmem, &queue, Some(&interrupt));
+        assert_eq!(delivered.load(Ordering::Relaxed), 2);
     }
 
     /// A round-trip through the mock backend: TX records, RX replays.
@@ -789,8 +802,16 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::{Duration, Instant};
 
-        // A single frame, a burst, a burst over the limit, and a starved ring.
-        for (count, available, signals) in [(1, 1, 1), (3, 3, 1), (65, 65, 2), (3, 1, 2)] {
+        // Single/burst/starved rings, including guest suppression and re-enable.
+        for (count, available, flags, signals) in [
+            (1, 1, 0, 1),
+            (3, 3, 0, 1),
+            (65, 65, 0, 2),
+            (3, 1, 0, 2),
+            (3, 3, 1, 0),
+            (65, 65, 1, 1),
+            (3, 1, 1, 1),
+        ] {
             let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
             let mut q = ready_queue(0x100, 0x1000, 0x2000);
             q.max_size = 128;
@@ -807,6 +828,7 @@ mod tests {
             }
             mem.write_obj::<u16>(available as u16, q.avail_ring.unchecked_add(2))
                 .unwrap();
+            mem.write_obj::<u16>(flags, q.avail_ring).unwrap();
             let qmem: Arc<dyn QueueMemory> =
                 Arc::new(SharedQueueMemory::new(vec![shared(&mem, 0, 0x4000)]));
             let bmem: Arc<dyn VirtioMemory> =
@@ -833,7 +855,10 @@ mod tests {
             })
             .with_checkpoint(move || {
                 if checkpoints.fetch_add(1, Ordering::Relaxed) == 1 {
-                    assert_eq!(notifications.load(Ordering::Relaxed), 1);
+                    assert_eq!(
+                        notifications.load(Ordering::Relaxed),
+                        usize::from(flags == 0)
+                    );
                     assert_eq!(
                         observe.read_u16(GuestAddress(0x2002)),
                         Some(available.min(RX_BATCH) as u16)
@@ -841,6 +866,7 @@ mod tests {
                     observe
                         .write_u16(GuestAddress(0x1002), count as u16)
                         .unwrap();
+                    observe.write_u16(GuestAddress(0x1000), 0).unwrap();
                 }
             });
             let source: Arc<dyn NetBackend> = backend;

@@ -126,7 +126,7 @@ jobs:
           -p dillo-machine-whp whp_trigger_ -- --nocapture
       - name: Check notification and network behavior
         shell: bash
-        run: cargo --config .copr/cargo-config.toml test --locked -p dillo-machine-unix -p dillo-virtio-net --lib
+        run: cargo --config .copr/cargo-config.toml test --locked -p dillo-machine-unix -p dillo-virtio -p dillo-virtio-net --lib
       - name: Build comparison executable
         if: inputs.baseline_ref != ''
         shell: bash
