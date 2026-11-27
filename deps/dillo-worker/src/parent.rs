@@ -878,7 +878,7 @@ impl VirtioDevice for Proxy {
                                 if shared.active.load(Ordering::Acquire) == epoch
                                     && let Some(interrupt) = &interrupt
                                 {
-                                    interrupt.signal();
+                                    interrupt.signal_published();
                                 }
                             }
                         }))

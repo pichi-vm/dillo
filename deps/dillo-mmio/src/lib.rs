@@ -502,6 +502,10 @@ impl Interrupt {
         self.0.signal();
     }
 
+    pub fn signal_published(&self) {
+        self.0.signal_published();
+    }
+
     /// Whether both handles refer to the same interrupt owner.
     pub fn same_source(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
@@ -565,6 +569,12 @@ pub trait InterruptUpdate: Send + Sync + std::fmt::Debug {
 /// Backend-resolved line interrupt.
 pub trait InterruptLine: Send + Sync + std::fmt::Debug {
     fn signal(&self);
+
+    /// Deliver a worker event whose shared transport status is already set.
+    /// A relay must not publish the event again after a concurrent guest ACK.
+    fn signal_published(&self) {
+        self.signal();
+    }
 
     fn set_level(&self, level: bool) -> Result<(), InterruptError>;
 

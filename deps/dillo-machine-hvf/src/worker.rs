@@ -9,6 +9,34 @@ use std::io;
 pub struct Worker;
 
 impl dillo_machine::worker::WorkerHost for Worker {
+    fn create_notification_state()
+    -> io::Result<std::sync::Arc<dillo_machine::worker::NotificationState>> {
+        let memory = dillo_machine_unix::allocate_memory(&[(vm_memory::GuestAddress(0), 4096)])?;
+        let mut export = dillo_machine_unix::export_memory(&memory)?;
+        // SAFETY: fresh unlinked POSIX shared memory. Darwin fixes its size
+        // at initial allocation; only NotificationState will access its word.
+        #[allow(unsafe_code)]
+        unsafe {
+            Self::adopt_notification_state(export.resources.remove(0))
+        }
+    }
+
+    #[allow(unsafe_code)]
+    unsafe fn adopt_notification_state(
+        resource: dillo_machine::worker::Resource,
+    ) -> io::Result<std::sync::Arc<dillo_machine::worker::NotificationState>> {
+        let file = std::fs::File::from(resource);
+        // Darwin reports the extent rounded to its native page size.
+        if file.metadata()?.len() < 4096 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // SAFETY: the caller supplies fixed POSIX shared backing and requires
+        // every alias to use NotificationState's aligned atomic operations.
+        unsafe {
+            dillo_machine::worker::NotificationState::from_file(file).map(std::sync::Arc::new)
+        }
+    }
+
     fn notification_pair() -> io::Result<(
         dillo_machine::worker::Resource,
         dillo_machine::worker::Resource,

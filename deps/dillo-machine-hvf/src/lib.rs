@@ -354,6 +354,19 @@ mod imp {
     }
 
     impl InterruptLine for SpiInterruptLine {
+        fn bind_status(
+            &self,
+            _: Arc<dillo_machine::worker::NotificationState>,
+            _: Option<Arc<dyn dillo_mmio::InterruptUpdate>>,
+        ) -> Result<Interrupt, InterruptError> {
+            Ok(Interrupt::new(Arc::new(StatusCompletion(Mutex::new(
+                Some(Self {
+                    intid: self.intid,
+                    vm: self.vm.clone(),
+                }),
+            )))))
+        }
+
         // Edge-style notify (virtio-mmio): pulse the line so the GIC sees a
         // fresh 0→1 edge each time. Asserting without deasserting leaves the SPI
         // latched high — the guest takes one interrupt, ACKs the virtio queue,
@@ -372,6 +385,31 @@ mod imp {
             self.vm
                 .set_spi(self.intid, level)
                 .map_err(|e| InterruptError::Delivery(e.to_string()))
+        }
+    }
+
+    /// Keep native injection in the VM process and revoke it at reset, even
+    /// if an obsolete completion callback remains retained by a caller.
+    #[derive(Debug)]
+    struct StatusCompletion(Mutex<Option<SpiInterruptLine>>);
+
+    impl InterruptLine for StatusCompletion {
+        fn signal(&self) {
+            if let Some(line) = self.0.lock().unwrap().as_ref() {
+                line.signal();
+            }
+        }
+
+        fn set_level(&self, level: bool) -> Result<(), InterruptError> {
+            if let Some(line) = self.0.lock().unwrap().as_ref() {
+                line.set_level(level)?;
+            }
+            Ok(())
+        }
+
+        fn retire(&self) -> Result<(), InterruptError> {
+            self.0.lock().unwrap().take();
+            Ok(())
         }
     }
 

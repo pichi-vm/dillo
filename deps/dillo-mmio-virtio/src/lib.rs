@@ -488,6 +488,10 @@ impl dillo_mmio::InterruptLine for SharedCompletion {
         }
     }
 
+    fn signal_published(&self) {
+        self.native.signal();
+    }
+
     fn set_level(&self, level: bool) -> Result<(), dillo_mmio::InterruptError> {
         if level {
             self.signal();
@@ -946,6 +950,16 @@ mod tests {
                     assert_eq!(status(), 0);
                     completion.signal();
                     assert_eq!(binding.signals.load(Ordering::SeqCst), 2);
+                    completion.signal_published();
+                    assert_eq!(binding.signals.load(Ordering::SeqCst), 3);
+                    transport
+                        .write(INTERRUPT_ACK, &INT_VRING.to_le_bytes())
+                        .unwrap();
+                    // A delayed relay may deliver a spurious interrupt, but
+                    // must not recreate an event the guest has acknowledged.
+                    completion.signal_published();
+                    assert_eq!(binding.signals.load(Ordering::SeqCst), 4);
+                    assert_eq!(status(), 0);
                 }
                 transport.write(STATUS, &0u32.to_le_bytes()).unwrap();
                 assert!(binding.retired.load(Ordering::SeqCst));
