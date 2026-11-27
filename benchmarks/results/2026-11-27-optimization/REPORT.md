@@ -610,6 +610,22 @@ retains the clocks, source, asset hashes and paired observations. The longer
 [ten-pair run](https://github.com/pichi-vm/dillo/actions/runs/46067542377) uses
 the same source tree with corrected commit messages (`3525c2d`).
 
+That ten-pair run completed all 44 boots. The longer paired medians are:
+
+| Transport / message | Throughput ratio | CPU/GiB ratio | p99 ratio |
+| --- | ---: | ---: | ---: |
+| PCI / 64 B | 0.958 | 1.025 | 1.029 |
+| PCI / 64 KiB | 0.953 | 1.043 | 1.263 |
+| PCI-free MMIO / 64 B | 0.982 | 1.020 | 1.000 |
+| PCI-free MMIO / 64 KiB | 0.963 | 1.032 | 1.298 |
+
+The large-message p99 intervals are [1.232, 1.326] for PCI and
+[1.272, 1.345] for MMIO: the tail deficit remains clear. Some throughput and
+CPU bounds remain inconclusive at the 5% measurement band. These observations
+use a different CI host from the short run and are not evidence of an intervening
+optimization. [windows-clock-network-long.json.gz](windows-clock-network-long.json.gz)
+retains all paired observations, intervals, clocks and exact asset provenance.
+
 ## macOS network stack profile
 
 [Run 46066522027](https://github.com/pichi-vm/dillo/actions/runs/46066522027)
@@ -627,3 +643,17 @@ lock, preserving a wake for later arrivals. Both execution modes receive the
 change. It is undergoing same-host native comparisons before any performance
 claim. [macos-network-stack-profile.json.gz](macos-network-stack-profile.json.gz)
 records the exact source, artifact and individual stack-file hashes.
+
+The first revision-comparison attempts are excluded from optimization evidence.
+Mac run `46068691985` stopped before measurement when Bash could not create a
+here-document temporary file; the helper now lives in `benchmarks/runtime.py`.
+Arm run `46068695950` and Windows run `46068693741` completed, but their baseline
+and candidate executable hashes were identical. Sharing Cargo's target directory
+between worktrees reused the baseline executable for the candidate. Their raw
+artifacts and logs are retained; the differing timings do not measure the code
+change. Mac retry `46069476195` was cancelled after this flaw was identified.
+
+The comparison fixture now gives the baseline a separate Cargo target directory
+and refuses identical executables before timing. Source-level network checks
+passed before the affected comparison builds; they are separate from the invalid
+performance attribution. Fresh comparisons at `ecd59d6` are pending.
