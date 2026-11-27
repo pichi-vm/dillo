@@ -127,12 +127,6 @@ mod imp {
             Ok(())
         }
 
-        fn fixed_interrupt_requester(&self) -> FixedInterruptRequester {
-            FixedInterruptRequester {
-                interrupt_controller: self.inner.interrupt_controller(),
-            }
-        }
-
         fn guest_memory(&self) -> Result<GuestMemoryMmap, Error> {
             self.inner.guest_memory()
         }
@@ -181,7 +175,7 @@ mod imp {
 
         fn create_message_interrupt_domain(&self, vectors: u16) -> Arc<dyn MessageInterruptDomain> {
             Arc::new(FixedMessageInterruptDomain::new(
-                self.fixed_interrupt_requester(),
+                self.inner.interrupt_controller(),
                 vectors,
             ))
         }
@@ -445,18 +439,6 @@ mod imp {
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct FixedInterruptRequester {
-        interrupt_controller: InterruptController,
-    }
-
-    impl FixedInterruptRequester {
-        fn request_fixed_interrupt(&self, destination: u32, vector: u8) -> Result<(), Error> {
-            self.interrupt_controller
-                .request_fixed_interrupt(destination, vector)
-        }
-    }
-
     #[derive(Clone, Copy, Debug, Default)]
     struct FixedMessage {
         address: u64,
@@ -466,13 +448,13 @@ mod imp {
     }
 
     #[derive(Debug)]
-    struct FixedMessageInterruptDomain {
+    pub(super) struct FixedMessageInterruptDomain {
         inner: Arc<FixedMessageInterruptDomainInner>,
     }
 
     #[derive(Debug)]
     struct FixedMessageInterruptDomainInner {
-        fixed_interrupts: FixedInterruptRequester,
+        fixed_interrupts: InterruptController,
         vectors: FixedMessageTable,
     }
 
@@ -480,7 +462,7 @@ mod imp {
     struct FixedMessageTable(Mutex<Vec<FixedMessage>>);
 
     impl FixedMessageInterruptDomain {
-        fn new(fixed_interrupts: FixedInterruptRequester, count: u16) -> Self {
+        pub(super) fn new(fixed_interrupts: InterruptController, count: u16) -> Self {
             Self {
                 inner: Arc::new(FixedMessageInterruptDomainInner {
                     fixed_interrupts,
@@ -526,7 +508,7 @@ mod imp {
     impl MessageInterruptDomain for FixedMessageInterruptDomain {
         fn event(&self) -> Result<Option<Arc<dyn MessageInterruptEvent>>, InterruptError> {
             Ok(Some(Arc::new(QueueEvent {
-                controller: self.inner.fixed_interrupts.interrupt_controller.clone(),
+                controller: self.inner.fixed_interrupts.clone(),
                 binding: Mutex::new(QueueBinding::software().map_err(delivery_error)?),
             })))
         }

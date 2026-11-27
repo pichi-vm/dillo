@@ -2687,6 +2687,44 @@ mod tests {
         assert_ne!(unsafe { SetEvent(exported.as_raw_handle()) }, 0);
         std::thread::sleep(Duration::from_millis(20));
         assert!(!pending(0x43));
+
+        // Exercise the transport-facing owner, including replacement of the
+        // exported handle while masked and a pending signal during unmask.
+        use dillo_mmio::{MessageInterrupt, MessageInterruptDomain};
+        let domain = crate::imp::FixedMessageInterruptDomain::new(vm.interrupt_controller(), 1);
+        let queue = domain.event().unwrap().unwrap();
+        let route = |data| {
+            Some(MessageInterrupt {
+                address: 0xfee0_0000,
+                data,
+                masked: false,
+            })
+        };
+        queue.signal();
+        assert!(queue.pending().unwrap());
+        assert!(!queue.pending().unwrap());
+        queue.configure(route(0x44)).unwrap();
+        let old = queue.export().unwrap().unwrap();
+        assert_ne!(unsafe { SetEvent(old.as_raw_handle()) }, 0);
+        wait(0x44, &mut pending);
+        queue.configure(None).unwrap();
+        queue.configure(route(0x45)).unwrap();
+        assert_ne!(unsafe { SetEvent(old.as_raw_handle()) }, 0);
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!pending(0x45), "retired handle reached replacement route");
+        let current = queue.export().unwrap().unwrap();
+        assert_ne!(unsafe { SetEvent(current.as_raw_handle()) }, 0);
+        wait(0x45, &mut pending);
+        queue.configure(None).unwrap();
+        queue.signal();
+        queue.configure(route(0x46)).unwrap();
+        wait(0x46, &mut pending);
+        queue.configure(route(0x47)).unwrap();
+        let last = queue.export().unwrap().unwrap();
+        drop(queue);
+        assert_ne!(unsafe { SetEvent(last.as_raw_handle()) }, 0);
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!pending(0x47), "dropped owner retained native delivery");
     }
 
     #[test]
