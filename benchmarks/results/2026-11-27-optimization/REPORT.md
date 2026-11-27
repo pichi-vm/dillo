@@ -524,3 +524,41 @@ predeclared 88-boot order and raw results are under
 specifically investigates the sequential-write regression. A follow-up CPU
 trace of the stripped release candidate is also retained; its unresolved
 Rust symbols cannot establish that a particular function's sampled cost fell.
+
+The native [Linux Arm](https://github.com/pichi-vm/dillo/actions/runs/46063811981)
+and [macOS](https://github.com/pichi-vm/dillo/actions/runs/46063813891) runs at
+`219fa22` each completed 16 PCI-free boots, three pairs of two-second operations
+after warm-up. On Arm, worker/control block throughput spans 92.4–103.2%, and
+network spans 94.8–97.1%; CPU/GiB spans 97.6–108.7% across the six workloads.
+On macOS, block retains 89.1–94.0% and network 97.5–98.0%, with CPU/GiB at
+104.6–124.3%. Neither platform establishes parity. These runs compare execution
+modes at the candidate revision, not the candidate against its predecessor;
+they cannot attribute a change to the shared mapping owner alone. All paired
+observations, binary hashes and clocks are retained in
+[region-owner-native-short.json.gz](region-owner-native-short.json.gz).
+
+## Windows block measurements with the Hyper-V clock
+
+[Run 46062103549](https://github.com/pichi-vm/dillo/actions/runs/46062103549)
+completed all 44 boots at `070fe3a`: ten alternating measured pairs for PCI and
+PCI-free MMIO, five seconds per QD1 operation, plus each retained warm-up pair.
+All guests selected `hyperv_clocksource_tsc_page`; the harness verified that
+only the intended `vda` disk was timed. This uses the unmodified prebuilt WSL
+kernel, so cross-kernel differences are not attributed to a Dillo optimization.
+
+| Operation | PCI throughput ratio | PCI CPU/GiB ratio | PCI p99 ratio | MMIO throughput ratio | MMIO CPU/GiB ratio | MMIO p99 ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Random read, 4 KiB | 0.962 | 1.014 | 1.024 | 0.931 | 1.043 | 1.059 |
+| Random write, 4 KiB | 0.965 | 0.979 | 1.043 | 0.955 | 1.024 | 0.950 |
+| Sequential read, 64 KiB | 1.309 | 0.844 | 0.829 | 1.414 | 0.747 | 0.806 |
+| Sequential write, 64 KiB | 1.240 | 0.850 | 0.816 | 1.429 | 0.771 | 0.750 |
+
+These are medians of paired worker/control ratios. The MMIO random-read
+throughput interval is [0.925, 0.937], so its roughly 7% deficit remains clear.
+PCI random-read CPU/GiB has a wide interval [0.956, 1.145], and further pairs
+are needed there. Sequential worker throughput is higher in this run; that
+does not compensate for random-I/O regressions or establish their cause.
+The latency histogram still has finite bin width, even with a working clock.
+Every paired observation and bootstrap interval is retained in
+[windows-clock-block-long.json.gz](windows-clock-block-long.json.gz), with raw
+artifacts under `target/performance/windows-block-long-46062103549`.
