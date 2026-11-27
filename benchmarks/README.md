@@ -4,6 +4,12 @@ Completed measurements: [2026-11-27 report](results/2026-11-27/REPORT.md).
 
 Active milestone: [device performance optimization](OPTIMIZATION.md).
 
+The harness explicitly selects its disposable virtio disks with
+`dillo.bench_devices=vda` (comma-separated for multiple disks, empty for network
+cases). Snuffler reports a missing selection as an error. Without this option,
+its timed mode keeps probing all nonempty whole disks. This prevents a kernel's
+built-in RAM disks from silently becoming additional timed workloads.
+
 ## Question and completion criteria
 
 Measure the cost of Dillo's out-of-process virtio devices, starting from

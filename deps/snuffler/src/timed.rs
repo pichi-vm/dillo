@@ -161,10 +161,25 @@ pub(crate) fn run(cmdline: &str, blocks: &[snuffler::BlockDevice], config: &Conf
         operations: Vec::new(),
         errors: Vec::new(),
     };
+    let selected = super::cmdline_token(cmdline, "dillo.bench_devices=");
     let blocks: Vec<_> = blocks
         .iter()
         .filter(|block| block.size_bytes != 0)
+        .filter(|block| {
+            selected
+                .as_ref()
+                .is_none_or(|names| names.split(',').any(|name| name == block.name))
+        })
         .collect();
+    if let Some(names) = &selected {
+        for name in names.split(',').filter(|name| !name.is_empty()) {
+            if !blocks.iter().any(|block| block.name == name) {
+                report
+                    .errors
+                    .push(format!("benchmark device {name} is unavailable"));
+            }
+        }
+    }
     let groups: Vec<_> = if cmdline
         .split_whitespace()
         .any(|word| word == "dillo.bench_concurrent")

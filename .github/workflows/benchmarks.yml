@@ -11,7 +11,7 @@ on:
       cases:
         description: Workload selection
         type: choice
-        options: [all, pci-free, block-pci, block-mmio, block4-pci, block4-concurrent-pci, net-pci, block-mmio-only, net-mmio-only]
+        options: [all, block-transports, pci-free, block-pci, block-mmio, block4-pci, block4-concurrent-pci, net-pci, block-mmio-only, net-mmio-only]
         default: all
       pairs:
         description: Measured pairs after the retained warm-up
@@ -36,6 +36,11 @@ on:
         type: choice
         options: [fixture, wsl-clock]
         default: fixture
+      completion:
+        description: Completion implementation to measure
+        type: choice
+        options: [both, relay, shared]
+        default: both
 
 permissions:
   contents: read
@@ -134,16 +139,17 @@ jobs:
       - name: Measure paired workloads
         shell: bash
         env:
-          BENCH_CASES: ${{ inputs.cases == 'pci-free' && 'block-mmio-only,net-mmio-only' || inputs.cases != 'all' && inputs.cases || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,net-pci,block-mmio-only,net-mmio-only' }}
+          BENCH_CASES: ${{ inputs.cases == 'block-transports' && 'block-pci,block-mmio-only' || inputs.cases == 'pci-free' && 'block-mmio-only,net-mmio-only' || inputs.cases != 'all' && inputs.cases || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,net-pci,block-mmio-only,net-mmio-only' }}
           BENCH_SAMPLING: ${{ inputs.sampling || 'on' }}
           BENCH_PAIRS: ${{ inputs.pairs || 10 }}
           BENCH_DURATION_MS: ${{ inputs.duration_ms || 5000 }}
           BENCH_QUEUE_DEPTH: ${{ inputs.queue_depth || 1 }}
           BENCH_KERNEL: ${{ inputs.kernel }}
+          BENCH_COMPLETIONS: ${{ inputs.completion == 'shared' && 'shared' || inputs.completion == 'relay' && 'relay' || 'relay shared' }}
         run: |
           bench_modes="$BENCH_SAMPLING"
           if [ "$bench_modes" = both ]; then bench_modes='on off'; fi
-          for bench_latch in relay shared; do
+          for bench_latch in $BENCH_COMPLETIONS; do
           unset DILLO_BENCH_SHARED_ISR
           if [ "$bench_latch" = shared ]; then export DILLO_BENCH_SHARED_ISR=1; fi
           for bench_mode in $bench_modes; do

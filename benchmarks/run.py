@@ -185,6 +185,10 @@ def run_vm(args, assets, image, disks, case, mode, label):
         assert not report["pci"], f"PCI device present in PCI-free case: {directory}"
     perf = report["performance"]
     assert not perf["errors"] and perf["operations"], f"guest benchmark failed: {directory}"
+    expected_devices = {"net"} if case.startswith("net-") else {
+        f"vd{chr(ord('a') + i)}" for i in range(len(disks))}
+    observed_devices = {op["device"] for op in perf["operations"]} - {"block-group"}
+    assert observed_devices == expected_devices, (expected_devices, observed_devices, directory)
     assert all(op["verified"] is not False and op["latency"]["count"] > 0
                for op in perf["operations"]), f"invalid result: {directory}"
     idle_counts = [len(s["processes"]) for s in samples if s["phase"] == "idle-after"]
@@ -291,9 +295,11 @@ def main():
             assert case in ("block-pci", "block-mmio", "block4-pci", "block4-concurrent-pci",
                             "net-pci", "block-mmio-only", "net-mmio-only")
             image = args.output / f"{case}.pmi"
+            count = 0 if case.startswith("net-") else (4 if case.startswith("block4-") else 1)
+            selected = ",".join(f"vd{chr(ord('a') + i)}" for i in range(count))
             cmdline = (f"console=hvc0 dillo.uptime_ns dillo.panic_report "
                        f"dillo.bench_ms={args.duration_ms} dillo.bench_warmup_ms={args.warmup_ms} "
-                       f"dillo.bench_qd={args.queue_depth}")
+                       f"dillo.bench_qd={args.queue_depth} dillo.bench_devices={selected}")
             cmdline += " " + args.extra_cmdline
             if case == "block4-concurrent-pci":
                 cmdline += " dillo.bench_concurrent"
@@ -309,7 +315,6 @@ def main():
             build.append(str(image))
             subprocess.run(build, check=True)
             save(args.output / f"{case}-image.json", {"command": build, "sha256": digest(image)})
-            count = 0 if case.startswith("net-") else (4 if case.startswith("block4-") else 1)
             disks = [backing / f"disk{i}.raw" for i in range(count)]
             for pair in range(-1, args.pairs):  # First pair warms the host and is retained but excluded.
                 order = ("local", "worker") if pair % 2 == 0 else ("worker", "local")
