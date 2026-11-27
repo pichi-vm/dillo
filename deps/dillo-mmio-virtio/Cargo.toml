@@ -7,10 +7,14 @@ license.workspace = true
 description = "Virtio MMIO transport adapter for dillo-mmio devices."
 
 [dependencies]
+dillo-machine.workspace = true
 dillo-mmio.workspace = true
 dillo-virtio.workspace = true
 vm-memory.workspace = true
 log.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -286,7 +286,15 @@ impl Prepared {
         }
         session.exchange(
             SET_PROTOCOL_FEATURES,
-            (PROTOCOL | (offered & wire::MQ)).to_ne_bytes().to_vec(),
+            (PROTOCOL
+                | (offered & wire::MQ)
+                | if std::env::var_os("DILLO_BENCH_SHARED_ISR").is_some() {
+                    offered & wire::EXPERIMENT_SHARED_ISR
+                } else {
+                    0
+                })
+            .to_ne_bytes()
+            .to_vec(),
             Vec::new(),
             Reply::None,
         )?;
@@ -361,7 +369,7 @@ impl Prepared {
                 features: features & !wire::PROTOCOL_FEATURES,
                 config,
                 next_epoch: 1,
-                interrupts: Vec::new(),
+                interrupts: Arc::default(),
             },
             Control(session),
         ))
@@ -675,7 +683,48 @@ pub struct Proxy {
     features: u64,
     config: Arc<Mutex<Vec<u8>>>,
     next_epoch: u64,
-    interrupts: Vec<(u32, dillo_mmio::Interrupt)>,
+    interrupts: Arc<Mutex<Vec<(u32, dillo_mmio::Interrupt)>>>,
+}
+
+#[derive(Debug)]
+struct InterruptUpdate {
+    session: std::sync::Weak<Session>,
+    interrupts: std::sync::Weak<Mutex<Vec<(u32, dillo_mmio::Interrupt)>>>,
+}
+
+impl dillo_mmio::InterruptUpdate for InterruptUpdate {
+    fn run(&self, update: &mut dyn FnMut() -> io::Result<()>) -> io::Result<()> {
+        let session = self.session.upgrade().ok_or(io::ErrorKind::NotConnected)?;
+        let mut paused = session.lifecycle.lock().unwrap();
+        if session.shared.active.load(Ordering::Acquire) == 0 {
+            return update();
+        }
+        let resume = !*paused;
+        if resume {
+            session.pause_queues()?;
+            *paused = true;
+        }
+        update()?;
+        let interrupts = self
+            .interrupts
+            .upgrade()
+            .ok_or(io::ErrorKind::NotConnected)?;
+        for (index, interrupt) in interrupts.lock().unwrap().iter() {
+            let resource = interrupt
+                .export()?
+                .ok_or_else(|| io::Error::other("interrupt endpoint no longer exportable"))?;
+            session.set(
+                SET_VRING_CALL,
+                u64::from(*index).to_ne_bytes().to_vec(),
+                vec![resource],
+            )?;
+        }
+        if resume {
+            session.resume_queues()?;
+            *paused = false;
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for Proxy {
@@ -713,31 +762,14 @@ impl VirtioDevice for Proxy {
     fn write_config(&mut self, _: u64, _: &[u8]) {}
 
     fn update_interrupts(&mut self, update: &mut dyn FnMut() -> io::Result<()>) -> io::Result<()> {
-        let mut paused = self.session.lifecycle.lock().unwrap();
-        if self.session.shared.active.load(Ordering::Acquire) == 0 {
-            return update();
-        }
-        let resume = !*paused;
-        if resume {
-            self.session.pause_queues()?;
-            *paused = true;
-        }
-        update()?;
-        for (index, interrupt) in &self.interrupts {
-            let resource = interrupt
-                .export()?
-                .ok_or_else(|| io::Error::other("interrupt endpoint no longer exportable"))?;
-            self.session.set(
-                SET_VRING_CALL,
-                u64::from(*index).to_ne_bytes().to_vec(),
-                vec![resource],
-            )?;
-        }
-        if resume {
-            self.session.resume_queues()?;
-            *paused = false;
-        }
-        Ok(())
+        self.interrupt_update().unwrap().run(update)
+    }
+
+    fn interrupt_update(&self) -> Option<Arc<dyn dillo_mmio::InterruptUpdate>> {
+        Some(Arc::new(InterruptUpdate {
+            session: Arc::downgrade(&self.session),
+            interrupts: Arc::downgrade(&self.interrupts),
+        }))
     }
 
     fn activate(
@@ -763,7 +795,7 @@ impl VirtioDevice for Proxy {
             .ok_or_else(|| ActivateError::InvalidConfig("activation epoch exhausted".into()))?;
         session.shared.active.store(epoch, Ordering::Release);
         *paused = false;
-        self.interrupts.clear();
+        self.interrupts.lock().unwrap().clear();
         let mut relays = Vec::new();
         let mut shared_calls: Vec<(dillo_mmio::Interrupt, Resource)> = Vec::new();
         let mut retained_kicks = Vec::new();
@@ -776,6 +808,15 @@ impl VirtioDevice for Proxy {
                     .to_vec(),
                 Vec::new(),
             )?;
+            if let Some(status) = activation
+                .queue_interrupt(0)
+                .as_ref()
+                .map(dillo_mmio::Interrupt::export_status)
+                .transpose()?
+                .flatten()
+            {
+                session.set(wire::EXPERIMENT_SET_ISR, Vec::new(), vec![status])?;
+            }
             for (index, (queue, kick)) in queues.into_iter().zip(kicks).enumerate() {
                 let index = index as u32;
                 let geometry = crate::queue::describe(&queue);
@@ -897,6 +938,12 @@ impl VirtioDevice for Proxy {
             }
             Ok(())
         })();
+        // Publish the exported owners before a controller update can acquire
+        // lifecycle. The callback needs no virtio transport/device lock.
+        self.interrupts
+            .lock()
+            .unwrap()
+            .clone_from(&retained_interrupts);
         drop(paused);
         if let Err(error) = result {
             let _ = session.reset(epoch);
@@ -909,7 +956,6 @@ impl VirtioDevice for Proxy {
             return Err(error.into());
         }
         let relays = Arc::new(Mutex::new(Some(relays)));
-        self.interrupts.clone_from(&retained_interrupts);
         let stop_relays = Arc::clone(&relays);
         Ok(VirtioDeviceHandle::new(
             move || {

@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Mutex;
+use std::io;
+use std::sync::{Arc, Mutex, Weak};
 
 use dillo_mmio::{MmioDevice, MmioError, MmioWindow, MmioWriteOutcome};
 
@@ -14,7 +15,13 @@ use dillo_mmio::{MmioDevice, MmioError, MmioWindow, MmioWriteOutcome};
 pub(crate) struct IoApic {
     window: MmioWindow,
     select: Mutex<u32>,
-    redirection: Mutex<[u64; 24]>,
+    redirection: Mutex<Redirection>,
+}
+
+#[derive(Debug)]
+struct Redirection {
+    entries: [u64; 24],
+    completions: [Vec<Weak<crate::wired_completion::Completion>>; 24],
 }
 
 impl IoApic {
@@ -22,15 +29,40 @@ impl IoApic {
         Self {
             window,
             select: Mutex::new(0),
-            redirection: Mutex::new([1 << 16; 24]),
+            redirection: Mutex::new(Redirection {
+                entries: [1 << 16; 24],
+                completions: std::array::from_fn(|_| Vec::new()),
+            }),
         }
     }
 
     pub(crate) fn route(&self, gsi: u32) -> Option<IoApicRoute> {
         let idx = usize::try_from(gsi).ok()?;
         let redirection = self.redirection.lock().expect("ioapic redir poisoned");
-        let entry = *redirection.get(idx)?;
+        let entry = *redirection.entries.get(idx)?;
         decode_route(entry)
+    }
+
+    pub(crate) fn bind_completion(
+        &self,
+        gsi: u32,
+        controller: crate::hypervisor::InterruptController,
+        status: Arc<dillo_machine::worker::NotificationState>,
+        update: Option<Arc<dyn dillo_mmio::InterruptUpdate>>,
+    ) -> io::Result<dillo_mmio::Interrupt> {
+        let completion = Arc::new(crate::wired_completion::Completion::new(
+            controller, status, update,
+        )?);
+        let mut redirection = self.redirection.lock().unwrap();
+        let index = usize::try_from(gsi).map_err(|_| io::ErrorKind::InvalidInput)?;
+        let entry = *redirection
+            .entries
+            .get(index)
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        completion.configure(decode_route(entry))?;
+        redirection.completions[index].retain(|old| old.strong_count() != 0);
+        redirection.completions[index].push(Arc::downgrade(&completion));
+        Ok(dillo_mmio::Interrupt::new(completion))
     }
 
     fn read_register(&self, offset: u64, data: &mut [u8]) -> bool {
@@ -46,21 +78,21 @@ impl IoApic {
         true
     }
 
-    fn write_register(&self, offset: u64, data: &[u8]) -> bool {
+    fn write_register(&self, offset: u64, data: &[u8]) -> io::Result<()> {
         let value = match data.len() {
             1 => u32::from(data[0]),
             2 => u32::from(u16::from_le_bytes([data[0], data[1]])),
             4 => u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
-            _ => return true,
+            _ => return Ok(()),
         };
         match offset {
             0x00..=0x03 => {
                 *self.select.lock().expect("ioapic select poisoned") = value;
             }
-            0x10..=0x13 => self.write_selected(value),
+            0x10..=0x13 => self.write_selected(value)?,
             _ => {}
         }
-        true
+        Ok(())
     }
 
     fn read_selected(&self) -> u32 {
@@ -77,7 +109,7 @@ impl IoApic {
                 let idx = ((reg - 0x10) / 2) as usize;
                 let high = (reg - 0x10) % 2 == 1;
                 let redirection = self.redirection.lock().expect("ioapic redir poisoned");
-                let Some(entry) = redirection.get(idx) else {
+                let Some(entry) = redirection.entries.get(idx) else {
                     return 0;
                 };
                 if high {
@@ -90,22 +122,34 @@ impl IoApic {
         }
     }
 
-    fn write_selected(&self, value: u32) {
+    fn write_selected(&self, value: u32) -> io::Result<()> {
         let select = *self.select.lock().expect("ioapic select poisoned");
         if !(0x10..=0x3f).contains(&select) {
-            return;
+            return Ok(());
         }
         let idx = ((select - 0x10) / 2) as usize;
         let high = (select - 0x10) % 2 == 1;
         let mut redirection = self.redirection.lock().expect("ioapic redir poisoned");
-        let Some(entry) = redirection.get_mut(idx) else {
-            return;
+        let Some(&entry) = redirection.entries.get(idx) else {
+            return Ok(());
         };
-        if high {
-            *entry = (*entry & 0x0000_0000_FFFF_FFFF) | (u64::from(value) << 32);
+        let entry = if high {
+            (entry & 0x0000_0000_FFFF_FFFF) | (u64::from(value) << 32)
         } else {
-            *entry = (*entry & 0xFFFF_FFFF_0000_0000) | u64::from(value);
+            (entry & 0xFFFF_FFFF_0000_0000) | u64::from(value)
+        };
+        // Serialize route changes and registration, but never call back into
+        // the virtio transport lock. Native completion uses the worker's
+        // separate lifecycle barrier to replace exported handles safely.
+        redirection.completions[idx].retain(|old| old.strong_count() != 0);
+        for completion in redirection.completions[idx]
+            .iter()
+            .filter_map(Weak::upgrade)
+        {
+            completion.configure(decode_route(entry))?;
         }
+        redirection.entries[idx] = entry;
+        Ok(())
     }
 }
 
@@ -127,8 +171,8 @@ impl MmioDevice for IoApic {
         data: &[u8],
     ) -> Result<MmioWriteOutcome, MmioError> {
         self.write_register(offset, data)
-            .then_some(MmioWriteOutcome::Continue)
-            .ok_or(MmioError::Unsupported)
+            .map_err(|e| MmioError::Device(e.to_string()))?;
+        Ok(MmioWriteOutcome::Continue)
     }
 }
 

@@ -1,8 +1,29 @@
 # Device isolation benchmark milestone
 
+The branch workflow accepts an optional `baseline_ref` for a runtime comparison
+on one native host. It builds and freezes that executable in a separate Cargo
+target directory, then uses the candidate's producer, probe and kernel for both.
+It rejects identical executables before measurement. Each
+result records the harness revision, runtime revision and executable hash.
+Results are grouped by `baseline` or `candidate`; each still compares worker
+and in-process execution. The variants run sequentially, so short comparisons
+are diagnostic and cannot exclude temporal host variation.
+
 Completed measurements: [2026-11-27 report](results/2026-11-27/REPORT.md).
 
 Active milestone: [device performance optimization](OPTIMIZATION.md).
+
+The harness explicitly selects its disposable virtio disks with
+`dillo.bench_devices=vda` (comma-separated for multiple disks, empty for network
+cases). Snuffler reports a missing selection as an error. Without this option,
+its timed mode keeps probing all nonempty whole disks. This prevents a kernel's
+built-in RAM disks from silently becoming additional timed workloads.
+
+For kernels without `CONFIG_IP_PNP`, network cases request
+`dillo.net_config=eth0,10.0.2.15/24`. Snuffler brings up that guest interface and
+sets its address before probing or timing. Netlink failures become benchmark
+errors. The echo endpoint is on the connected subnet, so no default route is
+needed. This supports the unmodified prebuilt WSL kernel's Hyper-V clock.
 
 ## Question and completion criteria
 

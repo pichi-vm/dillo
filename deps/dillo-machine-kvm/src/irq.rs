@@ -59,6 +59,8 @@ pub(crate) struct IrqManager {
     /// by [`flush_pending_wired`] once the vGIC is up.
     #[cfg(target_arch = "aarch64")]
     pending_wired: Vec<(u32, EventFd)>,
+    #[cfg(target_arch = "aarch64")]
+    wired_gsis: Vec<(u32, u32)>,
 }
 
 impl std::fmt::Debug for IrqManager {
@@ -108,6 +110,8 @@ impl IrqManager {
             irqfds: Vec::new(),
             #[cfg(target_arch = "aarch64")]
             pending_wired: Vec::new(),
+            #[cfg(target_arch = "aarch64")]
+            wired_gsis: Vec::new(),
         };
         // Commit only a non-empty initial table. aarch64 starts empty and must
         // not call KVM_SET_GSI_ROUTING before the vGIC is initialized; its first
@@ -216,8 +220,26 @@ impl IrqManager {
                 .register_irqfd(&eventfd, gsi)
                 .map_err(IrqError::KvmIrqfd)?;
             self.irqfds.push((gsi, eventfd));
+            self.wired_gsis.push((pin, gsi));
         }
         Ok(())
+    }
+
+    pub(crate) fn wired_binding(&self, source: u32) -> Result<(Vm, u32), IrqError> {
+        #[cfg(target_arch = "x86_64")]
+        let gsi = if source < NUM_IOAPIC_PINS {
+            source
+        } else {
+            return Err(IrqError::RoutingAllocation);
+        };
+        #[cfg(target_arch = "aarch64")]
+        let gsi = self
+            .wired_gsis
+            .iter()
+            .find(|(pin, _)| *pin == source)
+            .map(|(_, gsi)| *gsi)
+            .ok_or(IrqError::RoutingAllocation)?;
+        Ok((self.vm.clone(), gsi))
     }
 
     /// Register an irqfd at an existing GSI (no new routing entry needed).

@@ -374,6 +374,12 @@ pub trait VirtioDevice: Send {
         update()
     }
 
+    /// Experimental equivalent of `update_interrupts` for a wired controller
+    /// whose registers are independent of the virtio transport's device lock.
+    fn interrupt_update(&self) -> Option<std::sync::Arc<dyn dillo_mmio::InterruptUpdate>> {
+        None
+    }
+
     /// Stop guest-memory access and publication after admitted work completes,
     /// preserving queue progress and negotiation for resume.
     fn quiesce(&mut self) -> Result<(), ActivateError> {

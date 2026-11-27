@@ -1134,12 +1134,12 @@ mod backend_tests {
 }
 
 #[cfg(test)]
-mod memory_registration_tests {
+pub(crate) mod memory_registration_tests {
     use super::*;
     use crate::irq::IrqManager;
     use crate::memory::{MappedMemory, MappingProbe};
 
-    fn native_cpu_test_child(name: &str) -> bool {
+    pub(crate) fn native_cpu_test_child(name: &str) -> bool {
         use std::{process::Command, time::Duration};
         use wait_timeout::ChildExt;
 

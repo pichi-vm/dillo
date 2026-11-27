@@ -514,6 +514,22 @@ impl Interrupt {
     pub fn export(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
         self.0.export()
     }
+
+    pub fn export_status(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
+        self.0.export_status()
+    }
+
+    pub fn bind_status(
+        &self,
+        state: Arc<dillo_machine::worker::NotificationState>,
+        update: Option<Arc<dyn InterruptUpdate>>,
+    ) -> Result<Interrupt, InterruptError> {
+        self.0.bind_status(state, update)
+    }
+
+    pub fn retire(&self) -> Result<(), InterruptError> {
+        self.0.retire()
+    }
 }
 
 struct FnInterruptLine {
@@ -539,6 +555,13 @@ impl InterruptLine for FnInterruptLine {
     }
 }
 
+/// Experimental control-plane barrier for replacing exported wired events.
+/// The implementation drains callers, runs the change, refreshes their event
+/// handles and resumes them. A failed update must leave callers stopped.
+pub trait InterruptUpdate: Send + Sync + std::fmt::Debug {
+    fn run(&self, change: &mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()>;
+}
+
 /// Backend-resolved line interrupt.
 pub trait InterruptLine: Send + Sync + std::fmt::Debug {
     fn signal(&self);
@@ -548,6 +571,25 @@ pub trait InterruptLine: Send + Sync + std::fmt::Debug {
     /// Export a signaling endpoint whose owner retains delivery policy.
     fn export(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
         Ok(None)
+    }
+
+    fn export_status(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
+        Ok(None)
+    }
+
+    /// Experimental activation-scoped completion binding; no default export.
+    fn bind_status(
+        &self,
+        _state: Arc<dillo_machine::worker::NotificationState>,
+        _update: Option<Arc<dyn InterruptUpdate>>,
+    ) -> Result<Interrupt, InterruptError> {
+        Err(InterruptError::Delivery(
+            "shared status is unsupported".into(),
+        ))
+    }
+
+    fn retire(&self) -> Result<(), InterruptError> {
+        Ok(())
     }
 }
 

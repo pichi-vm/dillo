@@ -185,6 +185,10 @@ def run_vm(args, assets, image, disks, case, mode, label):
         assert not report["pci"], f"PCI device present in PCI-free case: {directory}"
     perf = report["performance"]
     assert not perf["errors"] and perf["operations"], f"guest benchmark failed: {directory}"
+    expected_devices = {"net"} if case.startswith("net-") else {
+        f"vd{chr(ord('a') + i)}" for i in range(len(disks))}
+    observed_devices = {op["device"] for op in perf["operations"]} - {"block-group"}
+    assert observed_devices == expected_devices, (expected_devices, observed_devices, directory)
     assert all(op["verified"] is not False and op["latency"]["count"] > 0
                for op in perf["operations"]), f"invalid result: {directory}"
     idle_counts = [len(s["processes"]) for s in samples if s["phase"] == "idle-after"]
@@ -255,6 +259,7 @@ def main():
     parser.add_argument("--no-sample", action="store_true")
     parser.add_argument("--backing-dir", type=Path, help="optional disposable disk directory, e.g. tmpfs")
     parser.add_argument("--extra-cmdline", default="", help="explicit guest settings for sensitivity runs")
+    parser.add_argument("--serial", action="store_true", help="retain early boot diagnostics through SPCR")
     args = parser.parse_args()
     assert args.pairs > 0 and args.sample_ms > 0
     args.output = args.output.resolve()
@@ -268,10 +273,12 @@ def main():
                    "cpu_count": psutil.cpu_count(), "psutil": psutil.__version__,
                    "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
                    "dirty": subprocess.check_output(["git", "status", "--porcelain"], text=True),
+                   "experimental_shared_isr": "DILLO_BENCH_SHARED_ISR" in os.environ,
                    "rustc": subprocess.check_output(["rustc", "-Vv"], text=True),
                    "assets": assets, "hashes": {k: digest(assets[k]) for k in
                                                 ("dillo", "arma", "snuffler", "kernel")},
                    "options": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}}
+    environment["runtime_source"] = assets.get("runtime_source", environment["source"])
     environment["host_cpu"] = (Path("/proc/cpuinfo").read_text() if platform.system() == "Linux" else
         subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"], text=True)
         if platform.system() == "Darwin" else os.environ.get("PROCESSOR_IDENTIFIER"))
@@ -289,23 +296,28 @@ def main():
             assert case in ("block-pci", "block-mmio", "block4-pci", "block4-concurrent-pci",
                             "net-pci", "block-mmio-only", "net-mmio-only")
             image = args.output / f"{case}.pmi"
+            count = 0 if case.startswith("net-") else (4 if case.startswith("block4-") else 1)
+            selected = ",".join(f"vd{chr(ord('a') + i)}" for i in range(count))
             cmdline = (f"console=hvc0 dillo.uptime_ns dillo.panic_report "
                        f"dillo.bench_ms={args.duration_ms} dillo.bench_warmup_ms={args.warmup_ms} "
-                       f"dillo.bench_qd={args.queue_depth}")
+                       f"dillo.bench_qd={args.queue_depth} dillo.bench_devices={selected}")
             cmdline += " " + args.extra_cmdline
             if case == "block4-concurrent-pci":
                 cmdline += " dillo.bench_concurrent"
             if case.startswith("net-"):
                 cmdline += (f" ip=10.0.2.15::10.0.2.2:255.255.255.0::eth0:off"
                             f" dillo.net_echo=10.0.2.2:{port}")
+                if "CONFIG_IP_PNP=y" not in assets["config"].splitlines():
+                    cmdline += " dillo.net_config=eth0,10.0.2.15/24"
             build = [assets["arma"], "build", "--kernel", assets["kernel"], "--config", str(config),
                      "--profile", assets["profile"], "--initrd", assets["snuffler"], "--cmdline", cmdline]
+            if args.serial:
+                build.append("--serial")
             if case.endswith("-mmio-only"):
                 build += ["--pci-slots", "0", "--mmio-slots", "2"]
             build.append(str(image))
             subprocess.run(build, check=True)
             save(args.output / f"{case}-image.json", {"command": build, "sha256": digest(image)})
-            count = 0 if case.startswith("net-") else (4 if case.startswith("block4-") else 1)
             disks = [backing / f"disk{i}.raw" for i in range(count)]
             for pair in range(-1, args.pairs):  # First pair warms the host and is retained but excluded.
                 order = ("local", "worker") if pair % 2 == 0 else ("worker", "local")

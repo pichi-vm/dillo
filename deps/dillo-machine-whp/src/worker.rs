@@ -34,6 +34,36 @@ mod vhost_user;
 pub struct Worker;
 
 impl dillo_machine::worker::WorkerHost for Worker {
+    fn create_notification_state() -> io::Result<Arc<dillo_machine::worker::NotificationState>> {
+        use windows_sys::Win32::System::Memory::{CreateFileMappingW, PAGE_READWRITE, SEC_COMMIT};
+        // SAFETY: unnamed, non-inheritable, cacheable committed pagefile
+        // backing. The successful handle is newly owned by this call.
+        #[allow(unsafe_code)]
+        unsafe {
+            let section = CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                std::ptr::null(),
+                PAGE_READWRITE | SEC_COMMIT,
+                0,
+                4096,
+                std::ptr::null(),
+            );
+            if section.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            Self::adopt_notification_state(OwnedHandle::from_raw_handle(section))
+        }
+    }
+
+    #[allow(unsafe_code)]
+    unsafe fn adopt_notification_state(
+        resource: OwnedHandle,
+    ) -> io::Result<Arc<dillo_machine::worker::NotificationState>> {
+        // SAFETY: the caller grants one of our committed pagefile sections
+        // and guarantees aligned atomic accesses through every retained alias.
+        unsafe { dillo_machine::worker::NotificationState::from_section(resource).map(Arc::new) }
+    }
+
     fn import_socket(message: Message) -> io::Result<dillo_machine::worker::Socket> {
         socket::import(message)
     }

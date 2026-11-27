@@ -12,6 +12,44 @@ use std::sync::Arc;
 pub struct Worker;
 
 impl dillo_machine::worker::WorkerHost for Worker {
+    fn create_notification_state() -> io::Result<Arc<dillo_machine::worker::NotificationState>> {
+        use nix::fcntl::{FcntlArg, SealFlag, fcntl};
+        use nix::sys::memfd::{MFdFlags, memfd_create};
+        let fd = memfd_create(
+            c"dillo-status-experiment",
+            MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING,
+        )?;
+        nix::unistd::ftruncate(&fd, 4096)?;
+        fcntl(
+            &fd,
+            FcntlArg::F_ADD_SEALS(
+                SealFlag::F_SEAL_GROW | SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_SEAL,
+            ),
+        )?;
+        // SAFETY: fresh sealed backing, with no other mappings or accessors.
+        #[allow(unsafe_code)]
+        unsafe {
+            Self::adopt_notification_state(fd)
+        }
+    }
+
+    #[allow(unsafe_code)]
+    unsafe fn adopt_notification_state(
+        resource: dillo_machine::worker::Resource,
+    ) -> io::Result<Arc<dillo_machine::worker::NotificationState>> {
+        use nix::fcntl::{FcntlArg, SealFlag, fcntl};
+        let seals = SealFlag::from_bits_retain(fcntl(&resource, FcntlArg::F_GET_SEALS)?);
+        let file = std::fs::File::from(resource);
+        if !seals.contains(SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_GROW)
+            || file.metadata()?.len() != 4096
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // SAFETY: the sealed extent cannot change; the caller guarantees
+        // that retained aliases use only aligned AtomicU32 accesses.
+        unsafe { dillo_machine::worker::NotificationState::from_file(file).map(Arc::new) }
+    }
+
     fn notification_pair() -> io::Result<(
         dillo_machine::worker::Resource,
         dillo_machine::worker::Resource,
@@ -211,6 +249,7 @@ fn confine(files: &[dillo_machine::worker::BorrowedResource<'_>]) -> io::Result<
     rules.insert(
         libc::SYS_fcntl,
         vec![
+            condition(1, u32::MAX as u64, libc::F_GET_SEALS as u64)?,
             condition(1, u32::MAX as u64, libc::F_GETFL as u64)?,
             condition(1, u32::MAX as u64, libc::F_GETFD as u64)?,
             condition(1, u32::MAX as u64, libc::F_SETFL as u64)?,

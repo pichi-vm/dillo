@@ -1,4 +1,4 @@
-name: Device isolation benchmarks
+name: Shared MMIO status experiment
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
       cases:
         description: Workload selection
         type: choice
-        options: [all, pci-free, block-pci, block-mmio, block4-pci, block4-concurrent-pci, net-pci, block-mmio-only, net-mmio-only]
+        options: [all, block-transports, net-transports, pci-free, block-pci, block-mmio, block4-pci, block4-concurrent-pci, net-pci, block-mmio-only, net-mmio-only]
         default: all
       pairs:
         description: Measured pairs after the retained warm-up
@@ -31,6 +31,20 @@ on:
         type: choice
         options: ["on", "off", both]
         default: "on"
+      kernel:
+        description: Existing fixture or prebuilt Hyper-V clock diagnostic (x86 only)
+        type: choice
+        options: [fixture, wsl-clock]
+        default: fixture
+      completion:
+        description: Completion implementation to measure
+        type: choice
+        options: [both, relay, shared]
+        default: both
+      baseline_ref:
+        description: Optional runtime revision to compare on the same host
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -98,6 +112,38 @@ jobs:
             sudo sysctl -w vm.nr_hugepages=256
           fi
           test "$(awk '/HugePages_Free/{print $2}' /proc/meminfo)" -ge 128
+      - name: Check native wired completion lifecycle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: >-
+          cargo --config .copr/cargo-config.toml test --locked
+          -p dillo-machine-kvm wired_completion::tests -- --nocapture
+      - name: Check native WHP completion lifecycle
+        if: runner.os == 'Windows'
+        shell: bash
+        run: >-
+          cargo --config .copr/cargo-config.toml test --locked
+          -p dillo-machine-whp whp_trigger_ -- --nocapture
+      - name: Check network behavior
+        shell: bash
+        run: cargo --config .copr/cargo-config.toml test --locked -p dillo-virtio-net --lib
+      - name: Build comparison executable
+        if: inputs.baseline_ref != ''
+        shell: bash
+        env:
+          BENCH_BASELINE: ${{ inputs.baseline_ref }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/dillo-benchmark-baseline-target
+          DILLO_BENCH_DIR: ${{ github.workspace }}/target/benchmarks-baseline
+        run: |
+          git fetch --depth=1 origin "$BENCH_BASELINE"
+          git worktree add --detach "$RUNNER_TEMP/dillo-benchmark-baseline" FETCH_HEAD
+          (
+            cd "$RUNNER_TEMP/dillo-benchmark-baseline"
+            cargo --config .copr/cargo-config.toml test --locked --release \
+              -p dillo --features vm-tests,bench-in-process --test boot \
+              benchmark::benchmark_assets -- --ignored --exact --nocapture
+            python "$GITHUB_WORKSPACE/benchmarks/runtime.py" freeze "$DILLO_BENCH_DIR"
+          )
       - name: Build matched release assets
         shell: bash
         env:
@@ -106,24 +152,47 @@ jobs:
           cargo --config .copr/cargo-config.toml test --locked --release
           -p dillo --features vm-tests,bench-in-process --test boot
           benchmark::benchmark_assets -- --ignored --exact --nocapture
+      - name: Select the prebuilt clock diagnostic kernel
+        if: inputs.kernel == 'wsl-clock'
+        shell: bash
+        run: >-
+          python benchmarks/wsl_kernel.py target/benchmarks/assets.json
+          --cache "$RUNNER_TEMP/dillo-wsl-kernel"
       - name: Measure paired workloads
         shell: bash
         env:
-          BENCH_CASES: ${{ inputs.cases == 'pci-free' && 'block-mmio-only,net-mmio-only' || inputs.cases != 'all' && inputs.cases || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,net-pci,block-mmio-only,net-mmio-only' }}
+          BENCH_CASES: ${{ inputs.cases == 'block-transports' && 'block-pci,block-mmio-only' || inputs.cases == 'net-transports' && 'net-pci,net-mmio-only' || inputs.cases == 'pci-free' && 'block-mmio-only,net-mmio-only' || inputs.cases != 'all' && inputs.cases || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,net-pci,block-mmio-only,net-mmio-only' }}
           BENCH_SAMPLING: ${{ inputs.sampling || 'on' }}
           BENCH_PAIRS: ${{ inputs.pairs || 10 }}
           BENCH_DURATION_MS: ${{ inputs.duration_ms || 5000 }}
           BENCH_QUEUE_DEPTH: ${{ inputs.queue_depth || 1 }}
+          BENCH_KERNEL: ${{ inputs.kernel }}
+          BENCH_BASELINE: ${{ inputs.baseline_ref }}
+          BENCH_COMPLETIONS: ${{ inputs.completion == 'shared' && 'shared' || inputs.completion == 'relay' && 'relay' || 'relay shared' }}
         run: |
+          bench_variants=candidate
+          if [ -n "$BENCH_BASELINE" ]; then
+            python benchmarks/runtime.py match target/benchmarks-baseline target/benchmarks/assets.json
+            bench_variants='baseline candidate'
+          fi
           bench_modes="$BENCH_SAMPLING"
           if [ "$bench_modes" = both ]; then bench_modes='on off'; fi
+          for bench_variant in $bench_variants; do
+          bench_assets=target/benchmarks/assets.json
+          if [ "$bench_variant" = baseline ]; then bench_assets=target/benchmarks-baseline/assets.json; fi
+          for bench_latch in $BENCH_COMPLETIONS; do
+          unset DILLO_BENCH_SHARED_ISR
+          if [ "$bench_latch" = shared ]; then export DILLO_BENCH_SHARED_ISR=1; fi
           for bench_mode in $bench_modes; do
             bench_options=()
             if [ "$bench_mode" = off ]; then bench_options+=(--no-sample); fi
-            python benchmarks/run.py --assets target/benchmarks/assets.json \
-              --output "$BENCH_RESULTS/$bench_mode" --pairs "$BENCH_PAIRS" \
+            if [ "$BENCH_KERNEL" = wsl-clock ]; then bench_options+=(--serial); fi
+            python benchmarks/run.py --assets "$bench_assets" \
+              --output "$BENCH_RESULTS/$bench_variant/$bench_latch/$bench_mode" --pairs "$BENCH_PAIRS" \
               --duration-ms "$BENCH_DURATION_MS" --queue-depth "$BENCH_QUEUE_DEPTH" \
               --cases "$BENCH_CASES" "${bench_options[@]}"
+          done
+          done
           done
       - name: Upload measurements and logs
         if: always()

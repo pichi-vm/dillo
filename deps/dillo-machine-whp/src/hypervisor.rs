@@ -2737,6 +2737,116 @@ mod tests {
     }
 
     #[test]
+    fn whp_trigger_wired_mask_and_retirement() {
+        use crate::worker::Worker;
+        use dillo_machine::worker::{NotificationRole, WorkerHost};
+        use dillo_mmio::{MmioDevice, MmioWindow};
+        use std::time::{Duration, Instant};
+        if !native_test_child("whp_trigger_wired_mask_and_retirement") {
+            return;
+        }
+        let mut vm = Vm::new_x86_64_with_local_apic_count(1).unwrap();
+        vm.add_memory(0x30000, 0x1000).unwrap();
+        vm.write_guest(
+            0x30000,
+            &[
+                0xb8, 0xff, 0x01, 0, 0, // enable LAPIC via SVR
+                0xbb, 0xf0, 0, 0xe0, 0xfe, 0x89, 0x03, 0xbb, 0x20, 0x02, 0xe0, 0xfe, 0x8b,
+                0x03, // IRR[64..96]
+                0xa3, 0, 0x08, 0x03, 0, 0xb0, 0xa5, 0xe6, 0x42, 0x0f, 0x0b,
+            ],
+        )
+        .unwrap();
+        let memory = vm.guest_memory().unwrap();
+        let mut cpu = vm.create_vcpu(0, Profile::V1).unwrap();
+        let mut pending = |vector: u32| {
+            set_protected_mode(&cpu, 0x30000);
+            assert!(matches!(
+                cpu.run(|_, _| 0, |_, _| false).unwrap(),
+                VmExit::PioWrite {
+                    port: 0x42,
+                    data: [0xa5, ..],
+                    ..
+                }
+            ));
+            memory.read_obj::<u32>(GuestAddress(0x30800)).unwrap() & (1 << (vector - 64)) != 0
+        };
+        let wait = |vector, pending: &mut dyn FnMut(u32) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !pending(vector) && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert!(pending(vector), "missing wired vector {vector}");
+        };
+        let window = MmioWindow {
+            base: 0xfec0_0000,
+            size: 0x1000,
+        };
+        let ioapic = crate::ioapic::IoApic::new(window);
+        let route = |value: u32| {
+            ioapic.write(window, 0, &0x30u32.to_le_bytes()).unwrap();
+            ioapic.write(window, 0x10, &value.to_le_bytes()).unwrap();
+        };
+        let endpoint = |interrupt: &dillo_mmio::Interrupt| {
+            Worker::notification_endpoint(
+                interrupt.export().unwrap().unwrap(),
+                NotificationRole::Signal,
+            )
+            .unwrap()
+        };
+        let status = Worker::create_notification_state().unwrap();
+        let completion = ioapic
+            .bind_completion(16, vm.interrupt_controller(), status.clone(), None)
+            .unwrap();
+        assert!(status.used());
+        endpoint(&completion).write(1).unwrap();
+        assert!(!pending(0x41));
+        route(0x41);
+        wait(0x41, &mut pending);
+        status.acknowledge(1);
+        route((1 << 16) | 0x42);
+        assert!(status.used());
+        endpoint(&completion).write(1).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!pending(0x42), "masked completion injected");
+        route(0x42);
+        wait(0x42, &mut pending);
+        status.acknowledge(1);
+
+        route(0x43);
+        let old = endpoint(&completion);
+        route(0x44);
+        old.write(1).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!pending(0x43), "old route retained delivery");
+        assert!(!pending(0x44), "old event reached the new route");
+        assert!(status.used());
+        endpoint(&completion).write(1).unwrap();
+        wait(0x44, &mut pending);
+        status.acknowledge(1);
+
+        route(0x45);
+        let retired = endpoint(&completion);
+        completion.retire().unwrap();
+        completion.retire().unwrap();
+        route(0x46);
+        let current = Worker::create_notification_state().unwrap();
+        let replacement = ioapic
+            .bind_completion(16, vm.interrupt_controller(), current.clone(), None)
+            .unwrap();
+        assert!(status.used());
+        retired.write(1).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!pending(0x45), "retired event retained delivery");
+        assert!(!pending(0x46), "retired event reached replacement");
+        assert_eq!(current.load(), 0);
+        assert!(current.used());
+        endpoint(&replacement).write(1).unwrap();
+        wait(0x46, &mut pending);
+        replacement.retire().unwrap();
+    }
+
+    #[test]
     fn whp_doorbell_matches_and_unregisters() {
         use dillo_mmio::WriteValue;
         if !native_test_child("whp_doorbell_matches_and_unregisters") {

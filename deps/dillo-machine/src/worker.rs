@@ -112,6 +112,83 @@ pub trait WriteNotification: Send + Sync + std::fmt::Debug {
     }
 }
 
+/// Experimental host-only notification latch. Never mapped into the guest.
+/// This is a measurement aid, not an assigned vhost-user interface.
+#[derive(Debug)]
+pub struct NotificationState {
+    mapping: vm_memory::MmapRegion<()>,
+    #[cfg(windows)]
+    section: Option<Resource>,
+}
+
+impl NotificationState {
+    /// # Safety
+    /// The file must retain at least 4096 committed writable bytes while mapped.
+    /// Every alias of its first word must use aligned AtomicU32 accesses only.
+    #[allow(unsafe_code)]
+    pub unsafe fn from_file(file: std::fs::File) -> io::Result<Self> {
+        let mapping = vm_memory::MmapRegion::from_file(vm_memory::FileOffset::new(file, 0), 4096)
+            .map_err(io::Error::other)?;
+        Ok(Self {
+            mapping,
+            #[cfg(windows)]
+            section: None,
+        })
+    }
+
+    /// # Safety
+    /// The handle must name a committed, cacheable, writable pagefile section
+    /// of at least 4096 bytes. Every alias of its first word must use aligned
+    /// AtomicU32 accesses only. The returned view retains the backing.
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    pub unsafe fn from_section(section: Resource) -> io::Result<Self> {
+        use std::os::windows::io::AsHandle;
+        // SAFETY: the caller supplies the section's backing/aliasing contract.
+        let mapping =
+            unsafe { vm_memory::MmapRegion::from_mapping_handle(section.as_handle(), 0, 4096) }
+                .map_err(io::Error::other)?;
+        Ok(Self {
+            mapping,
+            section: Some(section),
+        })
+    }
+
+    fn word(&self) -> &std::sync::atomic::AtomicU32 {
+        use vm_memory::VolatileMemory;
+        self.mapping
+            .get_atomic_ref(0)
+            .expect("aligned mapped status word")
+    }
+
+    pub fn load(&self) -> u32 {
+        self.word().load(std::sync::atomic::Ordering::SeqCst) & 3
+    }
+
+    pub fn used(&self) -> bool {
+        self.word().fetch_or(1, std::sync::atomic::Ordering::SeqCst) & 1 == 0
+    }
+
+    pub fn acknowledge(&self, bits: u32) {
+        self.word()
+            .fetch_and(!(bits & 3), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn export(&self) -> io::Result<Resource> {
+        #[cfg(windows)]
+        if let Some(section) = &self.section {
+            return section.try_clone();
+        }
+        Ok(self
+            .mapping
+            .file_offset()
+            .expect("file-backed status")
+            .file()
+            .try_clone()?
+            .into())
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum NotificationRole {
     Wait,
@@ -142,6 +219,21 @@ impl WriteNotification for QueueNotification {
 /// Facilities available to a device worker. This interface deliberately has no
 /// native VM, vCPU, debugger, or arbitrary process-handle operation.
 pub trait WorkerHost {
+    fn create_notification_state() -> io::Result<std::sync::Arc<NotificationState>> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    /// # Safety
+    /// The resource must be created by this family's `create_notification_state`
+    /// or exported from that state. Retained aliases must follow the
+    /// NotificationState atomic-access contract; the resource is not guest RAM.
+    #[allow(unsafe_code)]
+    unsafe fn adopt_notification_state(
+        _resource: Resource,
+    ) -> io::Result<std::sync::Arc<NotificationState>> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
     /// Import a socket granted by the parent, without creating a connection or
     /// selecting a native process. The returned object owns its local socket.
     fn import_socket(mut message: Message) -> io::Result<Socket> {

@@ -65,6 +65,14 @@ impl Channel for Peer {
 pub(super) struct Host;
 
 impl WorkerHost for Host {
+    #[allow(unsafe_code)]
+    unsafe fn adopt_notification_state(
+        resource: Resource,
+    ) -> io::Result<Arc<dillo_machine::worker::NotificationState>> {
+        // SAFETY: the fixture forwards its parent's private atomic status grant.
+        unsafe { super::Worker::adopt_notification_state(resource) }
+    }
+
     fn import_socket(message: Message) -> io::Result<dillo_machine::worker::Socket> {
         super::Worker::import_socket(message)
     }

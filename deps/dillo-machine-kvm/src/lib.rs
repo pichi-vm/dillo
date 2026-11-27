@@ -22,6 +22,7 @@ mod irq;
 mod memory;
 mod msi;
 mod notification;
+mod wired_completion;
 #[cfg(target_os = "linux")]
 pub mod worker;
 
@@ -346,7 +347,15 @@ mod imp {
                 .map(|requirement| match requirement {
                     MmioInterruptRequirement::Line { source } => {
                         let irq = Self::wired_irq_from_cells(&source.cells, source.cell_count)?;
-                        self.create_line_interrupt(irq).map(MmioInterrupt::Line)
+                        let flags = source
+                            .cell_count
+                            .checked_sub(1)
+                            .filter(|index| *index != 0)
+                            .and_then(|index| source.cells.get(usize::from(index)))
+                            .copied()
+                            .unwrap_or(0);
+                        self.create_line_interrupt(irq, flags & 0xc != 0)
+                            .map(MmioInterrupt::Line)
                     }
                     MmioInterruptRequirement::MessageDomain { vectors, .. } => {
                         Ok(MmioInterrupt::MessageDomain(
@@ -379,7 +388,11 @@ mod imp {
             }
         }
 
-        fn create_line_interrupt(&self, source: u32) -> Result<dillo_mmio::Interrupt, Error> {
+        fn create_line_interrupt(
+            &self,
+            source: u32,
+            level: bool,
+        ) -> Result<dillo_mmio::Interrupt, Error> {
             // Both arches deliver via irqfd + an EventFdInterruptLine; only the
             // routing differs. x86 binds to a pre-existing IOAPIC GSI; aarch64
             // adds an IRQCHIP route to GIC SPI `source` (no GICv3 defaults).
@@ -398,6 +411,9 @@ mod imp {
             drop(mgr);
             Ok(dillo_mmio::Interrupt::new(Arc::new(EventFdInterruptLine {
                 eventfd,
+                manager: Arc::clone(&self.irq_manager),
+                source,
+                level,
             })))
         }
 
@@ -702,9 +718,27 @@ mod imp {
     #[derive(Debug)]
     struct EventFdInterruptLine {
         eventfd: EventFd,
+        manager: Arc<Mutex<IrqManager>>,
+        source: u32,
+        level: bool,
     }
 
     impl InterruptLine for EventFdInterruptLine {
+        fn bind_status(
+            &self,
+            state: Arc<dillo_machine::worker::NotificationState>,
+            _update: Option<Arc<dyn dillo_mmio::InterruptUpdate>>,
+        ) -> Result<dillo_mmio::Interrupt, InterruptError> {
+            let (vm, gsi) = self
+                .manager
+                .lock()
+                .unwrap()
+                .wired_binding(self.source)
+                .map_err(|e| InterruptError::Delivery(e.to_string()))?;
+            crate::wired_completion::bind(vm, gsi, self.level, state)
+                .map(|owner| dillo_mmio::Interrupt::new(owner))
+        }
+
         fn signal(&self) {
             if let Err(e) = self.eventfd.write(1) {
                 log::warn!("KVM irqfd interrupt signal failed: {e}");
