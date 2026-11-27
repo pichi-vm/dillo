@@ -915,3 +915,42 @@ large-message throughput: 97.9% on PCI and 98.7% on MMIO, with CPU/GiB at
 the 5% measurement band. Full paired observations, intervals, schedule and
 source/asset provenance are retained in
 [network-integrated-x86-long.json.gz](network-integrated-x86-long.json.gz).
+
+## Available-ring notification suppression
+
+The network candidate `a7c0d20` checks the driver's standard NO_INTERRUPT flag
+after publishing a batch. Unreadable flags preserve notification, and the
+existing publication barrier orders the check. This does not negotiate
+EVENT_IDX or change the worker protocol.
+
+[Arm run 46082171694](https://github.com/pichi-vm/dillo/actions/runs/46082171694)
+and [Windows run 46082174187](https://github.com/pichi-vm/dillo/actions/runs/46082174187)
+passed their native checks and all 40 boots each against `4c13db5`. Each uses
+four independently balanced two-second pairs with matching guest assets.
+Arm large-message worker throughput changes by +0.5% on PCI and -1.6% on
+MMIO; its PCI worker/control ratio is 91.1%, with CPU/GiB at 112.4% and p99
+at 118.9%. Windows MMIO large-message throughput improves 7.4%, but its
+control improves 8.1%; worker/control remains 98.0%, with p99 at 133.6%.
+Windows PCI small-message CPU/GiB increases 4.7% against the baseline worker.
+These mixed short results do not establish an overall benefit or parity.
+The candidate remains outside the integrated branch. Full paired observations,
+including small-message and unfavorable results, are retained in
+[network-notification-suppression-short.json.gz](network-notification-suppression-short.json.gz).
+
+## macOS shared-status call coalescing
+
+[Run 46082983918](https://github.com/pichi-vm/dillo/actions/runs/46082983918)
+compares `9d53cc9` with `4c13db5` using four balanced two-second pairs of
+PCI-free block and network operations. All 40 boots and native notification
+checks pass. The candidate publishes the used bit in shared host-only memory,
+coalesces calls until guest ACK, and retains parent-side HVF injection. The
+relay delivers already-published status without reasserting it after an ACK.
+
+Block worker throughput changes range from -1.9% to 0.0% against the baseline;
+worker/control throughput remains 89.3–92.2%. Large-message network throughput
+improves 1.6%, while the control improves 1.0%; worker/control is 95.2%, with
+CPU/GiB at 112.0% and p99 at 107.4%. Small-message results do not improve.
+The added path has not demonstrated enough benefit to integrate. Pipe
+notification and native injection costs remain; no interrupt-count attribution
+is established by these rates. All observations and provenance are retained in
+[macos-mmio-call-coalescing-short.json.gz](macos-mmio-call-coalescing-short.json.gz).
