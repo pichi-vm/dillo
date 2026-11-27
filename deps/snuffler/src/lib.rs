@@ -12,6 +12,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod performance;
+
 /// Sentinel pair the fixture brackets the JSON report with on stdout. The
 /// kernel also writes its own printks to hvc0 when `console=hvc0` is in
 /// cmdline, so the host harness needs unambiguous markers to extract the
