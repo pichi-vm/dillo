@@ -178,7 +178,12 @@ separate. Native PSS omits hugetlb pages. Do not interpret either as total
 guest-plus-host physical residency.
 
 Run `python benchmarks/analyze.py RESULTS --output RESULTS/comparison.json`
-to export absolute medians and every paired ratio as JSON and CSV. The report
+to export absolute medians and every paired ratio as JSON and CSV. With at
+least ten pairs, it also reports a deterministic 10,000-resample paired
+bootstrap 95% interval for the median ratio. Shorter diagnostic runs leave
+that interval unset. These intervals describe one host/workload combination;
+they do not turn hosted runners or coarse guest clocks into native evidence.
+The report
 includes compressed copies of these comparisons; raw console/process samples
 are retained separately. `benchmarks/plot.py RESULTS` regenerates its chart
 with matplotlib 3.10.8. `benchmarks/footprint.py OLD NEW` inventories source

@@ -8,7 +8,18 @@ import argparse
 import csv
 import json
 from pathlib import Path
+import random
 import statistics
+
+
+def median_interval(values):
+    """Paired bootstrap 95% interval; short diagnostics are not qualification."""
+    if len(values) < 10:
+        return None
+    rng = random.Random(20261127)
+    medians = sorted(statistics.median(rng.choices(values, k=len(values)))
+                     for _ in range(10000))
+    return [medians[249], medians[9749]]
 
 
 def analyze(root):
@@ -51,6 +62,7 @@ def analyze(root):
                          "paired_delta_median": statistics.median(
                              b - a for a, b in zip(values["local"], values["worker"])),
                          "ratio_median": statistics.median(ratios),
+                         "ratio_median_ci95": median_interval(ratios),
                          "ratio_min": min(ratios), "ratio_max": max(ratios),
                          "local_values": values["local"], "worker_values": values["worker"],
                          "paired_ratios": ratios})
