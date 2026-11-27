@@ -1,4 +1,4 @@
-name: Device isolation benchmarks
+name: macOS completion read experiment
 
 on:
   workflow_dispatch:
@@ -7,11 +7,11 @@ on:
         description: Select a platform or run the full matrix
         type: choice
         options: [all, linux-x86, linux-arm, macos-arm, windows-msvc]
-        default: all
+        default: macos-arm
       cases:
         description: Workload selection
         type: choice
-        options: [all, pci-free, block-pci, block-mmio, block4-pci, block4-concurrent-pci, net-pci, block-mmio-only, net-mmio-only]
+        options: [all, both-transports, pci-free, block-pci, block-mmio, block4-pci, block4-concurrent-pci, net-pci, block-mmio-only, net-mmio-only]
         default: all
       pairs:
         description: Measured pairs after the retained warm-up
@@ -98,6 +98,14 @@ jobs:
             sudo sysctl -w vm.nr_hugepages=256
           fi
           test "$(awk '/HugePages_Free/{print $2}' /proc/meminfo)" -ge 128
+      - name: Check completion receiver lifecycle
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          DILLO_BENCH_DIRECT_CALL_READ: "1"
+        run: >-
+          cargo --config .copr/cargo-config.toml test --locked
+          -p dillo-worker -p dillo-machine-unix
       - name: Build matched release assets
         shell: bash
         env:
@@ -109,7 +117,7 @@ jobs:
       - name: Measure paired workloads
         shell: bash
         env:
-          BENCH_CASES: ${{ inputs.cases == 'pci-free' && 'block-mmio-only,net-mmio-only' || inputs.cases != 'all' && inputs.cases || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,net-pci,block-mmio-only,net-mmio-only' }}
+          BENCH_CASES: ${{ inputs.cases == 'both-transports' && 'block-pci,net-pci,block-mmio-only,net-mmio-only' || inputs.cases == 'pci-free' && 'block-mmio-only,net-mmio-only' || inputs.cases != 'all' && inputs.cases || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,net-pci,block-mmio-only,net-mmio-only' }}
           BENCH_SAMPLING: ${{ inputs.sampling || 'on' }}
           BENCH_PAIRS: ${{ inputs.pairs || 10 }}
           BENCH_DURATION_MS: ${{ inputs.duration_ms || 5000 }}
@@ -117,13 +125,17 @@ jobs:
         run: |
           bench_modes="$BENCH_SAMPLING"
           if [ "$bench_modes" = both ]; then bench_modes='on off'; fi
+          for bench_wait in existing direct; do
+          unset DILLO_BENCH_DIRECT_CALL_READ
+          if [ "$bench_wait" = direct ]; then export DILLO_BENCH_DIRECT_CALL_READ=1; fi
           for bench_mode in $bench_modes; do
             bench_options=()
             if [ "$bench_mode" = off ]; then bench_options+=(--no-sample); fi
             python benchmarks/run.py --assets target/benchmarks/assets.json \
-              --output "$BENCH_RESULTS/$bench_mode" --pairs "$BENCH_PAIRS" \
+              --output "$BENCH_RESULTS/$bench_wait/$bench_mode" --pairs "$BENCH_PAIRS" \
               --duration-ms "$BENCH_DURATION_MS" --queue-depth "$BENCH_QUEUE_DEPTH" \
               --cases "$BENCH_CASES" "${bench_options[@]}"
+          done
           done
       - name: Upload measurements and logs
         if: always()
