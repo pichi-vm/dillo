@@ -38,6 +38,7 @@ use snuffler::{
 
 mod bench;
 mod memory;
+mod network;
 mod timed;
 mod virtiofs;
 
@@ -76,14 +77,24 @@ fn run() {
             poweroff();
         }));
     }
-    let config = timed::Config::from_cmdline(&read_trim("/proc/cmdline"));
+    let cmdline = read_trim("/proc/cmdline");
+    let config = timed::Config::from_cmdline(&cmdline);
+    let network_setup = network::configure(&cmdline);
     if config.is_some() {
         timed::mark("ready");
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
     let mut report = observe();
     if let Some(config) = config {
-        report.performance = Some(timed::run(&report.cmdline, &report.block, &config));
+        report.performance = Some(match network_setup {
+            Ok(()) => timed::run(&report.cmdline, &report.block, &config),
+            Err(error) => snuffler::performance::Performance {
+                duration_ms: config.duration.as_millis() as u64,
+                warmup_ms: config.warmup.as_millis() as u64,
+                operations: Vec::new(),
+                errors: vec![format!("network setup: {error}")],
+            },
+        });
     }
     // Cmdline-gated diagnostics via /dev/kmsg: unlike snuffler's own console fd
     // (which can silently drop output on a slow/absent MMIO console), writing to

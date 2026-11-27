@@ -41,6 +41,7 @@ rustix = { version = "1", default-features = false, features = [
     "param",
     "time",
     "termios",
+    "net",
 ] }
 # AF_VSOCK has no safe rustix wrapper; the `vsock` crate provides a std::io
 # stream (its unsafe/libc is internal — our code stays unsafe-free). Used only
@@ -56,6 +57,10 @@ rustix = { version = "1", default-features = false, features = [
 # on the host lib instance, not the cross-built bin (see the rustix note above).
 [target.'cfg(unix)'.dependencies]
 vsock = "0.5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+netlink-packet-core = "0.9"
+netlink-packet-route = "0.33"
 
 [lints]
 workspace = true

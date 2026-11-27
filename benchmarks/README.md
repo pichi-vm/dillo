@@ -10,6 +10,12 @@ cases). Snuffler reports a missing selection as an error. Without this option,
 its timed mode keeps probing all nonempty whole disks. This prevents a kernel's
 built-in RAM disks from silently becoming additional timed workloads.
 
+For kernels without `CONFIG_IP_PNP`, network cases request
+`dillo.net_config=eth0,10.0.2.15/24`. Snuffler brings up that guest interface and
+sets its address before probing or timing. Netlink failures become benchmark
+errors. The echo endpoint is on the connected subnet, so no default route is
+needed. This supports the unmodified prebuilt WSL kernel's Hyper-V clock.
+
 ## Question and completion criteria
 
 Measure the cost of Dillo's out-of-process virtio devices, starting from
