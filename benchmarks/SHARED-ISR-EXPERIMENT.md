@@ -41,20 +41,30 @@ all parent activity or CPU cost. Edge declarations retain edge delivery.
 The local x86 native fixture performs an actual guest LAPIC EOI, checks
 reassertion before transport acknowledgement and no reassertion after it,
 then checks an obsolete export against a replacement binding. An analogous
-Arm fixture uses guest GIC system-register reads and EOI. Native Arm execution
-and the follow-up performance comparison are pending.
+Arm fixture uses guest GIC system-register reads and EOI. It passes on the
+native runner at `fefb91e` after explicitly selecting level-triggered delivery;
+the earlier fixture incorrectly relied on the GIC reset value. The recorded
+failure showed ICFGR=0xaaaaaaaa (edge-triggered), with IAR and EOI otherwise
+working. Run 46052881345 measures the corrected version separately.
+
+The transport fixture checks status publication, coalescing until ACK, reset,
+failed activation, and isolation from retained callbacks after reactivation.
+Its recording native binding verifies retirement calls; the native fixtures
+above separately exercise kernel deassignment. These do not establish all
+concurrent ACK/EOI/reset interleavings.
 
 The following remain unqualified and prevent merging this prototype:
 
-- The integrated transport reset/restart and concurrent ACK/EOI paths, beyond
-  the native binding fixture. Asynchronous resampler failure supervision also
+- Concurrent transport reset/restart and ACK/EOI paths, beyond the fixtures
+  above. Asynchronous resampler failure supervision also
   needs integration; the current helper reports its failure at retirement.
 - Windows and macOS realization, arbitrary backend interoperability, and a
   full failure/reset/concurrent-acknowledgement qualification.
 
-The existing MMIO transport tests pass, and eight PCI-free Linux x86 smoke
+The MMIO transport tests pass, and 32 PCI-free Linux x86 comparison
 boots complete block/network operations in both modes. Neither establishes
 the outstanding contracts. Raw local assets, source patch, binary hashes and
 measurements are retained under `target/performance/shared-isr-experiment`
+and `target/performance/shared-isr-lifetime`
 in the main performance worktree. The branch workflow compares both paths
 on the same native runner; it is explicitly diagnostic.
