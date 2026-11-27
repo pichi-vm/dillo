@@ -10,6 +10,13 @@ cases). Snuffler reports a missing selection as an error. Without this option,
 its timed mode keeps probing all nonempty whole disks. This prevents a kernel's
 built-in RAM disks from silently becoming additional timed workloads.
 
+On macOS, `--stack-phase active:net:tcp_echo:65536` captures three seconds of
+`sample` call stacks for the parent and its workers during that phase. Use
+operations of at least five seconds and an optimized build with symbols.
+These are diagnostic runs: stack counts include blocked threads and their
+perturbed rates do not establish performance parity. Commands, profiler exit
+codes and stack reports are retained with every boot.
+
 ## Question and completion criteria
 
 Measure the cost of Dillo's out-of-process virtio devices, starting from

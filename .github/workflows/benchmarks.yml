@@ -41,6 +41,10 @@ on:
         type: choice
         options: [both, relay, shared]
         default: both
+      stack_phase:
+        description: macOS stack diagnostic phase (empty disables)
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -124,6 +128,8 @@ jobs:
         shell: bash
         env:
           DILLO_BENCH_DIR: ${{ github.workspace }}/target/benchmarks
+          CARGO_PROFILE_RELEASE_DEBUG: ${{ inputs.stack_phase != '' && '1' || '0' }}
+          CARGO_PROFILE_RELEASE_STRIP: ${{ inputs.stack_phase != '' && 'none' || 'symbols' }}
         run: >-
           cargo --config .copr/cargo-config.toml test --locked --release
           -p dillo --features vm-tests,bench-in-process --test boot
@@ -145,6 +151,7 @@ jobs:
           BENCH_DURATION_MS: ${{ inputs.duration_ms || 5000 }}
           BENCH_QUEUE_DEPTH: ${{ inputs.queue_depth || 1 }}
           BENCH_KERNEL: ${{ inputs.kernel }}
+          BENCH_STACK_PHASE: ${{ inputs.stack_phase }}
           BENCH_COMPLETIONS: ${{ inputs.completion == 'shared' && 'shared' || inputs.completion == 'relay' && 'relay' || 'relay shared' }}
         run: |
           bench_modes="$BENCH_SAMPLING"
@@ -156,6 +163,7 @@ jobs:
             bench_options=()
             if [ "$bench_mode" = off ]; then bench_options+=(--no-sample); fi
             if [ "$BENCH_KERNEL" = wsl-clock ]; then bench_options+=(--serial); fi
+            if [ -n "$BENCH_STACK_PHASE" ]; then bench_options+=(--stack-phase "$BENCH_STACK_PHASE"); fi
             python benchmarks/run.py --assets target/benchmarks/assets.json \
               --output "$BENCH_RESULTS/$bench_latch/$bench_mode" --pairs "$BENCH_PAIRS" \
               --duration-ms "$BENCH_DURATION_MS" --queue-depth "$BENCH_QUEUE_DEPTH" \

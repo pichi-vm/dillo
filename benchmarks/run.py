@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import socket
 import socketserver
 import statistics
@@ -99,6 +100,7 @@ def run_vm(args, assets, image, disks, case, mode, label):
     env["RUST_LOG"] = "warn,dillo::boot=trace"
     env["RUST_LOG_STYLE"] = "never"
     samples, phases, errors, known = [], [], [], {}
+    profiles = []
     last_memory, ready = 0, None
     expected = 2 + (0 if mode == "local" else (len(disks) or 1))
     phase, failure = "startup", None
@@ -132,6 +134,14 @@ def run_vm(args, assets, image, disks, case, mode, label):
                     except psutil.NoSuchProcess:
                         pass
                     next_discovery = elapsed + 0.5
+                if args.stack_phase == phase and not profiles:
+                    for process in tracked.values():
+                        path = directory / f"stacks-{process.pid}.txt"
+                        profile_command = ["sample", str(process.pid), "3", "1", "-file", str(path)]
+                        with path.with_suffix(".log.txt").open("wb") as log:
+                            profiler = subprocess.Popen(profile_command, stdout=log, stderr=log)
+                        profiles.append({"process": profiler, "pid": process.pid,
+                                         "observed_s": elapsed, "command": profile_command})
                 if not args.no_sample:
                     records = []
                     for process in tracked.values():
@@ -159,6 +169,13 @@ def run_vm(args, assets, image, disks, case, mode, label):
                         pass
             child.wait()
             child.stdin.close()
+            for profile in profiles:
+                profiler = profile.pop("process")
+                try:
+                    profile["returncode"] = profiler.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    profiler.kill()
+                    profile["returncode"] = profiler.wait()
             survivors = [p for p in tracked.values() if p.pid != child.pid and p.is_running()]
             if survivors:
                 failure = f"surviving workers: {[p.pid for p in survivors]}"
@@ -178,8 +195,12 @@ def run_vm(args, assets, image, disks, case, mode, label):
               "samples": samples, "last_process_samples": list(known.values()),
               "sampling_errors": errors, "phases": phases, "guest": report,
               "failure": failure,
+              "stack_profiles": profiles,
               "sampler_and_echo_cpu_s": time.process_time() - sampler_start}
     save(directory / "result.json", result)
+    if args.stack_phase:
+        assert len(profiles) == expected and all(p["returncode"] == 0 for p in profiles), (
+            f"stack profiling failed: {directory}")
     assert not failure and child.returncode == 0 and ready is not None and report, f"boot failed: {directory}"
     if pci_free:
         assert not report["pci"], f"PCI device present in PCI-free case: {directory}"
@@ -260,8 +281,12 @@ def main():
     parser.add_argument("--backing-dir", type=Path, help="optional disposable disk directory, e.g. tmpfs")
     parser.add_argument("--extra-cmdline", default="", help="explicit guest settings for sensitivity runs")
     parser.add_argument("--serial", action="store_true", help="retain early boot diagnostics through SPCR")
+    parser.add_argument("--stack-phase", help="macOS diagnostic only: sample stacks during this phase")
     args = parser.parse_args()
     assert args.pairs > 0 and args.sample_ms > 0
+    if args.stack_phase:
+        assert platform.system() == "Darwin" and shutil.which("sample")
+        assert args.duration_ms >= 5000
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     backing = args.output
