@@ -124,7 +124,7 @@ Memory metric definitions follow [psutil's API documentation](https://psutil.rea
 
 ## Reproduce
 
-Install Python 3.12+ and `psutil==7.2.2` in a virtual environment. With the
+Install Python 3.9+ and `psutil==7.2.2` in a virtual environment. With the
 repository's pinned Rust toolchain and a working native hypervisor:
 
 ```sh

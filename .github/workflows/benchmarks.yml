@@ -66,8 +66,10 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo chmod 666 /dev/kvm
-          if [ "$(sysctl -n vm.nr_hugepages)" -lt 256 ]; then
+          if ! test -r /dev/kvm || ! test -w /dev/kvm; then
+            sudo chmod 666 /dev/kvm
+          fi
+          if [ "$(awk '/HugePages_Free/{print $2}' /proc/meminfo)" -lt 128 ]; then
             sudo sysctl -w vm.nr_hugepages=256
           fi
           test "$(awk '/HugePages_Free/{print $2}' /proc/meminfo)" -ge 128

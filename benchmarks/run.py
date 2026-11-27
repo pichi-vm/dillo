@@ -31,8 +31,11 @@ def save(path, value):
 
 
 def digest(path):
+    result = hashlib.sha256()
     with open(path, "rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            result.update(chunk)
+    return result.hexdigest()
 
 
 class Echo(socketserver.BaseRequestHandler):
