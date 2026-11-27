@@ -391,3 +391,52 @@ native binding; native deassignment is tested separately above. Strict Linux
 workspace Clippy passes with both VM tests and the in-process benchmark
 enabled. Concurrent transport/native reset races and live resampler-failure
 supervision remain open, as do the protocol and non-Linux implementation.
+
+## Windows shared-status and native wired completion experiment
+
+[Run 46057401790](https://github.com/pichi-vm/dillo/actions/runs/46057401790)
+completed 32 PCI-free boots at `2fc9543`, comparing relay and shared-status
+paths in the same binary with identical guest assets. Each path retains a
+warm-up pair and three alternating measured pairs of two-second QD1 operations.
+Both console and workload use MMIO; all guest PCI lists are empty. The modes
+run sequentially, so these short observations still allow host/time variation.
+
+| Operation | Relay worker MiB/s | Shared worker MiB/s | Shared control MiB/s | Paired shared/control throughput | Paired CPU/GiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Random read, 4 KiB | 16.89 | 18.83 | 20.23 | 0.932 | 1.169 |
+| Random write, 4 KiB | 16.42 | 18.77 | 19.96 | 0.940 | 1.036 |
+| Sequential read, 64 KiB | 183.14 | 195.43 | 207.67 | 0.944 | 1.044 |
+| Sequential write, 64 KiB | 183.68 | 197.11 | 209.05 | 0.937 | 1.118 |
+| TCP echo, 64 B | 0.138 | 0.217 | 0.225 | 0.972 | 1.018 |
+| TCP echo, 64 KiB | 44.97 | 67.53 | 69.40 | 0.964 | 1.058 |
+
+Block worker idle threads fall from 30 to 28; control falls from 22 to 21.
+Random-read worker CPU/GiB falls from 53.35 to 46.18 seconds, but the shared
+control uses 40.96 seconds. The worker/control differences remain real work;
+neither these medians nor the coarse guest latency histograms establish parity.
+[shared-isr-windows-short.json.gz](shared-isr-windows-short.json.gz) retains
+every paired metric, clock report, exact source, asset hashes and artifact
+digest. Raw observations and native logs are under
+`target/performance/windows-wired-completion-46057401790`.
+
+The status page uses an owned pagefile section transferred through ALPC.
+[Run 46056134419](https://github.com/pichi-vm/dillo/actions/runs/46056134419)
+at `203a2ea` first qualified its real confined-worker mapping and atomic
+status/ACK behavior. [Run 46057399368](https://github.com/pichi-vm/dillo/actions/runs/46057399368)
+at `2fc9543` then passed the integrated worker fixtures and native WHP
+mask/pending, retarget, retirement and obsolete-event checks; the benchmark
+job repeats those native checks before building the measured assets.
+IOAPIC route changes drain the worker before replacing its exported trigger.
+This preserves the backend's existing edge injection model; it does not prove
+level interrupt/EOI conformance. Concurrent integrated teardown/error paths
+and the experimental unassigned protocol extension still need qualification.
+
+The Windows latency limitation has a concrete fixture cause. Its pinned
+[Firecracker 6.1.155 config](https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155.config)
+disables `CONFIG_HYPERV`. The matching
+[Linux initialization](https://github.com/gregkh/linux/blob/v6.1.155/arch/x86/kernel/cpu/mshyperv.c)
+registers the Hyper-V clock only with that option enabled and marks TSC
+unstable without the invariant-TSC privilege. Retained guest logs show this
+decision and only jiffies/refined-jiffies clocks. A prebuilt kernel with the
+existing Hyper-V clock driver is being investigated; no forced TSC reliability
+or kernel source modification is part of the measurement plan.
