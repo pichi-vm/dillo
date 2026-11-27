@@ -341,7 +341,7 @@ acknowledgement and obsolete-export checks. Arm runs
 [46051334834](https://github.com/pichi-vm/dillo/actions/runs/46051334834) fail
 before benchmarking: initial delivery and guest IAR/EOI execute, but the
 fixture observes no resample notification. Their logs remain under
-`target/performance/shared-isr-lifetime`; Arm correctness is unresolved.
+`target/performance/shared-isr-lifetime`; the correction below reruns it.
 
 Apollo completed 32 PCI-free boots with this runtime, using the same frozen
 binary for both paths, three pairs of two-second operations and CPUs 24–27.
@@ -351,7 +351,7 @@ versus 23.39 in process. Random writes rise from 46.78 to 57.39 MiB/s.
 The 64-KiB echo rate rises from 123.86 to 142.97 MiB/s, against 147.49 in
 process. Sequential reads still retain only 93.5% of control throughput and
 use 9.0% more CPU/GiB. These short observations do not establish parity, and
-the x86 image's edge interrupts do not exercise the Arm resampling cost.
+the x86 image's edge interrupts do not exercise level-resampling cost.
 [shared-isr-lifetime-short.json.gz](shared-isr-lifetime-short.json.gz)
 records every paired metric and asset hash. The transport-level reset races,
 asynchronous helper failure, and protocol interoperability remain unqualified.
@@ -364,3 +364,30 @@ echo case retains 98.9% throughput with 1.6% more CPU/GiB. The sequential-read
 p99 paired ratio is 1.097. These independent PCI observations are included in
 the same data file. They neither qualify final parity nor substitute for the
 MMIO results; the two transports have separate controls and acceptance tests.
+
+[Run 46052881345](https://github.com/pichi-vm/dillo/actions/runs/46052881345)
+passes the native Arm lifecycle fixture and completes 32 PCI-free measurement
+boots at `fefb91e`. The prior fixture had never programmed SPI 48's trigger
+type: diagnostic run 46052592772 observed ICFGR=0xaaaaaaaa, indicating edges,
+while confirming IAR activation and EOI deactivation. Explicitly selecting
+level delivery fixes the fixture; it now observes reassertion before ACK,
+no reassertion after ACK, and revocation of retained old exports.
+
+The benchmark images still use Arma's declared edge-triggered MMIO SPIs,
+preserved through the launcher; they do not measure level-resampling overhead.
+Their worker random reads increase from 93.96 to 118.34 MiB/s, against a
+115.85 MiB/s shared-path control, while CPU/GiB falls from 16.97 to 13.19
+seconds. The 64-KiB echo median rises from 108.96 to 116.42 MiB/s, but the
+paired worker/control throughput ratio is 0.937, CPU/GiB ratio 1.159, and p99
+ratio 1.25. Random writes vary substantially between pairs: the median of
+paired throughput ratios is 0.945 even though the separate worker median
+exceeds the separate control median. Short runs remain diagnostic, and all
+paired observations are retained in
+[shared-isr-arm-lifetime-short.json.gz](shared-isr-arm-lifetime-short.json.gz).
+
+The separate register-level fixture also verifies ACK/coalescing, activation
+failure and reset isolation from retained callbacks. It uses a recording
+native binding; native deassignment is tested separately above. Strict Linux
+workspace Clippy passes with both VM tests and the in-process benchmark
+enabled. Concurrent transport/native reset races and live resampler-failure
+supervision remain open, as do the protocol and non-Linux implementation.
