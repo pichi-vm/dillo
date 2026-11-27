@@ -26,6 +26,33 @@ pub fn pair() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok((read.into(), write.into()))
 }
 
+/// A receiver created alongside its sender can cancel a blocking read through
+/// that same pipe. Retaining the wake means sender closure alone is not EOF.
+pub fn call() -> io::Result<(Arc<dyn WriteNotification>, OwnedFd)> {
+    let (read, write) = pair()?;
+    let receiver = Call {
+        read: read.into(),
+        wake: write.try_clone()?.into(),
+    };
+    Ok((Arc::new(receiver), write))
+}
+
+#[derive(Debug)]
+struct Call {
+    read: File,
+    wake: File,
+}
+
+impl WriteNotification for Call {
+    fn read(&self) -> io::Result<u64> {
+        read_counter(&self.read)
+    }
+
+    fn write(&self, count: u64) -> io::Result<()> {
+        write_counter(&self.wake, count)
+    }
+}
+
 #[derive(Debug)]
 struct Notification {
     file: File,
@@ -132,45 +159,68 @@ impl WriteNotification for Notification {
     fn read(&self) -> io::Result<u64> {
         let (wake, _) = self.wake.as_ref().ok_or(io::ErrorKind::Unsupported)?;
         loop {
-            for (ready, mut file) in self.readable(wake)?.into_iter().zip([&self.file, wake]) {
+            for (ready, file) in self.readable(wake)?.into_iter().zip([&self.file, wake]) {
                 if ready {
-                    // Drain ready counters together so a burst causes one
-                    // ring scan or interrupt, rather than one per pipe word.
-                    let mut bytes = [0; 256];
-                    let n = match file.read(&mut bytes) {
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                        result => result?,
-                    };
-                    if n == 0 {
-                        return Err(io::ErrorKind::UnexpectedEof.into());
-                    }
-                    let end = n.div_ceil(8) * 8;
-                    file.read_exact(&mut bytes[n..end])?;
-                    return Ok(bytes[..end]
-                        .as_chunks::<8>()
-                        .0
-                        .iter()
-                        .fold(0u64, |sum, word| {
-                            sum.saturating_add(u64::from_ne_bytes(*word))
-                        }));
+                    return read_counter(file);
                 }
             }
         }
     }
 
     fn write(&self, count: u64) -> io::Result<()> {
-        let mut file = self.wake.as_ref().map_or(&self.file, |(_, write)| write);
-        match file.write_all(&count.to_ne_bytes()) {
-            // A full pipe already contains a wake. Ring state determines work.
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
-            result => result,
-        }
+        write_counter(
+            self.wake.as_ref().map_or(&self.file, |(_, write)| write),
+            count,
+        )
     }
+}
+
+fn write_counter(mut file: &File, count: u64) -> io::Result<()> {
+    match file.write_all(&count.to_ne_bytes()) {
+        // A full pipe already contains a wake. Ring state determines work.
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
+        result => result,
+    }
+}
+
+fn read_counter(mut file: &File) -> io::Result<u64> {
+    // Drain a burst in one read; every writer emits whole pipe-atomic words.
+    let mut bytes = [0; 256];
+    let n = loop {
+        match file.read(&mut bytes) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            result => break result?,
+        }
+    };
+    if n == 0 {
+        return Err(io::ErrorKind::UnexpectedEof.into());
+    }
+    let end = n.div_ceil(8) * 8;
+    file.read_exact(&mut bytes[n..end])?;
+    Ok(bytes[..end]
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .fold(0u64, |sum, word| {
+            sum.saturating_add(u64::from_ne_bytes(*word))
+        }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn call_coalesces_and_retains_its_local_wake() {
+        let (receiver, write) = call().unwrap();
+        let sender = adopt(write, NotificationRole::Signal).unwrap();
+        sender.write(3).unwrap();
+        sender.write(2).unwrap();
+        assert_eq!(receiver.read().unwrap(), 5);
+        drop(sender);
+        receiver.write(1).unwrap();
+        assert_eq!(receiver.read().unwrap(), 1);
+    }
 
     #[test]
     fn signal_and_cancel_a_receiver() {

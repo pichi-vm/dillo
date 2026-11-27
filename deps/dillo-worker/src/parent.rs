@@ -240,6 +240,7 @@ impl Prepared {
             retired: AtomicBool::new(false),
             kicks: Mutex::new(Vec::new()),
             pair: H::notification_pair,
+            call: H::call_notification,
             endpoint: H::notification_endpoint,
             _files: files,
             retained: Mutex::new(self.retained),
@@ -429,6 +430,7 @@ enum Reply {
 }
 
 type NotificationPair = fn() -> io::Result<(Resource, Resource)>;
+type CallNotification = fn() -> io::Result<(Arc<dyn WriteNotification>, Resource)>;
 type NotificationEndpoint =
     fn(Resource, NotificationRole) -> io::Result<Arc<dyn WriteNotification>>;
 
@@ -446,6 +448,7 @@ struct Session {
     threads: Mutex<Vec<JoinHandle<()>>>,
     kicks: Mutex<Vec<Resource>>,
     pair: NotificationPair,
+    call: CallNotification,
     endpoint: NotificationEndpoint,
 }
 
@@ -814,13 +817,12 @@ impl VirtioDevice for Proxy {
                 }) {
                     resource.try_clone()?
                 } else {
-                    let (read, write) = (session.pair)()?;
+                    let (call, write) = (session.call)()?;
                     // Queues sharing one status/line owner need one receiver.
                     // Keep its endpoint while wiring the remaining queues.
                     if let Some(interrupt) = &interrupt {
                         shared_calls.push((interrupt.clone(), write.try_clone()?));
                     }
-                    let call = (session.endpoint)(read, NotificationRole::Wait)?;
                     let wake = Kick::from_notification(Arc::clone(&call));
                     let shared = Arc::clone(&session.shared);
                     let relay = host

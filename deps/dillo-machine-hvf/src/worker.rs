@@ -9,6 +9,20 @@ use std::io;
 pub struct Worker;
 
 impl dillo_machine::worker::WorkerHost for Worker {
+    fn call_notification() -> io::Result<(
+        std::sync::Arc<dyn dillo_machine::worker::WriteNotification>,
+        dillo_machine::worker::Resource,
+    )> {
+        if std::env::var_os("DILLO_BENCH_DIRECT_CALL_READ").is_some() {
+            return dillo_machine_unix::notification::call();
+        }
+        let (read, write) = Self::notification_pair()?;
+        Ok((
+            Self::notification_endpoint(read, dillo_machine::worker::NotificationRole::Wait)?,
+            write,
+        ))
+    }
+
     fn notification_pair() -> io::Result<(
         dillo_machine::worker::Resource,
         dillo_machine::worker::Resource,

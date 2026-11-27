@@ -200,6 +200,17 @@ pub trait WorkerHost {
         Err(io::ErrorKind::Unsupported.into())
     }
 
+    /// Parent completion receiver with a local cancellation wake, and the
+    /// signaling endpoint exported to the worker. Process/control supervision
+    /// owns peer liveness; the receiver may retain its own signaling reference.
+    fn call_notification() -> io::Result<(std::sync::Arc<dyn WriteNotification>, Resource)> {
+        let (read, write) = Self::notification_pair()?;
+        Ok((
+            Self::notification_endpoint(read, NotificationRole::Wait)?,
+            write,
+        ))
+    }
+
     /// One queue wake usable locally or by an exported worker receiver.
     /// Software notify dispatch signals the same object in either case.
     fn queue_notification() -> io::Result<std::sync::Arc<dyn WriteNotification>> {
