@@ -1,7 +1,8 @@
 # Device performance milestone
 
 Plan dated 2026-11-27. Source inspected: `7604a035dc25d13e7fe274d42836a75c58a04494`.
-This is the proposed next milestone; implementation has not started.
+Implementation is underway. Interim measurements and qualification status are
+recorded in [the execution report](results/2026-11-27-optimization/REPORT.md).
 
 ## Outcome
 
