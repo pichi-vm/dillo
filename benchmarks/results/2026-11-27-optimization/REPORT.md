@@ -440,3 +440,23 @@ unstable without the invariant-TSC privilege. Retained guest logs show this
 decision and only jiffies/refined-jiffies clocks. A prebuilt kernel with the
 existing Hyper-V clock driver is being investigated; no forced TSC reliability
 or kernel source modification is part of the measurement plan.
+
+[Clock diagnostic run 46059813993](https://github.com/pichi-vm/dillo/actions/runs/46059813993)
+completed all eight boots at `7a4cec0`. It uses Microsoft's unmodified prebuilt
+WSL 6.18.58.1 kernel, extracted from the checksum-verified WSL 3.0.5 MSI without
+installing it. The embedded configuration enables the existing Hyper-V clock
+drivers. All guests selected `hyperv_clocksource_tsc_page` and the Hyper-V
+clockevent; real virtio-disk p99 bounds were sub-millisecond. The host-observed
+active intervals agree with the requested 500-ms windows at the precision of
+console observation. This resolves the clock capability question without
+asserting that raw TSC is reliable or changing a kernel or CPU declaration.
+
+This is a clock diagnostic, not a parity result. That kernel supplies sixteen
+nonempty RAM disks, and the old snuffler timed them as well as the intended
+virtio disk. [windows-clock-diagnostic.json.gz](windows-clock-diagnostic.json.gz)
+retains every boot's clock, selected-disk operation and observed interval, plus
+the paired data and artifact digest. The complete logs remain under
+`target/performance/windows-clock-diagnostic/46059813993`. The follow-up harness
+explicitly selects its disposable virtio disks and checks the resulting device
+set before longer PCI and PCI-free comparisons. This kernel lacks built-in
+IP autoconfiguration, so it does not yet qualify the network measurements.
