@@ -8,6 +8,16 @@ on:
         type: choice
         options: [all, linux-x86, linux-arm, macos-arm, windows-msvc]
         default: all
+      cases:
+        description: Workload selection
+        type: choice
+        options: [all, block-pci]
+        default: all
+      sampling:
+        description: Compare instrumentation on the same host
+        type: choice
+        options: [on, off, both]
+        default: on
 
 permissions:
   contents: read
@@ -83,9 +93,19 @@ jobs:
           benchmark::benchmark_assets -- --ignored --exact --nocapture
       - name: Measure paired workloads
         shell: bash
-        run: >-
-          python benchmarks/run.py --assets target/benchmarks/assets.json
-          --output target/benchmark-results --pairs 5 --duration-ms 1000
+        env:
+          BENCH_CASES: ${{ inputs.cases == 'block-pci' && 'block-pci' || 'block-pci,block-mmio,block4-pci,net-pci' }}
+          BENCH_SAMPLING: ${{ inputs.sampling || 'on' }}
+        run: |
+          bench_modes="$BENCH_SAMPLING"
+          if [ "$bench_modes" = both ]; then bench_modes='on off'; fi
+          for bench_mode in $bench_modes; do
+            bench_options=()
+            if [ "$bench_mode" = off ]; then bench_options+=(--no-sample); fi
+            python benchmarks/run.py --assets target/benchmarks/assets.json \
+              --output "target/benchmark-results/$bench_mode" --pairs 5 \
+              --duration-ms 1000 --cases "$BENCH_CASES" "${bench_options[@]}"
+          done
       - name: Upload measurements and logs
         if: always()
         uses: actions/upload-artifact@v7.0.2
