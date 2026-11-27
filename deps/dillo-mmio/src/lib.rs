@@ -522,8 +522,9 @@ impl Interrupt {
     pub fn bind_status(
         &self,
         state: Arc<dillo_machine::worker::NotificationState>,
+        update: Option<Arc<dyn InterruptUpdate>>,
     ) -> Result<Interrupt, InterruptError> {
-        self.0.bind_status(state)
+        self.0.bind_status(state, update)
     }
 
     pub fn retire(&self) -> Result<(), InterruptError> {
@@ -554,6 +555,13 @@ impl InterruptLine for FnInterruptLine {
     }
 }
 
+/// Experimental control-plane barrier for replacing exported wired events.
+/// The implementation drains callers, runs the change, refreshes their event
+/// handles and resumes them. A failed update must leave callers stopped.
+pub trait InterruptUpdate: Send + Sync + std::fmt::Debug {
+    fn run(&self, change: &mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()>;
+}
+
 /// Backend-resolved line interrupt.
 pub trait InterruptLine: Send + Sync + std::fmt::Debug {
     fn signal(&self);
@@ -573,6 +581,7 @@ pub trait InterruptLine: Send + Sync + std::fmt::Debug {
     fn bind_status(
         &self,
         _state: Arc<dillo_machine::worker::NotificationState>,
+        _update: Option<Arc<dyn InterruptUpdate>>,
     ) -> Result<Interrupt, InterruptError> {
         Err(InterruptError::Delivery(
             "shared status is unsupported".into(),

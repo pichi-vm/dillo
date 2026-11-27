@@ -834,6 +834,7 @@ fn direct_calls(
     shared_status: bool,
 ) -> io::Result<()> {
     let mut retired: Option<Arc<dillo_machine::worker::NotificationState>> = None;
+    let update = proxy.interrupt_update().unwrap();
     for _ in 0..2 {
         let (read, write) = Worker::notification_pair()?;
         let status = shared_status
@@ -865,7 +866,7 @@ fn direct_calls(
             if index == 2 {
                 control.quiesce()?;
                 let (new_read, write) = Worker::notification_pair()?;
-                proxy.update_interrupts(&mut || {
+                update.run(&mut || {
                     *interrupt.endpoint.lock().unwrap() = write.try_clone()?;
                     Ok(())
                 })?;

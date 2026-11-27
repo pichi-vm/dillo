@@ -431,7 +431,7 @@ impl VirtioMmio {
                             .unwrap()
                             .as_ref()
                             .ok_or_else(|| MmioError::Device("unresolved wired interrupt".into()))?
-                            .bind_status(Arc::clone(&state))
+                            .bind_status(Arc::clone(&state), g.device.interrupt_update())
                             .map_err(|e| MmioError::Device(e.to_string()))?;
                         let interrupt = Interrupt::new(Arc::new(SharedCompletion {
                             state: Arc::clone(&state),
@@ -874,6 +874,7 @@ mod tests {
         fn bind_status(
             &self,
             _: Arc<dillo_machine::worker::NotificationState>,
+            _: Option<Arc<dyn dillo_mmio::InterruptUpdate>>,
         ) -> Result<Interrupt, dillo_mmio::InterruptError> {
             let binding = Arc::new(Self::default());
             self.bindings.lock().unwrap().push(Arc::clone(&binding));

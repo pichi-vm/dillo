@@ -727,6 +727,7 @@ mod imp {
         fn bind_status(
             &self,
             state: Arc<dillo_machine::worker::NotificationState>,
+            _update: Option<Arc<dyn dillo_mmio::InterruptUpdate>>,
         ) -> Result<dillo_mmio::Interrupt, InterruptError> {
             let (vm, gsi) = self
                 .manager
