@@ -245,24 +245,38 @@ pub trait SharedRegionAccess: Send + Sync + std::fmt::Debug {
 /// Opaque shared-memory region handle.
 #[derive(Clone, Debug)]
 pub struct SharedRegion {
-    access: Arc<dyn SharedRegionAccess>,
+    access: RegionAccess,
+}
+
+#[derive(Clone, Debug)]
+enum RegionAccess {
+    Mapped(MappedSharedRegion),
+    Custom(Arc<dyn SharedRegionAccess>),
 }
 
 impl SharedRegion {
     pub fn new(access: Arc<dyn SharedRegionAccess>) -> Self {
-        Self { access }
+        Self {
+            access: RegionAccess::Custom(access),
+        }
     }
 
     pub fn read(&self, offset: u64, data: &mut [u8]) -> Result<(), SharedMemoryError> {
-        self.access.read(offset, data)
+        match &self.access {
+            RegionAccess::Mapped(region) => region.read(offset, data),
+            RegionAccess::Custom(region) => region.read(offset, data),
+        }
     }
 
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), SharedMemoryError> {
-        self.access.write(offset, data)
+        match &self.access {
+            RegionAccess::Mapped(region) => region.write(offset, data),
+            RegionAccess::Custom(region) => region.write(offset, data),
+        }
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct MappedSharedRegion {
     memory: GuestMemoryMmap,
     gpa: u64,
@@ -442,12 +456,14 @@ impl SharedMemory for MappedSharedMemory {
         if !self.shared.contains(range.gpa, range.size) {
             return Err(SharedMemoryError::NotShared);
         }
-        Ok(SharedRegion::new(Arc::new(MappedSharedRegion {
-            memory: self.memory.clone(),
-            gpa: range.gpa,
-            size: range.size,
-            access: range.access,
-        })))
+        Ok(SharedRegion {
+            access: RegionAccess::Mapped(MappedSharedRegion {
+                memory: self.memory.clone(),
+                gpa: range.gpa,
+                size: range.size,
+                access: range.access,
+            }),
+        })
     }
 }
 
