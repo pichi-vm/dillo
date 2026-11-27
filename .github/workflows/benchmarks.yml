@@ -13,6 +13,14 @@ on:
         type: choice
         options: [all, block-pci]
         default: all
+      pairs:
+        description: Measured pairs after the retained warm-up
+        type: number
+        default: 10
+      duration_ms:
+        description: Duration of each measured operation
+        type: number
+        default: 5000
       sampling:
         description: Compare instrumentation on the same host
         type: choice
@@ -35,7 +43,7 @@ jobs:
         platform: ${{ fromJSON(inputs.platform != 'all' && format('["{0}"]', inputs.platform) || '["linux-x86","linux-arm","macos-arm","windows-msvc"]') }}
     name: ${{ matrix.platform }} paired measurements
     runs-on: ${{ fromJSON(matrix.platform == 'linux-arm' && '["self-hosted","Linux","ARM64","bare-metal","aarch64","kvm"]' || matrix.platform == 'macos-arm' && '["self-hosted","macOS","ARM64","bare-metal","m1","self-managed-seatbelt"]' || matrix.platform == 'windows-msvc' && '["windows-2025"]' || '["ubuntu-24.04"]') }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Use the writable job temporary directory
@@ -96,6 +104,8 @@ jobs:
         env:
           BENCH_CASES: ${{ inputs.cases == 'block-pci' && 'block-pci' || 'block-pci,block-mmio,block4-pci,net-pci' }}
           BENCH_SAMPLING: ${{ inputs.sampling || 'on' }}
+          BENCH_PAIRS: ${{ inputs.pairs || 10 }}
+          BENCH_DURATION_MS: ${{ inputs.duration_ms || 5000 }}
         run: |
           bench_modes="$BENCH_SAMPLING"
           if [ "$bench_modes" = both ]; then bench_modes='on off'; fi
@@ -103,8 +113,8 @@ jobs:
             bench_options=()
             if [ "$bench_mode" = off ]; then bench_options+=(--no-sample); fi
             python benchmarks/run.py --assets target/benchmarks/assets.json \
-              --output "target/benchmark-results/$bench_mode" --pairs 5 \
-              --duration-ms 1000 --cases "$BENCH_CASES" "${bench_options[@]}"
+              --output "target/benchmark-results/$bench_mode" --pairs "$BENCH_PAIRS" \
+              --duration-ms "$BENCH_DURATION_MS" --cases "$BENCH_CASES" "${bench_options[@]}"
           done
       - name: Upload measurements and logs
         if: always()
