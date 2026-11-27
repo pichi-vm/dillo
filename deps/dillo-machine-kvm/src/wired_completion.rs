@@ -331,8 +331,10 @@ mod tests {
             // Command 2 reads IAR1; 3 writes EOIR1 with the last accepted ID.
             // Other commands read HPPIR1. Every command reports through MMIO.
             0xb9400061, 0x7100083f, 0x540000a0, 0x71000c3f, 0x540000a0, 0xd538cc40, 0x14000006,
-            0xd538cc00, 0x14000004, 0xd518cc24, 0xd5033fdf, 0xd2844440, 0xaa0003e4, 0xf9000040,
-            0x17fffff2,
+            0xd538cc00, 0x14000004, 0xd518cc24, 0xd5033fdf, 0xd2844440,
+            // Retain guest-visible CTLR/RPR/ICFGR/ISACTIVER for failure diagnosis.
+            0xd538cc85, 0xf9000465, 0xd538cb65, 0xf9000865, 0xd2a10006, 0xb94c0cc5, 0xb9001865,
+            0xb94304c5, 0xb9001c65, 0xaa0003e4, 0xf9000040, 0x17ffffe9,
         ];
         memory
             .write(
@@ -363,6 +365,17 @@ mod tests {
             memory.write(0x800, &command.to_le_bytes()).unwrap();
             report(cpu)
         };
+        let inspect = |stage: &str| {
+            use vm_memory::{Bytes, GuestAddress};
+            let view = memory.guest_memory();
+            eprintln!(
+                "{stage}: CTLR={:#x}, RPR={:#x}, ICFGR={:#x}, ACTIVE={:#x}",
+                view.read_obj::<u64>(GuestAddress(0x808)).unwrap(),
+                view.read_obj::<u64>(GuestAddress(0x810)).unwrap(),
+                view.read_obj::<u32>(GuestAddress(0x818)).unwrap(),
+                view.read_obj::<u32>(GuestAddress(0x81c)).unwrap(),
+            );
+        };
         let (_, gsi) = manager.wired_binding(16).unwrap();
         let state = crate::worker::Worker::create_notification_state().unwrap();
         let event = bind(vm.clone(), gsi, true, Arc::clone(&state)).unwrap();
@@ -370,7 +383,9 @@ mod tests {
         event.signal();
         wait_value(|| command(&mut cpu, 1), 48);
         assert_eq!(command(&mut cpu, 2), 48);
+        inspect("after IAR");
         assert_eq!(command(&mut cpu, 3), 0x2222);
+        inspect("after EOI");
         wait_value(|| event.resamples.load(Ordering::Acquire), 1);
         wait_value(|| command(&mut cpu, 1), 48);
         assert_eq!(command(&mut cpu, 2), 48);
