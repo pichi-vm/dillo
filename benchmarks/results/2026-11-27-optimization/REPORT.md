@@ -891,3 +891,27 @@ abbreviated baseline `4c13db5`. It produced no comparison. The corrected run
 uses the full SHA without runner or confinement changes. Full successful-run
 observations and provenance are in
 [macos-lazy-watcher-short.json.gz](macos-lazy-watcher-short.json.gz).
+
+## Longer x86 comparison rejects Linux-wide per-frame wakes
+
+Apollo completed all 104 boots comparing `0c7c8bc` with `73201a6`: twelve
+five-second pairs per transport/revision, plus warm-ups, on CPUs 24–27 with
+no concurrent local compilation. Each binary/mode combination occupies each
+execution position three times. Different frozen executables share the same
+guest assets. The runtime changes are Linux's per-frame wake restoration and
+the Unix partial-notification cancellation fix; KVM uses eventfd notifications.
+
+Large-message worker throughput falls to 90.1% of the preceding binary on
+PCI (95% interval 89.3–90.3%) and 93.8% on MMIO (93.2–94.3%). CPU/GiB rises
+18.5%/11.6%, and p99 bounds rise 11.5%/7.1%. The control also slows: its
+throughput ratios are 91.3%/94.2%. Restore wake coalescing on Linux x86 and
+keep the per-frame policy confined to Linux Arm, where the earlier balanced
+comparison supported it. The current Arm/RX composition still needs longer
+qualification; this result cannot establish its optimal wake policy.
+
+The rejected x86 candidate also remains below its same-revision control for
+large-message throughput: 97.9% on PCI and 98.7% on MMIO, with CPU/GiB at
+102.7%/102.5%. Those repeatable smaller gaps remain open despite falling within
+the 5% measurement band. Full paired observations, intervals, schedule and
+source/asset provenance are retained in
+[network-integrated-x86-long.json.gz](network-integrated-x86-long.json.gz).

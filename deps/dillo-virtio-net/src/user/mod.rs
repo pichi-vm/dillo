@@ -222,16 +222,15 @@ impl NetBackend for UserNetBackend {
     fn send(&self, frame: &[u8]) -> io::Result<()> {
         let wake = {
             let mut q = self.inbound.lock().expect("user-net inbound poisoned");
-            let wake = cfg!(target_os = "linux") || q.is_empty();
+            let wake = cfg!(all(target_os = "linux", target_arch = "aarch64")) || q.is_empty();
             if q.len() < device::MAX_QUEUE_FRAMES {
                 q.push_back(frame.to_vec());
             }
             // Past the cap we drop, exactly as a NIC does on overrun.
             wake
         };
-        // The stack drains this queue under the same lock. Non-Linux hosts
-        // coalesce queued frames; Linux retains per-frame wakes because
-        // suppressing them regressed measured stack throughput.
+        // The stack drains this queue under the same lock. Linux Arm retains
+        // per-frame wakes; the other measured hosts benefit from coalescing.
         if wake {
             let _ = self.waker.wake();
         }
