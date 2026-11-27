@@ -107,7 +107,7 @@ jobs:
       - name: Measure paired workloads
         shell: bash
         env:
-          BENCH_CASES: ${{ inputs.cases == 'block-pci' && 'block-pci' || 'block-pci,block-mmio,block4-pci,net-pci' }}
+          BENCH_CASES: ${{ inputs.cases == 'block-pci' && 'block-pci' || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,net-pci' }}
           BENCH_SAMPLING: ${{ inputs.sampling || 'on' }}
           BENCH_PAIRS: ${{ inputs.pairs || 10 }}
           BENCH_DURATION_MS: ${{ inputs.duration_ms || 5000 }}

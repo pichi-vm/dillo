@@ -161,10 +161,22 @@ pub(crate) fn run(cmdline: &str, blocks: &[snuffler::BlockDevice], config: &Conf
         operations: Vec::new(),
         errors: Vec::new(),
     };
-    for block in blocks.iter().filter(|block| block.size_bytes != 0) {
-        match super::bench::timed_device(&block.name, block.size_bytes, block.ro, config) {
+    let blocks: Vec<_> = blocks
+        .iter()
+        .filter(|block| block.size_bytes != 0)
+        .collect();
+    let groups: Vec<_> = if cmdline
+        .split_whitespace()
+        .any(|word| word == "dillo.bench_concurrent")
+    {
+        vec![blocks]
+    } else {
+        blocks.into_iter().map(|block| vec![block]).collect()
+    };
+    for group in groups {
+        match super::bench::timed_devices(&group, config) {
             Ok(operations) => report.operations.extend(operations),
-            Err(error) => report.errors.push(format!("{}: {error}", block.name)),
+            Err(error) => report.errors.push(format!("block: {error}")),
         }
     }
     if let Some(address) = super::cmdline_token(cmdline, "dillo.net_echo=") {

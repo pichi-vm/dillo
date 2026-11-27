@@ -155,6 +155,12 @@ requests that finish after the deadline. Reported elapsed time includes those
 completions. Write verification happens afterward. The default remains the
 original single-thread path. Use separate output directories for each depth.
 
+`--cases block4-concurrent-pci` measures all four disks in the same window.
+Each has the chosen concurrency bound and independent ranges and buffers;
+the report's `block-group` operation aggregates their bytes and latency
+samples. With the default depth, its total in-flight bound is four. The old
+`block4-pci` case continues to run each disk separately.
+
 `environment.json` records provenance. Every run directory retains the full
 console, stderr, guest report, observed phase timestamps, and native process
 samples. `metrics.json` contains absolute measurements; `summary.json` contains

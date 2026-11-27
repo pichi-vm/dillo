@@ -282,19 +282,21 @@ def main():
         threading.Thread(target=server.serve_forever, daemon=True).start()
         port = server.server_address[1]
         for case in args.cases.split(","):
-            assert case in ("block-pci", "block-mmio", "block4-pci", "net-pci")
+            assert case in ("block-pci", "block-mmio", "block4-pci", "block4-concurrent-pci", "net-pci")
             image = args.output / f"{case}.pmi"
             cmdline = (f"console=hvc0 dillo.uptime_ns dillo.panic_report "
                        f"dillo.bench_ms={args.duration_ms} dillo.bench_warmup_ms={args.warmup_ms} "
                        f"dillo.bench_qd={args.queue_depth}")
             cmdline += " " + args.extra_cmdline
+            if case == "block4-concurrent-pci":
+                cmdline += " dillo.bench_concurrent"
             if case == "net-pci":
                 cmdline += (f" ip=10.0.2.15::10.0.2.2:255.255.255.0::eth0:off"
                             f" dillo.net_echo=10.0.2.2:{port}")
             subprocess.run([assets["arma"], "build", "--kernel", assets["kernel"], "--config", str(config),
                             "--profile", assets["profile"], "--initrd", assets["snuffler"],
                             "--cmdline", cmdline, str(image)], check=True)
-            count = 0 if case == "net-pci" else (4 if case == "block4-pci" else 1)
+            count = 0 if case == "net-pci" else (4 if case.startswith("block4-") else 1)
             disks = [backing / f"disk{i}.raw" for i in range(count)]
             for pair in range(-1, args.pairs):  # First pair warms the host and is retained but excluded.
                 order = ("local", "worker") if pair % 2 == 0 else ("worker", "local")

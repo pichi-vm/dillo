@@ -247,22 +247,37 @@ fn pwrite_full(fd: &OwnedFd, buf: &[u8], off: u64) -> bool {
 }
 
 /// Timed opt-in uses the same aligned buffers and I/O helpers as quick probes.
-pub(crate) fn timed_device(
-    name: &str,
-    size: u64,
-    ro: bool,
+pub(crate) fn timed_devices(
+    blocks: &[&snuffler::BlockDevice],
     config: &super::timed::Config,
 ) -> std::io::Result<Vec<snuffler::performance::Operation>> {
     use std::io;
-    if size < SEQ_BLK as u64 || size > 1024 * 1024 * 1024 {
-        return Err(io::ErrorKind::InvalidInput.into());
+    if blocks.is_empty() {
+        return Ok(Vec::new());
     }
-    // Refuse cached guest I/O rather than silently changing the experiment.
-    let fd = rustix::fs::open(
-        format!("/dev/{name}"),
-        OFlags::DIRECT | if ro { OFlags::RDONLY } else { OFlags::RDWR },
-        Mode::empty(),
-    )?;
+    let name = if blocks.len() == 1 {
+        &blocks[0].name
+    } else {
+        "block-group"
+    };
+    let mut disks = Vec::new();
+    for block in blocks {
+        if block.size_bytes < SEQ_BLK as u64 || block.size_bytes > 1024 * 1024 * 1024 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        // Refuse cached guest I/O rather than silently changing the experiment.
+        let fd = rustix::fs::open(
+            format!("/dev/{}", block.name),
+            OFlags::DIRECT
+                | if block.ro {
+                    OFlags::RDONLY
+                } else {
+                    OFlags::RDWR
+                },
+            Mode::empty(),
+        )?;
+        disks.push((block, fd));
+    }
     let mut results = Vec::new();
     for (operation, len, random, write) in [
         ("seq_read", SEQ_BLK, false, false),
@@ -270,31 +285,38 @@ pub(crate) fn timed_device(
         ("seq_write", SEQ_BLK, false, true),
         ("rand_write", RAND_BLK, true, true),
     ] {
-        if ro && write {
+        let devices: Vec<_> = disks
+            .iter()
+            .filter(|(block, _)| !write || !block.ro)
+            .collect();
+        if devices.is_empty() {
             continue;
         }
         // Disjoint partitions keep concurrent writers from verifying each
         // other's writes. Each thread has at most one synchronous I/O active.
-        let nblocks = size / len as u64 / config.queue_depth as u64;
-        if nblocks == 0 {
-            return Err(io::ErrorKind::InvalidInput.into());
-        }
-        let mut storage: Vec<_> = (0..config.queue_depth)
-            .map(|_| {
+        let mut storage = Vec::new();
+        for (block, _) in &devices {
+            let nblocks = block.size_bytes / len as u64 / config.queue_depth as u64;
+            if nblocks == 0 {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            for _ in 0..config.queue_depth {
                 let mut buffer = AlignedBuf::new(len);
                 buffer.as_mut_slice().fill(0x5a);
-                (buffer, vec![false; nblocks as usize])
-            })
-            .collect();
+                storage.push((buffer, vec![false; nblocks as usize]));
+            }
+        }
         let mut calls: Vec<_> = storage
             .iter_mut()
             .enumerate()
-            .map(|(worker, (buffer, touched))| {
-                let seed = fnv1a(name.as_bytes()) ^ worker as u64;
+            .map(|(index, (buffer, touched))| {
+                let (block, fd) = devices[index / config.queue_depth];
+                let worker = index % config.queue_depth;
+                let nblocks = touched.len() as u64;
+                let seed = fnv1a(block.name.as_bytes()) ^ worker as u64;
                 let mut rng = Rng::new(seed);
                 let mut index = 0;
                 let mut measuring = false;
-                let fd = &fd;
                 move |warmup: bool| {
                     if !warmup && !measuring {
                         rng = Rng::new(seed);
@@ -322,18 +344,21 @@ pub(crate) fn timed_device(
                 }
             })
             .collect();
-        let mut result = if config.queue_depth == 1 {
+        let mut result = if calls.len() == 1 {
             super::timed::measure(config, name, operation, "o_direct", len, &mut calls[0])?
         } else {
             super::timed::measure_parallel(config, name, operation, len, &mut calls)?
         };
         drop(calls);
         if write {
-            for (worker, (mut buffer, touched)) in storage.into_iter().enumerate() {
+            for (index, (mut buffer, touched)) in storage.into_iter().enumerate() {
+                let (_, fd) = devices[index / config.queue_depth];
+                let worker = index % config.queue_depth;
+                let nblocks = touched.len() as u64;
                 for (block, touched) in touched.into_iter().enumerate() {
                     let offset = (worker as u64 * nblocks + block as u64) * len as u64;
                     if touched
-                        && (!pread_full(&fd, buffer.as_mut_slice(), offset)
+                        && (!pread_full(fd, buffer.as_mut_slice(), offset)
                             || buffer.as_slice().iter().any(|byte| *byte != 0x5a))
                     {
                         return Err(io::Error::other("block write verification failed"));
