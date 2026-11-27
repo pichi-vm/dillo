@@ -266,7 +266,8 @@ Arm, 90.5/77.8% on macOS and 92.2/84.1% on Windows. These short diagnostics conf
 without PCI; they are not final qualification or controlled comparisons
 against different-duration runs on different hosted allocations.
 
-PCI-free performance is a primary acceptance condition. The next experiment
+PCI and MMIO performance are independent, equal acceptance conditions,
+including guests without a PCI bridge. The next experiment
 tests publishing a host-only interrupt latch before native notification,
 leaving register reads and acknowledgements in the parent transport. This is
 isolated from the production branch: a prototype using an unassigned protocol
@@ -330,3 +331,27 @@ establish parity. [shared-isr-arm-coalesced-short.json.gz](shared-isr-arm-coales
 retains all paired metrics; the raw artifact and its verified digest are
 recorded with the data. The level-delivery and revocation limits above still
 apply. Coalescing is not merged into the production branch.
+
+The activation-scoped follow-up (`bdcc6fa`) creates a fresh native binding and
+status page on each activation, and deassigns the old irqfd on retirement.
+Level declarations use KVM resampling rather than the earlier pulse path.
+The native x86 fixture passes real guest EOI, reassertion while pending,
+acknowledgement and obsolete-export checks. Arm runs
+[46050795668](https://github.com/pichi-vm/dillo/actions/runs/46050795668) and
+[46051334834](https://github.com/pichi-vm/dillo/actions/runs/46051334834) fail
+before benchmarking: initial delivery and guest IAR/EOI execute, but the
+fixture observes no resample notification. Their logs remain under
+`target/performance/shared-isr-lifetime`; Arm correctness is unresolved.
+
+Apollo completed 32 PCI-free boots with this runtime, using the same frozen
+binary for both paths, three pairs of two-second operations and CPUs 24–27.
+Random-read worker throughput rises from 50.65 to 57.18 MiB/s, against a
+57.55 MiB/s shared-path control; CPU/GiB falls from 28.63 to 23.57 seconds,
+versus 23.39 in process. Random writes rise from 46.78 to 57.39 MiB/s.
+The 64-KiB echo rate rises from 123.86 to 142.97 MiB/s, against 147.49 in
+process. Sequential reads still retain only 93.5% of control throughput and
+use 9.0% more CPU/GiB. These short observations do not establish parity, and
+the x86 image's edge interrupts do not exercise the Arm resampling cost.
+[shared-isr-lifetime-short.json.gz](shared-isr-lifetime-short.json.gz)
+records every paired metric and asset hash. The transport-level reset races,
+asynchronous helper failure, and protocol interoperability remain unqualified.
