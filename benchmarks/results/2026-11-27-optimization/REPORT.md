@@ -87,7 +87,8 @@ optimization; they do not establish the final confidence criterion.
   operations; its 64-KiB network echo retains 77%.
 - Physical Linux Arm PCI random reads reach 108% of control, while random
   writes retain 84%. MMIO random reads/writes retain 71%/64%, and cost more
-  CPU per GiB. Their necessary parent completion relay remains.
+  CPU per GiB. Their current parent completion relay remains; this is an
+  implementation choice, not a virtio requirement.
 - macOS PCI random reads/writes retain 88%/89%; MMIO retains 88%/78%.
   Direct kicks help, but completion injection still crosses the parent.
 - Windows PCI random reads/writes retain 86%/85% before native completions.
@@ -199,9 +200,63 @@ partial drain. It adds one descriptor per receiver; native correctness and
 latency results must justify that cost before keeping it. Linux fallback
 tests and strict Clippy pass, but do not qualify the macOS implementation.
 The macOS worker run at `59f3e98` passed the native pipe tests and real
-confined-process fixture. Guest performance on Hermes remains unmeasured
-for this candidate.
+confined-process fixture. The later three-pair Hermes run at `6d4b3cb` retains
+substantial worker/control differences; it does not isolate kqueue from
+polling because the earlier run used different durations. A comparison with
+both wait implementations and identical guest assets on one host is pending.
 
-The ten-pair/five-second matrix is running at `6e73b7c` in
-[run 46032087496](https://github.com/pichi-vm/dillo/actions/runs/46032087496).
-Its results and residual gaps will be recorded before any parity claim.
+## Completed long matrix and PCI-free measurements
+
+[Run 46032087496](https://github.com/pichi-vm/dillo/actions/runs/46032087496)
+completed all four native platforms at `6e73b7c`: ten alternating measured
+pairs per case, five seconds per operation, plus a retained warm-up pair.
+This includes native kicks, KVM/WHP PCI completions, memory improvements and
+TCP_NODELAY. It precedes shared software call receivers and the kqueue
+candidate. [matrix-long.json.gz](matrix-long.json.gz) retains selected absolute
+observations, paired ratios and 95% bootstrap intervals. The raw artifact
+directories are under `target/performance/matrix-long-46032087496`.
+
+The remaining MMIO gap is clear. For random reads/writes, paired worker/control
+throughput is 0.775/0.663 on physical Linux Arm, 0.899/0.828 on macOS and
+0.817/0.818 on Windows. Linux Arm uses 1.333/1.613 times the CPU per GiB;
+Windows uses 1.221/1.242 times. These cases have an MMIO workload but a PCI
+console. They do not qualify a guest with no PCI hardware.
+
+PCI is closer, but does not establish the overall goal either. Windows block
+throughput retains 94.5–96.0% across the four operations. Physical Linux Arm
+sequential reads/writes retain 93.3/93.1%, with about 8% more CPU per GiB.
+macOS PCI block retains 87.8–92.0%. Windows histogram tails remain unusable
+for microsecond comparisons because the guest clock is refined-jiffies;
+identical reported bounds are not evidence of equal latency.
+
+The separate Apollo ten-pair/five-second run at `5f6c1eb` includes shared call
+receivers. PCI random reads retain 99.1% of control throughput, while MMIO
+random reads retain 88.0% and use 21.9% more CPU per GiB. Other cases and their
+intervals are retained in [apollo-current-long.json.gz](apollo-current-long.json.gz).
+Both modes used CPUs 24–27 and the same frozen guest assets. This physical
+host result is distinct from the hosted Linux x86 matrix allocation.
+
+The new `block-mmio-only` and `net-mmio-only` cases request zero PCI slots and
+two MMIO slots from Arma, put both console and workload on MMIO, and reject a
+guest report containing any PCI devices. Image-generation commands and hashes
+are retained. PCI driver support in the shared kernel does not create PCI
+hardware in these images.
+
+The initial three-pair/two-second PCI-free diagnostics completed on Apollo,
+[Linux Arm](https://github.com/pichi-vm/dillo/actions/runs/46042528649),
+[macOS](https://github.com/pichi-vm/dillo/actions/runs/46041985577) and
+[Windows](https://github.com/pichi-vm/dillo/actions/runs/46042528651). The native
+runs use `6d4b3cb`; Apollo uses that harness with the frozen `5f6c1eb` binary.
+[pci-free-short.json.gz](pci-free-short.json.gz) retains all selected results.
+Random-read/write throughput retains 90.4/82.6% on Apollo, 75.1/70.1% on Linux
+Arm, 90.5/77.8% on macOS and 92.2/84.1% on Windows. These short diagnostics confirm the gap exists
+without PCI; they are not final qualification or controlled comparisons
+against different-duration runs on different hosted allocations.
+
+PCI-free performance is a primary acceptance condition. The next experiment
+tests publishing a host-only interrupt latch before native notification,
+leaving register reads and acknowledgements in the parent transport. This is
+isolated from the production branch: a prototype using an unassigned protocol
+extension cannot establish interoperability, reset/revocation correctness or
+native level reassertion. Its purpose is to measure the cost of the relay
+before selecting a complete mechanism.
