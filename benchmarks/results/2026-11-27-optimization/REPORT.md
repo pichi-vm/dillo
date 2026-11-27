@@ -459,7 +459,8 @@ the paired data and artifact digest. The complete logs remain under
 `target/performance/windows-clock-diagnostic/46059813993`. The follow-up harness
 explicitly selects its disposable virtio disks and checks the resulting device
 set before longer PCI and PCI-free comparisons. This kernel lacks built-in
-IP autoconfiguration, so it does not yet qualify the network measurements.
+IP autoconfiguration; the explicit guest setup used by the subsequent network
+measurements is described below.
 
 ## macOS direct completion-read experiment
 
@@ -514,7 +515,7 @@ change by +1.2%/−1.4%. These short sequential runs do not distinguish temporal
 variation from a regression. The candidate remains experimental pending
 further measurement. All paired observations are in
 [region-owner-short.json.gz](region-owner-short.json.gz); native Arm and macOS
-checks are underway. The raw comparison remains in the candidate worktree's
+results follow below. The raw comparison remains in the candidate worktree's
 `target/performance/region-owner` directory.
 
 A ten-pair/five-second follow-up now interleaves both binaries and both modes
@@ -562,3 +563,67 @@ The latency histogram still has finite bin width, even with a working clock.
 Every paired observation and bootstrap interval is retained in
 [windows-clock-block-long.json.gz](windows-clock-block-long.json.gz), with raw
 artifacts under `target/performance/windows-block-long-46062103549`.
+
+## Interleaved mapping-owner follow-up
+
+All 88 boots completed: ten five-second measured pairs per variant and case,
+with both binary order and worker/control order rotated. Warm-ups remain in
+the raw evidence. The frozen executables and guest assets match the preceding
+short comparison. [region-owner-interleaved.json.gz](region-owner-interleaved.json.gz)
+retains the predeclared order, provenance, paired results and confidence bounds.
+
+For 64-KiB echo, candidate worker throughput improves 6.8% over the baseline
+worker, with a paired 95% interval of +5.9–8.1%; CPU/GiB falls 7.2%
+([−8.1%, −6.3%]). The control improves too: throughput rises 5.9% and CPU/GiB
+falls 8.1%. Against that faster control, the candidate worker retains 99.0%
+throughput, uses 102.9% CPU/GiB, and has a 105.6% p99 bound. This supports the
+allocation reduction, but does not establish parity or a latency improvement.
+
+Block results remain inconclusive. The candidate worker's sequential-write
+throughput changes by −4.9%, with an interval spanning −13.9% to +2.8%, while
+the control becomes faster. Random-write and sequential-read worker intervals
+also cross no change. The predeclared extension to twenty block pairs is
+running with the same frozen executables; all original observations are kept.
+The candidate remains experimental pending that result.
+
+## Windows network measurements with the Hyper-V clock
+
+[Run 46065767739](https://github.com/pichi-vm/dillo/actions/runs/46065767739)
+completed 16 boots at `566ad5c`: three two-second measured pairs per transport,
+plus warm-ups. Safe guest netlink setup brings up the named interface and
+assigns its benchmark IPv4 address before timing; it is used only when the
+kernel lacks IP autoconfiguration. All guests use the unmodified prebuilt WSL
+kernel and `hyperv_clocksource_tsc_page`; only the intended network operation
+is timed.
+
+| Transport / message | Throughput ratio | CPU/GiB ratio | p99 ratio |
+| --- | ---: | ---: | ---: |
+| PCI / 64 B | 0.887 | 1.100 | 1.143 |
+| PCI / 64 KiB | 0.938 | 1.063 | 1.588 |
+| PCI-free MMIO / 64 B | 0.955 | 0.998 | 1.000 |
+| PCI-free MMIO / 64 KiB | 0.959 | 1.035 | 1.478 |
+
+These paired medians expose substantial network tail overhead that the former
+coarse clock could not resolve. They are short diagnostic results, not parity
+qualification. [windows-clock-network-short.json.gz](windows-clock-network-short.json.gz)
+retains the clocks, source, asset hashes and paired observations. The longer
+[ten-pair run](https://github.com/pichi-vm/dillo/actions/runs/46067542377) uses
+the same source tree with corrected commit messages (`3525c2d`).
+
+## macOS network stack profile
+
+[Run 46066522027](https://github.com/pichi-vm/dillo/actions/runs/46066522027)
+completed four PCI-free boots at `daa975a`, collecting ten successful
+three-second process profiles during 64-KiB echo. This optimized symbolized
+build is for attribution; stack counts include sleeping threads, and the
+instrumented rates are not performance qualification.
+
+The parent/child control receivers remain blocked during the captured steady
+traffic. The data path includes pipe notification reads/writes, the stack's
+socket I/O and per-frame `mio::Waker::wake` calls from `UserNetBackend::send`.
+The latter wakes even when frames are already queued. A small candidate wakes
+only when that queue becomes nonempty; the consumer drains under the same
+lock, preserving a wake for later arrivals. Both execution modes receive the
+change. It is undergoing same-host native comparisons before any performance
+claim. [macos-network-stack-profile.json.gz](macos-network-stack-profile.json.gz)
+records the exact source, artifact and individual stack-file hashes.
