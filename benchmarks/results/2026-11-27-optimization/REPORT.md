@@ -290,6 +290,15 @@ substantially and some p99 bounds remain worse. All observations are retained.
 The first binary corresponds to `3605a64` source, with the recorded harness
 change and frozen hash; the coalescing variant has its own retained patch and
 binary. Both variants are excluded from the production optimization branch.
-Native Linux Arm comparison is pending. Neither the host-only latch nor
-successful guest I/O resolves per-activation capability revocation or native
-level reassertion; the experiment retains the existing KVM pulse behavior.
+[Native Linux Arm run 46045365585](https://github.com/pichi-vm/dillo/actions/runs/46045365585)
+completed both paths at `3605a64` on the same host, with the same three-pair,
+two-second design. Worker random reads rise from 94.94 to 135.07 MiB/s and
+random writes from 83.29 to 121.96 MiB/s. The corresponding shared-path control
+medians are 117.49 and 118.09 MiB/s. Worker CPU/GiB falls from 16.81 to 11.26
+seconds for reads and 19.75 to 12.82 for writes. The 64-KiB network case still
+has a worse p99 bound; the coalescing follow-up is being measured separately.
+[shared-isr-arm-short.json.gz](shared-isr-arm-short.json.gz) retains the paired
+observations, and raw artifacts are in `target/performance/shared-isr-arm-46045365585`.
+Neither the host-only latch nor successful guest I/O resolves per-activation
+capability revocation or native level reassertion; the experiment retains the
+existing KVM pulse behavior.
