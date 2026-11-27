@@ -869,3 +869,25 @@ do not establish equivalence or isolate either change's effect. They remain
 part of qualification rather than being replaced by the more favorable
 earlier snapshot. Full observations, schedule and provenance are retained in
 [notification-cancellation-arm-short.json.gz](notification-cancellation-arm-short.json.gz).
+
+## macOS unused notification watcher experiment
+
+`003f32a` delays kqueue registration until a receiver first reads. Exported
+queue endpoints retain an unused parent receiver; this avoids registering
+that receiver alongside the worker that actually waits. Cancellation and
+partial-word state remain local to each receiver.
+
+[Run 46081837796](https://github.com/pichi-vm/dillo/actions/runs/46081837796)
+passed native notification/network checks and all 40 boots against `4c13db5`.
+Four two-second pairs per case/revision balance order independently, with
+different executables and identical guest assets. Worker throughput changes
+range from +0.1% to +0.6%, and CPU/GiB from -1.2% to 0.0%. p99 changes are
+mixed. These short observations do not establish a performance benefit; the
+candidate remains outside the integrated branch. No descriptor-count or
+private-memory reduction was measured.
+
+The earlier run `46080767960` passed its native checks but could not fetch the
+abbreviated baseline `4c13db5`. It produced no comparison. The corrected run
+uses the full SHA without runner or confinement changes. Full successful-run
+observations and provenance are in
+[macos-lazy-watcher-short.json.gz](macos-lazy-watcher-short.json.gz).
