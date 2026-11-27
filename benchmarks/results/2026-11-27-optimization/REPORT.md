@@ -202,8 +202,21 @@ tests and strict Clippy pass, but do not qualify the macOS implementation.
 The macOS worker run at `59f3e98` passed the native pipe tests and real
 confined-process fixture. The later three-pair Hermes run at `6d4b3cb` retains
 substantial worker/control differences; it does not isolate kqueue from
-polling because the earlier run used different durations. A comparison with
-both wait implementations and identical guest assets on one host is pending.
+polling because the earlier run used different durations.
+
+The controlled [Hermes comparison](https://github.com/pichi-vm/dillo/actions/runs/46046071714)
+builds both waits on one host with identical Arma, snuffler and kernel hashes.
+Three-pair/two-second PCI-free measurements favor kqueue in all six measured
+worker operations: throughput rises 1.0–13.4% and CPU/GiB falls 2.6–12.8%.
+Block random-write p99 bounds fall from 34.8 to 31.7 microseconds; the 64-KiB
+network bound falls from 344 to 328 microseconds. The in-process control also
+benefits. This supports retaining the implementation and its extra descriptor
+per receiver, but does not establish worker/control parity. Results are in
+[macos-wait-short.json.gz](macos-wait-short.json.gz), with raw artifacts under
+`target/performance/macos-wait-comparison-46046071714`.
+The first comparison attempt (`46045085711`) failed before measurement because
+the runner denied Bash's here-document temporary file. A checked-in Python
+helper replaced that shell mechanism; the runner configuration was unchanged.
 
 ## Completed long matrix and PCI-free measurements
 
