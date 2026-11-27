@@ -794,3 +794,41 @@ The combined RX changes remain under native comparison before acceptance.
 [network-rx-header-local-short.json.gz](network-rx-header-local-short.json.gz)
 retains both favorable and unfavorable observations with their full schedule
 and source/binary provenance.
+
+## Native receive-path comparison
+
+Runs [46076484267](https://github.com/pichi-vm/dillo/actions/runs/46076484267)
+(macOS), [46076702385](https://github.com/pichi-vm/dillo/actions/runs/46076702385)
+(Linux Arm), and [46076703994](https://github.com/pichi-vm/dillo/actions/runs/46076703994)
+(Windows) compare `73201a6` with `0adf801`. The candidate combines scratch
+reuse, bounded receive batching and header reuse. Each run completed 40 boots:
+four independently balanced two-second pairs per case/revision, plus warm-ups.
+All boots returned zero. Executable hashes differ; guest assets match. Windows
+uses the unmodified prebuilt WSL kernel with its Hyper-V clock. These short
+comparisons have no confidence intervals and do not qualify parity.
+
+Large-message worker throughput improves 11.1%/11.3% on macOS PCI/MMIO, with
+CPU/GiB falling 24.9%/22.2%. The control improves more in throughput, leaving
+worker/control ratios at 93.5%/94.8%; CPU/GiB remains 115.8%/113.9% of control.
+Retained process samples put large-message PCI user CPU at about 1.05 cores
+in both modes, but system CPU at 0.58 for the worker tree versus 0.45 locally.
+MMIO shows the same pattern (1.07/1.06 user, 0.57/0.46 system). This narrows
+the residual-cost investigation without identifying a particular syscall.
+
+Linux Arm large-message throughput improves 7.7%/37.6% on PCI/MMIO, against
+0.4%/17.1% control gains. Worker/control throughput is 97.7%/99.4%, CPU/GiB
+104.2%/98.6%, and p99 96.4%/105.8%. Both revisions still have Linux wake
+coalescing; these results do not qualify its later restoration in `7b218d9`.
+
+Windows PCI large-message throughput rises 125.1% for the worker and 120.3%
+for the control; CPU/GiB falls 59.3%/58.0%. The resulting worker/control
+throughput is 96.9%, CPU/GiB 102.4%, and p99 133.4%. MMIO throughput improves
+4.8%/4.9%, leaving worker/control throughput at 97.7% and p99 at 137.6%.
+The tail-latency deficit therefore remains despite the absolute speedup.
+Small-message results are mixed and remain in the complete data, rather than
+being hidden by the larger gains.
+
+[network-rx-native-short.json.gz](network-rx-native-short.json.gz) retains
+absolute values, paired ratios, schedules, environments, artifact digests,
+every boot-record hash and the macOS process CPU decomposition. The subsequent
+Unix partial-counter cancellation correction is not part of these runs.
