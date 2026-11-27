@@ -112,6 +112,57 @@ pub trait WriteNotification: Send + Sync + std::fmt::Debug {
     }
 }
 
+/// Experimental host-only notification latch. Never mapped into the guest.
+/// This is a measurement aid, not an assigned vhost-user interface.
+#[derive(Debug)]
+pub struct NotificationState(vm_memory::MmapRegion<()>);
+
+impl NotificationState {
+    /// # Safety
+    /// The file must retain at least 4096 committed writable bytes while mapped.
+    /// Every alias of its first word must use aligned AtomicU32 accesses only.
+    #[allow(unsafe_code)]
+    pub unsafe fn from_file(file: std::fs::File) -> io::Result<Self> {
+        let mapping = vm_memory::MmapRegion::from_file(vm_memory::FileOffset::new(file, 0), 4096)
+            .map_err(io::Error::other)?;
+        Ok(Self(mapping))
+    }
+
+    fn word(&self) -> &std::sync::atomic::AtomicU32 {
+        use vm_memory::VolatileMemory;
+        self.0
+            .get_atomic_ref(0)
+            .expect("aligned mapped status word")
+    }
+
+    pub fn load(&self) -> u32 {
+        self.word().load(std::sync::atomic::Ordering::SeqCst) & 3
+    }
+
+    pub fn used(&self) {
+        self.word().fetch_or(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn acknowledge(&self, bits: u32) {
+        self.word()
+            .fetch_and(!(bits & 3), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn clear(&self) {
+        self.word().store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn export(&self) -> io::Result<Resource> {
+        Ok(self
+            .0
+            .file_offset()
+            .expect("file-backed status")
+            .file()
+            .try_clone()?
+            .into())
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum NotificationRole {
     Wait,
@@ -142,6 +193,16 @@ impl WriteNotification for QueueNotification {
 /// Facilities available to a device worker. This interface deliberately has no
 /// native VM, vCPU, debugger, or arbitrary process-handle operation.
 pub trait WorkerHost {
+    fn create_notification_state() -> io::Result<std::sync::Arc<NotificationState>> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    fn adopt_notification_state(
+        _resource: Resource,
+    ) -> io::Result<std::sync::Arc<NotificationState>> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
     /// Import a socket granted by the parent, without creating a connection or
     /// selecting a native process. The returned object owns its local socket.
     fn import_socket(mut message: Message) -> io::Result<Socket> {

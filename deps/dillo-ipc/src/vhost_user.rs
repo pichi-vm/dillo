@@ -19,6 +19,10 @@ pub const RESET_DEVICE: u64 = 1 << 13;
 pub const CONFIGURE_MEM_SLOTS: u64 = 1 << 15;
 pub const GPA_ADDRESSES: u64 = 1 << 21;
 
+// Unassigned experimental values, confined to the MMIO measurement branch.
+pub const EXPERIMENT_SHARED_ISR: u64 = 1 << 63;
+pub const EXPERIMENT_SET_ISR: u32 = 0xffff_0001;
+
 pub mod request {
     pub const GET_FEATURES: u32 = 1;
     pub const SET_FEATURES: u32 = 2;

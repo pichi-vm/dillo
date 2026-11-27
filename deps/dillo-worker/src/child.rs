@@ -39,7 +39,8 @@ const PROTOCOL: u64 = wire::MQ
     | wire::CONFIG
     | wire::RESET_DEVICE
     | wire::CONFIGURE_MEM_SLOTS
-    | wire::GPA_ADDRESSES;
+    | wire::GPA_ADDRESSES
+    | wire::EXPERIMENT_SHARED_ISR;
 
 /// Publish a new map after draining in-flight requests. Region capabilities
 /// retain their old view until released; ordinary accesses take no update lock.
@@ -168,6 +169,7 @@ impl Ring {
 
 struct Backend {
     active: Option<VirtioDeviceHandle>,
+    notification_state: Option<Arc<dillo_machine::worker::NotificationState>>,
     device: Box<dyn VirtioDevice>,
     rings: Vec<Ring>,
     memory: GuestMemoryMmap,
@@ -198,6 +200,7 @@ impl Backend {
             active.join().map_err(io::Error::other)?;
         }
         self.device.reset().map_err(io::Error::other)?;
+        self.notification_state = None;
         self.barrier.resume();
         self.rings = self
             .device
@@ -236,7 +239,11 @@ impl Backend {
             queues.push(queue);
             kicks.push(Kick::from_notification(ring.kick.clone()));
             let call = Arc::clone(&ring.call);
+            let state = self.notification_state.clone();
             interrupts.push(Some(Interrupt::from_fn(move || {
+                if let Some(state) = &state {
+                    state.used();
+                }
                 if let Err(error) = call.write(1) {
                     log::error!("virtio call notification: {error}");
                     std::process::exit(1);
@@ -286,10 +293,24 @@ impl Backend {
         let mut reply = None;
         let resource_request = matches!(
             frame.request,
-            SET_MEM_TABLE | ADD_MEM_REG | SET_VRING_KICK | SET_VRING_CALL | SET_VRING_ERR
+            SET_MEM_TABLE
+                | ADD_MEM_REG
+                | SET_VRING_KICK
+                | SET_VRING_CALL
+                | SET_VRING_ERR
+                | wire::EXPERIMENT_SET_ISR
         );
         require(resource_request || resources.is_empty())?;
         match frame.request {
+            wire::EXPERIMENT_SET_ISR => {
+                require(
+                    self.owner
+                        && self.active.is_none()
+                        && self.protocol & wire::EXPERIMENT_SHARED_ISR != 0
+                        && resources.len() == 1,
+                )?;
+                self.notification_state = Some(H::adopt_notification_state(resources.remove(0))?);
+            }
             GET_FEATURES => {
                 reply = Some(
                     (self.device.features() | wire::PROTOCOL_FEATURES)
@@ -657,6 +678,7 @@ pub unsafe fn run_prepared<H: WorkerHost, T>(
         .collect();
     let mut backend = Backend {
         active: None,
+        notification_state: None,
         device,
         rings,
         memory: GuestMemoryMmap::new(),

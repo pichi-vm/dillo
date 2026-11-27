@@ -717,6 +717,7 @@ dependencies = [
 name = "dillo-mmio-virtio"
 version = "0.1.0"
 dependencies = [
+ "dillo-machine",
  "dillo-mmio",
  "dillo-virtio",
  "log",

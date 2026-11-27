@@ -514,6 +514,10 @@ impl Interrupt {
     pub fn export(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
         self.0.export()
     }
+
+    pub fn export_status(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
+        self.0.export_status()
+    }
 }
 
 struct FnInterruptLine {
@@ -547,6 +551,10 @@ pub trait InterruptLine: Send + Sync + std::fmt::Debug {
 
     /// Export a signaling endpoint whose owner retains delivery policy.
     fn export(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
+        Ok(None)
+    }
+
+    fn export_status(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
         Ok(None)
     }
 }

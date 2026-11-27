@@ -705,6 +705,16 @@ mod imp {
     }
 
     impl InterruptLine for EventFdInterruptLine {
+        fn export(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
+            use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+            // Experiment only: the VM owns this binding. Per-activation
+            // revocation is not qualified by this one-activation measurement.
+            let event = self.eventfd.try_clone()?;
+            // SAFETY: the newly duplicated event transfers its owned descriptor.
+            #[allow(unsafe_code)]
+            Ok(Some(unsafe { OwnedFd::from_raw_fd(event.into_raw_fd()) }))
+        }
+
         fn signal(&self) {
             if let Err(e) = self.eventfd.write(1) {
                 log::warn!("KVM irqfd interrupt signal failed: {e}");

@@ -164,6 +164,7 @@ struct QueueCfg {
 
 struct Inner {
     device: Box<dyn VirtioDevice>,
+    notification_state: Option<Arc<dillo_machine::worker::NotificationState>>,
     device_id: u32,
     device_features: u64,
     driver_features: u64,
@@ -244,6 +245,7 @@ impl VirtioMmio {
             interrupts,
             inner: Mutex::new(Inner {
                 device,
+                notification_state: None,
                 device_id,
                 device_features,
                 driver_features: 0,
@@ -273,6 +275,13 @@ impl VirtioMmio {
             .replace(Arc::new(MmioVirtioHost { attachment }));
     }
 
+    pub fn set_notification_state(&self, state: Arc<dillo_machine::worker::NotificationState>) {
+        self.inner
+            .lock()
+            .expect("virtio-mmio poisoned")
+            .notification_state = Some(state);
+    }
+
     pub fn read(&self, offset: u64, data: &mut [u8]) -> bool {
         let g = self.inner.lock().expect("virtio-mmio poisoned");
         if offset >= CONFIG {
@@ -294,7 +303,10 @@ impl VirtioMmio {
             }
             QUEUE_NUM_MAX => g.queues.get(sel).map_or(0, |q| u32::from(q.max)),
             QUEUE_READY => g.queues.get(sel).map_or(0, |q| u32::from(q.ready)),
-            INTERRUPT_STATUS => self.int_status.load(Ordering::SeqCst),
+            INTERRUPT_STATUS => g.notification_state.as_ref().map_or_else(
+                || self.int_status.load(Ordering::SeqCst),
+                |state| state.load(),
+            ),
             STATUS => g.status,
             // Config never changes mid-flight, so the generation is always 0.
             // Kept as a named arm (not folded into the wildcard) to document the
@@ -358,8 +370,14 @@ impl VirtioMmio {
                 }
             }
             INTERRUPT_ACK => {
-                self.int_status.fetch_and(!val, Ordering::SeqCst);
-                if self.int_status.load(Ordering::SeqCst) == 0 {
+                let pending = if let Some(state) = &g.notification_state {
+                    state.acknowledge(val);
+                    state.load()
+                } else {
+                    self.int_status.fetch_and(!val, Ordering::SeqCst);
+                    self.int_status.load(Ordering::SeqCst)
+                };
+                if pending == 0 {
                     self.irq.set(false);
                 }
             }
@@ -384,13 +402,20 @@ impl VirtioMmio {
                         };
                     }
                     self.int_status.store(0, Ordering::SeqCst);
+                    if let Some(state) = &g.notification_state {
+                        state.clear();
+                    }
                     self.irq.set(false);
                 } else {
-                    maybe_activate(
-                        &mut g,
-                        self.window,
-                        Self::interrupt(Arc::clone(&self.int_status), self.irq.clone()),
-                    );
+                    let interrupt = if let Some(state) = &g.notification_state {
+                        Interrupt::new(Arc::new(SharedCompletion {
+                            state: Arc::clone(state),
+                            irq: self.irq.clone(),
+                        }))
+                    } else {
+                        Self::interrupt(Arc::clone(&self.int_status), self.irq.clone())
+                    };
+                    maybe_activate(&mut g, self.window, interrupt);
                     if g.status & STATUS_DRIVER_OK != 0 && !g.activated {
                         g.status |= STATUS_DEVICE_NEEDS_RESET;
                     }
@@ -412,6 +437,40 @@ impl VirtioMmio {
             int_status.fetch_or(INT_VRING, Ordering::SeqCst);
             irq.set(true);
         })
+    }
+}
+
+#[derive(Debug)]
+struct SharedCompletion {
+    state: Arc<dillo_machine::worker::NotificationState>,
+    irq: WiredIrq,
+}
+
+impl dillo_mmio::InterruptLine for SharedCompletion {
+    fn signal(&self) {
+        self.state.used();
+        self.irq.set(true);
+    }
+
+    fn set_level(&self, level: bool) -> Result<(), dillo_mmio::InterruptError> {
+        if level {
+            self.signal();
+        }
+        Ok(())
+    }
+
+    fn export(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
+        self.irq
+            .interrupt
+            .read()
+            .unwrap()
+            .as_ref()
+            .ok_or(std::io::ErrorKind::NotConnected)?
+            .export()
+    }
+
+    fn export_status(&self) -> std::io::Result<Option<dillo_machine::worker::Resource>> {
+        self.state.export().map(Some)
     }
 }
 

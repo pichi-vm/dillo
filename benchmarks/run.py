@@ -268,6 +268,7 @@ def main():
                    "cpu_count": psutil.cpu_count(), "psutil": psutil.__version__,
                    "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
                    "dirty": subprocess.check_output(["git", "status", "--porcelain"], text=True),
+                   "experimental_shared_isr": "DILLO_BENCH_SHARED_ISR" in os.environ,
                    "rustc": subprocess.check_output(["rustc", "-Vv"], text=True),
                    "assets": assets, "hashes": {k: digest(assets[k]) for k in
                                                 ("dillo", "arma", "snuffler", "kernel")},

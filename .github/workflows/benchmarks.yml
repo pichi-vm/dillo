@@ -1,4 +1,4 @@
-name: Device isolation benchmarks
+name: Shared MMIO status experiment
 
 on:
   workflow_dispatch:
@@ -117,13 +117,17 @@ jobs:
         run: |
           bench_modes="$BENCH_SAMPLING"
           if [ "$bench_modes" = both ]; then bench_modes='on off'; fi
+          for bench_latch in relay shared; do
+          unset DILLO_BENCH_SHARED_ISR
+          if [ "$bench_latch" = shared ]; then export DILLO_BENCH_SHARED_ISR=1; fi
           for bench_mode in $bench_modes; do
             bench_options=()
             if [ "$bench_mode" = off ]; then bench_options+=(--no-sample); fi
             python benchmarks/run.py --assets target/benchmarks/assets.json \
-              --output "$BENCH_RESULTS/$bench_mode" --pairs "$BENCH_PAIRS" \
+              --output "$BENCH_RESULTS/$bench_latch/$bench_mode" --pairs "$BENCH_PAIRS" \
               --duration-ms "$BENCH_DURATION_MS" --queue-depth "$BENCH_QUEUE_DEPTH" \
               --cases "$BENCH_CASES" "${bench_options[@]}"
+          done
           done
       - name: Upload measurements and logs
         if: always()

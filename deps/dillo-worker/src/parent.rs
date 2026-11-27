@@ -286,7 +286,15 @@ impl Prepared {
         }
         session.exchange(
             SET_PROTOCOL_FEATURES,
-            (PROTOCOL | (offered & wire::MQ)).to_ne_bytes().to_vec(),
+            (PROTOCOL
+                | (offered & wire::MQ)
+                | if std::env::var_os("DILLO_BENCH_SHARED_ISR").is_some() {
+                    offered & wire::EXPERIMENT_SHARED_ISR
+                } else {
+                    0
+                })
+            .to_ne_bytes()
+            .to_vec(),
             Vec::new(),
             Reply::None,
         )?;
@@ -776,6 +784,15 @@ impl VirtioDevice for Proxy {
                     .to_vec(),
                 Vec::new(),
             )?;
+            if let Some(status) = activation
+                .queue_interrupt(0)
+                .as_ref()
+                .map(dillo_mmio::Interrupt::export_status)
+                .transpose()?
+                .flatten()
+            {
+                session.set(wire::EXPERIMENT_SET_ISR, Vec::new(), vec![status])?;
+            }
             for (index, (queue, kick)) in queues.into_iter().zip(kicks).enumerate() {
                 let index = index as u32;
                 let geometry = crate::queue::describe(&queue);
