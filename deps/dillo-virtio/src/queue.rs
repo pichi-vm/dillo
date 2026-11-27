@@ -422,16 +422,17 @@ impl Queue {
         fence(Ordering::Release);
         let _ = mem.write_u16(self.used_ring.unchecked_add(2), self.next_used.0);
 
-        // Update avail_event: tell the driver to notify us when it adds more
-        // descriptors past what we've already seen. Without this, drivers using
-        // VIRTIO_F_RING_EVENT_IDX suppress kicks after the first descriptor.
-        let avail_event_offset = 4 + 8 * self.size as u64;
-        let _ = mem.write_u16(
-            self.used_ring.unchecked_add(avail_event_offset),
-            self.next_avail.0,
-        );
+        // Only EVENT_IDX queues have an avail_event field. Ask for a kick
+        // when the driver adds descriptors past those already consumed.
+        if self.uses_notif_suppression {
+            let avail_event_offset = 4 + 8 * self.size as u64;
+            let _ = mem.write_u16(
+                self.used_ring.unchecked_add(avail_event_offset),
+                self.next_avail.0,
+            );
+        }
 
-        // Order avail_event before the next avail_idx read to avoid a lost kick.
+        // Order publication before reading driver flags or the next avail_idx.
         fence(Ordering::SeqCst);
     }
 
@@ -745,6 +746,22 @@ mod tests {
         // EVENT_IDX must ignore the available-ring suppression bit.
         q.uses_notif_suppression = true;
         assert!(q.needs_notification(&flags));
+    }
+
+    #[test]
+    fn test_used_ring_without_event_index_leaves_following_bytes_untouched() {
+        let (mem, _, _, used) = setup_queue_memory(QUEUE_SIZE);
+        let shared = shared_queue_memory(&mem, 0x2000, 0x1000);
+        let mut q = make_valid_queue(QUEUE_SIZE);
+        let following = used.unchecked_add(4 + 8 * u64::from(QUEUE_SIZE));
+        mem.write_obj::<u16>(0xabcd, following).unwrap();
+        q.next_avail = Wrapping(7);
+        q.add_used(&shared, 0, 64);
+        assert_eq!(mem.read_obj::<u16>(following).unwrap(), 0xabcd);
+        q.uses_notif_suppression = true;
+        q.add_used(&shared, 1, 32);
+        assert_eq!(mem.read_obj::<u16>(following).unwrap(), 7);
+        assert_eq!(mem.read_obj::<u16>(used.unchecked_add(2)).unwrap(), 2);
     }
 
     // --- Feature constants tests ---
