@@ -121,3 +121,39 @@ architectural question.
 - No optimization or security weakening justified solely by noisy timings.
 
 Memory metric definitions follow [psutil's API documentation](https://psutil.readthedocs.io/stable/index.html#psutil.Process.memory_full_info).
+
+## Reproduce
+
+Install Python 3.12+ and `psutil==7.2.2` in a virtual environment. With the
+repository's pinned Rust toolchain and a working native hypervisor:
+
+```sh
+export DILLO_BENCH_DIR="$PWD/target/benchmarks"
+cargo --config .copr/cargo-config.toml test --locked --release -p dillo \
+  --features vm-tests,bench-in-process --test boot \
+  benchmark::benchmark_assets -- --ignored --exact --nocapture
+python benchmarks/run.py --assets target/benchmarks/assets.json \
+  --output target/benchmark-results --pairs 5 --duration-ms 1000
+```
+
+Use a new output directory for each experiment. `--cases block-pci` selects a
+single workload; `--no-sample` checks instrumentation sensitivity while keeping
+guest timing and logs. Native Windows uses `CARGO_BUILD_TARGET=x86_64-pc-windows-msvc`.
+The asset fixture signs the macOS executable with its existing HVF entitlement.
+Linux needs permission to use `/dev/kvm` and 128 free 2 MiB huge pages per VM.
+
+`environment.json` records provenance. Every run directory retains the full
+console, stderr, guest report, observed phase timestamps, and native process
+samples. `metrics.json` contains absolute measurements; `summary.json` contains
+worker/local ratios for every measured pair. Pair zero is a retained warm-up
+and is excluded from summaries. Startup marker precision is one sampling
+interval; the existing boot-stage trace has microsecond resolution.
+
+Steady-state CPU metrics estimate cores and CPU seconds per GiB between active
+samples, including every discovered VM process. Whole-run CPU is sampled and
+can miss the final interval; it includes startup, idle, and verification work.
+Context-switch fields retain the OS API's scope (on Linux they describe the
+main thread); they are not an aggregate of all device threads. Huge-page
+private residency is removed from the Linux private-overhead metric and kept
+separate. Native PSS omits hugetlb pages. Do not interpret either as total
+guest-plus-host physical residency.
