@@ -5,9 +5,12 @@ on one native host. It builds and freezes that executable in a separate Cargo
 target directory, then uses the candidate's producer, probe and kernel for both.
 It rejects identical executables before measurement. Each
 result records the harness revision, runtime revision and executable hash.
-Results are grouped by `baseline` or `candidate`; each still compares worker
-and in-process execution. The variants run sequentially, so short comparisons
-are diagnostic and cannot exclude temporal host variation.
+Within each case, the schedule rotates revision and worker/control order
+independently, balancing all four positions over four pairs. Both revisions
+use the same built image. `plan.json`
+records the order before measurement; each revision retains its own excluded
+warm-up pair and results under `baseline` or `candidate`. Short comparisons
+remain diagnostic. Locally, pass matching assets with `--baseline-assets`.
 
 Completed measurements: [2026-11-27 report](results/2026-11-27/REPORT.md).
 

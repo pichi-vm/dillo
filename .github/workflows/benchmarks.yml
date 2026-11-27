@@ -170,16 +170,13 @@ jobs:
           BENCH_BASELINE: ${{ inputs.baseline_ref }}
           BENCH_COMPLETIONS: ${{ inputs.completion == 'shared' && 'shared' || inputs.completion == 'relay' && 'relay' || 'relay shared' }}
         run: |
-          bench_variants=candidate
+          bench_comparison=()
           if [ -n "$BENCH_BASELINE" ]; then
             python benchmarks/runtime.py match target/benchmarks-baseline target/benchmarks/assets.json
-            bench_variants='baseline candidate'
+            bench_comparison+=(--baseline-assets target/benchmarks-baseline/assets.json)
           fi
           bench_modes="$BENCH_SAMPLING"
           if [ "$bench_modes" = both ]; then bench_modes='on off'; fi
-          for bench_variant in $bench_variants; do
-          bench_assets=target/benchmarks/assets.json
-          if [ "$bench_variant" = baseline ]; then bench_assets=target/benchmarks-baseline/assets.json; fi
           for bench_latch in $BENCH_COMPLETIONS; do
           unset DILLO_BENCH_SHARED_ISR
           if [ "$bench_latch" = shared ]; then export DILLO_BENCH_SHARED_ISR=1; fi
@@ -187,11 +184,10 @@ jobs:
             bench_options=()
             if [ "$bench_mode" = off ]; then bench_options+=(--no-sample); fi
             if [ "$BENCH_KERNEL" = wsl-clock ]; then bench_options+=(--serial); fi
-            python benchmarks/run.py --assets "$bench_assets" \
-              --output "$BENCH_RESULTS/$bench_variant/$bench_latch/$bench_mode" --pairs "$BENCH_PAIRS" \
+            python benchmarks/run.py --assets target/benchmarks/assets.json \
+              --output "$BENCH_RESULTS/$bench_latch/$bench_mode" --pairs "$BENCH_PAIRS" \
               --duration-ms "$BENCH_DURATION_MS" --queue-depth "$BENCH_QUEUE_DEPTH" \
-              --cases "$BENCH_CASES" "${bench_options[@]}"
-          done
+              --cases "$BENCH_CASES" "${bench_options[@]}" "${bench_comparison[@]}"
           done
           done
       - name: Upload measurements and logs

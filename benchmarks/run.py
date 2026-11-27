@@ -247,6 +247,8 @@ def summarize(results, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--assets", type=Path, required=True)
+    parser.add_argument("--baseline-assets", type=Path,
+                        help="interleave a frozen runtime with identical guest assets")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cases", default="block-pci,block-mmio,block4-pci,net-pci")
     parser.add_argument("--pairs", type=int, default=5)
@@ -285,10 +287,38 @@ def main():
     environment["host_load"] = psutil.getloadavg()
     if hasattr(psutil.Process(), "cpu_affinity"):
         environment["cpu_affinity"] = psutil.Process().cpu_affinity()
-    save(args.output / "environment.json", environment)
+    variants = {"": assets}
+    if args.baseline_assets:
+        baseline = json.loads(args.baseline_assets.read_text())
+        for key in ("arma", "snuffler", "kernel"):
+            if digest(baseline[key]) != environment["hashes"][key]:
+                parser.error(f"baseline {key} differs from candidate")
+        if digest(baseline["dillo"]) == environment["hashes"]["dillo"]:
+            parser.error("baseline and candidate executables are identical")
+        variants = {"baseline": baseline, "candidate": assets}
+    for name, runtime in variants.items():
+        output = args.output / name
+        output.mkdir(exist_ok=True)
+        save(output / "environment.json", environment | {
+            "assets": runtime,
+            "runtime_source": runtime.get("runtime_source", environment["source"]),
+            "hashes": environment["hashes"] | {"dillo": digest(runtime["dillo"])},
+        })
+    plan = []
+    for case in args.cases.split(","):
+        for pair in range(-1, args.pairs):
+            names = list(variants)
+            if pair % 2:
+                names.reverse()
+            for position, name in enumerate(names):
+                # Rotate mode order independently of revision order.
+                modes = ("local", "worker") if (pair // len(names) + position) % 2 == 0 else ("worker", "local")
+                plan.extend({"case": case, "pair": pair, "variant": name, "mode": mode}
+                            for mode in modes)
+    save(args.output / "plan.json", plan)
     config = args.output / "kernel.config"
     config.write_text(assets["config"])
-    results = []
+    results = {name: [] for name in variants}
     with Server(("127.0.0.1", 0), Echo) as server:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         port = server.server_address[1]
@@ -319,15 +349,17 @@ def main():
             subprocess.run(build, check=True)
             save(args.output / f"{case}-image.json", {"command": build, "sha256": digest(image)})
             disks = [backing / f"disk{i}.raw" for i in range(count)]
-            for pair in range(-1, args.pairs):  # First pair warms the host and is retained but excluded.
-                order = ("local", "worker") if pair % 2 == 0 else ("worker", "local")
-                for mode in order:
-                    label = f"{case}-{pair + 1:02d}-{mode}"
-                    result = run_vm(args, assets, image, disks, case, mode, label)
-                    result["pair"] = pair
-                    if pair >= 0:
-                        results.append(result)
-            summarize(results, args.output)
+            for item in (item for item in plan if item["case"] == case):
+                pair, name, mode = (item[key] for key in ("pair", "variant", "mode"))
+                options = argparse.Namespace(**vars(args))
+                options.output = args.output / name
+                label = f"{case}-{pair + 1:02d}-{mode}"
+                result = run_vm(options, variants[name], image, disks, case, mode, label)
+                result["pair"] = pair
+                if pair >= 0:  # Retain the first warm-up pair, but exclude it from analysis.
+                    results[name].append(result)
+            for name in variants:
+                summarize(results[name], args.output / name)
         server.shutdown()
 
 
