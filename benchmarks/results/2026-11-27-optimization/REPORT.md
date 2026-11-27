@@ -481,3 +481,46 @@ candidate remains outside the production optimization branch. The existing
 kqueue implementation remains in place. All metrics, including the mixed
 results, are retained in [macos-call-read-short.json.gz](macos-call-read-short.json.gz)
 and `target/performance/macos-call-read-46060898814`.
+
+## Sharing the immutable mapping collection
+
+A phase-isolated Linux x86 profile identifies repeated region-handle work in
+both modes during 64-KiB TCP echo. Dropping `SharedRegion` accounts for about
+13–14% of sampled cycles, and constructing a mapped claim accounts for about
+8%. Source inspection confirms that cloning `GuestMemoryMmap` allocates a new
+vector of region references on every claim. The candidate `219fa22` retains
+one `Arc<GuestMemoryMmap>` instead. This changes private ownership fields only;
+range/permission/shared-state checks and access behavior remain in place. The
+existing access fixture now drops the provider before using its claimed region.
+Memory and virtqueue checks and strict Clippy pass.
+
+The profile uses user call chains and the monotonic clock, filtering to the
+interior of each measured phase and the Dillo process tree. Earlier attempts
+without explicit user-only call chains were refused; those logs are retained.
+The raw trace can contain guest-address samples, which are not attributed to
+host functions. Profiled rates are not parity evidence. The selected symbols
+and time windows are in [region-owner-profile.json.gz](region-owner-profile.json.gz).
+
+An unprofiled comparison completed 32 PCI-free boots with identical guest
+assets on CPUs 24–27: three two-second pairs per case and binary, baseline
+`070fe3a` before candidate `219fa22`. Large network echo increases from 144.92
+to 152.99 MiB/s; worker CPU/GiB falls from 14.14 to 13.35 seconds. The candidate
+retains 99.4% of its control's throughput with 2.4% more CPU/GiB, but its p99
+bound is 5.6% higher. Small-message echo is essentially unchanged.
+
+Block observations are mixed: sequential reads gain 7.0% throughput, while
+sequential writes lose 12.9% and use 18.0% more CPU/GiB. Random reads/writes
+change by +1.2%/−1.4%. These short sequential runs do not distinguish temporal
+variation from a regression. The candidate remains experimental pending
+further measurement. All paired observations are in
+[region-owner-short.json.gz](region-owner-short.json.gz); native Arm and macOS
+checks are underway. The raw comparison remains in the candidate worktree's
+`target/performance/region-owner` directory.
+
+A ten-pair/five-second follow-up now interleaves both binaries and both modes
+on the same host, rather than measuring the complete baseline first. Its
+predeclared 88-boot order and raw results are under
+`target/performance/region-owner-interleaved` in the candidate worktree. This
+specifically investigates the sequential-write regression. A follow-up CPU
+trace of the stripped release candidate is also retained; its unresolved
+Rust symbols cannot establish that a particular function's sampled cost fell.
