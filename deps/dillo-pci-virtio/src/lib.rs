@@ -91,8 +91,7 @@ impl PciDevice for VirtioPciAdapter {
         self.inner
             .lock()
             .expect("virtio PCI transport poisoned")
-            .config_write(reg_idx, offset, data);
-        Ok(())
+            .config_write(reg_idx, offset, data)
     }
 
     fn name(&self) -> &'static str {
@@ -111,7 +110,7 @@ impl PciDevice for VirtioPciAdapter {
         self.inner
             .lock()
             .expect("virtio PCI transport poisoned")
-            .bar_read(bar_idx, offset, data)
+            .bar_read(bar_idx, offset, data)?
             .then_some(())
             .ok_or(PciError::Unsupported)
     }
@@ -120,7 +119,7 @@ impl PciDevice for VirtioPciAdapter {
         self.inner
             .lock()
             .expect("virtio PCI transport poisoned")
-            .bar_write(bar_idx, offset, data)
+            .bar_write(bar_idx, offset, data)?
             .then_some(())
             .ok_or(PciError::Unsupported)
     }

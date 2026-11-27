@@ -97,6 +97,16 @@ impl MsixTableEntry {
 /// dillo-pci never touches a machine backend directly. Instead, the VMM implements this trait
 /// to receive notifications when vectors change or MSI-X enable state changes.
 pub trait MsixNotifier: Send + Sync {
+    /// Stable native completion endpoint, when the backend supports one.
+    fn event(
+        &self,
+    ) -> Result<
+        Option<std::sync::Arc<dyn dillo_mmio::MessageInterruptEvent>>,
+        dillo_mmio::InterruptError,
+    > {
+        Ok(None)
+    }
+
     /// Called when a vector's address/data/mask is updated by the guest.
     fn vector_updated(&self, vector: u16, entry: &MsixTableEntry);
 
@@ -207,6 +217,19 @@ impl MsixTable {
             return true;
         }
         self.entries[idx].is_masked()
+    }
+
+    /// The current unmasked message, including function-level enable/mask.
+    pub fn message(&self, vector: u16) -> Option<dillo_mmio::MessageInterrupt> {
+        if self.is_vector_masked(vector) {
+            return None;
+        }
+        let entry = &self.entries[usize::from(vector)];
+        Some(dillo_mmio::MessageInterrupt {
+            address: (u64::from(entry.msg_addr_hi) << 32) | u64::from(entry.msg_addr_lo),
+            data: entry.msg_data,
+            masked: false,
+        })
     }
 
     /// Set the pending bit for a vector.

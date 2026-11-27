@@ -63,6 +63,12 @@ impl std::fmt::Display for PciError {
 
 impl std::error::Error for PciError {}
 
+impl From<dillo_mmio::InterruptError> for PciError {
+    fn from(error: dillo_mmio::InterruptError) -> Self {
+        Self::Device(error.to_string())
+    }
+}
+
 impl From<PciError> for MmioError {
     fn from(error: PciError) -> Self {
         match error {
@@ -175,6 +181,13 @@ impl MsixInterruptAdapter {
 }
 
 impl MsixNotifier for MsixInterruptAdapter {
+    fn event(
+        &self,
+    ) -> Result<Option<Arc<dyn dillo_mmio::MessageInterruptEvent>>, dillo_mmio::InterruptError>
+    {
+        self.domain.event()
+    }
+
     fn vector_updated(&self, vector: u16, entry: &MsixTableEntry) {
         let mut interrupts = self.interrupts.lock().expect("MSI-X endpoints poisoned");
         interrupts.remove(&vector);
@@ -629,6 +642,13 @@ impl OffsetMsixNotifier {
 }
 
 impl MsixNotifier for OffsetMsixNotifier {
+    fn event(
+        &self,
+    ) -> Result<Option<Arc<dyn dillo_mmio::MessageInterruptEvent>>, dillo_mmio::InterruptError>
+    {
+        self.inner.event()
+    }
+
     fn vector_updated(&self, vector: u16, entry: &MsixTableEntry) {
         if let Some(vector) = self.domain_vector(vector) {
             self.inner.vector_updated(vector, entry);

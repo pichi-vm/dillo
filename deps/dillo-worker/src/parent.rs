@@ -719,6 +719,7 @@ impl VirtioDevice for Proxy {
         session.shared.active.store(epoch, Ordering::Release);
         let mut relays = Vec::new();
         let mut retained_kicks = Vec::new();
+        let mut retained_interrupts = Vec::new();
         let result = (|| -> io::Result<()> {
             session.set(
                 SET_FEATURES,
@@ -747,31 +748,45 @@ impl VirtioDevice for Proxy {
                     wire::state(index, u32::from(queue.next_avail.0)),
                     Vec::new(),
                 )?;
-                let (read, write) = (session.pair)()?;
-                let call = (session.endpoint)(read, NotificationRole::Wait)?;
-                let wake = Kick::from_notification(Arc::clone(&call));
-                let shared = Arc::clone(&session.shared);
                 let interrupt = activation.queue_interrupt(index as usize);
-                let relay = host
-                    .spawn(Box::new(move |token| {
-                        loop {
-                            let result = call.read();
-                            if token.is_shutdown_requested()
-                                || shared.active.load(Ordering::Acquire) != epoch
-                            {
-                                return Ok(());
+                let write = if let Some(resource) = interrupt
+                    .as_ref()
+                    .map(dillo_mmio::Interrupt::export)
+                    .transpose()?
+                    .flatten()
+                {
+                    // Retain the binding until reset has stopped the backend.
+                    // The transferred resource is only its signaling endpoint.
+                    retained_interrupts.extend(interrupt);
+                    resource
+                } else {
+                    let (read, write) = (session.pair)()?;
+                    let call = (session.endpoint)(read, NotificationRole::Wait)?;
+                    let wake = Kick::from_notification(Arc::clone(&call));
+                    let shared = Arc::clone(&session.shared);
+                    let relay = host
+                        .spawn(Box::new(move |token| {
+                            loop {
+                                let result = call.read();
+                                if token.is_shutdown_requested()
+                                    || shared.active.load(Ordering::Acquire) != epoch
+                                {
+                                    return Ok(());
+                                }
+                                result
+                                    .map_err(|error| DeviceJoinError::Worker(error.to_string()))?;
+                                if shared.active.load(Ordering::Acquire) == epoch
+                                    && let Some(interrupt) = &interrupt
+                                {
+                                    interrupt.signal();
+                                }
                             }
-                            result.map_err(|error| DeviceJoinError::Worker(error.to_string()))?;
-                            if shared.active.load(Ordering::Acquire) == epoch
-                                && let Some(interrupt) = &interrupt
-                            {
-                                interrupt.signal();
-                            }
-                        }
-                    }))
-                    .map_err(io::Error::other)?
-                    .with_shutdown_wake(wake);
-                relays.push(relay);
+                        }))
+                        .map_err(io::Error::other)?
+                        .with_shutdown_wake(wake);
+                    relays.push(relay);
+                    write
+                };
                 session.set(
                     SET_VRING_CALL,
                     u64::from(index).to_ne_bytes().to_vec(),
@@ -856,6 +871,7 @@ impl VirtioDevice for Proxy {
                     }
                 }
                 drop(retained_kicks);
+                drop(retained_interrupts);
                 result
             },
         ))

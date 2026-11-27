@@ -11,9 +11,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use dillo_mmio::SharedMemory;
+use dillo_mmio::{MessageInterruptEvent, SharedMemory};
 use dillo_pci::{CAP_ID_MSIX, MsixNotifier, MsixTable, NoopNotifier, PciConfiguration};
-use dillo_pci::{MmioJoinError, PciDeviceHost};
+use dillo_pci::{MmioJoinError, PciDeviceHost, PciError};
 use dillo_virtio::Kick;
 use dillo_virtio::queue::Queue;
 use dillo_virtio::{
@@ -108,17 +108,60 @@ impl QueueConfig {
 struct CompletionState {
     table: MsixTable,
     vectors: Vec<u16>,
+    events: Vec<Option<Arc<dyn MessageInterruptEvent>>>,
     isr: u8,
     notifier: Arc<dyn MsixNotifier>,
 }
 
 impl CompletionState {
-    fn reset(&mut self) {
+    fn collect_pending(&mut self) -> Result<(), PciError> {
+        for (index, event) in self.events.iter().enumerate() {
+            if let Some(event) = event
+                && event.pending()?
+            {
+                if !self.table.enabled() {
+                    self.isr |= 1;
+                }
+                self.table.signal(self.vectors[index], &*self.notifier);
+            }
+        }
+        Ok(())
+    }
+
+    // Unbind before changing the declaration. Drain notifications against
+    // the old vector; subsequent notifications follow the new declaration.
+    fn suspend(&mut self) -> Result<(), PciError> {
+        for event in self.events.iter().flatten() {
+            event.configure(None)?;
+        }
+        self.collect_pending()
+    }
+
+    fn resume(&self) -> Result<(), PciError> {
+        for (index, event) in self.events.iter().enumerate() {
+            if let Some(event) = event {
+                event.configure(self.table.message(self.vectors[index]))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn retire(&mut self) -> Result<(), PciError> {
+        for event in self.events.iter().flatten() {
+            event.configure(None)?;
+        }
+        self.events.fill(None);
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Result<(), PciError> {
+        self.retire()?;
         self.vectors.fill(0xffff);
         self.isr = 0;
         for vector in 0..self.table.num_vectors() {
             self.table.clear_pending(vector);
         }
+        Ok(())
     }
 }
 
@@ -308,6 +351,7 @@ impl VirtioPciDevice {
             completion: Arc::new(Mutex::new(CompletionState {
                 table: msix_table,
                 vectors: vec![0xffff; num_queues],
+                events: vec![None; num_queues],
                 isr: 0,
                 notifier,
             })),
@@ -356,11 +400,12 @@ impl VirtioPciDevice {
     ///
     /// Does NOT touch the PCIe config space, MSI-X table, or BAR addresses — the
     /// guest driver continues to see the same PCI device without re-enumeration.
-    pub fn reset_for_reconnect(&mut self) {
+    pub fn reset_for_reconnect(&mut self) -> Result<(), PciError> {
         self.activation.take();
         self.activated = false;
         self.device_status = 0;
         self.queue_kicks.clear();
+        self.completion.lock().expect("completion mutex").retire()
     }
 
     /// Set the ISR status bits (used by device to signal interrupts).
@@ -374,7 +419,12 @@ impl VirtioPciDevice {
     }
 
     /// Write to the PCI configuration space.
-    pub fn config_write(&mut self, reg_idx: usize, offset: u64, data: &[u8]) {
+    pub fn config_write(
+        &mut self,
+        reg_idx: usize,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), PciError> {
         self.config.write_reg(reg_idx, offset, data);
 
         // Intercept MSI-X msg_ctl writes.
@@ -389,17 +439,26 @@ impl VirtioPciDevice {
             if write_end > 2 {
                 let msg_ctl = (self.config.read_reg(self.msix_cap_reg) >> 16) as u16;
                 let mut state = self.completion.lock().expect("completion mutex");
+                state.suspend()?;
                 let CompletionState {
                     table, notifier, ..
                 } = &mut *state;
                 table.write_msg_ctl(msg_ctl, &**notifier);
+                state.resume()?;
             }
         }
+        Ok(())
     }
 
     /// Handle a BAR MMIO read.
-    pub fn bar_read(&self, bar_idx: u8, offset: u64, data: &mut [u8]) -> bool {
-        match bar_idx {
+    pub fn bar_read(&self, bar_idx: u8, offset: u64, data: &mut [u8]) -> Result<bool, PciError> {
+        // Masked native endpoints accumulate events without a parent relay.
+        // Observe them before returning PBA or read-and-clear ISR state.
+        self.completion
+            .lock()
+            .expect("completion mutex")
+            .collect_pending()?;
+        Ok(match bar_idx {
             0 => {
                 self.bar0_read(offset, data);
                 true
@@ -411,25 +470,27 @@ impl VirtioPciDevice {
                 .table
                 .bar_read(2, offset, data),
             _ => false,
-        }
+        })
     }
 
     /// Handle a BAR MMIO write.
-    pub fn bar_write(&mut self, bar_idx: u8, offset: u64, data: &[u8]) -> bool {
-        log::trace!("virtio-pci: bar_write bar={bar_idx} offset={offset:#x} data={data:02x?}");
+    pub fn bar_write(&mut self, bar_idx: u8, offset: u64, data: &[u8]) -> Result<bool, PciError> {
         match bar_idx {
             0 => {
-                self.bar0_write(offset, data);
-                true
+                self.bar0_write(offset, data)?;
+                Ok(true)
             }
             2 => {
                 let mut state = self.completion.lock().expect("completion mutex");
+                state.suspend()?;
                 let CompletionState {
                     table, notifier, ..
                 } = &mut *state;
-                table.bar_write(2, offset, data, &**notifier)
+                let handled = table.bar_write(2, offset, data, &**notifier);
+                state.resume()?;
+                Ok(handled)
             }
-            _ => false,
+            _ => Ok(false),
         }
     }
 
@@ -467,9 +528,9 @@ impl VirtioPciDevice {
         }
     }
 
-    fn bar0_write(&mut self, offset: u64, data: &[u8]) {
+    fn bar0_write(&mut self, offset: u64, data: &[u8]) -> Result<(), PciError> {
         if offset < COMMON_CFG_OFFSET + COMMON_CFG_LENGTH as u64 {
-            self.common_cfg_write(offset - COMMON_CFG_OFFSET, data);
+            self.common_cfg_write(offset - COMMON_CFG_OFFSET, data)?;
         } else if offset >= ISR_CFG_OFFSET && offset < ISR_CFG_OFFSET + ISR_CFG_LENGTH as u64 {
             // ISR is read-only from guest perspective.
         } else if offset >= DEVICE_CFG_OFFSET
@@ -479,6 +540,7 @@ impl VirtioPciDevice {
         } else if offset >= NOTIFY_CFG_OFFSET {
             self.notify_write(offset - NOTIFY_CFG_OFFSET, data);
         }
+        Ok(())
     }
 
     // --- Common config read (byte-granularity) ---
@@ -549,13 +611,13 @@ impl VirtioPciDevice {
 
     // --- Common config write (byte-granularity) ---
 
-    fn common_cfg_write(&mut self, offset: u64, data: &[u8]) {
+    fn common_cfg_write(&mut self, offset: u64, data: &[u8]) -> Result<(), PciError> {
         // Read full value depending on write width.
         let val = match data.len() {
             1 => data[0] as u32,
             2 => u16::from_le_bytes([data[0], data[1]]) as u32,
             4 => u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
-            _ => return,
+            _ => return Ok(()),
         };
 
         match offset {
@@ -574,18 +636,19 @@ impl VirtioPciDevice {
                 }
             }
             CC_MSIX_CONFIG => self.msix_config_vector = val as u16,
-            CC_DEVICE_STATUS => self.write_device_status(val as u8),
+            CC_DEVICE_STATUS => self.write_device_status(val as u8)?,
             CC_QUEUE_SELECT => {
                 self.queue_select = val as u16;
             }
-            _ => self.queue_cfg_write(offset, val),
+            _ => self.queue_cfg_write(offset, val)?,
         }
+        Ok(())
     }
 
-    fn queue_cfg_write(&mut self, offset: u64, val: u32) {
+    fn queue_cfg_write(&mut self, offset: u64, val: u32) -> Result<(), PciError> {
         let qi = self.queue_select as usize;
         if qi >= self.queues.len() {
-            return;
+            return Ok(());
         }
         let qc = &mut self.queues[qi];
         match offset {
@@ -593,11 +656,13 @@ impl VirtioPciDevice {
             CC_QUEUE_MSIX_VECTOR => {
                 let vector = val as u16;
                 let mut state = self.completion.lock().expect("completion mutex");
+                state.suspend()?;
                 state.vectors[qi] = if vector < state.table.num_vectors() {
                     vector
                 } else {
                     0xFFFF // VIRTIO_MSI_NO_VECTOR
                 };
+                state.resume()?;
             }
             CC_QUEUE_ENABLE if val != 0 => {
                 qc.enabled = true;
@@ -611,11 +676,12 @@ impl VirtioPciDevice {
             CC_QUEUE_USED_HI => qc.used_hi = val,
             _ => {}
         }
+        Ok(())
     }
 
     // --- Device status FSM ---
 
-    fn write_device_status(&mut self, new_status: u8) {
+    fn write_device_status(&mut self, new_status: u8) -> Result<(), PciError> {
         log::debug!(
             "virtio-pci: status write new={new_status:#x} old={:#x} activated={}",
             self.device_status,
@@ -627,7 +693,7 @@ impl VirtioPciDevice {
             log::info!("virtio-pci: device reset");
             self.activation.take();
             self.queue_kicks.clear();
-            self.completion.lock().expect("completion mutex").reset();
+            self.completion.lock().expect("completion mutex").reset()?;
             self.device_status = 0;
             self.driver_features = 0;
             self.device_feature_select = 0;
@@ -637,7 +703,7 @@ impl VirtioPciDevice {
             for qc in &mut self.queues {
                 *qc = QueueConfig::new(qc.queue.max_size);
             }
-            return;
+            return Ok(());
         }
 
         self.device_status = new_status | (self.device_status & STATUS_DEVICE_NEEDS_RESET);
@@ -654,15 +720,17 @@ impl VirtioPciDevice {
             && !self.activated
             && self.device_status & STATUS_DEVICE_NEEDS_RESET == 0
         {
-            self.activate_device();
+            self.activate_device()?;
             if !self.activated {
                 self.queue_kicks.clear();
+                self.completion.lock().expect("completion mutex").retire()?;
                 self.device_status |= STATUS_DEVICE_NEEDS_RESET;
             }
         }
+        Ok(())
     }
 
-    fn activate_device(&mut self) {
+    fn activate_device(&mut self) -> Result<(), PciError> {
         log::info!(
             "virtio-pci: activate_device bar0={:#x} bar2={:#x}",
             self.bar0_gpa,
@@ -670,7 +738,7 @@ impl VirtioPciDevice {
         );
         let Some(host) = self.host.as_ref().map(Arc::clone) else {
             log::error!("virtio-pci: activate failed: no PCI attachment host");
-            return;
+            return Ok(());
         };
         let mut queues = Vec::new();
         let mut queue_interrupts = Vec::new();
@@ -694,11 +762,19 @@ impl VirtioPciDevice {
                 Ok(kick) => kicks.push(kick),
                 Err(error) => {
                     log::error!("virtio-pci: failed to create kick: {error}");
-                    return;
+                    return Ok(());
                 }
             }
-            let vector = self.completion.lock().expect("completion mutex").vectors[index];
+            let mut state = self.completion.lock().expect("completion mutex");
+            let vector = state.vectors[index];
             queues.push(config.to_queue(vector));
+            if let Some(event) = state.notifier.event()? {
+                event.configure(state.table.message(vector))?;
+                queue_interrupts.push(Some(dillo_mmio::Interrupt::new(event.clone())));
+                state.events[index] = Some(event);
+                continue;
+            }
+            drop(state);
             let completion = Arc::clone(&self.completion);
             queue_interrupts.push(Some(dillo_mmio::Interrupt::from_fn(move || {
                 let mut state = completion.lock().expect("completion mutex");
@@ -725,13 +801,14 @@ impl VirtioPciDevice {
             Ok(handle) => handle,
             Err(e) => {
                 log::error!("virtio-pci: device activation failed: {e}");
-                return;
+                return Ok(());
             }
         };
 
         self.activation = Some(handle);
         self.activated = true;
         log::info!("virtio-pci: device activated");
+        Ok(())
     }
 
     // --- ISR ---
@@ -918,6 +995,130 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct NativeEvent {
+        route: Mutex<Option<dillo_mmio::MessageInterrupt>>,
+        pending: std::sync::atomic::AtomicBool,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl dillo_mmio::InterruptLine for NativeEvent {
+        fn signal(&self) {
+            self.pending
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        fn set_level(&self, _: bool) -> Result<(), dillo_mmio::InterruptError> {
+            self.signal();
+            Ok(())
+        }
+    }
+
+    impl dillo_mmio::MessageInterruptEvent for NativeEvent {
+        fn configure(
+            &self,
+            message: Option<dillo_mmio::MessageInterrupt>,
+        ) -> Result<(), dillo_mmio::InterruptError> {
+            if self.fail.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(dillo_mmio::InterruptError::Delivery(
+                    "injected binding failure".into(),
+                ));
+            }
+            *self.route.lock().unwrap() = message;
+            Ok(())
+        }
+        fn pending(&self) -> Result<bool, dillo_mmio::InterruptError> {
+            Ok(self.route.lock().unwrap().is_none()
+                && self
+                    .pending
+                    .swap(false, std::sync::atomic::Ordering::AcqRel))
+        }
+    }
+
+    #[derive(Default)]
+    struct PendingNotifier(Arc<Mutex<Vec<u16>>>);
+    impl dillo_pci::MsixNotifier for PendingNotifier {
+        fn vector_updated(&self, _: u16, _: &dillo_pci::MsixTableEntry) {}
+        fn msix_enabled(&self, _: u16, _: bool) {}
+        fn interrupt_for(&self, vector: u16) -> Option<dillo_mmio::Interrupt> {
+            let delivered = self.0.clone();
+            Some(dillo_mmio::Interrupt::from_fn(move || {
+                delivered.lock().unwrap().push(vector);
+            }))
+        }
+    }
+
+    #[test]
+    fn native_queue_masks_pending_retarget_reset_and_errors() {
+        use dillo_mmio::InterruptLine;
+        let mut pci = make_test_device(2);
+        let notifier = Arc::new(PendingNotifier::default());
+        pci.set_notifier(notifier.clone());
+        let events = [
+            Arc::new(NativeEvent::default()),
+            Arc::new(NativeEvent::default()),
+        ];
+        pci.completion.lock().unwrap().events = events
+            .iter()
+            .map(|e| Some(e.clone() as Arc<dyn super::MessageInterruptEvent>))
+            .collect();
+        for queue in 0..2u16 {
+            pci.bar_write(0, super::CC_QUEUE_SELECT, &queue.to_le_bytes())
+                .unwrap();
+            pci.bar_write(0, super::CC_QUEUE_MSIX_VECTOR, &0u16.to_le_bytes())
+                .unwrap();
+        }
+        pci.bar_write(2, 8, &0x41u32.to_le_bytes()).unwrap();
+        pci.bar_write(2, 12, &0u32.to_le_bytes()).unwrap();
+        pci.config_write(pci.msix_cap_reg, 2, &0x8000u16.to_le_bytes())
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .all(|e| e.route.lock().unwrap().unwrap().data == 0x41)
+        );
+        pci.config_write(pci.msix_cap_reg, 2, &0xc000u16.to_le_bytes())
+            .unwrap();
+        for event in &events {
+            event.signal();
+        }
+        let pending = |pci: &VirtioPciDevice| {
+            let mut bytes = [0; 8];
+            pci.bar_read(2, 0x800, &mut bytes).unwrap();
+            u64::from_le_bytes(bytes)
+        };
+        assert_eq!(pending(&pci), 1); // Shared vector, one pending bit.
+        pci.bar_write(2, 8, &0x42u32.to_le_bytes()).unwrap();
+        pci.config_write(pci.msix_cap_reg, 2, &0x8000u16.to_le_bytes())
+            .unwrap();
+        assert_eq!(*notifier.0.lock().unwrap(), [0]);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.route.lock().unwrap().unwrap().data == 0x42)
+        );
+        assert_eq!(pending(&pci), 0);
+        pci.bar_write(0, super::CC_QUEUE_MSIX_VECTOR, &u16::MAX.to_le_bytes())
+            .unwrap();
+        assert!(events[1].route.lock().unwrap().is_none());
+        events[1].signal();
+        assert_eq!(pending(&pci), 0); // NO_VECTOR cannot create a PBA bit.
+        pci.bar_write(2, 12, &1u32.to_le_bytes()).unwrap();
+        events[0].signal();
+        assert_eq!(pending(&pci), 1);
+        pci.bar_write(0, super::CC_DEVICE_STATUS, &[0]).unwrap();
+        assert_eq!(pending(&pci), 0);
+        assert!(events.iter().all(|e| e.route.lock().unwrap().is_none()));
+        // A failed native reconfiguration remains an error to the CPU caller.
+        pci.completion.lock().unwrap().events[0] = Some(events[0].clone());
+        events[0]
+            .fail
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(matches!(
+            pci.bar_write(2, 12, &0u32.to_le_bytes()),
+            Err(dillo_pci::PciError::Device(_))
+        ));
+    }
+
     // --- Helper to create a VirtioPciDevice for testing ---
 
     use super::VirtioPciDevice;
@@ -936,37 +1137,37 @@ mod tests {
     // Helper to read a u16 from BAR 0
     fn bar0_read_u16(dev: &VirtioPciDevice, offset: u64) -> u16 {
         let mut buf = [0u8; 2];
-        dev.bar_read(0, offset, &mut buf);
+        dev.bar_read(0, offset, &mut buf).unwrap();
         u16::from_le_bytes(buf)
     }
 
     // Helper to write a u16 to BAR 0
     fn bar0_write_u16(dev: &mut VirtioPciDevice, offset: u64, val: u16) {
-        dev.bar_write(0, offset, &val.to_le_bytes());
+        dev.bar_write(0, offset, &val.to_le_bytes()).unwrap();
     }
 
     // Helper to read a u32 from BAR 0
     fn bar0_read_u32(dev: &VirtioPciDevice, offset: u64) -> u32 {
         let mut buf = [0u8; 4];
-        dev.bar_read(0, offset, &mut buf);
+        dev.bar_read(0, offset, &mut buf).unwrap();
         u32::from_le_bytes(buf)
     }
 
     // Helper to write a u32 to BAR 0
     fn bar0_write_u32(dev: &mut VirtioPciDevice, offset: u64, val: u32) {
-        dev.bar_write(0, offset, &val.to_le_bytes());
+        dev.bar_write(0, offset, &val.to_le_bytes()).unwrap();
     }
 
     // Helper to read a u8 from BAR 0
     fn bar0_read_u8(dev: &VirtioPciDevice, offset: u64) -> u8 {
         let mut buf = [0u8; 1];
-        dev.bar_read(0, offset, &mut buf);
+        dev.bar_read(0, offset, &mut buf).unwrap();
         buf[0]
     }
 
     // Helper to write a u8 to BAR 0
     fn bar0_write_u8(dev: &mut VirtioPciDevice, offset: u64, val: u8) {
-        dev.bar_write(0, offset, &[val]);
+        dev.bar_write(0, offset, &[val]).unwrap();
     }
 
     // Common config offsets (from virtio spec 4.1.4.3)
@@ -1373,11 +1574,11 @@ mod tests {
 
         // First read should return the value
         let mut buf = [0u8; 4];
-        dev.bar_read(0, ISR_CFG_OFFSET, &mut buf);
+        dev.bar_read(0, ISR_CFG_OFFSET, &mut buf).unwrap();
         assert_eq!(buf[0], 0x03);
 
         // Second read should return 0 (cleared)
-        dev.bar_read(0, ISR_CFG_OFFSET, &mut buf);
+        dev.bar_read(0, ISR_CFG_OFFSET, &mut buf).unwrap();
         assert_eq!(buf[0], 0x00);
     }
 
@@ -1389,7 +1590,7 @@ mod tests {
 
         // MockVirtioDevice returns 0 for all config reads initially
         let mut buf = [0xFFu8; 4];
-        dev.bar_read(0, DEVICE_CFG_OFFSET, &mut buf);
+        dev.bar_read(0, DEVICE_CFG_OFFSET, &mut buf).unwrap();
         assert_eq!(buf, [0, 0, 0, 0]);
     }
 
@@ -1398,11 +1599,12 @@ mod tests {
         let mut dev = make_test_device(2);
 
         // Write to device config region
-        dev.bar_write(0, DEVICE_CFG_OFFSET, &[0xAA, 0xBB, 0xCC, 0xDD]);
+        dev.bar_write(0, DEVICE_CFG_OFFSET, &[0xAA, 0xBB, 0xCC, 0xDD])
+            .unwrap();
 
         // Read it back
         let mut buf = [0u8; 4];
-        dev.bar_read(0, DEVICE_CFG_OFFSET, &mut buf);
+        dev.bar_read(0, DEVICE_CFG_OFFSET, &mut buf).unwrap();
         assert_eq!(buf, [0xAA, 0xBB, 0xCC, 0xDD]);
     }
 
@@ -1439,7 +1641,7 @@ mod tests {
     fn config_write_dispatches() {
         let mut dev = make_test_device(2);
         // Write to command register (reg 1) -- should be writable
-        dev.config_write(1, 0, &[0x07, 0x00]);
+        dev.config_write(1, 0, &[0x07, 0x00]).unwrap();
         let val = dev.config_read(1);
         assert_eq!(val & 0xFFFF, 0x0007);
     }

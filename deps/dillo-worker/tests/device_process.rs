@@ -361,6 +361,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for mode in [
         "normal",
         "native",
+        "direct-call",
         "qcow2",
         "gated",
         "gated-reset",
@@ -584,6 +585,9 @@ fn exercise(mode: &str) -> io::Result<()> {
     if mode == "pci" {
         return pci_interrupts(proxy, control, &memory);
     }
+    if mode == "direct-call" {
+        return direct_calls(proxy, control, &memory);
+    }
     let control = Arc::new(control);
     let interrupts = Arc::new(AtomicUsize::new(0));
     if mode == "normal" {
@@ -793,6 +797,61 @@ fn without_inherited_reader<T>(start: impl FnOnce() -> io::Result<T>) -> io::Res
     Ok(ready)
 }
 
+// This endpoint deliberately cannot deliver through a parent callback.
+// Both queue directions must be transferred without spawning a relay.
+#[derive(Debug)]
+struct DirectCall(dillo_machine::worker::Resource);
+impl dillo_mmio::InterruptLine for DirectCall {
+    fn signal(&self) {
+        panic!("exported call used a parent relay");
+    }
+    fn set_level(&self, _: bool) -> Result<(), dillo_mmio::InterruptError> {
+        panic!("exported call used a parent relay");
+    }
+    fn export(&self) -> io::Result<Option<dillo_machine::worker::Resource>> {
+        self.0.try_clone().map(Some)
+    }
+}
+
+fn direct_calls(
+    mut proxy: dillo_worker::Proxy,
+    control: dillo_worker::Control,
+    memory: &GuestMemoryMmap,
+) -> io::Result<()> {
+    for _ in 0..2 {
+        let (read, write) = Worker::notification_pair()?;
+        let read =
+            Worker::notification_endpoint(read, dillo_machine::worker::NotificationRole::Wait)?;
+        let rescue = Worker::notification_endpoint(
+            write.try_clone()?,
+            dillo_machine::worker::NotificationRole::Signal,
+        )?;
+        let (mut params, kick) = activation(Arc::new(AtomicUsize::new(0)), false, "native");
+        let params = VirtioActivate::with_host_and_queue_interrupts(
+            params.take_queues(),
+            params.take_queue_evts(),
+            Arc::new(Host(AtomicUsize::new(0))),
+            vec![Some(Interrupt::new(Arc::new(DirectCall(write))))],
+        )
+        .with_negotiated_features(1 << 32);
+        let active = proxy.activate(params).map_err(io::Error::other)?;
+        let (send, receive) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || send.send(read.read()));
+        request(memory, 1, 1, 0x3a);
+        kick.write(1)?;
+        let result = receive.recv_timeout(Duration::from_secs(5));
+        // Bound failed cleanup without turning the rescue into a passing result.
+        rescue.write(1)?;
+        waiter.join().unwrap().map_err(io::Error::other)?;
+        assert!(result.map_err(io::Error::other)?? > 0);
+        complete(memory, 1)?;
+        active.join().map_err(io::Error::other)?;
+        memory.write_slice(&[0; 64], GuestAddress(0x2000)).unwrap();
+        memory.write_slice(&[0; 256], GuestAddress(0x3000)).unwrap();
+    }
+    control.shutdown()
+}
+
 // The native notifier intentionally does not filter masks. The parent transport
 // must retain pending work and select the current route before reaching it.
 #[derive(Default)]
@@ -841,7 +900,7 @@ fn pci_interrupts(
     }
     assert_ne!(cap, 0);
     let cap = cap as usize / 4;
-    pci.config_write(cap, 2, &0x8000u16.to_le_bytes());
+    pci.config_write(cap, 2, &0x8000u16.to_le_bytes()).unwrap();
     for (offset, value) in [
         (0x08, 1u32),
         (0x0c, 1),
@@ -849,20 +908,20 @@ fn pci_interrupts(
         (0x28, 0x2000),
         (0x30, 0x3000),
     ] {
-        assert!(pci.bar_write(0, offset, &value.to_le_bytes()));
+        assert!(pci.bar_write(0, offset, &value.to_le_bytes()).unwrap());
     }
     for (offset, value) in [(0x18, 16u16), (0x1a, 0), (0x1c, 1)] {
-        assert!(pci.bar_write(0, offset, &value.to_le_bytes()));
+        assert!(pci.bar_write(0, offset, &value.to_le_bytes()).unwrap());
     }
-    assert!(pci.bar_write(0, 0x14, &[15]));
+    assert!(pci.bar_write(0, 0x14, &[15]).unwrap());
     let pending = |pci: &VirtioPciDevice| {
         let mut bytes = [0; 8];
-        assert!(pci.bar_read(2, 0x800, &mut bytes));
+        assert!(pci.bar_read(2, 0x800, &mut bytes).unwrap());
         u64::from_le_bytes(bytes)
     };
     let submit = |pci: &mut VirtioPciDevice, index| -> io::Result<()> {
         request(memory, index, 1, 0x6a);
-        assert!(pci.bar_write(0, 0x100, &0u16.to_le_bytes()));
+        assert!(pci.bar_write(0, 0x100, &0u16.to_le_bytes()).unwrap());
         complete(memory, index)?;
         control.quiesce() // Also orders the parent's completion callback.
     };
@@ -871,37 +930,37 @@ fn pci_interrupts(
     assert_eq!(pending(&pci), 1);
     assert!(signals.delivered.lock().unwrap().is_empty());
     // A changed route must be installed before releasing a masked completion.
-    pci.bar_write(2, 8, &0x56u32.to_le_bytes());
-    pci.bar_write(2, 12, &0u32.to_le_bytes());
+    pci.bar_write(2, 8, &0x56u32.to_le_bytes()).unwrap();
+    pci.bar_write(2, 12, &0u32.to_le_bytes()).unwrap();
     assert_eq!(*signals.delivered.lock().unwrap(), [(0, 0x56)]);
     assert_eq!(pending(&pci), 0);
 
     // Function masking also retains work; repeated masks cannot replay it.
-    pci.config_write(cap, 2, &0xc000u16.to_le_bytes());
+    pci.config_write(cap, 2, &0xc000u16.to_le_bytes()).unwrap();
     control.resume()?;
     submit(&mut pci, 2)?;
     assert_eq!(pending(&pci), 1);
     assert_eq!(signals.delivered.lock().unwrap().len(), 1);
-    pci.config_write(cap, 2, &0x8000u16.to_le_bytes());
-    pci.config_write(cap, 2, &0x8000u16.to_le_bytes());
+    pci.config_write(cap, 2, &0x8000u16.to_le_bytes()).unwrap();
+    pci.config_write(cap, 2, &0x8000u16.to_le_bytes()).unwrap();
     assert_eq!(signals.delivered.lock().unwrap().len(), 2);
 
     // Queue-vector selection remains parent state after activation.
-    pci.bar_write(2, 24, &0x78u32.to_le_bytes());
-    pci.bar_write(2, 28, &0u32.to_le_bytes());
-    pci.bar_write(0, 0x1a, &1u16.to_le_bytes());
+    pci.bar_write(2, 24, &0x78u32.to_le_bytes()).unwrap();
+    pci.bar_write(2, 28, &0u32.to_le_bytes()).unwrap();
+    pci.bar_write(0, 0x1a, &1u16.to_le_bytes()).unwrap();
     control.resume()?;
     submit(&mut pci, 3)?;
     assert_eq!(signals.delivered.lock().unwrap().last(), Some(&(1, 0x78)));
 
-    pci.config_write(cap, 2, &0xc000u16.to_le_bytes());
+    pci.config_write(cap, 2, &0xc000u16.to_le_bytes()).unwrap();
     control.resume()?;
     submit(&mut pci, 4)?;
     assert_eq!(pending(&pci), 2);
     let delivered = signals.delivered.lock().unwrap().len();
-    pci.bar_write(0, 0x14, &[0]);
+    pci.bar_write(0, 0x14, &[0]).unwrap();
     assert_eq!(pending(&pci), 0);
-    pci.config_write(cap, 2, &0x8000u16.to_le_bytes());
+    pci.config_write(cap, 2, &0x8000u16.to_le_bytes()).unwrap();
     assert_eq!(signals.delivered.lock().unwrap().len(), delivered);
     control.shutdown()
 }
