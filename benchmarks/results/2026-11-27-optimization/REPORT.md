@@ -832,3 +832,21 @@ being hidden by the larger gains.
 absolute values, paired ratios, schedules, environments, artifact digests,
 every boot-record hash and the macOS process CPU decomposition. The subsequent
 Unix partial-counter cancellation correction is not part of these runs.
+
+## Cancellable partial pipe notifications
+
+`4c13db5` removes an uncancellable `read_exact` after a short pipe read.
+The receiver retains incomplete words while continuing to watch its separate
+cancellation pipe; cancellation does not discard the fragment. A regression
+fixture verifies cancellation and later completion, and closes the external
+writer on timeout so cleanup cannot wait indefinitely for the missing bytes.
+Local notification tests, strict Clippy and formatting passed.
+
+Native macOS [run 46079568134](https://github.com/pichi-vm/dillo/actions/runs/46079568134)
+passed the notification and network tests, then completed all 40 boots in a
+balanced four-pair/two-second comparison with `73201a6`. Worker throughput
+changes range from -0.1% to +0.9%, and CPU/GiB from -0.8% to +0.1%; this short
+run does not establish equivalence or a latency benefit. The correctness fix
+is retained on its own merits. Source identities, hashes, raw-record digests,
+full ratios and the schedule are in
+[notification-cancellation-macos-short.json.gz](notification-cancellation-macos-short.json.gz).
