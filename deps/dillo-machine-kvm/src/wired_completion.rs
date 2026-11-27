@@ -321,7 +321,9 @@ mod tests {
         vm.attach_memory(Arc::clone(&memory)).unwrap();
         let code: &[u32] = &[
             // Enable group 1; SPI 48 is level-triggered, unmasked and routed to CPU 0.
-            0xd2a10000, 0x52800241, 0xb9000001, 0x52a00021, 0xb9008401, 0xb9010401, 0x91401803,
+            0xd2a10000, 0x52800241, 0xb9000001,
+            // Clear SPI 48's edge bit: native reset defaults need not be level.
+            0xb94c0c01, 0x121e7821, 0xb90c0c01, 0x52a00021, 0xb9008401, 0xb9010401, 0x91401803,
             0xf900c07f, 0xd2a10200, 0xb900141f,
             // Wake GICR, PMR=255, combined EOI/deactivate, enable ICC group 1.
             0xd2801fe1, 0xd5184601, 0xd538cc81, 0x927ef821, 0xd518cc81, 0xd2800021, 0xd518cce1,
