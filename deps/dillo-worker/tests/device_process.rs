@@ -836,7 +836,8 @@ fn direct_calls(
         .with_negotiated_features(1 << 32);
         let active = proxy.activate(params).map_err(io::Error::other)?;
         let (send, receive) = std::sync::mpsc::channel();
-        let waiter = std::thread::spawn(move || send.send(read.read()));
+        let receiver = Arc::clone(&read);
+        let waiter = std::thread::spawn(move || send.send(receiver.read()));
         request(memory, 1, 1, 0x3a);
         kick.write(1)?;
         let result = receive.recv_timeout(Duration::from_secs(5));
