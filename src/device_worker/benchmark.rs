@@ -3,7 +3,7 @@
 
 //! Temporary benchmark control. This module is absent from production builds.
 
-use super::*;
+use super::{Arc, Backing, File, VirtioDevice, io};
 
 pub(super) fn selected(kind: u32) -> io::Result<bool> {
     let selected = match std::env::var("DILLO_BENCH_LOCAL").as_deref() {
