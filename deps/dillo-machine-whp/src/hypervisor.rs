@@ -2514,6 +2514,90 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
+    fn whp_trigger_retargets_and_revokes_exported_event() {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::System::Threading::SetEvent;
+        if !native_test_child("whp_trigger_retargets_and_revokes_exported_event") {
+            return;
+        }
+        let vm = Vm::new_x86_64_with_local_apic_count(1).unwrap();
+        let cpu = vm.create_vcpu_without_ram_check(0, Profile::V1).unwrap();
+        cpu.set_registers(vec![
+            (
+                WHvX64RegisterApicBase,
+                WHV_REGISTER_VALUE { Reg64: 0xfee0_0900 },
+            ),
+            (
+                WHvX64RegisterApicSpurious,
+                WHV_REGISTER_VALUE { Reg64: 0x1ff },
+            ),
+        ])
+        .unwrap();
+        let parameters = |vector| WHV_TRIGGER_PARAMETERS {
+            TriggerType: WHvTriggerTypeInterrupt,
+            Anonymous: WHV_TRIGGER_PARAMETERS_0 {
+                Interrupt: WHV_INTERRUPT_CONTROL {
+                    _bitfield: 0, // Fixed, physical destination, edge-triggered.
+                    Destination: 0,
+                    Vector: vector,
+                },
+            },
+            ..Default::default()
+        };
+        let pending = |vector: u32| {
+            raw::get_virtual_processor_register_words(vm.inner.partition, 0, WHvX64RegisterApicIrr2)
+                .unwrap()[0]
+                & (1 << (vector - 64))
+                != 0
+        };
+        let wait = |vector| {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !pending(vector) && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert!(pending(vector), "missing trigger vector {vector}");
+        };
+        let mut trigger = std::ptr::null_mut();
+        let mut event = std::ptr::null_mut();
+        // SAFETY: the partition is live; the parameters and output slots are
+        // initialized. A successful call grants ownership of the event handle.
+        assert_eq!(
+            unsafe {
+                WHvCreateTrigger(
+                    vm.inner.partition,
+                    &parameters(0x41),
+                    &mut trigger,
+                    &mut event,
+                )
+            },
+            0
+        );
+        let event = unsafe { OwnedHandle::from_raw_handle(event) };
+        let exported = event.try_clone().unwrap();
+        // SAFETY: these are live event/trigger handles from this partition.
+        assert_ne!(unsafe { SetEvent(exported.as_raw_handle()) }, 0);
+        wait(0x41);
+        assert_eq!(
+            unsafe { WHvUpdateTriggerParameters(vm.inner.partition, &parameters(0x42), trigger) },
+            0
+        );
+        assert_ne!(unsafe { SetEvent(exported.as_raw_handle()) }, 0);
+        wait(0x42);
+        assert_eq!(
+            unsafe { WHvUpdateTriggerParameters(vm.inner.partition, &parameters(0x43), trigger) },
+            0
+        );
+        assert_eq!(unsafe { WHvDeleteTrigger(vm.inner.partition, trigger) }, 0);
+        drop(event);
+        // The exported event stays valid, but cannot inject after retirement.
+        assert_ne!(unsafe { SetEvent(exported.as_raw_handle()) }, 0);
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!pending(0x43));
+    }
+
+    #[test]
     fn whp_doorbell_matches_and_unregisters() {
         use dillo_mmio::WriteValue;
         if !native_test_child("whp_doorbell_matches_and_unregisters") {
