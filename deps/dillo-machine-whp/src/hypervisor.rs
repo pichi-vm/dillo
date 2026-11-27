@@ -2523,13 +2523,14 @@ mod tests {
             let mut vm = Vm::new().unwrap();
             let code_base = 0x3_0000;
             vm.add_memory(code_base, 0x1000).unwrap();
-            // dword 1, dword 2, word 1, wrong address, then HLT.
+            // Use register stores in protected mode, like the Linux notify
+            // path. WHP may exit for store instructions its doorbell decoder
+            // does not recognize; those retain ordinary MMIO dispatch.
             vm.write_guest(
                 code_base,
                 &[
-                    0x66, 0xc7, 0x06, 0x50, 0x20, 1, 0, 0, 0, 0x66, 0xc7, 0x06, 0x50, 0x20, 2, 0,
-                    0, 0, 0xc7, 0x06, 0x50, 0x20, 1, 0, 0x66, 0xc7, 0x06, 0x54, 0x20, 1, 0, 0, 0,
-                    0xf4,
+                    0xb8, 1, 0, 0, 0, 0xbb, 0x50, 0x20, 0, 0, 0x89, 0x03, 0xb8, 2, 0, 0, 0, 0x89,
+                    0x03, 0xb8, 1, 0, 0, 0, 0x66, 0x89, 0x03, 0x89, 0x43, 4, 0xf4,
                 ],
             )
             .unwrap();
@@ -2547,6 +2548,21 @@ mod tests {
             let mut registration = Some(retained);
             for registered in [true, false] {
                 set_real_mode(&vcpu, code_base, 0);
+                vcpu.set_registers(vec![
+                    (WHvX64RegisterCr0, WHV_REGISTER_VALUE { Reg64: 0x11 }),
+                    (
+                        WHvX64RegisterCs,
+                        WHV_REGISTER_VALUE {
+                            Segment: WHV_X64_SEGMENT_REGISTER {
+                                Base: code_base,
+                                Limit: 0xffff,
+                                Selector: 0,
+                                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xc09b },
+                            },
+                        },
+                    ),
+                ])
+                .unwrap();
                 for (address, width, byte) in writes {
                     if registered
                         && address == 0x2050
