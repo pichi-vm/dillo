@@ -156,7 +156,7 @@ pub struct VirtioPciDevice {
     // Activation state.
     activated: bool,
     activation: Option<VirtioDeviceHandle>,
-    host: Option<Arc<dyn VirtioDeviceHost>>,
+    host: Option<Arc<PciVirtioHost>>,
 
     // Retained kick clones so the MMIO notify path can signal queue workers.
     queue_kicks: Vec<Kick>,
@@ -332,8 +332,8 @@ impl VirtioPciDevice {
     }
 
     /// Set the host service inherited from the attached PCI root.
-    pub fn set_host(&mut self, host: Arc<dyn VirtioDeviceHost>) {
-        self.host = Some(host);
+    pub fn set_host(&mut self, host: Arc<dyn PciDeviceHost>) {
+        self.host = Some(Arc::new(PciVirtioHost::new(host)));
     }
 
     pub fn set_notifier(&mut self, notifier: Arc<dyn MsixNotifier>) {
@@ -674,7 +674,29 @@ impl VirtioPciDevice {
         };
         let mut queues = Vec::new();
         let mut queue_interrupts = Vec::new();
+        let mut kicks = Vec::new();
         for (index, config) in self.queues.iter().enumerate().filter(|(_, qc)| qc.enabled) {
+            let window = dillo_mmio::MmioWindow {
+                base: self.bar0_gpa,
+                size: BAR0_SIZE,
+            };
+            let offset = NOTIFY_CFG_OFFSET + index as u64 * u64::from(NOTIFY_OFF_MULTIPLIER);
+            let kick = host
+                .host
+                .write_notification(window, offset, dillo_mmio::WriteValue::U16(index as u16))
+                .and_then(|wake| {
+                    wake.map_or_else(
+                        || host.notification(),
+                        |wake| Ok(Kick::from_notification(wake)),
+                    )
+                });
+            match kick {
+                Ok(kick) => kicks.push(kick),
+                Err(error) => {
+                    log::error!("virtio-pci: failed to create kick: {error}");
+                    return;
+                }
+            }
             let vector = self.completion.lock().expect("completion mutex").vectors[index];
             queues.push(config.to_queue(vector));
             let completion = Arc::clone(&self.completion);
@@ -687,17 +709,6 @@ impl VirtioPciDevice {
                 } = &mut *state;
                 table.signal(vector, &**notifier);
             })));
-        }
-
-        let mut kicks: Vec<Kick> = Vec::new();
-        for _ in &queues {
-            match host.notification() {
-                Ok(k) => kicks.push(k),
-                Err(e) => {
-                    log::error!("virtio-pci: failed to create kick: {e}");
-                    return;
-                }
-            }
         }
 
         self.queue_kicks.clear();

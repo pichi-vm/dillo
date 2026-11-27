@@ -112,6 +112,15 @@ pub trait PciDeviceHost: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    fn write_notification(
+        &self,
+        _window: MmioWindow,
+        _offset: u64,
+        _value: dillo_mmio::WriteValue,
+    ) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
+        Ok(None)
+    }
+
     fn msix_notifier(&self) -> Option<Arc<dyn MsixNotifier>> {
         None
     }
@@ -269,6 +278,14 @@ impl PciBus {
                 inner: Arc::clone(&host),
                 vector_base: base,
                 vector_count: n,
+                windows: device
+                    .bar_regions()
+                    .iter()
+                    .map(|bar| MmioWindow {
+                        base: bar.base_gpa,
+                        size: bar.size,
+                    })
+                    .collect(),
             }));
             base = next_base;
         }
@@ -494,6 +511,15 @@ struct PciRootHost {
 }
 
 impl PciDeviceHost for PciRootHost {
+    fn write_notification(
+        &self,
+        window: MmioWindow,
+        offset: u64,
+        value: dillo_mmio::WriteValue,
+    ) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
+        self.attachment.write_notification(window, offset, value)
+    }
+
     fn notification(&self) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
         self.attachment.notification()
     }
@@ -532,9 +558,22 @@ struct OffsetPciDeviceHost {
     inner: Arc<dyn PciDeviceHost>,
     vector_base: u16,
     vector_count: u16,
+    windows: Vec<MmioWindow>,
 }
 
 impl PciDeviceHost for OffsetPciDeviceHost {
+    fn write_notification(
+        &self,
+        window: MmioWindow,
+        offset: u64,
+        value: dillo_mmio::WriteValue,
+    ) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
+        if !self.windows.contains(&window) {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        self.inner.write_notification(window, offset, value)
+    }
+
     fn notification(&self) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
         self.inner.notification()
     }
@@ -912,6 +951,18 @@ mod tests {
         struct FakeAttachment;
 
         impl MmioAttachment for FakeAttachment {
+            fn write_notification(
+                &self,
+                window: MmioWindow,
+                offset: u64,
+                value: dillo_mmio::WriteValue,
+            ) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
+                assert_eq!(window.base, 0x5000_0000);
+                assert_eq!(offset, 0x100);
+                assert_eq!(value, dillo_mmio::WriteValue::U16(0));
+                Ok(None)
+            }
+
             fn interrupts(&self) -> &[dillo_mmio::MmioInterrupt] {
                 &[]
             }
@@ -930,6 +981,7 @@ mod tests {
 
         struct HostAwareDevice {
             observed_host: Arc<AtomicBool>,
+            bar: BarRegion,
         }
 
         impl std::fmt::Debug for HostAwareDevice {
@@ -956,7 +1008,28 @@ mod tests {
                 "host-aware-device"
             }
 
-            fn set_host(&self, _host: Arc<dyn PciDeviceHost>) {
+            fn bar_regions(&self) -> &[BarRegion] {
+                std::slice::from_ref(&self.bar)
+            }
+
+            fn set_host(&self, host: Arc<dyn PciDeviceHost>) {
+                let mut window = MmioWindow {
+                    base: self.bar.base_gpa,
+                    size: self.bar.size,
+                };
+                let value = dillo_mmio::WriteValue::U16(0);
+                assert!(
+                    host.write_notification(window, 0x100, value)
+                        .unwrap()
+                        .is_none()
+                );
+                window.base += window.size;
+                assert_eq!(
+                    host.write_notification(window, 0x100, value)
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
                 self.observed_host.store(true, Ordering::Release);
             }
         }
@@ -970,6 +1043,11 @@ mod tests {
             1,
             Box::new(HostAwareDevice {
                 observed_host: Arc::clone(&observed_host),
+                bar: BarRegion {
+                    bar_idx: 0,
+                    base_gpa: 0x5000_0000,
+                    size: 0x1000,
+                },
             }),
         );
 

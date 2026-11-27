@@ -44,8 +44,6 @@ use std::sync::Mutex;
 
 use dillo_pci::{BarRegion, PciDevice, PciDeviceHost, PciError};
 
-use crate::transport::PciVirtioHost;
-
 /// Adapter wrapping a [`VirtioPciDevice`] as a [`PciDevice`].
 pub struct VirtioPciAdapter {
     inner: Mutex<VirtioPciDevice>,
@@ -132,6 +130,6 @@ impl PciDevice for VirtioPciAdapter {
         if let Some(notifier) = host.msix_notifier() {
             inner.set_notifier(notifier);
         }
-        inner.set_host(std::sync::Arc::new(PciVirtioHost::new(host)));
+        inner.set_host(host);
     }
 }

@@ -35,6 +35,32 @@ use dillo_machine_whp::worker::Worker;
 #[derive(Debug)]
 struct Host(AtomicUsize);
 
+impl dillo_pci::PciDeviceHost for Host {
+    fn shared_memory(&self) -> &[Arc<dyn dillo_mmio::SharedMemory>] {
+        &[]
+    }
+
+    fn spawn(
+        &self,
+        run: dillo_mmio::MmioDeviceRun,
+    ) -> Result<dillo_mmio::MmioDeviceHandle, dillo_mmio::MmioSpawnError> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let token = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            run(dillo_mmio::MmioRunToken::from_fn(move || {
+                token.load(Ordering::Acquire)
+            }))
+        });
+        Ok(dillo_mmio::MmioDeviceHandle::new(
+            move || {
+                stop.store(true, Ordering::Release);
+                Ok(())
+            },
+            move || thread.join().unwrap(),
+        ))
+    }
+}
+
 impl VirtioDeviceHost for Host {
     fn spawn(
         &self,
