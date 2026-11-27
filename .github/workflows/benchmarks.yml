@@ -24,8 +24,8 @@ on:
       sampling:
         description: Compare instrumentation on the same host
         type: choice
-        options: [on, off, both]
-        default: on
+        options: ["on", "off", both]
+        default: "on"
 
 permissions:
   contents: read
