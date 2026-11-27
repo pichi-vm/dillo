@@ -2466,7 +2466,10 @@ mod machine_select {
                 let attachment =
                     Attach::attach(vm, Arc::clone(&transport)).map_err(RunError::machine)?;
                 transport.set_attachment(attachment);
-                #[cfg(all(target_os = "linux", feature = "bench-in-process"))]
+                #[cfg(all(
+                    any(target_os = "linux", target_os = "windows"),
+                    feature = "bench-in-process"
+                ))]
                 if std::env::var_os("DILLO_BENCH_SHARED_ISR").is_some() {
                     transport.set_notification_state_factory(
                         <M::Worker as dillo_machine::worker::WorkerHost>::create_notification_state,

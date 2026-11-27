@@ -43,7 +43,7 @@ jobs:
         run: cargo test --locked -p dillo-machine-whp worker::vhost_user
       - if: inputs.native_notifications && runner.os == 'Windows'
         run: |
-          cargo test --locked -p dillo-machine-whp whp_trigger_retargets_and_revokes_exported_event
+          cargo test --locked -p dillo-machine-whp whp_trigger_
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p dillo-machine-whp whp_doorbell_matches_and_unregisters
       - if: inputs.network

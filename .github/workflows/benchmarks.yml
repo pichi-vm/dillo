@@ -104,6 +104,12 @@ jobs:
         run: >-
           cargo --config .copr/cargo-config.toml test --locked
           -p dillo-machine-kvm wired_completion::tests -- --nocapture
+      - name: Check native WHP completion lifecycle
+        if: runner.os == 'Windows'
+        shell: bash
+        run: >-
+          cargo --config .copr/cargo-config.toml test --locked
+          -p dillo-machine-whp whp_trigger_ -- --nocapture
       - name: Build matched release assets
         shell: bash
         env:

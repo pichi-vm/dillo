@@ -7,6 +7,7 @@
 mod hypervisor;
 mod ioapic;
 mod memory;
+mod wired_completion;
 pub mod worker;
 
 /// Reasons a WHP vCPU run returned to backend code.
@@ -736,6 +737,16 @@ mod imp {
     }
 
     impl InterruptLine for IoApicInterruptLine {
+        fn bind_status(
+            &self,
+            state: Arc<dillo_machine::worker::NotificationState>,
+            update: Option<Arc<dyn dillo_mmio::InterruptUpdate>>,
+        ) -> Result<Interrupt, InterruptError> {
+            self.ioapic
+                .bind_completion(self.gsi, self.interrupt_controller.clone(), state, update)
+                .map_err(delivery_error)
+        }
+
         fn signal(&self) {
             if let Err(e) = self.inject() {
                 log::warn!(
