@@ -200,6 +200,26 @@ impl RamRegistration {
 }
 
 impl Vm {
+    pub(crate) fn write_notification(
+        &self,
+        address: u64,
+        value: dillo_mmio::WriteValue,
+    ) -> std::io::Result<Arc<dyn dillo_mmio::WriteNotification>> {
+        use dillo_machine::worker::WorkerHost;
+        use std::os::windows::io::AsHandle;
+
+        let wake = crate::worker::Worker::queue_notification()?;
+        let event = wake.export()?.ok_or(std::io::ErrorKind::Unsupported)?;
+        let port =
+            raw::create_notification_port(self.inner.partition, event.as_handle(), address, value)
+                .map_err(|error| std::io::Error::other(format!("create WHP doorbell: {error}")))?;
+        Ok(Arc::new(Doorbell {
+            vm: self.clone(),
+            wake,
+            port,
+        }))
+    }
+
     #[cfg(test)]
     pub(crate) fn new() -> Result<Self, Error> {
         Self::new_with_options(PartitionOptions::default())
@@ -394,6 +414,33 @@ impl InterruptController {
         self.inner.memory().ready()?;
         raw::request_fixed_interrupt(self.inner.partition, destination, vector)
             .map_err(|hr| Error::RequestInterrupt(status(hr)))
+    }
+}
+
+#[derive(Debug)]
+struct Doorbell {
+    vm: Vm,
+    wake: Arc<dyn dillo_mmio::WriteNotification>,
+    port: usize,
+}
+
+impl dillo_mmio::WriteNotification for Doorbell {
+    fn read(&self) -> std::io::Result<u64> {
+        self.wake.read()
+    }
+    fn write(&self, count: u64) -> std::io::Result<()> {
+        self.wake.write(count)
+    }
+    fn export(&self) -> std::io::Result<Option<std::os::windows::io::OwnedHandle>> {
+        self.wake.export()
+    }
+}
+
+impl Drop for Doorbell {
+    fn drop(&mut self) {
+        if let Err(error) = raw::delete_notification_port(self.vm.inner.partition, self.port) {
+            log::error!("delete WHP doorbell: {error}");
+        }
     }
 }
 
@@ -854,6 +901,62 @@ mod raw {
     use super::{HResult, failed, hyperv_leaf1_cpuid};
 
     pub(super) type PartitionHandle = WHV_PARTITION_HANDLE;
+
+    pub(super) fn create_notification_port(
+        partition: PartitionHandle,
+        event: std::os::windows::io::BorrowedHandle<'_>,
+        address: u64,
+        value: dillo_mmio::WriteValue,
+    ) -> Result<usize, HResult> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Hypervisor::{
+            WHV_DOORBELL_MATCH_DATA, WHV_NOTIFICATION_PORT_PARAMETERS,
+            WHV_NOTIFICATION_PORT_PARAMETERS_0, WHvCreateNotificationPort,
+            WHvNotificationPortTypeDoorbell,
+        };
+        let parameters = WHV_NOTIFICATION_PORT_PARAMETERS {
+            NotificationPortType: WHvNotificationPortTypeDoorbell,
+            Anonymous: WHV_NOTIFICATION_PORT_PARAMETERS_0 {
+                Doorbell: WHV_DOORBELL_MATCH_DATA {
+                    GuestAddress: address,
+                    Value: match value {
+                        dillo_mmio::WriteValue::U16(v) => u64::from(v),
+                        dillo_mmio::WriteValue::U32(v) => u64::from(v),
+                    },
+                    Length: value.size() as u32,
+                    _bitfield: 3, // MatchOnValue | MatchOnLength
+                },
+            },
+            ..Default::default()
+        };
+        let mut port = ptr::null_mut();
+        // SAFETY: the setup partition and borrowed event remain live; both
+        // pointers describe initialized native buffers for this call. The
+        // returned opaque handle is only passed back to WHP for deletion.
+        let hr = unsafe {
+            WHvCreateNotificationPort(partition, &parameters, event.as_raw_handle(), &mut port)
+        };
+        if failed(hr) {
+            Err(HResult(hr))
+        } else {
+            Ok(port as usize)
+        }
+    }
+
+    pub(super) fn delete_notification_port(
+        partition: PartitionHandle,
+        port: usize,
+    ) -> Result<(), HResult> {
+        // SAFETY: Doorbell retains this partition and deletes its unique port
+        // only after the last notification owner releases it.
+        let hr = unsafe {
+            windows_sys::Win32::System::Hypervisor::WHvDeleteNotificationPort(
+                partition,
+                port as *const c_void,
+            )
+        };
+        if failed(hr) { Err(HResult(hr)) } else { Ok(()) }
+    }
 
     pub(super) fn guest_physical_bits(
         partition: PartitionHandle,
@@ -2408,6 +2511,69 @@ mod tests {
 
         let exit = vcpu.run(|_, _| 0, |_, _| false).expect("run hlt");
         assert!(matches!(exit, VmExit::Halted), "expected HLT, got {exit:?}");
+    }
+
+    #[test]
+    fn whp_doorbell_matches_and_unregisters() {
+        use dillo_mmio::WriteValue;
+        if !native_test_child("whp_doorbell_matches_and_unregisters") {
+            return;
+        }
+        for value in [WriteValue::U16(1), WriteValue::U32(1)] {
+            let mut vm = Vm::new().unwrap();
+            let code_base = 0x3_0000;
+            vm.add_memory(code_base, 0x1000).unwrap();
+            // dword 1, dword 2, word 1, wrong address, then HLT.
+            vm.write_guest(
+                code_base,
+                &[
+                    0x66, 0xc7, 0x06, 0x50, 0x20, 1, 0, 0, 0, 0x66, 0xc7, 0x06, 0x50, 0x20, 2, 0,
+                    0, 0, 0xc7, 0x06, 0x50, 0x20, 1, 0, 0x66, 0xc7, 0x06, 0x54, 0x20, 1, 0, 0, 0,
+                    0xf4,
+                ],
+            )
+            .unwrap();
+            let notification = vm.write_notification(0x2050, value).unwrap();
+            let retained = notification.clone();
+            drop(notification);
+            let mut vcpu = vm.create_vcpu(0, Profile::V1).unwrap();
+            let writes = [
+                (0x2050, 4, 1),
+                (0x2050, 4, 2),
+                (0x2050, 2, 1),
+                (0x2054, 4, 1),
+            ];
+            let event = retained.export().unwrap().unwrap();
+            let mut registration = Some(retained);
+            for registered in [true, false] {
+                set_real_mode(&vcpu, code_base, 0);
+                for (address, width, byte) in writes {
+                    if registered
+                        && address == 0x2050
+                        && u64::from(width) == value.size()
+                        && byte == 1
+                    {
+                        continue;
+                    }
+                    match vcpu.run(|_, _| 0, |_, _| false).unwrap() {
+                        VmExit::MmioWrite { addr, data, size } => {
+                            assert_eq!((addr, size, data[0]), (address, width, byte))
+                        }
+                        exit => panic!("unexpected exit: {exit:?}"),
+                    }
+                }
+                assert!(matches!(
+                    vcpu.run(|_, _| 0, |_, _| false).unwrap(),
+                    VmExit::Halted
+                ));
+                if let Some(notification) = registration.take() {
+                    // Consume the matched write, then remove the port before
+                    // the next run. The exported event itself remains live.
+                    assert_eq!(notification.read().unwrap(), 1);
+                }
+            }
+            drop(event); // Exported event lifetime does not retain the port.
+        }
     }
 
     fn set_real_mode(vcpu: &super::Vcpu, code_base: u64, rax: u64) {

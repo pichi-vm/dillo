@@ -430,11 +430,14 @@ mod imp {
                 )));
             }
             let interrupts = self.resolve_interrupts(item.interrupts())?;
+            let windows = item.windows().to_vec();
             self.mmio_bus
                 .lock()
                 .expect("MMIO bus lock poisoned")
                 .register_device(item);
             Ok(Arc::new(MachineMmioAttachment {
+                vm: self.inner.clone(),
+                windows,
                 interrupts,
                 shared_memory: self.shared_memory.clone(),
             }))
@@ -651,6 +654,8 @@ mod imp {
     }
 
     struct MachineMmioAttachment {
+        vm: crate::hypervisor::Vm,
+        windows: Vec<MmioWindow>,
         interrupts: Vec<MmioInterrupt>,
         shared_memory: Vec<Arc<dyn SharedMemory>>,
     }
@@ -665,6 +670,27 @@ mod imp {
     }
 
     impl MmioAttachment for MachineMmioAttachment {
+        fn write_notification(
+            &self,
+            window: MmioWindow,
+            offset: u64,
+            value: dillo_mmio::WriteValue,
+        ) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
+            if !self.windows.contains(&window)
+                || offset
+                    .checked_add(value.size())
+                    .is_none_or(|end| end > window.size)
+            {
+                return Err(std::io::ErrorKind::InvalidInput.into());
+            }
+            let address = window
+                .base
+                .checked_add(offset)
+                .filter(|address| address.checked_add(value.size()).is_some())
+                .ok_or(std::io::ErrorKind::InvalidInput)?;
+            self.vm.write_notification(address, value).map(Some)
+        }
+
         fn notification(&self) -> std::io::Result<Option<Arc<dyn dillo_mmio::WriteNotification>>> {
             <crate::worker::Worker as dillo_machine::worker::WorkerHost>::queue_notification()
                 .map(Some)
