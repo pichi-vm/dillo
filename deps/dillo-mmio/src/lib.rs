@@ -278,7 +278,7 @@ impl SharedRegion {
 
 #[derive(Clone, Debug)]
 struct MappedSharedRegion {
-    memory: GuestMemoryMmap,
+    memory: Arc<GuestMemoryMmap>,
     gpa: u64,
     size: u64,
     access: SharedAccess,
@@ -385,7 +385,8 @@ impl SharedMemoryState {
 /// `shared` when guest shared/private conversion exits are handled internally.
 #[derive(Debug, Clone)]
 pub struct MappedSharedMemory {
-    memory: GuestMemoryMmap,
+    // Each claim retains the same immutable collection of mapped regions.
+    memory: Arc<GuestMemoryMmap>,
     limits: Vec<AddressRange>,
     access: SharedAccess,
     shared: SharedMemoryState,
@@ -394,7 +395,7 @@ pub struct MappedSharedMemory {
 impl MappedSharedMemory {
     pub fn new(memory: GuestMemoryMmap, requirement: SharedMemoryRequirement) -> Self {
         Self {
-            memory,
+            memory: Arc::new(memory),
             limits: vec![requirement.range],
             access: requirement.access,
             shared: SharedMemoryState::new(vec![requirement.range]),
@@ -404,7 +405,7 @@ impl MappedSharedMemory {
     pub fn for_guest_memory(memory: GuestMemoryMmap, access: SharedAccess) -> Self {
         let limits = Self::guest_memory_ranges(&memory);
         Self {
-            memory,
+            memory: Arc::new(memory),
             access,
             shared: SharedMemoryState::new(limits.clone()),
             limits,
@@ -417,7 +418,7 @@ impl MappedSharedMemory {
         shared: Vec<AddressRange>,
     ) -> Self {
         Self {
-            memory,
+            memory: Arc::new(memory),
             limits: vec![requirement.range],
             access: requirement.access,
             shared: SharedMemoryState::new(shared),
@@ -430,7 +431,7 @@ impl MappedSharedMemory {
         shared: SharedMemoryState,
     ) -> Self {
         Self {
-            memory,
+            memory: Arc::new(memory),
             limits: vec![requirement.range],
             access: requirement.access,
             shared,
@@ -468,7 +469,7 @@ impl SharedMemory for MappedSharedMemory {
         }
         Ok(SharedRegion {
             access: RegionAccess::Mapped(MappedSharedRegion {
-                memory: self.memory.clone(),
+                memory: Arc::clone(&self.memory),
                 gpa: range.gpa,
                 size: range.size,
                 access: range.access,
@@ -1043,6 +1044,7 @@ mod tests {
                 access: SharedAccess::ReadWrite,
             })
             .unwrap();
+        drop(shared); // The claim retains its backing independently of the provider.
         let mut buf = [0; 4];
         region.read(0, &mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4]);
