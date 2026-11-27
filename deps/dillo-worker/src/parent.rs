@@ -235,7 +235,7 @@ impl Prepared {
             commands: Mutex::new(Some(commands)),
             replies: Mutex::new(replies),
             serial: Mutex::new(()),
-            lifecycle: Mutex::new(()),
+            lifecycle: Mutex::new(false),
             threads: Mutex::new(vec![reader, writer]),
             retired: AtomicBool::new(false),
             kicks: Mutex::new(Vec::new()),
@@ -440,7 +440,8 @@ struct Session {
     commands: Mutex<Option<mpsc::SyncSender<Outgoing>>>,
     replies: Mutex<mpsc::Receiver<Frame>>,
     serial: Mutex<()>,
-    lifecycle: Mutex<()>,
+    // Serializes activation/control changes and records explicit quiescence.
+    lifecycle: Mutex<bool>,
     retired: AtomicBool,
     threads: Mutex<Vec<JoinHandle<()>>>,
     kicks: Mutex<Vec<Resource>>,
@@ -559,7 +560,7 @@ impl Session {
     }
 
     fn reset(&self, epoch: u64) -> io::Result<()> {
-        let _lifecycle = self.lifecycle.lock().unwrap();
+        let mut paused = self.lifecycle.lock().unwrap();
         if self
             .shared
             .active
@@ -569,6 +570,7 @@ impl Session {
             return Ok(());
         }
         let result = self.set(RESET_DEVICE, Vec::new(), Vec::new());
+        *paused = false;
         self.kicks.lock().unwrap().clear();
         result
     }
@@ -631,16 +633,18 @@ impl Control {
         }
     }
     pub fn quiesce(&self) -> io::Result<()> {
-        let _lifecycle = self.0.lifecycle.lock().unwrap();
-        if self.0.shared.active.load(Ordering::Acquire) != 0 {
+        let mut paused = self.0.lifecycle.lock().unwrap();
+        if self.0.shared.active.load(Ordering::Acquire) != 0 && !*paused {
             self.0.pause_queues()?;
+            *paused = true;
         }
         Ok(())
     }
     pub fn resume(&self) -> io::Result<()> {
-        let _lifecycle = self.0.lifecycle.lock().unwrap();
-        if self.0.shared.active.load(Ordering::Acquire) != 0 {
+        let mut paused = self.0.lifecycle.lock().unwrap();
+        if self.0.shared.active.load(Ordering::Acquire) != 0 && *paused {
             self.0.resume_queues()?;
+            *paused = false;
         }
         Ok(())
     }
@@ -709,11 +713,15 @@ impl VirtioDevice for Proxy {
     fn write_config(&mut self, _: u64, _: &[u8]) {}
 
     fn update_interrupts(&mut self, update: &mut dyn FnMut() -> io::Result<()>) -> io::Result<()> {
-        let _lifecycle = self.session.lifecycle.lock().unwrap();
+        let mut paused = self.session.lifecycle.lock().unwrap();
         if self.session.shared.active.load(Ordering::Acquire) == 0 {
             return update();
         }
-        self.session.pause_queues()?;
+        let resume = !*paused;
+        if resume {
+            self.session.pause_queues()?;
+            *paused = true;
+        }
         update()?;
         for (index, interrupt) in &self.interrupts {
             let resource = interrupt
@@ -725,7 +733,11 @@ impl VirtioDevice for Proxy {
                 vec![resource],
             )?;
         }
-        self.session.resume_queues()
+        if resume {
+            self.session.resume_queues()?;
+            *paused = false;
+        }
+        Ok(())
     }
 
     fn activate(
@@ -733,7 +745,7 @@ impl VirtioDevice for Proxy {
         mut activation: VirtioActivate,
     ) -> Result<VirtioDeviceHandle, ActivateError> {
         let session = Arc::clone(&self.session);
-        let lifecycle = session.lifecycle.lock().unwrap();
+        let mut paused = session.lifecycle.lock().unwrap();
         let host = activation.host()?;
         let queues = activation.take_queues();
         let kicks = activation.take_queue_evts();
@@ -750,6 +762,7 @@ impl VirtioDevice for Proxy {
             .checked_add(1)
             .ok_or_else(|| ActivateError::InvalidConfig("activation epoch exhausted".into()))?;
         session.shared.active.store(epoch, Ordering::Release);
+        *paused = false;
         self.interrupts.clear();
         let mut relays = Vec::new();
         let mut retained_kicks = Vec::new();
@@ -872,7 +885,7 @@ impl VirtioDevice for Proxy {
             }
             Ok(())
         })();
-        drop(lifecycle);
+        drop(paused);
         if let Err(error) = result {
             let _ = session.reset(epoch);
             for relay in &mut relays {

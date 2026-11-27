@@ -833,6 +833,7 @@ fn direct_calls(
         let mut read = read;
         for index in 1..=2 {
             if index == 2 {
+                control.quiesce()?;
                 let (new_read, write) = Worker::notification_pair()?;
                 proxy.update_interrupts(&mut || {
                     *interrupt.0.lock().unwrap() = write.try_clone()?;
@@ -852,6 +853,12 @@ fn direct_calls(
             let waiter = std::thread::spawn(move || send.send(receiver.read()));
             request(memory, index, 1, 0x3a);
             kick.write(1)?;
+            if index == 2 {
+                // Updating an already-paused queue must not restart it.
+                std::thread::sleep(Duration::from_millis(20));
+                assert_eq!(memory.read_obj::<u16>(GuestAddress(0x3002)).unwrap(), 1);
+                control.resume()?;
+            }
             let result = receive.recv_timeout(Duration::from_secs(5));
             // Keep the read handle alive through cleanup, including on Darwin.
             // Capture the result before the rescue so a lost call still fails.
