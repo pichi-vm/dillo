@@ -260,7 +260,7 @@ mod tests {
             .iter_mut()
             .zip(0x1ffu32.to_le_bytes())
         {
-            *slot = byte as i8;
+            *slot = byte.cast_signed();
         }
         cpu.set_lapic(&lapic).unwrap();
         let pending = |vector: u32| {
