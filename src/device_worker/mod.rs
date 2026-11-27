@@ -13,6 +13,9 @@ use dillo_virtio_blk::{RawImageBacking, VirtioBlk};
 pub(crate) mod filesystem;
 pub(crate) mod network;
 
+#[cfg(feature = "bench-in-process")]
+mod benchmark;
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Backing {
     Fs {
@@ -259,6 +262,10 @@ impl Device {
         controls: &mut Vec<dillo_worker::Control>,
         shutdown: &'static std::sync::atomic::AtomicBool,
     ) -> io::Result<Box<dyn VirtioDevice>> {
+        #[cfg(feature = "bench-in-process")]
+        if benchmark::selected(self.0.benchmark_kind())? {
+            return self.0.benchmark_local(benchmark::device::<M::Worker>);
+        }
         let (proxy, control) = self
             .0
             .start::<M::Worker>(machine.worker_memory()?, move || {

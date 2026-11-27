@@ -96,6 +96,27 @@ impl Prepared {
         self.info.queues.len()
     }
 
+    /// Benchmark-only access to select the one device kind under comparison.
+    #[cfg(feature = "bench-in-process")]
+    pub fn benchmark_kind(&self) -> u32 {
+        self.info.kind
+    }
+
+    /// Construct the same backend locally, bypassing process isolation.
+    #[cfg(feature = "bench-in-process")]
+    pub fn benchmark_local(
+        self,
+        factory: impl FnOnce(serde_json::Value, Vec<File>) -> io::Result<Box<dyn VirtioDevice>>,
+    ) -> io::Result<Box<dyn VirtioDevice>> {
+        if self.config_poll.is_some() || !self.retained.is_empty() {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
+        factory(
+            self.backend,
+            self.files.into_iter().map(File::from).collect(),
+        )
+    }
+
     pub fn with_policy(mut self, policy: Policy) -> Self {
         self.policy = policy;
         self

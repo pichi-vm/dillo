@@ -6,6 +6,9 @@ publish.workspace = true
 license.workspace = true
 description = "Parent virtio backend proxy and child lifecycle protocol."
 
+[features]
+bench-in-process = []
+
 [dependencies]
 dillo-ipc.workspace = true
 dillo-machine.workspace = true

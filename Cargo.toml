@@ -190,6 +190,8 @@ default = []
 # OS permissions to use them). Off by default so `cargo test` runs anywhere;
 # CI's hardware lane runs `cargo test -p dillo --features vm-tests`.
 vm-tests = []
+# Measurement control only; normal builds always use confined workers.
+bench-in-process = ["dillo-worker/bench-in-process"]
 
 [dependencies]
 uuid.workspace = true
