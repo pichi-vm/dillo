@@ -434,6 +434,16 @@ impl Queue {
         // Order avail_event before the next avail_idx read to avoid a lost kick.
         fence(Ordering::SeqCst);
     }
+
+    /// Check the driver's available-ring flag after `add_used` has published
+    /// completions and issued its full barrier. Unreadable flags conservatively
+    /// leave notifications enabled. Event-index suppression is not implemented.
+    pub fn needs_notification<M: QueueMemory>(&self, mem: &M) -> bool {
+        self.uses_notif_suppression
+            || mem
+                .read_u16(self.avail_ring)
+                .is_none_or(|flags| flags & 1 == 0) // VIRTQ_AVAIL_F_NO_INTERRUPT
+    }
 }
 
 #[cfg(test)]
@@ -719,6 +729,22 @@ mod tests {
         assert_eq!(ring_id, 0);
         assert_eq!(ring_len, 64);
         assert_eq!(q.next_used, Wrapping(1));
+    }
+
+    #[test]
+    fn test_notification_with_unreadable_flags_or_event_index() {
+        let (mem, _, avail, _) = setup_queue_memory(QUEUE_SIZE);
+        let mut q = make_valid_queue(QUEUE_SIZE);
+        let shared = shared_queue_memory(&mem, 0x2000, 0x1000);
+        q.add_used(&shared, 0, 64);
+        mem.write_obj::<u16>(1, avail).unwrap();
+        // Publishing the used entry does not grant access to the flags.
+        assert!(q.needs_notification(&shared));
+        let flags = shared_queue_memory(&mem, 0x1000, 0x1000);
+        assert!(!q.needs_notification(&flags));
+        // EVENT_IDX must ignore the available-ring suppression bit.
+        q.uses_notif_suppression = true;
+        assert!(q.needs_notification(&flags));
     }
 
     // --- Feature constants tests ---
