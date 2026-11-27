@@ -290,6 +290,11 @@ impl SharedRegionAccess for MappedSharedRegion {
             return Err(SharedMemoryError::AccessDenied);
         }
         let addr = self.checked_access(offset, data.len())?;
+        if let Ok(slice) = self.memory.get_slice(GuestAddress(addr), data.len()) {
+            return slice
+                .read_slice(data, 0)
+                .map_err(|e| SharedMemoryError::Backing(e.to_string()));
+        }
         self.memory
             .read(data, GuestAddress(addr))
             .map_err(|e| SharedMemoryError::Backing(e.to_string()))
@@ -301,6 +306,11 @@ impl SharedRegionAccess for MappedSharedRegion {
             return Err(SharedMemoryError::AccessDenied);
         }
         let addr = self.checked_access(offset, data.len())?;
+        if let Ok(slice) = self.memory.get_slice(GuestAddress(addr), data.len()) {
+            return slice
+                .write_slice(data, 0)
+                .map_err(|e| SharedMemoryError::Backing(e.to_string()));
+        }
         self.memory
             .write(data, GuestAddress(addr))
             .map_err(|e| SharedMemoryError::Backing(e.to_string()))
@@ -1017,6 +1027,36 @@ mod tests {
             })
             .expect_err("range crosses capability limits");
         assert!(matches!(err, SharedMemoryError::OutOfLimits));
+    }
+
+    #[test]
+    fn mapped_region_copies_across_adjacent_allocations() {
+        let memory = GuestMemoryMmap::from_ranges(&[
+            (GuestAddress(0x1000), 0x1000),
+            (GuestAddress(0x2000), 0x1000),
+        ])
+        .unwrap();
+        let shared = MappedSharedMemory::new(
+            memory,
+            SharedMemoryRequirement {
+                range: AddressRange {
+                    base: 0x1000,
+                    size: 0x2000,
+                },
+                access: SharedAccess::ReadWrite,
+            },
+        );
+        let region = shared
+            .region(SharedRange {
+                gpa: 0x1ffe,
+                size: 4,
+                access: SharedAccess::ReadWrite,
+            })
+            .unwrap();
+        region.write(0, &[1, 2, 3, 4]).unwrap();
+        let mut bytes = [0; 4];
+        region.read(0, &mut bytes).unwrap();
+        assert_eq!(bytes, [1, 2, 3, 4]);
     }
 
     #[test]
