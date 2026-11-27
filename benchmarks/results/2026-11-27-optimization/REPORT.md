@@ -355,3 +355,12 @@ the x86 image's edge interrupts do not exercise the Arm resampling cost.
 [shared-isr-lifetime-short.json.gz](shared-isr-lifetime-short.json.gz)
 records every paired metric and asset hash. The transport-level reset races,
 asynchronous helper failure, and protocol interoperability remain unqualified.
+
+The same frozen runtime also completed a separate 16-boot PCI comparison,
+with the same short design and CPU affinity. Paired worker/control throughput
+retains 98.5% for random reads, 96.6% for random writes, 97.4% for sequential
+reads and 97.9% for sequential writes; CPU/GiB is 2.6–4.0% higher. The 64-KiB
+echo case retains 98.9% throughput with 1.6% more CPU/GiB. The sequential-read
+p99 paired ratio is 1.097. These independent PCI observations are included in
+the same data file. They neither qualify final parity nor substitute for the
+MMIO results; the two transports have separate controls and acceptance tests.
