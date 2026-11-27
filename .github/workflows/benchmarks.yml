@@ -53,7 +53,9 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - name: Use the writable job temporary directory
         shell: bash
-        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+        run: |
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "BENCH_RESULTS=$RUNNER_TEMP/dillo-benchmark-results-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v6
         if: runner.environment == 'github-hosted'
         with:
@@ -119,7 +121,7 @@ jobs:
             bench_options=()
             if [ "$bench_mode" = off ]; then bench_options+=(--no-sample); fi
             python benchmarks/run.py --assets target/benchmarks/assets.json \
-              --output "target/benchmark-results/$bench_mode" --pairs "$BENCH_PAIRS" \
+              --output "$BENCH_RESULTS/$bench_mode" --pairs "$BENCH_PAIRS" \
               --duration-ms "$BENCH_DURATION_MS" --queue-depth "$BENCH_QUEUE_DEPTH" \
               --cases "$BENCH_CASES" "${bench_options[@]}"
           done
@@ -129,6 +131,6 @@ jobs:
         with:
           name: device-benchmarks-${{ matrix.platform }}
           path: |
-            target/benchmark-results/**/*.json
-            target/benchmark-results/**/*.txt
+            ${{ env.BENCH_RESULTS }}/**/*.json
+            ${{ env.BENCH_RESULTS }}/**/*.txt
           if-no-files-found: warn
