@@ -133,28 +133,37 @@ impl InterruptLine for Completion {
     fn retire(&self) -> Result<(), InterruptError> {
         let mut binding = self.binding.lock().unwrap();
         self.stopped.store(true, Ordering::Release);
-        let resampled = if binding.resampler.is_some() {
-            self.resample.as_ref().unwrap().write(1).map_err(delivery)?;
-            binding
-                .resampler
-                .take()
-                .unwrap()
-                .join()
-                .map_err(|_| delivery("MMIO resampler panicked"))
-                .and_then(|result| result.map_err(delivery))
-        } else {
-            Ok(())
-        };
-        if binding.registered {
-            // KVM deassignment flushes delivery. Retained worker duplicates
-            // then refer to an ordinary eventfd with no native authority.
+        let unregistered = if binding.registered {
+            // Revoke native delivery before stopping the resampler, including
+            // when its wake or join fails. KVM deassignment flushes delivery;
+            // retained worker duplicates then refer to an ordinary eventfd.
             self.vm
                 .fd()
                 .unregister_irqfd(&self.event, self.gsi)
-                .map_err(delivery)?;
-            binding.registered = false;
-        }
-        resampled
+                .map_err(delivery)
+                .map(|()| binding.registered = false)
+        } else {
+            Ok(())
+        };
+        let resampled = if binding.resampler.is_some() {
+            self.resample
+                .as_ref()
+                .unwrap()
+                .write(1)
+                .map_err(delivery)
+                .and_then(|()| {
+                    binding
+                        .resampler
+                        .take()
+                        .unwrap()
+                        .join()
+                        .map_err(|_| delivery("MMIO resampler panicked"))
+                        .and_then(|result| result.map_err(delivery))
+                })
+        } else {
+            Ok(())
+        };
+        unregistered.and(resampled)
     }
 }
 
