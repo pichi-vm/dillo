@@ -2159,3 +2159,27 @@ noise calibration and do not qualify small differences. Unsampled runs provide
 no process CPU or memory estimates. All raw reports, logs, schedules, paired
 values and artifact provenance are retained in
 [concurrent-sampling-arm-short.json.gz](concurrent-sampling-arm-short.json.gz).
+
+## Linux thread scheduling observer
+
+The benchmark-only `bf91eca` change reads per-thread runtime, runqueue wait and
+context-switch counters at the existing sparse snapshots. TID plus start time
+identify observations; threads that disappear or cannot be read retain an
+explicit error. The benchmark records whether scheduler statistics are enabled.
+According to the [kernel counter documentation](https://docs.kernel.org/scheduler/sched-stats.html#proc-pid-schedstat),
+runqueue wait counts time runnable but awaiting a CPU; it is not I/O sleep time
+or a request-latency histogram. No host setting is changed.
+
+Eight local smoke boots use the frozen `8196bb4` runtime, four disks, both
+transports, QD8 per disk and one 500-ms pair plus warmups. All guest reports,
+write verification, PCI-free inventories and observer captures validate, with
+no thread-read errors. The local host has scheduler statistics disabled, so its
+zero wait counters cannot establish an absence of scheduler delay. Runtime
+counter growth passes the standalone self-check. Raw evidence is retained in
+[linux-scheduler-observer-smoke.json.gz](linux-scheduler-observer-smoke.json.gz).
+
+[Arm run 46124151486](https://github.com/pichi-vm/dillo/actions/runs/46124151486)
+was dispatched on this source for two ten-second pairs per transport, including
+warmups (12 boots). It is a diagnostic of thread work and scheduling, not a
+performance qualification or an optimization. It does not modify Dillo runtime
+code or the guest workload.
