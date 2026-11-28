@@ -1,0 +1,66 @@
+{
+  "source": "0f0bfb6cc4b79b3ca8c1c37dccc3cdc740983e02",
+  "run": 46092675530,
+  "job": 140816956480,
+  "artifact_sha256": "8104e6c593f187a6d184123e851ff3db5e431d3b6aaf73023780c78a5d0abf73",
+  "native_job_evidence": [
+    "2026-11-28T01:21:21.6714796Z [command]/nix/store/ixp98f9avf8ikpdrmp40cj33g0dazyp9-git-2.54.0/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +0f0bfb6cc4b79b3ca8c1c37dccc3cdc740983e02:refs/remotes/origin/experiment/kvm-completion-failures",
+    "2026-11-28T01:21:22.2167747Z  * [new ref]         0f0bfb6cc4b79b3ca8c1c37dccc3cdc740983e02 -> origin/experiment/kvm-completion-failures",
+    "2026-11-28T01:21:22.2300225Z 0f0bfb6cc4b79b3ca8c1c37dccc3cdc740983e02",
+    "2026-11-28T01:21:22.3034996Z 0f0bfb6cc4b79b3ca8c1c37dccc3cdc740983e02",
+    "2026-11-28T01:22:13.9573459Z test wired_completion::tests::normal_resampler_stop_does_not_report_failure ... ok",
+    "2026-11-28T01:22:13.9576633Z test wired_completion::tests::resampler_failure_notifies_before_join ... ok",
+    "2026-11-28T01:22:13.9760186Z test wired_completion::tests::arm_level_reasserts_until_ack_and_retired_exports_cannot_signal ... ok",
+    "2026-11-28T01:22:13.9762594Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.02s",
+    "2026-11-28T01:22:13.9765000Z test wired_completion::tests::arm_level_reasserts_until_ack_and_retired_exports_cannot_signal ... ok",
+    "2026-11-28T01:22:13.9767299Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.02s",
+    "2026-11-28T01:22:21.5638651Z test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+    "2026-11-28T01:22:22.7792411Z test result: ok. 57 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 1.21s",
+    "2026-11-28T01:26:17.7485614Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 28 filtered out; finished in 0.42s"
+  ],
+  "environment": {
+    "platform": "Linux-7.0.10-aarch64-with-glibc2.42",
+    "uname": {
+      "system": "Linux",
+      "node": "ares",
+      "release": "7.0.10",
+      "version": "#1-NixOS SMP PREEMPT Tue Jan  1 00:00:00 UTC 1980",
+      "machine": "aarch64",
+      "processor": ""
+    },
+    "rustc": "rustc 1.99.0-nightly (3659db0d3 2026-07-05)\nbinary: rustc\ncommit-hash: 3659db0d3e2cd634c766fcda79ed118eca31a9fd\ncommit-date: 2026-07-05\nhost: aarch64-unknown-linux-gnu\nrelease: 1.99.0-nightly\nLLVM version: 22.1.8\n",
+    "source": "0f0bfb6cc4b79b3ca8c1c37dccc3cdc740983e02",
+    "runtime_source": "0f0bfb6cc4b79b3ca8c1c37dccc3cdc740983e02",
+    "dirty": "",
+    "hashes": {
+      "dillo": "5350300417ec1fdf945ede5733ac1d18c2d5546173f2b61c233d44f81dddad23",
+      "arma": "70e7818f24e8bbe1324f321373a4ec79a633cc67c02bdf08fe86c7821186fa21",
+      "snuffler": "9f4a4ecfc89e6862b856e5216fb9d68aa42214ab9271ef4f0f1d785393018df0",
+      "kernel": "e3544b10603acbf3db492cb52e000d22ba202cb4b63b9add027565683e11c591"
+    },
+    "experimental_shared_isr": true,
+    "options": {
+      "assets": "target/benchmarks/assets.json",
+      "baseline_assets": null,
+      "output": "/var/lib/private/github-runner-work/ares-2/_temp/dillo-benchmark-results-46092675530-1/shared/off",
+      "cases": "block-mmio-only",
+      "pairs": 1,
+      "duration_ms": 1000,
+      "queue_depth": 1,
+      "warmup_ms": 250,
+      "sample_ms": 50,
+      "timeout": 180,
+      "no_sample": true,
+      "backing_dir": null,
+      "extra_cmdline": "",
+      "serial": false
+    }
+  },
+  "boot_hashes": {
+    "shared/off/block-mmio-only-00-local/result.json": "4ebcea15b3e88a75f981229ba2402723d5e71836a0e6a7458b7695d0ad14ee2a",
+    "shared/off/block-mmio-only-00-worker/result.json": "3482069420d3122bd977d49879686aba360c6761ec4dcb4d9225153a0051966e",
+    "shared/off/block-mmio-only-01-local/result.json": "828cf3829d4d59e8ae74afebc7bb51fd51fcd9e1db126e01b9325a0220825966",
+    "shared/off/block-mmio-only-01-worker/result.json": "e2c2ff4e3815ca9f8946f716e2b84198f012e88ef23bea3e20e4f1e7f6329bd1"
+  },
+  "scope": "Native Arm level/ACK/reassert/stale-export lifecycle plus live-error boundary/normal-stop tests; four PCI-free block smoke boots. Not performance qualification. Only OOP supplies a live failure observer; benchmark control retains join reporting."
+}

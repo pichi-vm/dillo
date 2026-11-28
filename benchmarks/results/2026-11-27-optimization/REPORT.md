@@ -1151,3 +1151,23 @@ establish these effects. The candidate remains separate rather than promoting
 the x86 gains across all platforms. All observations, intervals, hashes and
 run provenance are retained in
 [network-tx-scratch-arm-long.json.gz](network-tx-scratch-arm-long.json.gz).
+
+## KVM resampler lifetime and failure reporting
+
+The experimental wired binding now attempts native irqfd deassignment before
+waking and joining its resampler, and attempts both cleanup stages on error.
+Asynchronous resampler errors and panics notify the existing worker supervisor;
+the original error is also retained for join. The callback uses the existing
+weak session owner without taking the worker lifecycle barrier. The benchmark
+in-process control has no such observer and retains join-time reporting.
+
+Native x86 and [Arm run 46092675530](https://github.com/pichi-vm/dillo/actions/runs/46092675530)
+pass the level/ACK/reassertion/stale-export checks at `0f0bfb6`, which includes
+the preceding retirement correction `4390fea`. Focused checks cover error and
+panic notification before join and normal shutdown without a failure. Related
+MMIO/worker compilation, library checks and strict Clippy pass locally. The
+Arm run also completes four PCI-free block smoke boots. This is correctness
+evidence; the one-second smoke schedule does not qualify performance.
+[kvm-resampler-lifecycle.json](kvm-resampler-lifecycle.json) retains the exact
+source, native job evidence and boot hashes. Shared-status interoperability,
+concurrent ACK/reset qualification and WHP level/EOI behavior remain open.
