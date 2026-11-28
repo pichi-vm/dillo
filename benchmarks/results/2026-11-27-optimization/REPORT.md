@@ -1818,3 +1818,47 @@ logs are retained; expected failure-case diagnostics are not removed.
 negative-control and fixed logs, native log, source identities and scope.
 This establishes optional-feature fallback, not an assigned extension,
 complete external-backend interoperability, or all ACK/EOI/reset races.
+
+## Windows reply-probe failure
+
+[Run 46112447857](https://github.com/pichi-vm/dillo/actions/runs/46112447857)
+at `281772e` passes its native prerequisites and builds both executables, but
+fails during the first PCI worker warmup. The guest reports `Connection reset
+by peer (os error 104)` and produces no measured operations. Dillo itself
+exits zero; the harness correctly rejects the guest's error report. No baseline
+boot or measured pair completes, so this run supplies no performance ratio.
+The failure does not by itself establish whether the reply probe caused the
+reset. No automatic performance rerun is used to replace this observation.
+
+All seven artifact files, including the failed guest report and both streams,
+are retained with hashes and source/run identity in
+[network-reply-probe-windows-failed.json.gz](network-reply-probe-windows-failed.json.gz).
+The source remains experimental. The separate memory/TX combined candidate
+does not include any writable-interest, read-tracking or reply-probe change.
+
+## Combined mapping-owner and TX-storage candidate
+
+Candidate `8196bb4` composes the separately measured mapping-owner change
+(`604c9de`, 16 changed lines) and TX storage reuse (`c2531a9`, 94 changed lines)
+on the current performance branch's `1b8a795` baseline. The latter now also
+releases oversized TX allocations after each frame, so one guest-selected
+descriptor size cannot leave a large cache while the worker waits for its
+next kick. This is a cache policy, not a new transmit-size refusal. Its fixture
+checks that a large frame is still forwarded and its scratch capacity released.
+
+Local validation passes 23 MMIO, 28 virtio and 57 network tests (four external
+network cases ignored), formatting and strict all-target/all-feature Clippy.
+The workflow adds a four-case primary selection and native memory/virtio
+checks. Prespecified comparisons cover block and network over both PCI and
+PCI-free MMIO: four balanced five-second pairs, QD1, sampling, shared status
+and 80 boots per host including warmups. Windows retains its prebuilt clock
+diagnostic kernel. Frozen executables have matched guest assets. This is a
+combined candidate screen; the prior macOS random-read CPU observation and
+other storage variation remain open, and no parity result is claimed yet.
+
+Native comparisons run on [macOS 46113398827](https://github.com/pichi-vm/dillo/actions/runs/46113398827),
+[Arm Linux 46113400098](https://github.com/pichi-vm/dillo/actions/runs/46113400098)
+and [Windows 46113636413](https://github.com/pichi-vm/dillo/actions/runs/46113636413).
+The local x86 comparison freezes both release builds before measurement and
+uses CPUs 24–27; no additional local compilation or test VM runs during timing.
+The unrelated long-lived VM remains present, so no host exclusivity is claimed.
