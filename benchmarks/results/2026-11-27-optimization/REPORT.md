@@ -2259,3 +2259,54 @@ The native Arm follow-up is prespecified as two ten-second pairs per transport,
 including warmups (12 boots). It investigates thread/disk fairness and guest
 runnable delay; cumulative counters cannot assign an individual request's tail
 to a particular cause. This diagnostic does not qualify performance.
+
+The [completed Arm run](https://github.com/pichi-vm/dillo/actions/runs/46126624927)
+validates all 12 boots and 1,536 thread records, with no counter-read errors.
+Every thread's count, maximum latency and elapsed time reconcile with the
+original aggregate report. The PCI-free inventory and write checks pass.
+Sequential-read worker throughput is 153.1%/160.9% of control for PCI/MMIO,
+while p99 is 232.5%/264.5%. Several disks and most of their threads exhibit
+the longer tails; this is not one isolated request thread skewing the aggregate.
+
+Guest runnable waiting also differs substantially. In the PCI runs, the median
+request thread spends 57–59% of the measured interval runnable but waiting,
+versus 15–16% in the control; MMIO is 57–59% versus 17–19%. Summed request-thread
+runtime is 0.38/0.40 of a guest CPU for PCI/MMIO workers, versus 0.22/0.20–0.21
+in the controls. These counters include the start barrier and counter reads;
+they neither measure interrupt time separately nor assign a particular p99
+request to scheduling or notification delay. The workload retains one guest
+vCPU and 32 blocking request threads. All disk/thread distributions, raw output,
+host samples and artifact provenance are retained in
+[concurrent-thread-distribution-arm.json.gz](concurrent-thread-distribution-arm.json.gz).
+
+## Bounded block-completion experiment
+
+Source inspection found that block notification waits until `pop` observes an
+empty ring; each `pop` rereads the available index, so guest refills can extend
+the batch. A deterministic fixture starts with two requests and appends two
+while they execute. The unchanged worker notifies only after all four; the
+experimental worker notifies after the original pair and again after the rest.
+The fixture also crosses the 16-bit index boundary and adopts pending queue
+configuration before sampling the batch.
+
+At `4e7485f`, the 14-line runtime change bounds each batch to a snapshot of
+available work after the first admission, capped by queue size. It continues
+draining after notifying, preserving pending kicks, pause/stop checks and final
+notification. There is no new public API, protocol feature or arbitrary fixed
+request limit. The extra metadata read per batch is a cost to measure in both
+execution modes. All 28 queue and nine block checks pass (one external qcow2
+case remains ignored), with strict Clippy and formatting checks passing.
+This proves the changed notification boundary, not a cause or repair of the
+native latency gap. The candidate remains outside the milestone branch while
+a prespecified balanced comparison evaluates throughput, CPU and latency.
+Eight local 500-ms boots also complete, covering both execution modes and
+transports, four disks at queue depth eight and verified writes. All 1,024
+guest-thread records reconcile with their aggregate reports. These short runs
+establish execution, not a performance improvement;
+[block-completion-batch-smoke.json.gz](block-completion-batch-smoke.json.gz)
+retains their raw output, the initial fixture compilation error, the expected
+old-code assertion failure, final check logs and comparison plan.
+The [Arm comparison](https://github.com/pichi-vm/dillo/actions/runs/46128203605)
+uses four balanced five-second pairs per transport and revision, comparing
+`4e7485f` with `3c6d63a` using identical guest assets. All 40 boots, including
+warmups and slow observations, are required for the planned analysis.
