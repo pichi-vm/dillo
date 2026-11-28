@@ -204,9 +204,19 @@ fn a_drain_from_another_device_cannot_stop_a_ring() {
                 dillo_virtio::Kick::new().unwrap(),
                 dillo_virtio::Kick::new().unwrap(),
             ],
-            host,
+            host.clone(),
         ))
         .unwrap();
+    let mut rebound = Slot::new(make());
+    assert!(
+        rebound
+            .start(VirtioActivate::with_host(
+                vec![ring.worker_queue(256), Queue::new(256)],
+                (0..2).map(|_| dillo_virtio::Kick::new().unwrap()).collect(),
+                host,
+            ))
+            .is_err()
+    );
     let mut unrelated = Slot::new(make());
     let (retained, _) = ring.stop(&unrelated.drained().unwrap()).unwrap_err();
     ring = retained;
@@ -214,4 +224,24 @@ fn a_drain_from_another_device_cannot_stop_a_ring() {
     let stopped = ring.stop(&owner.drained().unwrap()).unwrap();
     assert_eq!(stopped.base(), 0);
     owner.reset().unwrap();
+}
+
+#[test]
+fn duplicate_ring_endpoints_fail_before_spawning() {
+    use dillo_virtio::ring::Ring;
+    console_stdio();
+    let host = Arc::new(Host::default());
+    let ring = Ring::new().configure(Queue::new(256)).unwrap().start();
+    let device = Device::new(dillo_virtio_console::VirtioConsole::new())
+        .configure(0)
+        .unwrap();
+    let (failed, _) = device
+        .start(VirtioActivate::with_host(
+            vec![ring.worker_queue(256), ring.worker_queue(256)],
+            (0..2).map(|_| dillo_virtio::Kick::new().unwrap()).collect(),
+            host.clone(),
+        ))
+        .unwrap_err();
+    assert_eq!(host.attempts.load(Ordering::Relaxed), 0);
+    drop(failed);
 }

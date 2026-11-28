@@ -151,7 +151,7 @@ impl VirtioActivate {
             barrier: Arc::clone(barrier),
         }));
         for queue in &mut self.queues {
-            queue.pause_with(barrier);
+            queue.pause_with(barrier)?;
         }
         Ok(self.queue_evts.clone())
     }

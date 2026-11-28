@@ -267,11 +267,21 @@ pub struct Queue {
 
 impl Queue {
     /// Stop new admissions while the host drains already consumed requests.
-    pub(crate) fn pause_with(&mut self, barrier: &Arc<crate::pause::Barrier>) {
-        self.pause = Some(Arc::clone(&barrier.requested));
+    pub(crate) fn pause_with(
+        &mut self,
+        barrier: &Arc<crate::pause::Barrier>,
+    ) -> Result<(), crate::ActivateError> {
         if let Some(control) = &self.control {
-            *control.domain.lock().unwrap() = Some(Arc::downgrade(barrier));
+            let mut domain = control.domain.lock().unwrap();
+            if domain.as_ref().and_then(std::sync::Weak::upgrade).is_some() {
+                return Err(crate::ActivateError::InvalidConfig(
+                    "ring already belongs to an execution domain".into(),
+                ));
+            }
+            *domain = Some(Arc::downgrade(barrier));
         }
+        self.pause = Some(Arc::clone(&barrier.requested));
+        Ok(())
     }
 
     /// Bind a queue to an independently controlled ring. Configuration is
