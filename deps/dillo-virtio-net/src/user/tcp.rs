@@ -14,8 +14,8 @@ use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::time::{Duration, Instant};
 
-use mio::Token;
 use mio::net::TcpStream;
+use mio::{Interest, Registry, Token};
 use smoltcp::socket::tcp;
 
 /// How long the host-side connect may take before the guest connection is reset.
@@ -34,6 +34,8 @@ pub(super) struct TcpFlow {
     pub(super) stream: TcpStream,
     /// mio token this stream is registered under (for deregistration on close).
     pub(super) token: Token,
+    /// Readiness currently registered with mio.
+    interest: Interest,
     /// The non-blocking connect has completed (peer address resolved).
     connected: bool,
     /// The guest connection has reached `Established` at least once. Until then
@@ -69,6 +71,7 @@ impl TcpFlow {
         Self {
             stream,
             token,
+            interest: Interest::READABLE | Interest::WRITABLE,
             connected: false,
             established_seen: false,
             host_write_closed: false,
@@ -84,6 +87,7 @@ impl TcpFlow {
         Self {
             stream,
             token,
+            interest: Interest::READABLE | Interest::WRITABLE,
             connected: true,
             established_seen: false,
             host_write_closed: false,
@@ -127,7 +131,7 @@ impl TcpFlow {
     /// Pump bytes between the guest-facing `socket` and the host `stream` once.
     /// Returns `true` if any bytes moved in either direction (so the caller
     /// knows to keep draining before it sleeps).
-    pub(super) fn pump(&mut self, socket: &mut tcp::Socket<'_>) -> bool {
+    pub(super) fn pump(&mut self, socket: &mut tcp::Socket<'_>, registry: &Registry) -> bool {
         if !self.ensure_connected() {
             // Either still connecting, or a connect error already set `reset`.
             if self.reset {
@@ -147,6 +151,9 @@ impl TcpFlow {
         if !self.reset {
             self.maybe_shutdown_host_write(socket);
             worked |= self.host_to_guest(socket);
+            if self.update_interest(socket, registry).is_err() {
+                self.reset = true;
+            }
         }
         if self.reset {
             // A host-side failure (refused/reset/broken): RST the guest. The next
@@ -156,6 +163,25 @@ impl TcpFlow {
             socket.abort();
         }
         worked
+    }
+
+    fn update_interest(
+        &mut self,
+        socket: &tcp::Socket<'_>,
+        registry: &Registry,
+    ) -> std::io::Result<()> {
+        // A blocked read rearms all mio interests on Windows. Watching an
+        // already-writable stream without pending output would keep waking us.
+        let interest = if socket.can_recv() && !self.host_write_closed {
+            Interest::READABLE | Interest::WRITABLE
+        } else {
+            Interest::READABLE
+        };
+        if interest != self.interest {
+            registry.reregister(&mut self.stream, self.token, interest)?;
+            self.interest = interest;
+        }
+        Ok(())
     }
 
     /// Wait for the non-blocking connect to complete. Sets `reset` on timeout.
@@ -251,4 +277,52 @@ enum ReadOutcome {
     Errored,
     Eof,
     WouldBlock,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_connected_flow_does_not_rearm_writes_after_a_blocked_read() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let mut poll = mio::Poll::new().unwrap();
+        let mut stream = TcpStream::from_std(stream);
+        poll.registry()
+            .register(
+                &mut stream,
+                Token(1),
+                Interest::READABLE | Interest::WRITABLE,
+            )
+            .unwrap();
+        let mut flow = TcpFlow::new_connected(stream, Token(1));
+        let socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 1024]),
+            tcp::SocketBuffer::new(vec![0; 1024]),
+        );
+        let mut events = mio::Events::with_capacity(8);
+        #[cfg(target_os = "windows")]
+        for _ in 0..3 {
+            assert_eq!(
+                flow.stream.read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            poll.poll(&mut events, Some(Duration::from_secs(1)))
+                .unwrap();
+            assert!(events.iter().any(mio::event::Event::is_writable));
+        }
+        flow.update_interest(&socket, poll.registry()).unwrap();
+        for _ in 0..4 {
+            assert_eq!(
+                flow.stream.read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            poll.poll(&mut events, Some(Duration::from_millis(10)))
+                .unwrap();
+            assert!(!events.iter().any(mio::event::Event::is_writable));
+        }
+    }
 }

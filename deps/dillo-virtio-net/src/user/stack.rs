@@ -498,7 +498,7 @@ impl Stack {
         let sockets = &mut self.sockets;
         for (handle, flow) in &mut self.tcp_flows {
             let socket = sockets.get_mut::<tcp::Socket<'_>>(*handle);
-            worked |= flow.pump(socket);
+            worked |= flow.pump(socket, self.poll.registry());
         }
         worked |= self.relay_udp_flows();
         worked
