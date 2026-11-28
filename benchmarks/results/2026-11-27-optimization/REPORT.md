@@ -1862,3 +1862,54 @@ and [Windows 46113636413](https://github.com/pichi-vm/dillo/actions/runs/4611363
 The local x86 comparison freezes both release builds before measurement and
 uses CPUs 24–27; no additional local compilation or test VM runs during timing.
 The unrelated long-lived VM remains present, so no host exclusivity is claimed.
+
+The local x86, macOS and Arm comparisons each complete all 80 boots. Source
+and executable hashes, matched guest assets, balanced schedules, minimum
+five-second operations and empty guest/sampling error lists are verified.
+The PCI-free images report no PCI devices. These are four-pair screens;
+their medians do not replace the twelve-pair calibrated network table.
+
+Bulk-network worker CPU/GiB falls by 10.6%/13.0% on x86, 15.0%/14.7% on
+Arm, and 14.6%/15.2% on macOS (PCI/MMIO respectively). The same changes also
+benefit the control. macOS worker/control bulk CPU/GiB remains 118.1%/114.7%,
+with throughput 92.4%/94.5%; the common-path improvement does not remove its
+isolation cost.
+
+Storage observations remain mixed. On x86, PCI-free sequential writes lose
+8.6% throughput and use 11.6% more CPU/GiB relative to the old worker; all
+four pairs have that direction while the control improves in three. This
+result is retained rather than discarded using the earlier write-variation
+evidence, which does not establish this observation's cause. Sequential
+reads improve on both transports, but the new worker still trails the new
+control. Arm PCI random reads lose 2.3% throughput and use 2.2% more CPU,
+while PCI-free random reads improve by 6.0%/7.3%. macOS sequential I/O
+improves, but the earlier small PCI-free random-read CPU concern remains:
+this screen observes +0.4%. No storage parity or blanket promotion follows.
+
+All workload metrics, both execution modes, every paired value and provenance
+are retained in [x86](memory-tx-integration-x86-short.json.gz),
+[Arm](memory-tx-integration-arm-short.json.gz) and
+[macOS](memory-tx-integration-macos-short.json.gz). Windows remains in progress
+at this checkpoint.
+
+## Concurrent PCI-free block workload
+
+The harness now runs the existing four-disk concurrent snuffler workload over
+PCI-free MMIO as well as PCI. The image declares five MMIO slots for its
+console and four disks, and the guest's PCI inventory must be empty.
+The first new smoke guest completed successfully, but the harness rejected
+its `block-group` report because the validator expected per-disk operation
+rows. The corrected validator accepts the aggregate while requiring all four
+disk names and the expected total in-flight bound.
+
+At harness `3383874`, using frozen runtime `8196bb4`, all eight subsequent
+smoke boots pass: a warmup and one 500-ms pair on each transport, queue depth
+eight per disk. Every boot contains four 64-MiB disks, four grouped operations,
+a bound of 32 in flight and verified writes. The sampled process counts are
+two for the control and six for the isolated configuration. Both the initial
+validator failure and the complete corrected records are retained in
+[concurrent-mmio-smoke.json.gz](concurrent-mmio-smoke.json.gz).
+This establishes workload execution and report validation, not performance
+parity. The prespecified four-pair, five-second screen now measures both
+transports locally and on the free Arm/macOS runners; Windows waits for its
+current comparison and sampler diagnostic.

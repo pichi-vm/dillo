@@ -187,7 +187,12 @@ def run_vm(args, assets, image, disks, case, mode, label):
     assert not perf["errors"] and perf["operations"], f"guest benchmark failed: {directory}"
     expected_devices = {"net"} if case.startswith("net-") else {
         f"vd{chr(ord('a') + i)}" for i in range(len(disks))}
-    observed_devices = {op["device"] for op in perf["operations"]} - {"block-group"}
+    observed_devices = {op["device"] for op in perf["operations"]}
+    if case.startswith("block4-concurrent-"):
+        assert expected_devices <= {block["name"] for block in report["block"]}, directory
+        assert all(op["max_in_flight"] == len(disks) * args.queue_depth
+                   for op in perf["operations"]), f"wrong concurrent group size: {directory}"
+        expected_devices = {"block-group"}
     assert observed_devices == expected_devices, (expected_devices, observed_devices, directory)
     assert all(op["verified"] is not False and op["latency"]["count"] > 0
                for op in perf["operations"]), f"invalid result: {directory}"
@@ -330,7 +335,7 @@ def main():
         port = server.server_address[1]
         for case in args.cases.split(","):
             assert case in ("block-pci", "block-mmio", "block4-pci", "block4-concurrent-pci",
-                            "net-pci", "block-mmio-only", "net-mmio-only")
+                            "block4-concurrent-mmio-only", "net-pci", "block-mmio-only", "net-mmio-only")
             image = args.output / f"{case}.pmi"
             count = 0 if case.startswith("net-") else (4 if case.startswith("block4-") else 1)
             selected = ",".join(f"vd{chr(ord('a') + i)}" for i in range(count))
@@ -338,7 +343,7 @@ def main():
                        f"dillo.bench_ms={args.duration_ms} dillo.bench_warmup_ms={args.warmup_ms} "
                        f"dillo.bench_qd={args.queue_depth} dillo.bench_devices={selected}")
             cmdline += " " + args.extra_cmdline
-            if case == "block4-concurrent-pci":
+            if case.startswith("block4-concurrent-"):
                 cmdline += " dillo.bench_concurrent"
             if case.startswith("net-"):
                 cmdline += (f" ip=10.0.2.15::10.0.2.2:255.255.255.0::eth0:off"
@@ -350,7 +355,7 @@ def main():
             if args.serial:
                 build.append("--serial")
             if case.endswith("-mmio-only"):
-                build += ["--pci-slots", "0", "--mmio-slots", "2"]
+                build += ["--pci-slots", "0", "--mmio-slots", str(1 + max(count, 1))]
             build.append(str(image))
             subprocess.run(build, check=True)
             save(args.output / f"{case}-image.json", {"command": build, "sha256": digest(image)})

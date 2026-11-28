@@ -202,7 +202,10 @@ requests that finish after the deadline. Reported elapsed time includes those
 completions. Write verification happens afterward. The default remains the
 original single-thread path. Use separate output directories for each depth.
 
-`--cases block4-concurrent-pci` measures all four disks in the same window.
+`--cases block4-concurrent-pci,block4-concurrent-mmio-only` measures all four
+disks in the same window over each transport. The PCI-free case declares five
+MMIO slots for the console and four disks, with no PCI bridge; the existing
+guest PCI-inventory assertion applies. Select `concurrent-transports` in CI.
 Each has the chosen concurrency bound and independent ranges and buffers;
 the report's `block-group` operation aggregates their bytes and latency
 samples. With the default depth, its total in-flight bound is four. The old
