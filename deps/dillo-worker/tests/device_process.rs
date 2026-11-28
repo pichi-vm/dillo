@@ -3,6 +3,7 @@
 
 //! Exercise the real executable/process boundary and its resource confinement.
 
+use dillo_virtio::lifecycle::Backend as DeviceBackend;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::sync::{
@@ -94,7 +95,7 @@ struct Backend {
     mode: String,
 }
 
-impl VirtioDevice for Backend {
+impl DeviceBackend for Backend {
     fn device_type(&self) -> u32 {
         self.device.device_type()
     }
@@ -115,12 +116,6 @@ impl VirtioDevice for Backend {
     }
     fn reset(&mut self) -> Result<(), ActivateError> {
         self.device.reset()
-    }
-    fn quiesce(&mut self) -> Result<(), ActivateError> {
-        self.device.quiesce()
-    }
-    fn resume(&mut self) -> Result<(), ActivateError> {
-        self.device.resume()
     }
     fn activate(
         &mut self,
@@ -237,18 +232,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                        config: serde_json::Value,
                        mut files: Vec<File>,
                        grants: Option<dillo_worker::grant::Client>|
-         -> io::Result<Box<dyn VirtioDevice>> {
+         -> io::Result<Box<dyn DeviceBackend>> {
             if let Some(backend) = prepared {
-                return Ok(Box::new(dillo_virtio_net::VirtioNet::new(
-                    [2, 0, 0, 0, 0, 1],
-                    backend,
+                return Ok(Box::new(dillo_virtio::lifecycle::Legacy(
+                    dillo_virtio_net::VirtioNet::new([2, 0, 0, 0, 0, 1], backend),
                 )));
             }
             #[cfg(target_os = "linux")]
             if config["mode"] == "frames" {
-                return Ok(Box::new(dillo_virtio_net::VirtioNet::new(
-                    [2, 0, 0, 0, 0, 1],
-                    Arc::new(dillo_virtio_net::FrameFd::new(files.remove(0))),
+                return Ok(Box::new(dillo_virtio::lifecycle::Legacy(
+                    dillo_virtio_net::VirtioNet::new(
+                        [2, 0, 0, 0, 0, 1],
+                        Arc::new(dillo_virtio_net::FrameFd::new(files.remove(0))),
+                    ),
                 )));
             }
             if config["mode"] == "sockets" {

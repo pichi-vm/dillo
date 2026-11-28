@@ -11,7 +11,7 @@ use dillo_virtio_console::{
     pipe::{Direction, PipeEnd, Transfer},
 };
 
-pub(super) fn device(mut files: Vec<File>) -> Box<dyn VirtioDevice> {
+pub(super) fn device(mut files: Vec<File>) -> Box<dyn dillo_virtio::lifecycle::Backend> {
     dillo_virtio_console::worker_stdio(files.remove(0), files.remove(0));
     let sizes = files.remove(0);
     let rx = PipeEnd::from_file("api", Direction::Rx, files.remove(0));
@@ -121,6 +121,9 @@ pub(super) fn exercise() -> io::Result<()> {
         kicks[3].write(1)?;
         wait_used(&memory, 3, 1)?;
         control.quiesce()?;
+        let mut before_resize = [0; 4];
+        proxy.read_config(0, &mut before_resize);
+        sizes.write_all(&[80 + epoch, 0, 25, 0])?;
         submit(&memory, 4, 1, &[0; 3], true);
         host_tx.write_all(b"rx!")?;
         std::thread::sleep(Duration::from_millis(20));
@@ -130,13 +133,15 @@ pub(super) fn exercise() -> io::Result<()> {
                 .unwrap(),
             0
         );
+        let mut while_paused = [0; 4];
+        proxy.read_config(0, &mut while_paused);
+        assert_eq!(while_paused, before_resize, "resize worker must also drain");
         control.resume()?;
         wait_used(&memory, 4, 1)?;
         memory
             .read_slice(&mut received, GuestAddress(0x10_4000))
             .unwrap();
         assert_eq!(&received, b"rx!");
-        sizes.write_all(&[80 + epoch, 0, 25, 0])?;
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let mut config = [0; 4];

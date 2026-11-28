@@ -11,7 +11,7 @@ on:
       cases:
         description: Workload selection
         type: choice
-        options: [all, block-transports, net-transports, concurrent-transports, pci-free, block-pci, block-mmio, block4-pci, block4-concurrent-pci, block4-concurrent-mmio-only, net-pci, block-mmio-only, net-mmio-only]
+        options: [all, lifecycle, block-transports, net-transports, concurrent-transports, pci-free, block-pci, block-mmio, block4-pci, block4-concurrent-pci, block4-concurrent-mmio-only, net-pci, block-mmio-only, net-mmio-only]
         default: all
       pairs:
         description: Measured pairs after the retained warm-up
@@ -172,7 +172,7 @@ jobs:
       - name: Measure paired workloads
         shell: bash
         env:
-          BENCH_CASES: ${{ inputs.cases == 'block-transports' && 'block-pci,block-mmio-only' || inputs.cases == 'net-transports' && 'net-pci,net-mmio-only' || inputs.cases == 'concurrent-transports' && 'block4-concurrent-pci,block4-concurrent-mmio-only' || inputs.cases == 'pci-free' && 'block-mmio-only,net-mmio-only' || inputs.cases != 'all' && inputs.cases || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,block4-concurrent-mmio-only,net-pci,block-mmio-only,net-mmio-only' }}
+          BENCH_CASES: ${{ inputs.cases == 'lifecycle' && 'block-pci,block-mmio-only,net-pci,net-mmio-only' || inputs.cases == 'block-transports' && 'block-pci,block-mmio-only' || inputs.cases == 'net-transports' && 'net-pci,net-mmio-only' || inputs.cases == 'concurrent-transports' && 'block4-concurrent-pci,block4-concurrent-mmio-only' || inputs.cases == 'pci-free' && 'block-mmio-only,net-mmio-only' || inputs.cases != 'all' && inputs.cases || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,block4-concurrent-mmio-only,net-pci,block-mmio-only,net-mmio-only' }}
           BENCH_SAMPLING: ${{ inputs.sampling || 'on' }}
           BENCH_PAIRS: ${{ inputs.pairs || 10 }}
           BENCH_DURATION_MS: ${{ inputs.duration_ms || 5000 }}

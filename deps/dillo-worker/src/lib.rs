@@ -6,8 +6,8 @@
 mod child;
 pub mod grant;
 mod parent;
-mod pause;
 mod queue;
+mod ring;
 
 pub use child::{run, run_prepared};
 pub use parent::{Control, DeviceInfo, Prepared, Proxy};

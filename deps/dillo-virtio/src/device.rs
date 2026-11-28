@@ -141,6 +141,21 @@ impl VirtioActivate {
         }
     }
 
+    pub(crate) fn managed(
+        &mut self,
+        barrier: &Arc<crate::pause::Barrier>,
+    ) -> Result<Vec<Kick>, ActivateError> {
+        let host = self.host()?;
+        self.host = Some(Arc::new(crate::lifecycle::Host {
+            inner: host,
+            barrier: Arc::clone(barrier),
+        }));
+        for queue in &mut self.queues {
+            queue.pause_with(barrier);
+        }
+        Ok(self.queue_evts.clone())
+    }
+
     pub fn queue_memory(&self) -> Arc<dyn QueueMemory> {
         Arc::clone(&self.queue_memory)
     }

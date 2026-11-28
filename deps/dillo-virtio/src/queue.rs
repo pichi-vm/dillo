@@ -202,34 +202,27 @@ impl QueueMemory for SharedQueueMemory {
 /// follow the host's drain barrier; stopping alone does not drain admitted I/O.
 /// The fast path reads atomics, locking only when adopting new configuration.
 #[derive(Debug, Default)]
-pub struct QueueControl {
-    started: AtomicBool,
-    enabled: AtomicBool,
+pub(crate) struct QueueControl {
+    pub(crate) started: AtomicBool,
+    pub(crate) enabled: AtomicBool,
+    pub(crate) domain: Mutex<Option<std::sync::Weak<crate::pause::Barrier>>>,
     progress: AtomicU16,
     pending: Mutex<Option<Queue>>,
     updated: AtomicBool,
 }
 
 impl QueueControl {
-    pub fn started(&self) -> bool {
+    pub(crate) fn started(&self) -> bool {
         self.started.load(Ordering::Acquire)
     }
 
-    pub fn set_started(&self, started: bool) {
-        self.started.store(started, Ordering::Release);
-    }
-
-    pub fn set_enabled(&self, enabled: bool) {
-        self.enabled.store(enabled, Ordering::Release);
-    }
-
     /// Sample only after draining the queue's admitted work.
-    pub fn base(&self) -> u16 {
+    pub(crate) fn base(&self) -> u16 {
         self.progress.load(Ordering::Acquire)
     }
 
     /// Replace a stopped ring's configuration without resetting device state.
-    pub fn configure(&self, mut queue: Queue) {
+    pub(crate) fn configure(&self, mut queue: Queue) {
         queue.control = None;
         queue.pause = None;
         self.progress.store(queue.next_avail.0, Ordering::Release);
@@ -274,13 +267,16 @@ pub struct Queue {
 
 impl Queue {
     /// Stop new admissions while the host drains already consumed requests.
-    pub fn pause_with(&mut self, requested: Arc<std::sync::atomic::AtomicBool>) {
-        self.pause = Some(requested);
+    pub(crate) fn pause_with(&mut self, barrier: &Arc<crate::pause::Barrier>) {
+        self.pause = Some(Arc::clone(&barrier.requested));
+        if let Some(control) = &self.control {
+            *control.domain.lock().unwrap() = Some(Arc::downgrade(barrier));
+        }
     }
 
     /// Bind a queue to an independently controlled ring. Configuration is
     /// adopted at the next admission, after the host has drained old work.
-    pub fn control_with(&mut self, control: Arc<QueueControl>) {
+    pub(crate) fn control_with(&mut self, control: Arc<QueueControl>) {
         self.control = Some(control);
     }
 

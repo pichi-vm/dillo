@@ -92,7 +92,8 @@ pub(crate) fn device<H: dillo_machine::worker::WorkerHost>(
     value: serde_json::Value,
     mut files: Vec<File>,
     grants: Option<dillo_worker::grant::Client>,
-) -> io::Result<Box<dyn VirtioDevice>> {
+) -> io::Result<Box<dyn dillo_virtio::lifecycle::Backend>> {
+    use dillo_virtio::lifecycle::Legacy;
     let backing: Backing = serde_json::from_value(value).map_err(io::Error::other)?;
     #[cfg(not(target_os = "macos"))]
     let _ = prepared;
@@ -103,7 +104,7 @@ pub(crate) fn device<H: dillo_machine::worker::WorkerHost>(
             }
             let backend = filesystem::GrantedFs::new(grants.ok_or(io::ErrorKind::InvalidInput)?);
             return dillo_virtio_fs::VirtioFs::new(&tag, Arc::new(backend), readonly)
-                .map(|device| Box::new(device) as Box<dyn VirtioDevice>)
+                .map(|device| Box::new(Legacy(device)) as Box<dyn dillo_virtio::lifecycle::Backend>)
                 .map_err(io::Error::other);
         }
         #[cfg(target_os = "macos")]
@@ -111,10 +112,10 @@ pub(crate) fn device<H: dillo_machine::worker::WorkerHost>(
             if !files.is_empty() {
                 return Err(io::ErrorKind::InvalidInput.into());
             }
-            return Ok(Box::new(dillo_virtio_net::VirtioNet::new(
+            return Ok(Box::new(Legacy(dillo_virtio_net::VirtioNet::new(
                 mac,
                 prepared.ok_or(io::ErrorKind::InvalidInput)?,
-            )));
+            ))));
         }
         #[cfg(target_os = "linux")]
         Backing::FrameNet { mac } => {
@@ -122,10 +123,10 @@ pub(crate) fn device<H: dillo_machine::worker::WorkerHost>(
                 return Err(io::ErrorKind::InvalidInput.into());
             }
             let backend = dillo_virtio_net::FrameFd::new(files.remove(0));
-            return Ok(Box::new(dillo_virtio_net::VirtioNet::new(
+            return Ok(Box::new(Legacy(dillo_virtio_net::VirtioNet::new(
                 mac,
                 Arc::new(backend),
-            )));
+            ))));
         }
         Backing::UserNet { mac, forwards } => {
             if !files.is_empty() {
@@ -135,10 +136,10 @@ pub(crate) fn device<H: dillo_machine::worker::WorkerHost>(
                 network::GrantedNetwork::new::<H>(grants.ok_or(io::ErrorKind::InvalidInput)?);
             let backend =
                 dillo_virtio_net::UserNetBackend::with_resources(forwards, Arc::new(resources))?;
-            return Ok(Box::new(dillo_virtio_net::VirtioNet::new(
+            return Ok(Box::new(Legacy(dillo_virtio_net::VirtioNet::new(
                 mac,
                 Arc::new(backend),
-            )));
+            ))));
         }
         #[cfg(unix)]
         Backing::Vsock { cid } => {
@@ -146,16 +147,15 @@ pub(crate) fn device<H: dillo_machine::worker::WorkerHost>(
                 return Err(io::ErrorKind::InvalidInput.into());
             }
             let mut grants = grants.ok_or(io::ErrorKind::InvalidInput)?;
-            return Ok(Box::new(dillo_virtio_vsock::VirtioVsock::with_connector(
-                cid,
-                move |port| {
+            return Ok(Box::new(Legacy(
+                dillo_virtio_vsock::VirtioVsock::with_connector(cid, move |port| {
                     grants.request(&port.to_ne_bytes(), |mut message| {
                         if !message.bytes.is_empty() || message.resources.len() != 1 {
                             return Err(io::ErrorKind::InvalidData.into());
                         }
                         Ok(message.resources.pop().unwrap().into())
                     })
-                },
+                }),
             )));
         }
         Backing::Console { ports, resize } => {

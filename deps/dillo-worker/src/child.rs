@@ -27,10 +27,10 @@ use dillo_mmio::{
     Interrupt, MappedSharedMemory, SharedAccess, SharedMemory, SharedMemoryError, SharedRange,
     SharedRegion,
 };
-use dillo_virtio::queue::{Queue, QueueControl};
+use dillo_virtio::lifecycle::{Backend as DeviceBackend, Slot};
 use dillo_virtio::{
-    ActivateError, DeviceJoinError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
-    VirtioDeviceHost, VirtioRunToken,
+    ActivateError, DeviceJoinError, Kick, VirtioActivate, VirtioDeviceHandle, VirtioDeviceHost,
+    VirtioRunToken,
 };
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
@@ -71,7 +71,6 @@ impl SharedMemory for Memory {
 
 struct Host {
     memory: Arc<dyn SharedMemory>,
-    pause: Arc<crate::pause::Barrier>,
 }
 
 impl std::fmt::Debug for Host {
@@ -91,17 +90,13 @@ impl VirtioDeviceHost for Host {
     ) -> Result<VirtioDeviceHandle, ActivateError> {
         let stopping = Arc::new(AtomicBool::new(false));
         let token = Arc::clone(&stopping);
-        let paused_token = Arc::clone(&stopping);
-        let barrier = Arc::clone(&self.pause);
-        let participant = barrier.register();
         let thread = std::thread::Builder::new()
             .name("virtio-queue".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run(
-                        VirtioRunToken::from_fn(move || token.load(Ordering::Acquire))
-                            .with_checkpoint(move || participant.checkpoint(&paused_token)),
-                    )
+                    run(VirtioRunToken::from_fn(move || {
+                        token.load(Ordering::Acquire)
+                    }))
                 }))
                 .unwrap_or(Err(DeviceJoinError::Panicked));
                 if let Err(error) = &result {
@@ -115,7 +110,6 @@ impl VirtioDeviceHost for Host {
         Ok(VirtioDeviceHandle::new(
             move || {
                 stopping.store(true, Ordering::Release);
-                barrier.wake();
             },
             move || thread.join().unwrap_or(Err(DeviceJoinError::Panicked)),
         ))
@@ -147,7 +141,7 @@ struct Ring {
     max: u16,
     geometry: Geometry,
     base: u16,
-    control: Arc<QueueControl>,
+    control: crate::ring::State,
     dirty: bool,
     kick: Arc<Endpoint>,
     call: Arc<Endpoint>,
@@ -159,7 +153,7 @@ impl Ring {
             max,
             geometry: Geometry::default(),
             base: 0,
-            control: Arc::default(),
+            control: crate::ring::State::default(),
             dirty: true,
             kick: Arc::default(),
             call: Arc::default(),
@@ -168,9 +162,8 @@ impl Ring {
 }
 
 struct Backend {
-    active: Option<VirtioDeviceHandle>,
     notification_state: Option<Arc<dillo_machine::worker::NotificationState>>,
-    device: Box<dyn VirtioDevice>,
+    device: Slot<Box<dyn DeviceBackend>>,
     rings: Vec<Ring>,
     memory: GuestMemoryMmap,
     shared: Arc<Memory>,
@@ -178,30 +171,16 @@ struct Backend {
     owner: bool,
     protocol: u64,
     features: u64,
-    paused: bool,
-    barrier: Arc<crate::pause::Barrier>,
 }
 
 impl Backend {
     fn pause(&mut self) -> io::Result<()> {
-        if self.active.is_some() && !self.paused {
-            self.barrier.requested.store(true, Ordering::Release);
-            for ring in &self.rings {
-                ring.kick.write(1)?;
-            }
-            self.barrier.wait();
-            self.paused = true;
-        }
-        Ok(())
+        self.device.quiesce().map_err(io::Error::other)
     }
 
     fn reset(&mut self) -> io::Result<()> {
-        if let Some(active) = self.active.take() {
-            active.join().map_err(io::Error::other)?;
-        }
         self.device.reset().map_err(io::Error::other)?;
         self.notification_state = None;
-        self.barrier.resume();
         self.rings = self
             .device
             .queue_max_sizes()
@@ -210,7 +189,6 @@ impl Backend {
             .map(Ring::new)
             .collect();
         self.features = 0;
-        self.paused = false;
         Ok(())
     }
 
@@ -218,25 +196,15 @@ impl Backend {
         if !self.rings.iter().any(|ring| ring.control.started()) {
             return Ok(());
         }
-        if self.active.is_some() {
-            if self.paused {
-                self.barrier.resume();
-                self.paused = false;
-                for ring in &self.rings {
-                    ring.kick.write(1)?;
-                }
-            }
-            return Ok(());
+        if self.device.active() {
+            return self.device.resume().map_err(io::Error::other);
         }
         require(self.owner && self.features & (1 << 32) != 0)?;
         let mut queues = Vec::new();
         let mut kicks = Vec::new();
         let mut interrupts = Vec::new();
         for ring in &mut self.rings {
-            let mut queue = Queue::new(ring.max);
-            queue.control_with(Arc::clone(&ring.control));
-            queue.pause_with(Arc::clone(&self.barrier.requested));
-            queues.push(queue);
+            queues.push(ring.control.worker_queue(ring.max));
             kicks.push(Kick::from_notification(ring.kick.clone()));
             let call = Arc::clone(&ring.call);
             let state = self.notification_state.clone();
@@ -251,17 +219,13 @@ impl Backend {
         }
         let host: Arc<dyn VirtioDeviceHost> = Arc::new(Host {
             memory: self.shared.clone(),
-            pause: Arc::clone(&self.barrier),
         });
-        self.active = Some(
-            self.device
-                .activate(
-                    VirtioActivate::with_host_and_queue_interrupts(queues, kicks, host, interrupts)
-                        .with_negotiated_features(self.features & !wire::PROTOCOL_FEATURES),
-                )
-                .map_err(io::Error::other)?,
-        );
-        // Process descriptors already published before SET_VRING_KICK.
+        self.device
+            .start(
+                VirtioActivate::with_host_and_queue_interrupts(queues, kicks, host, interrupts)
+                    .with_negotiated_features(self.features & !wire::PROTOCOL_FEATURES),
+            )
+            .map_err(io::Error::other)?;
         for ring in &self.rings {
             ring.kick.write(1)?;
         }
@@ -304,7 +268,7 @@ impl Backend {
             wire::EXPERIMENT_SET_ISR => {
                 require(
                     self.owner
-                        && self.active.is_none()
+                        && !self.device.active()
                         && self.protocol & wire::EXPERIMENT_SHARED_ISR != 0
                         && resources.len() == 1,
                 )?;
@@ -325,7 +289,7 @@ impl Backend {
             GET_PROTOCOL_FEATURES => reply = Some(PROTOCOL.to_ne_bytes().to_vec()),
             SET_PROTOCOL_FEATURES => {
                 let features = wire::take_u64(&mut data)?;
-                require(features & !PROTOCOL == 0 && self.active.is_none())?;
+                require(features & !PROTOCOL == 0 && !self.device.active())?;
                 self.protocol = features;
             }
             SET_OWNER => {
@@ -339,13 +303,14 @@ impl Backend {
                 let features = wire::take_u64(&mut data)?;
                 require(
                     self.owner
-                        && self.active.is_none()
+                        && !self.device.active()
                         && features & !(self.device.features() | wire::PROTOCOL_FEATURES) == 0,
                 )?;
                 self.features = features;
                 if features & wire::PROTOCOL_FEATURES == 0 {
                     for ring in &mut self.rings {
-                        ring.control.set_enabled(true);
+                        ring.control
+                            .enable(true, &self.device.drained().map_err(io::Error::other)?)?;
                     }
                 }
             }
@@ -499,15 +464,22 @@ impl Backend {
                         ring.dirty = true;
                     }
                     GET_VRING_BASE => {
-                        ring.control.set_started(false);
-                        if !ring.dirty {
-                            ring.base = ring.control.base();
+                        let base = ring
+                            .control
+                            .stop(&self.device.drained().map_err(io::Error::other)?)?;
+                        if !ring.dirty
+                            && let Some(base) = base
+                        {
+                            ring.base = base;
                         }
                         reply = Some(wire::state(index as u32, u32::from(ring.base)));
                     }
                     SET_VRING_ENABLE => {
                         require(value <= 1 && self.features & wire::PROTOCOL_FEATURES != 0)?;
-                        ring.control.set_enabled(value != 0);
+                        ring.control.enable(
+                            value != 0,
+                            &self.device.drained().map_err(io::Error::other)?,
+                        )?;
                     }
                     _ => unreachable!(),
                 }
@@ -562,10 +534,10 @@ impl Backend {
                                 .read_obj::<u16>(GuestAddress(ring.geometry.used + 2))
                                 .map_err(io::Error::other)?,
                         ));
-                        ring.control.configure(queue);
+                        ring.control.configure(queue)?;
                         ring.dirty = false;
                     }
-                    ring.control.set_started(true);
+                    ring.control.start()?;
                 } else if frame.request == SET_VRING_CALL {
                     *ring.call.0.lock().unwrap() = endpoint;
                 }
@@ -583,7 +555,8 @@ impl Backend {
         Ok(reply)
     }
 
-    fn publish_memory(&self) -> io::Result<()> {
+    fn publish_memory(&mut self) -> io::Result<()> {
+        let _drained = self.device.drained().map_err(io::Error::other)?;
         for ring in self.rings.iter().filter(|ring| ring.control.started()) {
             crate::queue::admit(ring.geometry.clone(), ring.max, &self.memory)?;
         }
@@ -611,7 +584,7 @@ pub unsafe fn run<H: WorkerHost>(
         serde_json::Value,
         Vec<File>,
         Option<crate::grant::Client>,
-    ) -> io::Result<Box<dyn VirtioDevice>>,
+    ) -> io::Result<Box<dyn DeviceBackend>>,
 ) -> io::Result<()> {
     // SAFETY: this entry preserves the caller's dedicated process contract.
     unsafe {
@@ -637,7 +610,7 @@ pub unsafe fn run_prepared<H: WorkerHost, T>(
         serde_json::Value,
         Vec<File>,
         Option<crate::grant::Client>,
-    ) -> io::Result<Box<dyn VirtioDevice>>,
+    ) -> io::Result<Box<dyn DeviceBackend>>,
 ) -> io::Result<()> {
     let mut bootstrap = unsafe { H::bootstrap() }?;
     let mut message = bootstrap
@@ -681,9 +654,8 @@ pub unsafe fn run_prepared<H: WorkerHost, T>(
         .map(Ring::new)
         .collect();
     let mut backend = Backend {
-        active: None,
         notification_state: None,
-        device,
+        device: Slot::new(device),
         rings,
         memory: GuestMemoryMmap::new(),
         shared: Arc::default(),
@@ -691,8 +663,6 @@ pub unsafe fn run_prepared<H: WorkerHost, T>(
         owner: false,
         protocol: 0,
         features: 0,
-        paused: false,
-        barrier: Arc::default(),
     };
     loop {
         let message = channel

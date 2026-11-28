@@ -9,18 +9,19 @@ use super::{
     queues::{base, submit, wait_used},
 };
 
-pub(super) fn device(mut grants: dillo_worker::grant::Client) -> Box<dyn VirtioDevice> {
+pub(super) fn device(
+    mut grants: dillo_worker::grant::Client,
+) -> Box<dyn dillo_virtio::lifecycle::Backend> {
     // A malformed resource request grants nothing and leaves the session usable.
     assert!(grants.request(&[0], |_| Ok(())).is_err());
-    Box::new(dillo_virtio_vsock::VirtioVsock::with_connector(
-        3,
-        move |port| {
+    Box::new(dillo_virtio::lifecycle::Legacy(
+        dillo_virtio_vsock::VirtioVsock::with_connector(3, move |port| {
             grants.request(&port.to_ne_bytes(), |mut message| {
                 assert!(message.bytes.is_empty());
                 assert_eq!(message.resources.len(), 1);
                 Ok(message.resources.pop().unwrap().into())
             })
-        },
+        }),
     ))
 }
 

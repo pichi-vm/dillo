@@ -20,7 +20,8 @@ pub(super) fn device<H: dillo_machine::worker::WorkerHost>(
     files: Vec<File>,
 ) -> io::Result<Box<dyn VirtioDevice>> {
     match serde_json::from_value(value.clone()).map_err(io::Error::other)? {
-        Backing::Raw { .. } => super::device::<H>(None, value, files, None),
+        Backing::Raw { .. } => super::device::<H>(None, value, files, None)
+            .map(|b| Box::new(dillo_virtio::lifecycle::Local::new(b)) as Box<dyn VirtioDevice>),
         Backing::UserNet { mac, forwards } if files.is_empty() => {
             let backend = dillo_virtio_net::UserNetBackend::with_resources(
                 forwards,

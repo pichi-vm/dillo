@@ -39,6 +39,7 @@ pub mod pipe;
 pub mod resize;
 pub mod stdio;
 
+use dillo_virtio::lifecycle::Backend;
 use std::collections::VecDeque;
 use std::io::{self, BufWriter, Write};
 use std::sync::OnceLock;
@@ -50,8 +51,8 @@ use std::time::Duration;
 use dillo_mmio::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
 use dillo_virtio::{
-    ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
-    VirtioMemory, VirtioRunToken,
+    ActivateError, Kick, VirtioActivate, VirtioDeviceHandle, VirtioDeviceHost, VirtioMemory,
+    VirtioRunToken,
 };
 
 /// VIRTIO_F_VERSION_1 from the virtio 1.x spec.
@@ -242,7 +243,6 @@ pub fn flush_output() {
 
 /// virtio-console: thread-mode device.
 pub struct VirtioConsole {
-    activated: bool,
     resize: Option<Arc<Mutex<resize::Input>>>,
     size: Option<Arc<std::sync::atomic::AtomicU32>>,
     /// Named MULTIPORT ports (port 0 is implicit and not in here).
@@ -254,7 +254,6 @@ pub struct VirtioConsole {
 impl std::fmt::Debug for VirtioConsole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VirtioConsole")
-            .field("activated", &self.activated)
             .field("resize", &self.resize)
             .field("size", &self.size)
             .field("ports", &self.ports)
@@ -286,7 +285,6 @@ impl VirtioConsole {
             2 + 2 * ports.len()
         };
         Self {
-            activated: false,
             resize: None,
             size: None,
             ports,
@@ -331,7 +329,7 @@ impl VirtioConsole {
     }
 }
 
-impl VirtioDevice for VirtioConsole {
+impl Backend for VirtioConsole {
     fn device_type(&self) -> u32 {
         VIRTIO_ID_CONSOLE
     }
@@ -367,11 +365,6 @@ impl VirtioDevice for VirtioConsole {
         let queues = activation.take_queues();
         let queue_evts = activation.take_queue_evts();
         let host = activation.host()?;
-        if self.activated {
-            return Err(ActivateError::InvalidConfig(
-                "VirtioConsole::activate called twice".into(),
-            ));
-        }
         let expected = self.num_queues();
         if queues.len() != expected || queue_evts.len() != expected {
             return Err(ActivateError::InvalidConfig(format!(
@@ -496,7 +489,6 @@ impl VirtioDevice for VirtioConsole {
         let workers = Arc::new(Mutex::new(workers));
         let shutdown_workers = Arc::clone(&workers);
 
-        self.activated = true;
         log::info!(
             "virtio-console: activated ({} worker(s), multiport={})",
             workers
@@ -563,7 +555,6 @@ impl VirtioDevice for VirtioConsole {
 
     fn reset(&mut self) -> Result<(), ActivateError> {
         flush_output();
-        self.activated = false;
         Ok(())
     }
 }

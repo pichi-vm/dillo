@@ -28,8 +28,11 @@
 pub mod device;
 pub mod features;
 pub mod kick;
+pub mod lifecycle;
 pub mod memory;
+mod pause;
 pub mod queue;
+pub mod ring;
 
 pub use device::{
     ActivateError, DeviceJoinError, VirtioActivate, VirtioDevice, VirtioDeviceHandle,

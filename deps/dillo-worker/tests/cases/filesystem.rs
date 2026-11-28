@@ -8,9 +8,11 @@ use super::{
     Ordering, Queue, VirtioActivate, VirtioDevice, Worker, io, memory,
 };
 
-pub(super) fn device() -> Box<dyn VirtioDevice> {
+pub(super) fn device() -> Box<dyn dillo_virtio::lifecycle::Backend> {
     let tree = dillo_virtio_fs::MapFs::new().with_file("hello", b"worker".to_vec());
-    Box::new(dillo_virtio_fs::VirtioFs::new("vhost", Arc::new(tree), true).unwrap())
+    Box::new(dillo_virtio::lifecycle::Legacy(
+        dillo_virtio_fs::VirtioFs::new("vhost", Arc::new(tree), true).unwrap(),
+    ))
 }
 
 fn request(
@@ -152,7 +154,7 @@ fn read_args(handle: u64) -> [u8; 40] {
 pub(super) fn native(
     client: dillo_worker::grant::Client,
     readonly: bool,
-) -> io::Result<Box<dyn VirtioDevice>> {
+) -> io::Result<Box<dyn dillo_virtio::lifecycle::Backend>> {
     use dillo_virtio_fs::{FsBackend, LinuxErrno, SetAttr};
     use std::path::Path;
 
@@ -230,9 +232,9 @@ pub(super) fn native(
             backend.remove_xattr(Path::new("renamed"), "user.vhost")?;
         }
     }
-    Ok(Box::new(
+    Ok(Box::new(dillo_virtio::lifecycle::Legacy(
         dillo_virtio_fs::VirtioFs::new("native", Arc::new(backend), readonly).unwrap(),
-    ))
+    )))
 }
 
 pub(super) fn native_exercise() -> io::Result<()> {
