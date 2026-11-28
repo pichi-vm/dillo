@@ -12,6 +12,14 @@ records the order before measurement; each revision retains its own excluded
 warm-up pair and results under `baseline` or `candidate`. Short comparisons
 remain diagnostic. Locally, pass matching assets with `--baseline-assets`.
 
+For an A/A noise calibration, use `--calibrate-noise` locally or the workflow's
+`calibrate_noise` input with no `baseline_ref`. Both comparison labels then use
+the same executable path and guest image, with the usual balanced schedule.
+Compare like modes across labels (worker/worker and local/local); worker/local
+still measures isolation overhead. Retain all observations and their order.
+A calibration characterizes the conditions of that run; it does not prove
+host exclusivity or eliminate drift in a different job.
+
 Completed measurements: [2026-11-27 report](results/2026-11-27/REPORT.md).
 
 Active milestone: [device performance optimization](OPTIMIZATION.md).

@@ -45,6 +45,10 @@ on:
         description: Optional runtime revision to compare on the same host
         type: string
         default: ""
+      calibrate_noise:
+        description: Compare the same executable under both labels (no baseline_ref)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -67,7 +71,14 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - name: Use the writable job temporary directory
         shell: bash
+        env:
+          BENCH_BASELINE: ${{ inputs.baseline_ref }}
+          BENCH_CALIBRATE: ${{ inputs.calibrate_noise }}
         run: |
+          if [ "$BENCH_CALIBRATE" = true ] && [ -n "$BENCH_BASELINE" ]; then
+            echo 'Noise calibration requires an empty baseline_ref' >&2
+            exit 1
+          fi
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
           echo "BENCH_RESULTS=$RUNNER_TEMP/dillo-benchmark-results-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v6
@@ -169,8 +180,12 @@ jobs:
           BENCH_KERNEL: ${{ inputs.kernel }}
           BENCH_BASELINE: ${{ inputs.baseline_ref }}
           BENCH_COMPLETIONS: ${{ inputs.completion == 'shared' && 'shared' || inputs.completion == 'relay' && 'relay' || 'relay shared' }}
+          BENCH_CALIBRATE: ${{ inputs.calibrate_noise }}
         run: |
           bench_comparison=()
+          if [ "$BENCH_CALIBRATE" = true ]; then
+            bench_comparison+=(--calibrate-noise)
+          fi
           if [ -n "$BENCH_BASELINE" ]; then
             python benchmarks/runtime.py match target/benchmarks-baseline target/benchmarks/assets.json
             bench_comparison+=(--baseline-assets target/benchmarks-baseline/assets.json)
