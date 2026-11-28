@@ -1023,3 +1023,43 @@ notification. These are queue requests before transport coalescing, not
 native interrupt counts. The candidate stays separate. All 160 boot records,
 counter observations, paired ratios, schedules and artifact provenance are
 retained in [network-event-index-short.json.gz](network-event-index-short.json.gz).
+
+## Reusing the network transmit buffer
+
+`06e7517` gives each TX worker one scratch buffer and borrows the assembled
+frame when calling its backend. This removes per-descriptor allocation and
+two intermediate copies; the user-network backend still owns its queued
+frame. It changes neither public interfaces nor notification policy. The
+existing TX fixture now also checks a shorter subsequent frame, a header split
+across descriptors, and a header-only frame. All 57 local network tests and
+strict Clippy pass; four external-network tests remain ignored.
+
+Physical x86 and native [macOS](https://github.com/pichi-vm/dillo/actions/runs/46087385999),
+[Arm](https://github.com/pichi-vm/dillo/actions/runs/46087693165), and
+[Windows](https://github.com/pichi-vm/dillo/actions/runs/46088042390) comparisons
+each completed 40 boots: four balanced two-second pairs per revision and
+transport plus warm-ups. Baselines are `aa9bbff` (native) and its unchanged
+runtime `d13eadd` (local); the candidate and baseline use identical guest assets.
+These are short, uninstrumented comparisons, not parity qualification.
+
+On x86, large-message worker CPU/GiB falls 5.8% on PCI and 4.8% on MMIO. On
+macOS it falls 5.3%/5.7%, while throughput rises about 2%; its control also
+improves and the isolation gap remains. Windows large-message PCI CPU/GiB
+falls 3.3%, but MMIO rises 0.9%. Arm is mixed: large-message PCI worker
+throughput rises 4.7%, while MMIO falls 2.2%; small-message MMIO falls 4.5%.
+The Arm control also moves substantially in opposite directions between
+transports. Longer balanced comparisons are required before promotion. All
+observations, including unfavorable results, are retained in
+[network-tx-scratch-short.json.gz](network-tx-scratch-short.json.gz).
+
+## macOS scheduling diagnostic
+
+[Run 46089105144](https://github.com/pichi-vm/dillo/actions/runs/46089105144)
+completed eight boots at `1681340`, with unchanged production runtime and five
+`ps -M` observations during each large-message phase. Every captured thread
+reports priority `20T`, in both execution modes and transports. This does not
+support a thread-priority mismatch as the explanation for the observed cost.
+It does not measure QoS class or performance/efficiency-core placement, and
+the instrumented rates are not performance qualification. No scheduling
+policy was changed. All 40 snapshots and provenance are retained in
+[macos-thread-priorities.json.gz](macos-thread-priorities.json.gz).
