@@ -21,6 +21,11 @@ to device status, not this interrupt latch; this experiment does not repurpose
 those messages. A production design would need a negotiated, documented
 interface with explicit ordering and lifecycle semantics.
 
+The parent uses the shared-status request and direct MMIO call export only
+when the backend negotiated this feature. Otherwise its ordinary call relay
+publishes status before native injection. PCI calls without a shared-status
+requirement retain their standard native export path.
+
 On Linux the child checks the exact extent and seals; confinement permits the
 read-only F_GET_SEALS query. Windows adopts the committed section granted by
 the trusted parent through ALPC. Neither resource is included in guest RAM.

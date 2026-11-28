@@ -284,12 +284,14 @@ impl Prepared {
                 "backend lacks required vhost-user features",
             ));
         }
+        let shared_isr = std::env::var_os("DILLO_BENCH_SHARED_ISR").is_some()
+            && offered & wire::EXPERIMENT_SHARED_ISR != 0;
         session.exchange(
             SET_PROTOCOL_FEATURES,
             (PROTOCOL
                 | (offered & wire::MQ)
-                | if std::env::var_os("DILLO_BENCH_SHARED_ISR").is_some() {
-                    offered & wire::EXPERIMENT_SHARED_ISR
+                | if shared_isr {
+                    wire::EXPERIMENT_SHARED_ISR
                 } else {
                     0
                 })
@@ -367,6 +369,7 @@ impl Prepared {
                 session: Arc::clone(&session),
                 info: self.info,
                 features: features & !wire::PROTOCOL_FEATURES,
+                shared_isr,
                 config,
                 next_epoch: 1,
                 interrupts: Arc::default(),
@@ -681,6 +684,7 @@ pub struct Proxy {
     session: Arc<Session>,
     info: DeviceInfo,
     features: u64,
+    shared_isr: bool,
     config: Arc<Mutex<Vec<u8>>>,
     next_epoch: u64,
     interrupts: Arc<Mutex<Vec<(u32, dillo_mmio::Interrupt)>>>,
@@ -814,12 +818,13 @@ impl VirtioDevice for Proxy {
                     .to_vec(),
                 Vec::new(),
             )?;
-            if let Some(status) = activation
-                .queue_interrupt(0)
-                .as_ref()
-                .map(dillo_mmio::Interrupt::export_status)
-                .transpose()?
-                .flatten()
+            if self.shared_isr
+                && let Some(status) = activation
+                    .queue_interrupt(0)
+                    .as_ref()
+                    .map(dillo_mmio::Interrupt::export_status)
+                    .transpose()?
+                    .flatten()
             {
                 session.set(wire::EXPERIMENT_SET_ISR, Vec::new(), vec![status])?;
             }
@@ -846,7 +851,15 @@ impl VirtioDevice for Proxy {
                 let interrupt = activation.queue_interrupt(index as usize);
                 let write = if let Some(resource) = interrupt
                     .as_ref()
-                    .map(dillo_mmio::Interrupt::export)
+                    .map(|interrupt| {
+                        // Without shared status, the parent callback must
+                        // publish the ISR before delivering the interrupt.
+                        if self.shared_isr || interrupt.export_status()?.is_none() {
+                            interrupt.export()
+                        } else {
+                            Ok(None)
+                        }
+                    })
                     .transpose()?
                     .flatten()
                 {
