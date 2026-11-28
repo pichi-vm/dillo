@@ -338,6 +338,7 @@ fn tx_worker(
     token: &VirtioRunToken,
 ) {
     let queue = Mutex::new(queue);
+    let mut scratch = Vec::new();
     loop {
         token.checkpoint();
         if let Err(e) = kick.read() {
@@ -347,7 +348,14 @@ fn tx_worker(
         if token.is_shutdown_requested() {
             return;
         }
-        drain_tx(backend, queue_memory, buffer_memory, &queue, interrupt);
+        drain_tx(
+            backend,
+            queue_memory,
+            buffer_memory,
+            &queue,
+            interrupt,
+            &mut scratch,
+        );
     }
 }
 
@@ -358,14 +366,15 @@ fn drain_tx(
     buffer_memory: &Arc<dyn VirtioMemory>,
     queue: &Mutex<Queue>,
     interrupt: Option<&Interrupt>,
+    scratch: &mut Vec<u8>,
 ) {
     let mut q = queue.lock().expect("virtio-net TX queue mutex");
     let mut signaled = false;
     while let Some(head) = q.pop(queue_memory) {
         let head_index = head.index;
         if q.enabled()
-            && let Some(frame) = read_tx_frame(queue_memory, buffer_memory, head)
-            && let Err(e) = backend.send(&frame)
+            && let Some(frame) = read_tx_frame(queue_memory, buffer_memory, head, scratch)
+            && let Err(e) = backend.send(frame)
         {
             log::warn!("virtio-net TX: backend send ({} bytes): {e}", frame.len());
         }
@@ -379,31 +388,34 @@ fn drain_tx(
     }
 }
 
-/// Read one guest TX descriptor chain into a raw Ethernet frame, stripping the
-/// leading 12-byte `virtio_net_hdr`. Returns `None` if the chain carries no
-/// payload past the header.
-fn read_tx_frame(
+/// Gather a TX chain into reusable storage and borrow its Ethernet payload.
+/// Returns `None` if the chain carries no payload past the 12-byte header.
+fn read_tx_frame<'a>(
     queue_memory: &Arc<dyn QueueMemory>,
     buffer_memory: &Arc<dyn VirtioMemory>,
     head: dillo_virtio::queue::DescriptorChain,
-) -> Option<Vec<u8>> {
-    let mut bytes = Vec::new();
+    scratch: &'a mut Vec<u8>,
+) -> Option<&'a [u8]> {
+    let mut length = 0usize;
     let mut current = Some(head);
     while let Some(desc) = current {
         // Device-readable = guest-to-host data.
         if desc.flags & VIRTQ_DESC_F_WRITE == 0 {
-            let mut buf = vec![0u8; desc.len as usize];
-            if let Ok(n) = buffer_memory.read(desc.addr, &mut buf) {
-                bytes.extend_from_slice(&buf[..n]);
+            let end = length.checked_add(desc.len as usize)?;
+            if end > scratch.len() {
+                scratch.resize(end, 0);
+            }
+            if let Ok(n) = buffer_memory.read(desc.addr, &mut scratch[length..end]) {
+                length += n;
             }
         }
         current = desc.next_desc(queue_memory);
     }
-    if bytes.len() <= NET_HDR_LEN {
+    if length <= NET_HDR_LEN {
         // Header-only (or short) chain: no Ethernet payload to transmit.
         return None;
     }
-    Some(bytes[NET_HDR_LEN..].to_vec())
+    Some(&scratch[NET_HDR_LEN..length])
 }
 
 /// RX worker: blocks on the backend for inbound frames and writes each into a
@@ -643,7 +655,9 @@ mod tests {
         let bmem: Arc<dyn VirtioMemory> =
             Arc::new(SharedVirtioMemory::new(vec![shared(&mem, 0x5000, 0x1000)]));
 
-        let out = read_tx_frame(&qmem, &bmem, q.pop(&qmem).expect("pop")).expect("frame");
+        let mut scratch = Vec::new();
+        let out =
+            read_tx_frame(&qmem, &bmem, q.pop(&qmem).expect("pop"), &mut scratch).expect("frame");
         assert_eq!(
             out, payload,
             "TX must deliver the Ethernet payload sans header"
@@ -651,8 +665,32 @@ mod tests {
 
         // And the backend records exactly that payload when drained.
         let backend = MockBackend::default();
-        backend.send(&out).unwrap();
+        backend.send(out).unwrap();
         assert_eq!(backend.sent.lock().unwrap()[0], payload);
+
+        // A shorter frame must not include bytes retained from the prior one.
+        // Split its header across two descriptors, then send a header-only chain.
+        for payload in [b"x".as_slice(), b""] {
+            let mut q = ready_queue(0x100, 0x1000, 0x2000);
+            let mut frame = vec![0u8; NET_HDR_LEN];
+            frame.extend_from_slice(payload);
+            mem.write(&frame, GuestAddress(0x5000)).unwrap();
+            mem.write_obj::<u32>(5, q.desc_table.unchecked_add(8))
+                .unwrap();
+            mem.write_obj::<u16>(
+                dillo_virtio::queue::VIRTQ_DESC_F_NEXT,
+                q.desc_table.unchecked_add(12),
+            )
+            .unwrap();
+            mem.write_obj::<u16>(1, q.desc_table.unchecked_add(14))
+                .unwrap();
+            mem.write_obj::<u64>(0x5005, q.desc_table.unchecked_add(16))
+                .unwrap();
+            mem.write_obj::<u32>((frame.len() - 5) as u32, q.desc_table.unchecked_add(24))
+                .unwrap();
+            let out = read_tx_frame(&qmem, &bmem, q.pop(&qmem).expect("pop"), &mut scratch);
+            assert_eq!(out, (!payload.is_empty()).then_some(payload));
+        }
     }
 
     /// A round-trip through the mock backend: TX records, RX replays.
