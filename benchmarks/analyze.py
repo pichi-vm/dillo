@@ -45,6 +45,18 @@ def analyze(root):
             metrics[key + "IOPS"] = op["latency"]["count"] * 1e9 / op["elapsed_ns"]
             for field in ("p50_upper_ns", "p95_upper_ns", "p99_upper_ns", "max_ns"):
                 metrics[key + field] = op["latency"][field]
+            active = [s for s in raw["samples"] if s["phase"] ==
+                      f"active:{op['device']}:{op['operation']}:{op['request_bytes']}"]
+            if len(active) >= 2:
+                first, last = active[0], active[-1]
+                identities = lambda s: {(p["pid"], p["created"]) for p in s["processes"]}
+                assert identities(first) == identities(last), "process tree changed during operation"
+                elapsed = last["elapsed_s"] - first["elapsed_s"]
+                gib_per_second = op["bytes"] * 1e9 / op["elapsed_ns"] / 2**30
+                for field in ("cpu_user_s", "cpu_system_s"):
+                    total = lambda s: sum(p[field] for p in s["processes"])
+                    metrics[key + field + "_per_GiB"] = (
+                        total(last) - total(first)) / elapsed / gib_per_second
         pairs.setdefault(case, {}).setdefault(pair, {})[mode] = metrics
     rows = []
     for case, cases in pairs.items():

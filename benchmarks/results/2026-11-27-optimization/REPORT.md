@@ -1314,3 +1314,20 @@ PCI-free block noise, then compares that storage case and both network
 transports; native macOS/Windows compare PCI-free block and network. This
 replaces the earlier confounded ordering, retaining that earlier evidence.
 Neither the profiles nor an unfinished comparison justify promotion.
+
+## macOS CPU accounting split
+
+Reanalysis of the 48 measured candidate boots in run 46090968077 uses the
+original phase samples and byte rates; it is not another experiment. For
+64-KiB echo, the median paired worker overhead is 0.73/0.68 CPU seconds per GiB
+on PCI/MMIO. The OS-reported system-time component adds 0.50/0.44 seconds,
+about two-thirds of that overhead. The remaining component is user time.
+Parent accounting includes vCPU execution; these counters do not distinguish
+IPC, wakeups, sandbox checks or individual syscalls. They support investigating
+native-call and scheduling costs alongside the common allocation work, without
+attributing all overhead to a sampled user-space function.
+
+The analyzer now retains both components. Recomputing all four identical-binary
+calibrations verifies that user plus system time reproduces the existing total
+for all 768 measured operations. Paired components, intervals, provenance and
+input hashes are retained in [network-macos-cpu-split.json.gz](network-macos-cpu-split.json.gz).
