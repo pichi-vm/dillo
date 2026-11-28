@@ -1654,3 +1654,42 @@ All 58 applicable local network tests and strict Clippy pass; four
 hardware-dependent/external tests remain intentionally ignored. A new native
 Windows comparison against `ceda4c5` is running. Neither candidate is integrated
 into the performance branch or treated as final parity qualification.
+
+## macOS thread CPU attribution
+
+[Run 46108797906](https://github.com/pichi-vm/dillo/actions/runs/46108797906)
+completes eight boots at `27ae6f6`, whose runtime retains the mapping-owner
+candidate. One ten-second pair per network transport, plus warmups, records
+public libproc thread CPU counters at the existing two-second memory sampling
+points. There is no stack sampler. The native counter self-check observes
+20.028 ms of CPU for its 20 ms spin. This is attribution evidence, not a
+performance comparison or calibrated parity result.
+
+All active intervals retain the same process creation times, pthread addresses
+and thread names. Every counter is monotonic, no thread query fails, and the
+largest difference between summed thread CPU and the separately sampled
+process CPU is 0.143 ms. This establishes actual CPU use rather than the
+sleep-inclusive wall observations in the earlier stack reports.
+
+During bulk traffic, the worker parent's unnamed helper threads consume
+0.142 CPU cores on PCI and 0.108 on MMIO. The source's unnamed completion
+relays and the earlier stack reports identify this as the completion-helper
+path; the counter API itself provides no stack identity. The worker network
+thread consumes about 0.40 cores, compared with 0.38–0.39 in process. The two
+network queue threads consume about 0.44 cores in the worker, compared with
+0.39–0.41 for their in-process counterparts. Lower worker throughput means
+these similar absolute CPU rates still imply more work per completed echo.
+
+Using the whole phase's operation rate to approximate the sampled interval,
+the worker completion helpers cost about 28 microseconds per bulk echo on
+PCI and 22 on MMIO. Queue threads cost about 88 microseconds versus 74–75 in
+process; the network loop costs about 79 versus 71–72. The vCPU cost is much
+closer: approximately 119 versus 116 on PCI and 126 versus 125 on MMIO.
+These approximations do not isolate syscall cost, prove a scheduling cause,
+or justify attributing the entire gap to interrupt delivery.
+
+The eight complete boot records, sparse snapshots, per-thread deltas, process
+cross-checks, warmups, input hashes and reproducing analysis are retained in
+[macos-network-thread-cpu.json.gz](macos-network-thread-cpu.json.gz). The
+protocol/control threads remain effectively idle. The next optimization must
+address measured queue/notification work rather than remove idle control RPC.
