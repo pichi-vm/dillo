@@ -13,7 +13,7 @@ import statistics
 
 
 def median_interval(values):
-    """Paired bootstrap 95% interval; short diagnostics are not qualification."""
+    """Bootstrap 95% interval assuming exchangeable pairs, not absence of drift."""
     if len(values) < 10:
         return None
     rng = random.Random(20261127)
@@ -69,12 +69,41 @@ def analyze(root):
     return rows
 
 
+def compare(baseline, candidate):
+    """Compare like execution modes across interleaved labels or revisions."""
+    indexes = [{(r["case"], r["metric"]): r for r in rows}
+               for rows in (baseline, candidate)]
+    assert indexes[0].keys() == indexes[1].keys(), "comparison metrics differ"
+    rows = []
+    for (case, metric), before in indexes[0].items():
+        after = indexes[1][case, metric]
+        assert before["pairs"] == after["pairs"], "comparison pair counts differ"
+        for mode in ("local", "worker"):
+            a, b = before[mode + "_values"], after[mode + "_values"]
+            if any(value == 0 for value in a):
+                continue
+            ratios = [second / first for first, second in zip(a, b)]
+            rows.append({"case": case, "metric": metric, "mode": mode,
+                         "pairs": len(ratios),
+                         "baseline_median": statistics.median(a),
+                         "candidate_median": statistics.median(b),
+                         "ratio_median": statistics.median(ratios),
+                         "ratio_median_ci95": median_interval(ratios),
+                         "baseline_values": a, "candidate_values": b,
+                         "paired_ratios": ratios})
+    return rows
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results", type=Path)
+    parser.add_argument("--baseline", type=Path,
+                        help="compare like modes with an interleaved baseline label")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     rows = analyze(args.results)
+    if args.baseline:
+        rows = compare(analyze(args.baseline), rows)
     args.output.write_text(json.dumps(rows, indent=2) + "\n")
     with args.output.with_suffix(".csv").open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))

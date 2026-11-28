@@ -19,6 +19,10 @@ Compare like modes across labels (worker/worker and local/local); worker/local
 still measures isolation overhead. Retain all observations and their order.
 A calibration characterizes the conditions of that run; it does not prove
 host exclusivity or eliminate drift in a different job.
+Use `python benchmarks/analyze.py RESULTS/candidate --baseline RESULTS/baseline
+--output comparison.json` for the like-mode ratios. Its intervals resample
+individual pairs; inspect execution order and calibration before attributing
+small changes to code.
 
 Completed measurements: [2026-11-27 report](results/2026-11-27/REPORT.md).
 
