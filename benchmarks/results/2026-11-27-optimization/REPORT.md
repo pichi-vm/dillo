@@ -971,3 +971,25 @@ optimization. The next diagnostic counts actual queue completions and calls
 to distinguish notification savings from the added available-flag reads.
 [network-suppression-x86-short.json.gz](network-suppression-x86-short.json.gz)
 retains every paired observation, executable hash and boot-record digest.
+
+## Counting network notification requests
+
+The diagnostic-only `f2e403a` build reports queue frames, drains, notification
+requests, suppression decisions and RX buffer shortages once at shutdown.
+There is no per-request logging or atomic counter. Counts cover the boot and
+both echo sizes; they precede transport-level coalescing and must not be read
+as native interrupt or syscall counts. Instrumented rates are not qualification.
+
+Apollo and native runs [46085384776](https://github.com/pichi-vm/dillo/actions/runs/46085384776)
+(macOS), [46085386462](https://github.com/pichi-vm/dillo/actions/runs/46085386462)
+(Arm), and [46085388161](https://github.com/pichi-vm/dillo/actions/runs/46085388161)
+(Windows) each complete 12 boots: two one-second pairs per transport plus
+warm-ups. No run reports RX buffer starvation. Worker batches average roughly
+six to eight frames. The available flag suppresses only 0.5–2.7% of eligible
+TX batches on Linux/macOS, and 9–11% on Windows. RX suppression is 7–17% except
+Linux x86 MMIO at 30%. Thus most batches still request notification; the
+standard EVENT_IDX mechanism is the next candidate to measure.
+
+[network-notification-counters.json.gz](network-notification-counters.json.gz)
+retains every counter record, schedule, asset hash and boot digest. The
+uninstrumented source and prior unfavorable performance evidence remain intact.
