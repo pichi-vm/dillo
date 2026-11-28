@@ -105,6 +105,10 @@ def run_vm(args, assets, image, disks, case, mode, label):
     env["RUST_LOG"] = "warn,dillo::boot=trace"
     env["RUST_LOG_STYLE"] = "never"
     samples, phases, errors, known = [], [], [], {}
+    profiles = None
+    if platform.system() == "Darwin" and "-00-" not in label:
+        from macos_sample import Profiles
+        profiles = Profiles(directory)
     last_memory, ready = 0, None
     expected = 2 + (0 if mode == "local" else (len(disks) or 1))
     phase, failure = "startup", None
@@ -138,6 +142,9 @@ def run_vm(args, assets, image, disks, case, mode, label):
                     except psutil.NoSuchProcess:
                         pass
                     next_discovery = elapsed + 0.5
+                if (profiles and not profiles.started and len(tracked) == expected
+                        and phase == "active:net:tcp_echo:65536"):
+                    profiles.start(tracked.values(), elapsed)
                 if not args.no_sample:
                     records = []
                     for process in tracked.values():
@@ -171,6 +178,8 @@ def run_vm(args, assets, image, disks, case, mode, label):
                 for process in survivors:
                     process.kill()
                 psutil.wait_procs(survivors, timeout=3)
+            if profiles:
+                profiles.finish(start)
     elapsed = time.monotonic() - start
     output = output_path.read_bytes()
     match = REPORT.search(output)
@@ -184,8 +193,12 @@ def run_vm(args, assets, image, disks, case, mode, label):
               "samples": samples, "last_process_samples": list(known.values()),
               "sampling_errors": errors, "phases": phases, "guest": report,
               "failure": failure,
+              "stack_profiles": profiles.records if profiles else [],
               "sampler_and_echo_cpu_s": time.process_time() - sampler_start}
     save(directory / "result.json", result)
+    if profiles:
+        assert profiles.records and all(p.get("returncode") == 0 and not p.get("error")
+                                        for p in profiles.records), profiles.records
     assert not failure and child.returncode == 0 and ready is not None and report, f"boot failed: {directory}"
     if pci_free:
         assert not report["pci"], f"PCI device present in PCI-free case: {directory}"

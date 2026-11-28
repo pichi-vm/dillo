@@ -56,6 +56,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_PROFILE_RELEASE_DEBUG: "1"
+  CARGO_PROFILE_RELEASE_STRIP: "false"
   NIGHTLY: nightly-2026-07-06
 
 jobs:
