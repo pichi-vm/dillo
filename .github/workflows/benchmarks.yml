@@ -45,6 +45,10 @@ on:
         description: Optional runtime revision to compare on the same host
         type: string
         default: ""
+      profile_user:
+        description: Diagnostic-only Linux userspace CPU profiles
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -101,6 +105,15 @@ jobs:
       - uses: Swatinem/rust-cache@master
         with:
           save-if: ${{ runner.environment == 'github-hosted' }}
+      - name: Prepare userspace CPU profiling
+        if: inputs.profile_user
+        shell: bash
+        run: |
+          test "$RUNNER_OS" = Linux
+          perf version
+          perf record -q -e cycles:u --clockid mono -o "$RUNNER_TEMP/perf-probe.data" -- true
+          echo 'CARGO_PROFILE_RELEASE_DEBUG=1' >> "$GITHUB_ENV"
+          echo 'CARGO_PROFILE_RELEASE_STRIP=false' >> "$GITHUB_ENV"
       - name: Provide native KVM RAM
         if: runner.os == 'Linux'
         shell: bash
@@ -169,6 +182,7 @@ jobs:
           BENCH_KERNEL: ${{ inputs.kernel }}
           BENCH_BASELINE: ${{ inputs.baseline_ref }}
           BENCH_COMPLETIONS: ${{ inputs.completion == 'shared' && 'shared' || inputs.completion == 'relay' && 'relay' || 'relay shared' }}
+          BENCH_PROFILE_USER: ${{ inputs.profile_user }}
         run: |
           bench_comparison=()
           if [ -n "$BENCH_BASELINE" ]; then
@@ -184,6 +198,7 @@ jobs:
             bench_options=()
             if [ "$bench_mode" = off ]; then bench_options+=(--no-sample); fi
             if [ "$BENCH_KERNEL" = wsl-clock ]; then bench_options+=(--serial); fi
+            if [ "$BENCH_PROFILE_USER" = true ]; then bench_options+=(--profile-user); fi
             python benchmarks/run.py --assets target/benchmarks/assets.json \
               --output "$BENCH_RESULTS/$bench_latch/$bench_mode" --pairs "$BENCH_PAIRS" \
               --duration-ms "$BENCH_DURATION_MS" --queue-depth "$BENCH_QUEUE_DEPTH" \
@@ -198,4 +213,5 @@ jobs:
           path: |
             ${{ env.BENCH_RESULTS }}/**/*.json
             ${{ env.BENCH_RESULTS }}/**/*.txt
+            ${{ env.BENCH_RESULTS }}/**/*.data
           if-no-files-found: warn

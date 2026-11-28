@@ -92,6 +92,9 @@ def run_vm(args, assets, image, disks, case, mode, label):
         command += ["--blk", f"path={disk},bus={bus}"]
     if case.startswith("net-"):
         command += ["--net", f"bus={bus},backend=user"]
+    if args.profile_user:
+        command = ["perf", "record", "-q", "-e", "cycles:u", "-F", "99", "--clockid", "mono",
+                   "-o", str(directory / "perf.data"), "--"] + command
     env = os.environ.copy()
     env.pop("DILLO_BENCH_LOCAL", None)
     if mode == "local":
@@ -100,8 +103,9 @@ def run_vm(args, assets, image, disks, case, mode, label):
     env["RUST_LOG_STYLE"] = "never"
     samples, phases, errors, known = [], [], [], {}
     last_memory, ready = 0, None
-    expected = 2 + (0 if mode == "local" else (len(disks) or 1))
+    expected = 2 + (0 if mode == "local" else (len(disks) or 1)) + int(args.profile_user)
     phase, failure = "startup", None
+    profile_status = None
     output_path, error_path = directory / "stdout.txt", directory / "stderr.txt"
     sampler_start = time.process_time()
     start = time.monotonic()
@@ -165,6 +169,22 @@ def run_vm(args, assets, image, disks, case, mode, label):
                 for process in survivors:
                     process.kill()
                 psutil.wait_procs(survivors, timeout=3)
+            if args.profile_user:
+                profile_status = {"record_returncode": child.returncode, "clock": "CLOCK_MONOTONIC"}
+                window = [start + p["observed_s"] for p in phases
+                          if p["phase"] in ("active:net:tcp_echo:65536", "verify:net:tcp_echo:65536")]
+                profile_status["report_window_s"] = window
+                if child.returncode == 0 and len(window) == 2:
+                    with (directory / "perf-report.txt").open("wb") as log:
+                        try:
+                            report_profile = subprocess.run(
+                                ["perf", "report", "--stdio", "--no-children", "--sort", "comm,symbol",
+                                 "--percent-limit", "1", "--time", ",".join(f"{t:.9f}" for t in window),
+                                 "-i", str(directory / "perf.data")],
+                                stdout=log, stderr=subprocess.STDOUT, timeout=15, check=False)
+                            profile_status["report_returncode"] = report_profile.returncode
+                        except subprocess.TimeoutExpired:
+                            profile_status["report_error"] = "perf report exceeded 15 seconds"
     elapsed = time.monotonic() - start
     output = output_path.read_bytes()
     match = REPORT.search(output)
@@ -178,6 +198,7 @@ def run_vm(args, assets, image, disks, case, mode, label):
               "samples": samples, "last_process_samples": list(known.values()),
               "sampling_errors": errors, "phases": phases, "guest": report,
               "failure": failure,
+              "user_profile": profile_status,
               "sampler_and_echo_cpu_s": time.process_time() - sampler_start}
     save(directory / "result.json", result)
     assert not failure and child.returncode == 0 and ready is not None and report, f"boot failed: {directory}"
@@ -262,7 +283,11 @@ def main():
     parser.add_argument("--backing-dir", type=Path, help="optional disposable disk directory, e.g. tmpfs")
     parser.add_argument("--extra-cmdline", default="", help="explicit guest settings for sensitivity runs")
     parser.add_argument("--serial", action="store_true", help="retain early boot diagnostics through SPCR")
+    parser.add_argument("--profile-user", action="store_true",
+                        help="diagnostic-only Linux userspace profile during large TCP echo")
     args = parser.parse_args()
+    if args.profile_user and platform.system() != "Linux":
+        parser.error("--profile-user requires Linux perf")
     assert args.pairs > 0 and args.sample_ms > 0
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
