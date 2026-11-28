@@ -2183,3 +2183,49 @@ was dispatched on this source for two ten-second pairs per transport, including
 warmups (12 boots). It is a diagnostic of thread work and scheduling, not a
 performance qualification or an optimization. It does not modify Dillo runtime
 code or the guest workload.
+
+The completed run validates all 12 boots and 1,152 per-thread observation
+windows without observer errors. This Arm host also has scheduler statistics
+disabled. Runnable-wait counters therefore cannot identify or exclude host
+scheduling delay. During sequential reads, summed thread runtime is about
+4.49/4.20 cores for the PCI/MMIO in-process control. The isolated parent uses
+0.99 cores and its children use 2.98/2.78 cores. Several local threads inherit
+the same name, so names alone do not identify their responsibilities.
+The read-tail difference persists in this longer diagnostic: sequential-read
+p99 is 222.9%/269.5% of control, with throughput 154.0%/159.5%. These totals
+do not distinguish guest scheduling, interrupt delivery or individual request
+delays; they are not evidence that host runqueue contention caused the tail.
+[concurrent-scheduler-arm.json.gz](concurrent-scheduler-arm.json.gz) retains
+all reports, counter identities, per-thread windows, logs and artifact hashes.
+
+## macOS sampling with a separate echo process
+
+[Run 46122844834](https://github.com/pichi-vm/dillo/actions/runs/46122844834)
+completes all 104 boots at `c8eb818`, with runtime equivalent to the shared-status
+prototype `f8dc0ed`. Twelve balanced five-second rounds per transport interleave
+sampling off/on and in-process/isolated devices. Both labels use identical
+executables and guest assets. The echo server runs in its own process outside
+the measured Dillo tree. All reports and PCI-free inventories validate, without
+guest or sampler failures; native HVF lifecycle checks also pass.
+
+Bulk sampling-on/off throughput is 99.95%/99.96% for PCI control/worker and
+99.93%/99.97% for MMIO. Corresponding p99 ratios are 100.0%/100.0% and
+99.6%/100.8%. All three four-round blocks remain close to unity. Small-message
+p99 still changes modestly, so this is not a claim that instrumentation has
+zero effect. There is no matched old/new echo-harness comparison here.
+
+| Bulk case | Sampling | Worker/control throughput | Worker/control p99 | Worker/control CPU/GiB |
+| --- | --- | ---: | ---: | ---: |
+| PCI | Off | 92.47% | 111.26% | Unmeasured |
+| PCI | On | 92.39% | 111.89% | 117.95% |
+| PCI-free MMIO | Off | 95.03% | 108.81% | Unmeasured |
+| PCI-free MMIO | On | 95.17% | 108.73% | 111.98% |
+
+The sampled bulk CPU gaps persist in each four-round block: 17.65–18.10% for
+PCI and 11.68–12.33% for MMIO. System CPU/GiB rises about 36.7%/23.9%, while
+user CPU/GiB rises about 9.2%/6.7%. The unsampled measurements supply no CPU
+estimate. These results support continuing completion-path work; the Windows
+sampling distortion does not explain this Mac bulk gap. They do not replace
+same-mode noise calibration or qualify the unpromoted runtime candidate.
+[network-sampling-echo-process-macos.json.gz](network-sampling-echo-process-macos.json.gz)
+contains every raw observation, schedule, artifact hash and temporal block.
