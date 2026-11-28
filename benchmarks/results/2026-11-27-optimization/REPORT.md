@@ -1234,3 +1234,39 @@ execution; the correction scopes the existing native-test allowance to this
 function. [whp-level-eoi-probe.json](whp-level-eoi-probe.json) records both runs
 and the successful artifact provenance. These smoke timings are not parity
 evidence.
+
+## Identical-binary network calibration
+
+The local x86 run, [Arm run 46094858600](https://github.com/pichi-vm/dillo/actions/runs/46094858600)
+and [macOS run 46094860785](https://github.com/pichi-vm/dillo/actions/runs/46094860785)
+each completed 104 boots: twelve balanced five-second pairs per transport,
+plus warm-ups. Both comparison labels use the same executable path, hash and
+guest assets. All four label/mode combinations occupy each schedule position
+equally. Like-mode comparisons below therefore measure variation without a
+code change; worker/control comparisons still measure real isolation costs.
+The calibration source is `8e8e5b4`, with runtime equivalent to `06e7517`.
+
+For Arm's large PCI echo, identical workers show an apparent 3.3% throughput
+loss and 6.7% p99 increase. Ordinary paired intervals are [−6.1%, +3.0%] and
+[+1.0%, +20.7%]. Even the latter excludes zero despite identical code: pair
+resampling does not account for temporal dependence. This undermines attributing
+the prior observed 4.6% throughput loss to the TX change. It does not identify
+the environmental cause or prove that every Arm difference is noise.
+
+On x86, identical workers show a 5.5% small-PCI throughput difference, with an
+interval spanning [−8.0%, +3.0%]. Large-message PCI/MMIO throughput differences
+are +0.6%/−0.3%, with intervals [−1.1%, +3.0%]/[−0.9%, +0.6%]. macOS throughput
+and CPU/GiB calibration intervals stay within about 0.7% of unity; p99 varies
+more. The previously observed macOS 14.8–16.4% CPU/GiB overhead remains much
+larger than that calibration. A single tolerance cannot describe every host
+or metric, and these network results do not calibrate storage workloads.
+
+There is no exclusive-host claim. In particular, the local host also had an
+unrelated long-lived VM; its ownership and state were left untouched. Full
+paired results, temporal block medians, schedules, hashes and provenance are in
+[network-noise-x86.json.gz](network-noise-x86.json.gz),
+[network-noise-arm.json.gz](network-noise-arm.json.gz) and
+[network-noise-macos.json.gz](network-noise-macos.json.gz). Windows calibration
+is still running. No discarded samples or rerun-until-success qualification
+is used, and no full platform/transport qualification follows from this
+network-only calibration.
