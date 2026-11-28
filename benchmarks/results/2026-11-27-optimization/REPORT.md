@@ -1958,3 +1958,42 @@ the launcher currently enables the shared interrupt-status factory only on
 Linux and Windows. macOS still uses the parent completion relay and its
 existing interrupt status; the environment flag alone does not establish
 shared-status operation there.
+
+## macOS shared-status prototype
+
+The isolated experiment `experiment/hvf-shared-status` adds the existing
+shared-status hook to HVF. Source `abb279b` provides the status mapping using
+the existing unlinked POSIX shared-memory allocator. Darwin's
+[shm implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/posix_shm.c)
+refuses resizing after the first allocation; the native fixture also verifies
+that both shrinking and growing an exported backing fail.
+
+Runtime `8f558ff` binds a call receiver to one activation. It exports the same
+Unix pipe type already used by workers, retains one receiver across that
+activation's queues, and skips pipe/thread creation for the in-process path.
+The worker sets the negotiated shared latch before signaling, coalescing
+notifications while the status remains pending. Declared edge sources pulse;
+level sources follow the latch. ACK and delivery share a lock and re-read the
+status so a stale zero observation cannot lower a newer level. Retirement
+revokes delivery before waking/joining the receiver, and repeated retirement
+does not lower a replacement binding's line. This uses the existing private
+experimental protocol feature; it is not a newly assigned vhost-user facility.
+
+The first qualification run `46119245700` compiled and passed the regular
+macOS suites, then failed before the native check because Bash could not
+create a heredoc temporary file. The harness-only correction `f8dc0ed` moves
+that code into a checked-in Python script. In
+[run 46119474739](https://github.com/pichi-vm/dillo/actions/runs/46119474739),
+the signed GIC check passes for edge/level injection, a controlled stale-ACK
+interleaving, retired endpoints and replacement activation. All eight
+500-ms PCI-free block/network smoke boots then succeed, across local/worker
+execution. The local MMIO transport suite and strict Clippy pass; the three
+KVM completion checks also pass after the shared transport ACK adjustment.
+
+Both run logs, all smoke outputs/hashes and local checks are retained in
+[hvf-shared-status-smoke.json.gz](hvf-shared-status-smoke.json.gz). This is
+bounded correctness evidence, not a concurrent stress proof or performance
+result. The predeclared comparison against `8196bb4` uses four balanced
+five-second pairs across PCI/MMIO block and network cases. The runtime remains
+outside the main optimization branch pending those measurements and remaining
+shared-status qualification.
