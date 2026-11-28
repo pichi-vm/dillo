@@ -2173,9 +2173,9 @@ or a request-latency histogram. No host setting is changed.
 Eight local smoke boots use the frozen `8196bb4` runtime, four disks, both
 transports, QD8 per disk and one 500-ms pair plus warmups. All guest reports,
 write verification, PCI-free inventories and observer captures validate, with
-no thread-read errors. The local host has scheduler statistics disabled, so its
-zero wait counters cannot establish an absence of scheduler delay. Runtime
-counter growth passes the standalone self-check. Raw evidence is retained in
+no thread-read errors. Runtime counter growth passes the standalone self-check.
+The global scheduler-statistics setting was recorded as zero; the interpretation
+of that setting is corrected below. Raw evidence is retained in
 [linux-scheduler-observer-smoke.json.gz](linux-scheduler-observer-smoke.json.gz).
 
 [Arm run 46124151486](https://github.com/pichi-vm/dillo/actions/runs/46124151486)
@@ -2185,16 +2185,25 @@ performance qualification or an optimization. It does not modify Dillo runtime
 code or the guest workload.
 
 The completed run validates all 12 boots and 1,152 per-thread observation
-windows without observer errors. This Arm host also has scheduler statistics
-disabled. Runnable-wait counters therefore cannot identify or exclude host
-scheduling delay. During sequential reads, summed thread runtime is about
+windows without observer errors. Although this Arm host reports
+`sched_schedstats=0`, its per-thread wait counters advance. The initial analysis
+incorrectly gated their interpretation on that global switch. Linux 7.0.10's
+[proc reader](https://raw.githubusercontent.com/gregkh/linux/v7.0.10/fs/proc/base.c)
+uses `sched_info.run_delay`; its
+[enable check](https://raw.githubusercontent.com/gregkh/linux/v7.0.10/include/linux/sched/stat.h)
+depends on `CONFIG_SCHED_INFO`, independently of the global switch.
+The archive preserves all original raw counters and records this correction.
+During sequential reads, summed thread runtime is about
 4.49/4.20 cores for the PCI/MMIO in-process control. The isolated parent uses
 0.99 cores and its children use 2.98/2.78 cores. Several local threads inherit
 the same name, so names alone do not identify their responsibilities.
 The read-tail difference persists in this longer diagnostic: sequential-read
 p99 is 222.9%/269.5% of control, with throughput 154.0%/159.5%. These totals
 do not distinguish guest scheduling, interrupt delivery or individual request
-delays; they are not evidence that host runqueue contention caused the tail.
+delays. Across the sampled sequential-read windows, summed host runnable wait
+is about 0.2–0.4% of a CPU-second per elapsed second in either mode, much smaller
+than CPU use. That does not support broad host runqueue saturation as the main
+explanation, but cumulative totals cannot exclude rare scheduling delays.
 [concurrent-scheduler-arm.json.gz](concurrent-scheduler-arm.json.gz) retains
 all reports, counter identities, per-thread windows, logs and artifact hashes.
 
@@ -2229,3 +2238,24 @@ sampling distortion does not explain this Mac bulk gap. They do not replace
 same-mode noise calibration or qualify the unpromoted runtime candidate.
 [network-sampling-echo-process-macos.json.gz](network-sampling-echo-process-macos.json.gz)
 contains every raw observation, schedule, artifact hash and temporal block.
+
+## Guest concurrent-request distribution diagnostic
+
+The 44-line `3c6d63a` diagnostic retains one latency summary per guest request
+thread, rather than only the merged histogram. Two `/proc/thread-self/schedstat`
+reads bracket each measured phase; no work is added per request. JSON output
+follows the verification marker after all requests finish. Thread indices follow
+device order, with eight consecutive threads per disk. The workload, Dillo
+runtime and kernel remain unchanged.
+
+Eight local 500-ms smoke boots validate all 1,024 thread records against their
+aggregate counts, maximum latency and maximum elapsed time. Guest counters are
+monotone and advance; the separate global switch is absent, not evidence of
+disabled per-thread accounting. Linux 6.1.155 uses the same
+[CONFIG_SCHED_INFO check](https://raw.githubusercontent.com/gregkh/linux/v6.1.155/include/linux/sched/stat.h).
+Raw reports and output are retained in
+[concurrent-thread-distribution-smoke.json.gz](concurrent-thread-distribution-smoke.json.gz).
+The native Arm follow-up is prespecified as two ten-second pairs per transport,
+including warmups (12 boots). It investigates thread/disk fairness and guest
+runnable delay; cumulative counters cannot assign an individual request's tail
+to a particular cause. This diagnostic does not qualify performance.
