@@ -1381,3 +1381,30 @@ itself retains about 99.1% of control throughput with 101.8% CPU/GiB; those smal
 costs remain visible above its much narrower calibration. Write and sequential
 results remain less resolved. This calibration covers this host, transport and
 backing only; the network noise bands are not reused for storage.
+
+## Balanced mapping-owner comparison on macOS
+
+[Run 46098627713](https://github.com/pichi-vm/dillo/actions/runs/46098627713),
+attempt 2, completes all 104 boots at `ab4c264` against `ad6ac6a`: twelve
+balanced five-second pairs per revision for PCI-free block and network.
+Both source trees are clean, executable hashes differ, guest assets match,
+and every guest reports no PCI devices. The first attempt failed during
+toolchain installation before any measurement; that failure remains recorded.
+
+The 16-line mapping-owner change improves worker sequential read/write
+throughput by 8.8%/7.1%, with CPU/GiB falling 8.1%/6.7%. Bulk network throughput
+improves 5.2% (paired 95% interval +5.0–5.4%) and CPU/GiB falls 8.6%
+(−9.0% to −8.4%). All three four-round blocks have the same direction.
+Random-read throughput is essentially unchanged; its +0.6% CPU/GiB observation
+needs storage-specific noise calibration before attribution. Random writes
+improve 3.0% in the worker but fall 1.6% in the control.
+
+This is useful common-path work, not a solution to isolation overhead. The
+bulk network control improves 6.1% in throughput and 11.1% in CPU/GiB, leaving
+the worker at 94.2% throughput, 116.1% CPU/GiB and 108.9% p99 relative to it.
+The larger relative gap does not erase the worker's absolute improvement.
+Storage gaps also remain. No PCI or whole-platform qualification follows.
+[mapping-owner-macos-balanced.json.gz](mapping-owner-macos-balanced.json.gz)
+retains both modes, all observations, temporal blocks, hashes and provenance.
+A separate identical-binary PCI-free storage calibration at `ab4c264` is
+running; no result from that unfinished series is included here.
