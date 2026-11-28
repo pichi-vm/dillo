@@ -1270,3 +1270,17 @@ paired results, temporal block medians, schedules, hashes and provenance are in
 is still running. No discarded samples or rerun-until-success qualification
 is used, and no full platform/transport qualification follows from this
 network-only calibration.
+
+## Remaining host-user work
+
+Eight local boots at `8a8233d` retain optimized, symbolized host-user cycle
+profiles for large TCP echo. All guests and profile commands succeed; the
+reports record no lost samples. In the measured pair, region construction
+and destruction together account for about 26–30% of worker samples and
+30–33% of control samples across MMIO/PCI. This is substantial common work,
+not an attribution of isolation overhead or total CPU including kernel/guest.
+It supports revisiting the existing small `219fa22` ownership experiment,
+whose earlier storage comparison had ordering bias, rather than adding a new
+mechanism for the same cost. Profiled rates do not qualify performance.
+[network-user-profile-x86.json.gz](network-user-profile-x86.json.gz) retains
+all eight reports, phase windows, result records and raw-file hashes.
