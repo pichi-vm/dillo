@@ -1716,3 +1716,31 @@ without retrying blocked reads on unrelated guest activity. That is a
 hypothesis to measure, not an established explanation of the transport split.
 All observations, including the losses, are retained in
 [network-readiness-x86-short.json.gz](network-readiness-x86-short.json.gz).
+
+## Windows read-readiness follow-up
+
+[Run 46108670292](https://github.com/pichi-vm/dillo/actions/runs/46108670292)
+completes forty boots comparing `2619d65` with `ceda4c5`. Both revisions already
+remove idle writable interest; this comparison isolates the subsequent read
+readiness tracking. Four balanced five-second pairs per network transport use
+matched guest assets, distinct binaries, and the Hyper-V-clock diagnostic
+kernel. Native WHP checks and all 52 applicable network tests pass; four
+external-network tests remain ignored. Boot reports and sampling validate.
+
+Bulk worker throughput is essentially unchanged on PCI and 1.6% lower on
+MMIO. CPU/GiB changes by −1.7% on PCI and +2.8% on MMIO, with mixed individual
+pairs. Small-message median throughput changes are −1.6%/−0.7%; an unusually
+slow baseline PCI pair is retained. Four pairs do not establish precision or
+justify promoting the additional tracking as a performance improvement.
+
+The runner reports AMD family 25/model 1, matching the family/model of the
+earlier calibration rather than the intervening family 26 writable-interest
+screen. Bulk worker/control p99 remains 131.3% on PCI and 129.5% on MMIO.
+The unchanged baseline ratios in this run are 129.8% and 140.3%. The additional
+read tracking has not resolved the recurring tail gap. These comparisons
+must not be multiplied across different runs to estimate a combined gain.
+
+[network-read-ready-windows-short.json.gz](network-read-ready-windows-short.json.gz)
+retains both revisions, all paired values, warmups, source identities and
+artifact hashes. The separate six-line reply-probe candidate `281772e` is
+being screened locally; no result from it is included here.
