@@ -199,7 +199,7 @@ jobs:
             bench_options=()
             if [ "$bench_mode" = off ]; then bench_options+=(--no-sample); fi
             if [ "$BENCH_KERNEL" = wsl-clock ]; then bench_options+=(--serial); fi
-            python benchmarks/run.py --assets target/benchmarks/assets.json \
+            python benchmarks/windows_trace.py --assets target/benchmarks/assets.json \
               --output "$BENCH_RESULTS/$bench_latch/$bench_mode" --pairs "$BENCH_PAIRS" \
               --duration-ms "$BENCH_DURATION_MS" --queue-depth "$BENCH_QUEUE_DEPTH" \
               --cases "$BENCH_CASES" "${bench_options[@]}" "${bench_comparison[@]}"
@@ -213,4 +213,5 @@ jobs:
           path: |
             ${{ env.BENCH_RESULTS }}/**/*.json
             ${{ env.BENCH_RESULTS }}/**/*.txt
+            ${{ env.BENCH_RESULTS }}/**/scheduler-events.jsonl.gz
           if-no-files-found: warn
