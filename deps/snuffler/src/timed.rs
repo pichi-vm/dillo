@@ -96,7 +96,11 @@ pub(crate) fn measure_parallel(
                     let mut latency = Histogram::default();
                     let mut error = None;
                     let mut elapsed_ns = 0;
+                    let mut scheduler = [String::new(), String::new()];
                     for (warmup, duration) in [(true, config.warmup), (false, config.duration)] {
+                        if !warmup {
+                            scheduler[0] = scheduler_snapshot();
+                        }
                         barrier.wait();
                         let start = *start.lock().unwrap();
                         if error.is_none() {
@@ -114,11 +118,14 @@ pub(crate) fn measure_parallel(
                             .err();
                         }
                         elapsed_ns = start.elapsed().as_nanos() as u64;
+                        if !warmup {
+                            scheduler[1] = scheduler_snapshot();
+                        }
                         barrier.wait();
                     }
                     match error {
                         Some(error) => Err(error),
-                        None => Ok((latency, elapsed_ns)),
+                        None => Ok((latency, elapsed_ns, scheduler)),
                     }
                 })
             })
@@ -129,18 +136,31 @@ pub(crate) fn measure_parallel(
             barrier.wait();
             barrier.wait();
         }
+        // Diagnostics are emitted after every request thread has finished.
+        // They must not add console work to the measured active phase.
+        mark(&format!("verify:{device}:{operation}:{request_bytes}"));
+        let accounting = std::fs::read_to_string("/proc/sys/kernel/sched_schedstats")
+            .unwrap_or_else(|error| format!("error: {error}"));
         let mut latency = Histogram::default();
         let mut elapsed = 0;
-        for thread in threads {
-            let (samples, duration) = thread
+        for (index, thread) in threads.into_iter().enumerate() {
+            let (samples, duration, scheduler) = thread
                 .join()
                 .map_err(|_| io::Error::other("benchmark thread panicked"))??;
+            eprintln!(
+                "<<<SNUFFLER-THREAD:{}>>>",
+                serde_json::json!({
+                    "device": device, "operation": operation,
+                    "request_bytes": request_bytes, "index": index,
+                    "elapsed_ns": duration, "latency": samples.summary(),
+                    "schedstat": scheduler, "sched_schedstats": accounting,
+                })
+            );
             latency.merge(&samples);
             elapsed = elapsed.max(duration);
         }
         Ok::<_, io::Error>((latency.summary(), elapsed))
     })?;
-    mark(&format!("verify:{device}:{operation}:{request_bytes}"));
     Ok(Operation {
         device: device.into(),
         operation: operation.into(),
@@ -152,6 +172,11 @@ pub(crate) fn measure_parallel(
         latency,
         verified: None,
     })
+}
+
+fn scheduler_snapshot() -> String {
+    std::fs::read_to_string("/proc/thread-self/schedstat")
+        .unwrap_or_else(|error| format!("error: {error}"))
 }
 
 pub(crate) fn run(cmdline: &str, blocks: &[snuffler::BlockDevice], config: &Config) -> Performance {

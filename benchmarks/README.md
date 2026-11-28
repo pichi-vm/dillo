@@ -255,3 +255,14 @@ its latency percentiles are not usable as microsecond measurements. The
 macOS runner could not supply detailed memory queries. Neither limitation is a zero
 cost result. The guest's `boot_to_userspace_ns` captures entry before probes;
 `uptime_secs` is read later and must not be used as boot latency.
+
+This diagnostic branch emits `SNUFFLER-THREAD` JSON records after each parallel
+operation has finished. They retain each guest thread's request count, latency
+summary, elapsed time and before/after `/proc/thread-self/schedstat` text.
+Threads follow device order, with `queue_depth` consecutive threads per disk.
+The two counter reads bracket the measured phase (including its starting
+barrier); there is no added per-request instrumentation. Errors remain explicit.
+Per-thread `schedstat` uses `CONFIG_SCHED_INFO`, independently of the reported
+global `sched_schedstats` switch. Nonzero advancing counters establish activity;
+a missing switch does not disable them. These summaries diagnose distribution
+and fairness, not individual request causes or performance parity.
