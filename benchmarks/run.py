@@ -5,6 +5,8 @@
 """Paired native device measurements; guest workloads remain in snuffler."""
 
 import argparse
+from contextlib import contextmanager
+import faulthandler
 import hashlib
 import json
 import os
@@ -35,6 +37,17 @@ def digest(path):
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             result.update(chunk)
     return result.hexdigest()
+
+
+@contextmanager
+def timeout_trace(path, timeout):
+    """Keep Python stacks if a native sampling or cleanup call stalls."""
+    with path.open("w") as stream:
+        faulthandler.dump_traceback_later(timeout, repeat=True, file=stream)
+        try:
+            yield
+        finally:
+            faulthandler.cancel_dump_traceback_later()
 
 
 def snapshot(process, memory):
@@ -92,7 +105,8 @@ def run_vm(args, assets, image, disks, case, mode, label):
     output_path, error_path = directory / "stdout.txt", directory / "stderr.txt"
     sampler_start = time.process_time()
     start = time.monotonic()
-    with output_path.open("wb") as out, error_path.open("wb") as err:
+    with (timeout_trace(directory / "timeout-stack.txt", args.timeout),
+          output_path.open("wb") as out, error_path.open("wb") as err):
         child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=out, stderr=err, env=env)
         parent = psutil.Process(child.pid)
         tracked, next_discovery = {parent.pid: parent}, 0
