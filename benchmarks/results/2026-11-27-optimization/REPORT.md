@@ -1166,6 +1166,29 @@ its effect is unresolved, not because a regression has been established.
 [arm-tx-order-sensitivity.json](arm-tx-order-sensitivity.json) preserves the
 original estimate and the sensitivity calculation.
 
+## Longer macOS and Windows transmit comparisons
+
+[macOS run 46090968077](https://github.com/pichi-vm/dillo/actions/runs/46090968077)
+and [Windows run 46090537665](https://github.com/pichi-vm/dillo/actions/runs/46090537665)
+each completed all 104 boots at `06e7517` against `aa9bbff`, using twelve
+balanced five-second pairs per transport/revision. Both retain matched guest
+assets and successful PCI-free assertions. Windows uses the existing prebuilt
+WSL clock diagnostic kernel and native MSVC executable. These are observations
+pending noise calibration, not causal attribution or milestone qualification.
+
+On macOS, large-message worker throughput is 2.9%/2.7% higher on PCI/MMIO than
+the prior worker; CPU/GiB is 6.8% lower on both. Against the equally optimized
+control, however, throughput is 94.0%/95.6%, CPU/GiB is 116.4%/114.8%, and p99
+is 108.2%/106.9%. The common allocation reduction does not remove those gaps.
+
+On Windows, large-message worker throughput changes +1.5%/−0.7% versus the
+prior worker; CPU/GiB changes remain inconclusive. Worker/control throughput
+is 96.3%/96.9%, CPU/GiB is 102.1%/101.9%, and p99 is 136.5%/133.5%. No
+cross-platform promotion follows from these results. Full observations,
+intervals, execution order and artifact provenance are retained in
+[network-tx-scratch-macos-long.json.gz](network-tx-scratch-macos-long.json.gz)
+and [network-tx-scratch-windows-long.json.gz](network-tx-scratch-windows-long.json.gz).
+
 ## KVM resampler lifetime and failure reporting
 
 The experimental wired binding now attempts native irqfd deassignment before
