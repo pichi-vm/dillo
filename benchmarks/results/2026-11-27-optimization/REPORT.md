@@ -1437,3 +1437,25 @@ x86 comparison remains in progress; no candidate is promoted from these
 partial-platform results. Full observations, temporal blocks, hashes and
 provenance are retained in [mapping-owner-arm-balanced.json.gz](mapping-owner-arm-balanced.json.gz)
 and [mapping-owner-windows-balanced.json.gz](mapping-owner-windows-balanced.json.gz).
+
+## Windows TCP policy comparison
+
+[Run 46099573387](https://github.com/pichi-vm/dillo/actions/runs/46099573387)
+completes 104 boots at `243c756` against `e5538b1`, using twelve balanced
+five-second pairs for each network transport. The one-line change sets
+TCP_NODELAY before exporting a Windows worker socket, matching the existing
+in-process connector. Native WHP lifecycle and notification/network checks
+pass before measurement; the unchanged prebuilt WSL kernel supplies the
+high-resolution guest clock.
+
+The setting does not explain the bulk tail gap. Worker p99 changes by +0.4%
+on PCI (paired interval −6.7% to +2.3%) and −1.4% on PCI-free MMIO (−2.8% to
++2.1%). Throughput changes by +0.1%/+0.6%, and CPU/GiB by +2.4%/−1.1%; these
+do not establish a performance win. Worker/control bulk p99 remains
+134.5%/129.6%. The setting is retained to make the two connection paths follow
+the same TCP policy, not as a claimed tail-latency optimization. No protocol,
+resource authority or lifetime changes are involved.
+
+[windows-network-nodelay-balanced.json.gz](windows-network-nodelay-balanced.json.gz)
+retains all boots, comparisons, temporal blocks, asset/source hashes and
+artifact provenance. This experiment excludes the mapping-owner change.
