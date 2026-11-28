@@ -1063,3 +1063,41 @@ It does not measure QoS class or performance/efficiency-core placement, and
 the instrumented rates are not performance qualification. No scheduling
 policy was changed. All 40 snapshots and provenance are retained in
 [macos-thread-priorities.json.gz](macos-thread-priorities.json.gz).
+
+## Longer physical x86 transmit comparison
+
+The twelve-pair, five-second comparison of `06e7517` against `d13eadd`
+completed all 104 boots on CPUs 24–27, without concurrent local compilation.
+For large messages, worker throughput rises 2.8% on PCI and 3.4% on MMIO;
+paired 95% intervals are +0.6–3.4% and +2.9–3.6%. CPU/GiB falls 7.3%/5.8%,
+and p99 bounds fall 5.1%/3.1%. The small-message estimates remain uncertain.
+The larger follow-up supports an improvement in the common TX path, while
+retaining the uncertainty in the other comparisons.
+
+Against its equally optimized control, large-message PCI still retains
+97.6% throughput (95% interval 96.3–99.6%), uses 102.8% CPU/GiB and has a
+102.4% p99 bound. Large-message MMIO is closer at 100.3% throughput and
+100.3% CPU/GiB, but these intervals do not establish the full milestone.
+An eight-pair extension is running to retain twenty observations where the
+twelve-pair estimates remain inconclusive. The recorded dirty flags identify
+only Python analysis bytecode; Rust source and frozen binaries were unchanged.
+All observations, schedule, hashes and intervals are retained in
+[network-tx-scratch-x86-long.json.gz](network-tx-scratch-x86-long.json.gz).
+
+## Native macOS wake primitive probe
+
+[Run 46090539469](https://github.com/pichi-vm/dillo/actions/runs/46090539469)
+at `9928e4e` compares six alternating pairs of blocking-pipe and shared-futex
+ping-pong between two native processes. Each trial warms up for 1,000 exchanges
+then times 100,000. The futex uses two different virtual addresses for the same
+file-backed page, lock-free aligned atomic words, and Apple's public shared
+wait/wake flags. Every child exits successfully. Its median paired round-trip
+cost is 38.5% higher than the blocking pipe, and total process-tree CPU is
+51.7% higher. The CPU observation includes warm-up and process lifetime costs.
+
+This is a primitive probe, with no guest, sandbox, vhost-user or native interrupt
+injection. Dillo's current notification reader also uses kqueue for cancellable
+readiness; a follow-up includes that additional operation before drawing an
+implementation conclusion. No notification or protocol change has been made.
+The complete observations and provenance are in
+[macos-native-wake.json](macos-native-wake.json).

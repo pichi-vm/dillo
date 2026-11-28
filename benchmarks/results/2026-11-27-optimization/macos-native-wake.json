@@ -1,0 +1,104 @@
+{
+  "run": 46090539469,
+  "source": "9928e4e66675d062c698df9028babc0a20f6de47",
+  "artifact_sha256": "db9f7f014e98df849b3ad5f88c5ab9a4f216ae707a3e97ddb4cddd2f9f3a3ac0",
+  "definition": "Native two-process ping-pong only. RTT excludes warm-up and process startup. CPU includes them. No sandbox, vhost-user, interrupt injection or guest path qualification.",
+  "observations": [
+    {
+      "trial": 0,
+      "method": "pipe",
+      "round_trip_ns": 3506.8,
+      "tree_cpu_s": 0.37233,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 0,
+      "method": "shared-futex",
+      "round_trip_ns": 4673.0,
+      "tree_cpu_s": 0.511035,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 1,
+      "method": "shared-futex",
+      "round_trip_ns": 4442.2,
+      "tree_cpu_s": 0.494762,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 1,
+      "method": "pipe",
+      "round_trip_ns": 3141.3,
+      "tree_cpu_s": 0.318233,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 2,
+      "method": "pipe",
+      "round_trip_ns": 3399.5,
+      "tree_cpu_s": 0.339415,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 2,
+      "method": "shared-futex",
+      "round_trip_ns": 4151.8,
+      "tree_cpu_s": 0.463221,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 3,
+      "method": "shared-futex",
+      "round_trip_ns": 4528.8,
+      "tree_cpu_s": 0.498375,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 3,
+      "method": "pipe",
+      "round_trip_ns": 3130.6,
+      "tree_cpu_s": 0.317043,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 4,
+      "method": "pipe",
+      "round_trip_ns": 3144.3,
+      "tree_cpu_s": 0.318399,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 4,
+      "method": "shared-futex",
+      "round_trip_ns": 4383.6,
+      "tree_cpu_s": 0.483605,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 5,
+      "method": "shared-futex",
+      "round_trip_ns": 4312.8,
+      "tree_cpu_s": 0.480814,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 5,
+      "method": "pipe",
+      "round_trip_ns": 3134.4,
+      "tree_cpu_s": 0.317519,
+      "exchanges": 100000,
+      "warmup": 1000
+    }
+  ]
+}
