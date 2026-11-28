@@ -8,7 +8,7 @@ the current wire protocol, native notifications, batching and buffer reuse.
 Do not extract standalone binaries in this milestone.
 
 The core owns the backend and its execution resources. A successful drain is
-required before reconfiguration; failed drains retain the stopping owner.
+required before reconfiguration; failed drains retain the quiescing owner.
 Stopping a queue is separate from stopping a worker: console shares one
 worker between its control queues. Enablement is separate from queue life.
 Runtime wire validation belongs at the adapter boundary.

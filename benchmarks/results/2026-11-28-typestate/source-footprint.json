@@ -1,0 +1,2813 @@
+{
+  "25f811fe93ee7e17fc301a53a505acf3c6e435fc": {
+    "components": {
+      "other_runtime": {
+        "production_lines": 10583,
+        "test_lines": 9602,
+        "files": 43,
+        "production_unsafe_functions": 7,
+        "production_unsafe_blocks": 1,
+        "test_unsafe_blocks": 8
+      },
+      "worker_and_wire": {
+        "production_lines": 2210,
+        "test_lines": 2495,
+        "files": 19,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 2,
+        "test_unsafe_functions": 3,
+        "test_unsafe_blocks": 11
+      },
+      "native_backends": {
+        "production_lines": 9832,
+        "test_lines": 4670,
+        "files": 22,
+        "production_unsafe_blocks": 104,
+        "test_unsafe_blocks": 16,
+        "production_unsafe_functions": 14
+      },
+      "unix_services": {
+        "production_lines": 747,
+        "test_lines": 230,
+        "files": 5,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 2
+      },
+      "devices": {
+        "production_lines": 12545,
+        "test_lines": 6989,
+        "files": 36,
+        "production_unsafe_blocks": 39,
+        "test_unsafe_blocks": 1
+      },
+      "windows_channel": {
+        "production_lines": 747,
+        "test_lines": 218,
+        "files": 3,
+        "production_unsafe_blocks": 13,
+        "test_unsafe_blocks": 1,
+        "native_and_build_lines": 359
+      },
+      "launcher": {
+        "production_lines": 4049,
+        "test_lines": 557,
+        "files": 7,
+        "production_unsafe_blocks": 1
+      }
+    },
+    "files": [
+      {
+        "path": "deps/dillo-config/src/console_size.rs",
+        "production_lines": 50,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-config/src/lib.rs",
+        "production_lines": 1095,
+        "test_lines": 744,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-devtree/src/lib.rs",
+        "production_lines": 21,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-devtree/src/platform.rs",
+        "production_lines": 1521,
+        "test_lines": 878,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-devtree/tests/platform_adversarial.rs",
+        "production_lines": 0,
+        "test_lines": 241,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-ipc/src/bootstrap.rs",
+        "production_lines": 12,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-ipc/src/lib.rs",
+        "production_lines": 25,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-ipc/src/vhost_user.rs",
+        "production_lines": 138,
+        "test_lines": 29,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-launch/src/lib.rs",
+        "production_lines": 708,
+        "test_lines": 85,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-hvf/src/hypervisor.rs",
+        "production_lines": 673,
+        "test_lines": 408,
+        "files": 1,
+        "production_unsafe_blocks": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-hvf/src/lib.rs",
+        "production_lines": 1027,
+        "test_lines": 420,
+        "files": 1,
+        "production_unsafe_blocks": 5
+      },
+      {
+        "path": "deps/dillo-machine-hvf/src/worker.rs",
+        "production_lines": 113,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_functions": 2,
+        "production_unsafe_blocks": 3
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/amd_tsc/mod.rs",
+        "production_lines": 72,
+        "test_lines": 88,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/cpuid_x86.rs",
+        "production_lines": 94,
+        "test_lines": 117,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/hypervisor.rs",
+        "production_lines": 1022,
+        "test_lines": 524,
+        "files": 1,
+        "production_unsafe_blocks": 6,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/intc_x86.rs",
+        "production_lines": 232,
+        "test_lines": 183,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/irq.rs",
+        "production_lines": 433,
+        "test_lines": 403,
+        "files": 1,
+        "production_unsafe_blocks": 3,
+        "test_unsafe_blocks": 6
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/lib.rs",
+        "production_lines": 1040,
+        "test_lines": 330,
+        "files": 1,
+        "production_unsafe_blocks": 8,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/memory.rs",
+        "production_lines": 147,
+        "test_lines": 126,
+        "files": 1,
+        "production_unsafe_blocks": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/msi.rs",
+        "production_lines": 246,
+        "test_lines": 68,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/notification.rs",
+        "production_lines": 121,
+        "test_lines": 206,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/wired_completion.rs",
+        "production_lines": 185,
+        "test_lines": 287,
+        "files": 1,
+        "production_unsafe_blocks": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/worker.rs",
+        "production_lines": 283,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 3
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/channel.rs",
+        "production_lines": 272,
+        "test_lines": 83,
+        "files": 1,
+        "production_unsafe_blocks": 2,
+        "production_unsafe_functions": 1
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/lib.rs",
+        "production_lines": 16,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/memory.rs",
+        "production_lines": 130,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_functions": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/notification.rs",
+        "production_lines": 198,
+        "test_lines": 63,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/vhost_user.rs",
+        "production_lines": 131,
+        "test_lines": 84,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/hypervisor.rs",
+        "production_lines": 1806,
+        "test_lines": 1347,
+        "files": 1,
+        "production_unsafe_blocks": 41,
+        "production_unsafe_functions": 5,
+        "test_unsafe_blocks": 5
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/ioapic.rs",
+        "production_lines": 227,
+        "test_lines": 70,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/lib.rs",
+        "production_lines": 976,
+        "test_lines": 93,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/memory.rs",
+        "production_lines": 78,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/wired_completion.rs",
+        "production_lines": 136,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/worker.rs",
+        "production_lines": 695,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 21,
+        "production_unsafe_functions": 3
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/worker/socket.rs",
+        "production_lines": 92,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 4
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/worker/vhost_user.rs",
+        "production_lines": 134,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine/src/cpuid_x86.rs",
+        "production_lines": 157,
+        "test_lines": 27,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine/src/lib.rs",
+        "production_lines": 261,
+        "test_lines": 307,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine/src/worker.rs",
+        "production_lines": 334,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_functions": 7,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-mmio-uart/src/lib.rs",
+        "production_lines": 272,
+        "test_lines": 108,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-mmio-virtio/src/lib.rs",
+        "production_lines": 675,
+        "test_lines": 307,
+        "files": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-mmio/src/lib.rs",
+        "production_lines": 884,
+        "test_lines": 437,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-mmio/src/syscon.rs",
+        "production_lines": 132,
+        "test_lines": 133,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci-virtio/src/capabilities.rs",
+        "production_lines": 91,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci-virtio/src/lib.rs",
+        "production_lines": 134,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci-virtio/src/transport.rs",
+        "production_lines": 942,
+        "test_lines": 743,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci-virtio/tests/msix_bounds.rs",
+        "production_lines": 0,
+        "test_lines": 199,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/address.rs",
+        "production_lines": 20,
+        "test_lines": 21,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/bar.rs",
+        "production_lines": 34,
+        "test_lines": 24,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/bdf.rs",
+        "production_lines": 42,
+        "test_lines": 28,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/capability.rs",
+        "production_lines": 15,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/configuration.rs",
+        "production_lines": 210,
+        "test_lines": 99,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/lib.rs",
+        "production_lines": 778,
+        "test_lines": 629,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/msix.rs",
+        "production_lines": 455,
+        "test_lines": 349,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/msix_tests.rs",
+        "production_lines": 214,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-runtime/src/lib.rs",
+        "production_lines": 252,
+        "test_lines": 2,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-runtime/src/tests.rs",
+        "production_lines": 0,
+        "test_lines": 408,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-storage/src/lib.rs",
+        "production_lines": 201,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-blk/src/lib.rs",
+        "production_lines": 802,
+        "test_lines": 539,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/control.rs",
+        "production_lines": 288,
+        "test_lines": 179,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/input.rs",
+        "production_lines": 69,
+        "test_lines": 21,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/lib.rs",
+        "production_lines": 1184,
+        "test_lines": 679,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/liveness.rs",
+        "production_lines": 204,
+        "test_lines": 112,
+        "files": 1,
+        "production_unsafe_blocks": 2
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/pipe.rs",
+        "production_lines": 453,
+        "test_lines": 101,
+        "files": 1,
+        "production_unsafe_blocks": 12
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/resize.rs",
+        "production_lines": 216,
+        "test_lines": 69,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/stdio.rs",
+        "production_lines": 102,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-fs/src/backend.rs",
+        "production_lines": 1606,
+        "test_lines": 425,
+        "files": 1,
+        "production_unsafe_blocks": 6
+      },
+      {
+        "path": "deps/dillo-virtio-fs/src/fuse.rs",
+        "production_lines": 1432,
+        "test_lines": 1160,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-fs/src/lib.rs",
+        "production_lines": 384,
+        "test_lines": 252,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-gpt/src/lib.rs",
+        "production_lines": 91,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-gpt/src/synth_gpt.rs",
+        "production_lines": 398,
+        "test_lines": 258,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-gpt/src/vgpt_backing.rs",
+        "production_lines": 226,
+        "test_lines": 371,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/backend.rs",
+        "production_lines": 97,
+        "test_lines": 13,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/bridge/linux.rs",
+        "production_lines": 221,
+        "test_lines": 47,
+        "files": 1,
+        "production_unsafe_blocks": 6
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/bridge/macos.rs",
+        "production_lines": 358,
+        "test_lines": 21,
+        "files": 1,
+        "production_unsafe_blocks": 12,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/bridge/mod.rs",
+        "production_lines": 26,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/lib.rs",
+        "production_lines": 542,
+        "test_lines": 375,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/linux_fd.rs",
+        "production_lines": 90,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/macvtap.rs",
+        "production_lines": 91,
+        "test_lines": 15,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/device.rs",
+        "production_lines": 114,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/dhcp.rs",
+        "production_lines": 188,
+        "test_lines": 124,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/dns.rs",
+        "production_lines": 307,
+        "test_lines": 96,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/forward.rs",
+        "production_lines": 80,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/mod.rs",
+        "production_lines": 337,
+        "test_lines": 2,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/ndp.rs",
+        "production_lines": 142,
+        "test_lines": 97,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/resources.rs",
+        "production_lines": 57,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/stack.rs",
+        "production_lines": 946,
+        "test_lines": 99,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/tcp.rs",
+        "production_lines": 254,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/tests.rs",
+        "production_lines": 0,
+        "test_lines": 1413,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/udp.rs",
+        "production_lines": 152,
+        "test_lines": 14,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-vsock/src/csm.rs",
+        "production_lines": 380,
+        "test_lines": 336,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-vsock/src/lib.rs",
+        "production_lines": 465,
+        "test_lines": 119,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-vsock/src/packet.rs",
+        "production_lines": 130,
+        "test_lines": 52,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-vsock/src/uds.rs",
+        "production_lines": 113,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/device.rs",
+        "production_lines": 405,
+        "test_lines": 221,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/features.rs",
+        "production_lines": 24,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/kick.rs",
+        "production_lines": 68,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/lib.rs",
+        "production_lines": 43,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/memory.rs",
+        "production_lines": 107,
+        "test_lines": 47,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/queue.rs",
+        "production_lines": 438,
+        "test_lines": 305,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-windows-channel/src/lib.rs",
+        "production_lines": 364,
+        "test_lines": 2,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-windows-channel/src/native.rs",
+        "production_lines": 383,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 13
+      },
+      {
+        "path": "deps/dillo-windows-channel/src/tests.rs",
+        "production_lines": 0,
+        "test_lines": 216,
+        "files": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/child.rs",
+        "production_lines": 724,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 2
+      },
+      {
+        "path": "deps/dillo-worker/src/grant.rs",
+        "production_lines": 173,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/lib.rs",
+        "production_lines": 13,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/parent.rs",
+        "production_lines": 1004,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/pause.rs",
+        "production_lines": 71,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/queue.rs",
+        "production_lines": 50,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/bad_peer.rs",
+        "production_lines": 0,
+        "test_lines": 115,
+        "files": 1,
+        "test_unsafe_functions": 3,
+        "test_unsafe_blocks": 3
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/console.rs",
+        "production_lines": 0,
+        "test_lines": 157,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/filesystem.rs",
+        "production_lines": 0,
+        "test_lines": 276,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/frames.rs",
+        "production_lines": 0,
+        "test_lines": 76,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/queues.rs",
+        "production_lines": 0,
+        "test_lines": 58,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/rings.rs",
+        "production_lines": 0,
+        "test_lines": 291,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/sockets.rs",
+        "production_lines": 0,
+        "test_lines": 138,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/vmnet.rs",
+        "production_lines": 0,
+        "test_lines": 68,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/vsock.rs",
+        "production_lines": 0,
+        "test_lines": 176,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/device_process.rs",
+        "production_lines": 0,
+        "test_lines": 1111,
+        "files": 1,
+        "test_unsafe_blocks": 8
+      },
+      {
+        "path": "src/device_worker/benchmark.rs",
+        "production_lines": 36,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/device_worker/filesystem.rs",
+        "production_lines": 300,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/device_worker/mod.rs",
+        "production_lines": 285,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/device_worker/network.rs",
+        "production_lines": 207,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/launch/bootconfig.rs",
+        "production_lines": 85,
+        "test_lines": 76,
+        "files": 1
+      },
+      {
+        "path": "src/launch/delegation_tests.rs",
+        "production_lines": 844,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/main.rs",
+        "production_lines": 2292,
+        "test_lines": 481,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "tests/architecture_cfg.rs",
+        "production_lines": 0,
+        "test_lines": 152,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/benchmark.rs",
+        "production_lines": 0,
+        "test_lines": 41,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/bootconfig.rs",
+        "production_lines": 0,
+        "test_lines": 133,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/console_input.rs",
+        "production_lines": 0,
+        "test_lines": 67,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/console_lifetime.rs",
+        "production_lines": 0,
+        "test_lines": 193,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/console_resize.rs",
+        "production_lines": 0,
+        "test_lines": 149,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/main.rs",
+        "production_lines": 0,
+        "test_lines": 1911,
+        "files": 1,
+        "test_unsafe_blocks": 6
+      },
+      {
+        "path": "tests/boot/virtiofs.rs",
+        "production_lines": 0,
+        "test_lines": 287,
+        "files": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "tests/pmi_adversarial.rs",
+        "production_lines": 0,
+        "test_lines": 327,
+        "files": 1
+      }
+    ]
+  },
+  "5419a7b4c9ea134d7c1c9727a76a1be9e4733cc4": {
+    "components": {
+      "other_runtime": {
+        "production_lines": 11520,
+        "test_lines": 9602,
+        "files": 46,
+        "production_unsafe_functions": 7,
+        "production_unsafe_blocks": 1,
+        "test_unsafe_blocks": 8
+      },
+      "worker_and_wire": {
+        "production_lines": 2241,
+        "test_lines": 2716,
+        "files": 20,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 2,
+        "test_unsafe_functions": 3,
+        "test_unsafe_blocks": 11
+      },
+      "native_backends": {
+        "production_lines": 9832,
+        "test_lines": 4670,
+        "files": 22,
+        "production_unsafe_blocks": 104,
+        "test_unsafe_blocks": 16,
+        "production_unsafe_functions": 14
+      },
+      "unix_services": {
+        "production_lines": 747,
+        "test_lines": 230,
+        "files": 5,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 2
+      },
+      "devices": {
+        "production_lines": 12410,
+        "test_lines": 6988,
+        "files": 36,
+        "production_unsafe_blocks": 39,
+        "test_unsafe_blocks": 1
+      },
+      "windows_channel": {
+        "production_lines": 747,
+        "test_lines": 218,
+        "files": 3,
+        "production_unsafe_blocks": 13,
+        "test_unsafe_blocks": 1,
+        "native_and_build_lines": 359
+      },
+      "launcher": {
+        "production_lines": 4050,
+        "test_lines": 557,
+        "files": 7,
+        "production_unsafe_blocks": 1
+      }
+    },
+    "files": [
+      {
+        "path": "deps/dillo-config/src/console_size.rs",
+        "production_lines": 50,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-config/src/lib.rs",
+        "production_lines": 1095,
+        "test_lines": 744,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-devtree/src/lib.rs",
+        "production_lines": 21,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-devtree/src/platform.rs",
+        "production_lines": 1521,
+        "test_lines": 878,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-devtree/tests/platform_adversarial.rs",
+        "production_lines": 0,
+        "test_lines": 241,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-ipc/src/bootstrap.rs",
+        "production_lines": 12,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-ipc/src/lib.rs",
+        "production_lines": 25,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-ipc/src/vhost_user.rs",
+        "production_lines": 138,
+        "test_lines": 29,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-launch/src/lib.rs",
+        "production_lines": 708,
+        "test_lines": 85,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-hvf/src/hypervisor.rs",
+        "production_lines": 673,
+        "test_lines": 408,
+        "files": 1,
+        "production_unsafe_blocks": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-hvf/src/lib.rs",
+        "production_lines": 1027,
+        "test_lines": 420,
+        "files": 1,
+        "production_unsafe_blocks": 5
+      },
+      {
+        "path": "deps/dillo-machine-hvf/src/worker.rs",
+        "production_lines": 113,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_functions": 2,
+        "production_unsafe_blocks": 3
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/amd_tsc/mod.rs",
+        "production_lines": 72,
+        "test_lines": 88,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/cpuid_x86.rs",
+        "production_lines": 94,
+        "test_lines": 117,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/hypervisor.rs",
+        "production_lines": 1022,
+        "test_lines": 524,
+        "files": 1,
+        "production_unsafe_blocks": 6,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/intc_x86.rs",
+        "production_lines": 232,
+        "test_lines": 183,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/irq.rs",
+        "production_lines": 433,
+        "test_lines": 403,
+        "files": 1,
+        "production_unsafe_blocks": 3,
+        "test_unsafe_blocks": 6
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/lib.rs",
+        "production_lines": 1040,
+        "test_lines": 330,
+        "files": 1,
+        "production_unsafe_blocks": 8,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/memory.rs",
+        "production_lines": 147,
+        "test_lines": 126,
+        "files": 1,
+        "production_unsafe_blocks": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/msi.rs",
+        "production_lines": 246,
+        "test_lines": 68,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/notification.rs",
+        "production_lines": 121,
+        "test_lines": 206,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/wired_completion.rs",
+        "production_lines": 185,
+        "test_lines": 287,
+        "files": 1,
+        "production_unsafe_blocks": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/worker.rs",
+        "production_lines": 283,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 3
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/channel.rs",
+        "production_lines": 272,
+        "test_lines": 83,
+        "files": 1,
+        "production_unsafe_blocks": 2,
+        "production_unsafe_functions": 1
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/lib.rs",
+        "production_lines": 16,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/memory.rs",
+        "production_lines": 130,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_functions": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/notification.rs",
+        "production_lines": 198,
+        "test_lines": 63,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/vhost_user.rs",
+        "production_lines": 131,
+        "test_lines": 84,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/hypervisor.rs",
+        "production_lines": 1806,
+        "test_lines": 1347,
+        "files": 1,
+        "production_unsafe_blocks": 41,
+        "production_unsafe_functions": 5,
+        "test_unsafe_blocks": 5
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/ioapic.rs",
+        "production_lines": 227,
+        "test_lines": 70,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/lib.rs",
+        "production_lines": 976,
+        "test_lines": 93,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/memory.rs",
+        "production_lines": 78,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/wired_completion.rs",
+        "production_lines": 136,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/worker.rs",
+        "production_lines": 695,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 21,
+        "production_unsafe_functions": 3
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/worker/socket.rs",
+        "production_lines": 92,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 4
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/worker/vhost_user.rs",
+        "production_lines": 134,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine/src/cpuid_x86.rs",
+        "production_lines": 157,
+        "test_lines": 27,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine/src/lib.rs",
+        "production_lines": 261,
+        "test_lines": 307,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine/src/worker.rs",
+        "production_lines": 334,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_functions": 7,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-mmio-uart/src/lib.rs",
+        "production_lines": 272,
+        "test_lines": 108,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-mmio-virtio/src/lib.rs",
+        "production_lines": 675,
+        "test_lines": 307,
+        "files": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-mmio/src/lib.rs",
+        "production_lines": 884,
+        "test_lines": 437,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-mmio/src/syscon.rs",
+        "production_lines": 132,
+        "test_lines": 133,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci-virtio/src/capabilities.rs",
+        "production_lines": 91,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci-virtio/src/lib.rs",
+        "production_lines": 134,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci-virtio/src/transport.rs",
+        "production_lines": 942,
+        "test_lines": 743,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci-virtio/tests/msix_bounds.rs",
+        "production_lines": 0,
+        "test_lines": 199,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/address.rs",
+        "production_lines": 20,
+        "test_lines": 21,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/bar.rs",
+        "production_lines": 34,
+        "test_lines": 24,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/bdf.rs",
+        "production_lines": 42,
+        "test_lines": 28,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/capability.rs",
+        "production_lines": 15,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/configuration.rs",
+        "production_lines": 210,
+        "test_lines": 99,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/lib.rs",
+        "production_lines": 778,
+        "test_lines": 629,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/msix.rs",
+        "production_lines": 455,
+        "test_lines": 349,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/msix_tests.rs",
+        "production_lines": 214,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-runtime/src/lib.rs",
+        "production_lines": 252,
+        "test_lines": 2,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-runtime/src/tests.rs",
+        "production_lines": 0,
+        "test_lines": 408,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-storage/src/lib.rs",
+        "production_lines": 201,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-blk/src/lib.rs",
+        "production_lines": 702,
+        "test_lines": 538,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/control.rs",
+        "production_lines": 288,
+        "test_lines": 179,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/input.rs",
+        "production_lines": 69,
+        "test_lines": 21,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/lib.rs",
+        "production_lines": 1149,
+        "test_lines": 679,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/liveness.rs",
+        "production_lines": 204,
+        "test_lines": 112,
+        "files": 1,
+        "production_unsafe_blocks": 2
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/pipe.rs",
+        "production_lines": 453,
+        "test_lines": 101,
+        "files": 1,
+        "production_unsafe_blocks": 12
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/resize.rs",
+        "production_lines": 216,
+        "test_lines": 69,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/stdio.rs",
+        "production_lines": 102,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-fs/src/backend.rs",
+        "production_lines": 1606,
+        "test_lines": 425,
+        "files": 1,
+        "production_unsafe_blocks": 6
+      },
+      {
+        "path": "deps/dillo-virtio-fs/src/fuse.rs",
+        "production_lines": 1432,
+        "test_lines": 1160,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-fs/src/lib.rs",
+        "production_lines": 384,
+        "test_lines": 252,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-gpt/src/lib.rs",
+        "production_lines": 91,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-gpt/src/synth_gpt.rs",
+        "production_lines": 398,
+        "test_lines": 258,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-gpt/src/vgpt_backing.rs",
+        "production_lines": 226,
+        "test_lines": 371,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/backend.rs",
+        "production_lines": 97,
+        "test_lines": 13,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/bridge/linux.rs",
+        "production_lines": 221,
+        "test_lines": 47,
+        "files": 1,
+        "production_unsafe_blocks": 6
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/bridge/macos.rs",
+        "production_lines": 358,
+        "test_lines": 21,
+        "files": 1,
+        "production_unsafe_blocks": 12,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/bridge/mod.rs",
+        "production_lines": 26,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/lib.rs",
+        "production_lines": 542,
+        "test_lines": 375,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/linux_fd.rs",
+        "production_lines": 90,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/macvtap.rs",
+        "production_lines": 91,
+        "test_lines": 15,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/device.rs",
+        "production_lines": 114,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/dhcp.rs",
+        "production_lines": 188,
+        "test_lines": 124,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/dns.rs",
+        "production_lines": 307,
+        "test_lines": 96,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/forward.rs",
+        "production_lines": 80,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/mod.rs",
+        "production_lines": 337,
+        "test_lines": 2,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/ndp.rs",
+        "production_lines": 142,
+        "test_lines": 97,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/resources.rs",
+        "production_lines": 57,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/stack.rs",
+        "production_lines": 946,
+        "test_lines": 99,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/tcp.rs",
+        "production_lines": 254,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/tests.rs",
+        "production_lines": 0,
+        "test_lines": 1413,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/udp.rs",
+        "production_lines": 152,
+        "test_lines": 14,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-vsock/src/csm.rs",
+        "production_lines": 380,
+        "test_lines": 336,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-vsock/src/lib.rs",
+        "production_lines": 465,
+        "test_lines": 119,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-vsock/src/packet.rs",
+        "production_lines": 130,
+        "test_lines": 52,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-vsock/src/uds.rs",
+        "production_lines": 113,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/device.rs",
+        "production_lines": 420,
+        "test_lines": 221,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/features.rs",
+        "production_lines": 24,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/kick.rs",
+        "production_lines": 68,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/lib.rs",
+        "production_lines": 46,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/lifecycle.rs",
+        "production_lines": 718,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/memory.rs",
+        "production_lines": 107,
+        "test_lines": 47,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/pause.rs",
+        "production_lines": 73,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/queue.rs",
+        "production_lines": 434,
+        "test_lines": 305,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/ring.rs",
+        "production_lines": 132,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-windows-channel/src/lib.rs",
+        "production_lines": 364,
+        "test_lines": 2,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-windows-channel/src/native.rs",
+        "production_lines": 383,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 13
+      },
+      {
+        "path": "deps/dillo-windows-channel/src/tests.rs",
+        "production_lines": 0,
+        "test_lines": 216,
+        "files": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/child.rs",
+        "production_lines": 694,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 2
+      },
+      {
+        "path": "deps/dillo-worker/src/grant.rs",
+        "production_lines": 173,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/lib.rs",
+        "production_lines": 13,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/parent.rs",
+        "production_lines": 1004,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/queue.rs",
+        "production_lines": 50,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/ring.rs",
+        "production_lines": 132,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/bad_peer.rs",
+        "production_lines": 0,
+        "test_lines": 115,
+        "files": 1,
+        "test_unsafe_functions": 3,
+        "test_unsafe_blocks": 3
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/console.rs",
+        "production_lines": 0,
+        "test_lines": 162,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/filesystem.rs",
+        "production_lines": 0,
+        "test_lines": 278,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/frames.rs",
+        "production_lines": 0,
+        "test_lines": 76,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/queues.rs",
+        "production_lines": 0,
+        "test_lines": 58,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/rings.rs",
+        "production_lines": 0,
+        "test_lines": 291,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/sockets.rs",
+        "production_lines": 0,
+        "test_lines": 138,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/vmnet.rs",
+        "production_lines": 0,
+        "test_lines": 68,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/vsock.rs",
+        "production_lines": 0,
+        "test_lines": 177,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/device_process.rs",
+        "production_lines": 0,
+        "test_lines": 1107,
+        "files": 1,
+        "test_unsafe_blocks": 8
+      },
+      {
+        "path": "deps/dillo-worker/tests/lifecycle.rs",
+        "production_lines": 0,
+        "test_lines": 217,
+        "files": 1
+      },
+      {
+        "path": "src/device_worker/benchmark.rs",
+        "production_lines": 37,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/device_worker/filesystem.rs",
+        "production_lines": 300,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/device_worker/mod.rs",
+        "production_lines": 285,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/device_worker/network.rs",
+        "production_lines": 207,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/launch/bootconfig.rs",
+        "production_lines": 85,
+        "test_lines": 76,
+        "files": 1
+      },
+      {
+        "path": "src/launch/delegation_tests.rs",
+        "production_lines": 844,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/main.rs",
+        "production_lines": 2292,
+        "test_lines": 481,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "tests/architecture_cfg.rs",
+        "production_lines": 0,
+        "test_lines": 152,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/benchmark.rs",
+        "production_lines": 0,
+        "test_lines": 41,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/bootconfig.rs",
+        "production_lines": 0,
+        "test_lines": 133,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/console_input.rs",
+        "production_lines": 0,
+        "test_lines": 67,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/console_lifetime.rs",
+        "production_lines": 0,
+        "test_lines": 193,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/console_resize.rs",
+        "production_lines": 0,
+        "test_lines": 149,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/main.rs",
+        "production_lines": 0,
+        "test_lines": 1911,
+        "files": 1,
+        "test_unsafe_blocks": 6
+      },
+      {
+        "path": "tests/boot/virtiofs.rs",
+        "production_lines": 0,
+        "test_lines": 287,
+        "files": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "tests/pmi_adversarial.rs",
+        "production_lines": 0,
+        "test_lines": 327,
+        "files": 1
+      }
+    ]
+  },
+  "b589d79f6fdcf25d919e3f6289cb260ab2d960c3": {
+    "components": {
+      "other_runtime": {
+        "production_lines": 11530,
+        "test_lines": 9602,
+        "files": 46,
+        "production_unsafe_functions": 7,
+        "production_unsafe_blocks": 1,
+        "test_unsafe_blocks": 8
+      },
+      "worker_and_wire": {
+        "production_lines": 2241,
+        "test_lines": 2746,
+        "files": 20,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 2,
+        "test_unsafe_functions": 3,
+        "test_unsafe_blocks": 11
+      },
+      "native_backends": {
+        "production_lines": 9832,
+        "test_lines": 4670,
+        "files": 22,
+        "production_unsafe_blocks": 104,
+        "test_unsafe_blocks": 16,
+        "production_unsafe_functions": 14
+      },
+      "unix_services": {
+        "production_lines": 747,
+        "test_lines": 230,
+        "files": 5,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 2
+      },
+      "devices": {
+        "production_lines": 12410,
+        "test_lines": 6988,
+        "files": 36,
+        "production_unsafe_blocks": 39,
+        "test_unsafe_blocks": 1
+      },
+      "windows_channel": {
+        "production_lines": 747,
+        "test_lines": 218,
+        "files": 3,
+        "production_unsafe_blocks": 13,
+        "test_unsafe_blocks": 1,
+        "native_and_build_lines": 359
+      },
+      "launcher": {
+        "production_lines": 4050,
+        "test_lines": 557,
+        "files": 7,
+        "production_unsafe_blocks": 1
+      }
+    },
+    "files": [
+      {
+        "path": "deps/dillo-config/src/console_size.rs",
+        "production_lines": 50,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-config/src/lib.rs",
+        "production_lines": 1095,
+        "test_lines": 744,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-devtree/src/lib.rs",
+        "production_lines": 21,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-devtree/src/platform.rs",
+        "production_lines": 1521,
+        "test_lines": 878,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-devtree/tests/platform_adversarial.rs",
+        "production_lines": 0,
+        "test_lines": 241,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-ipc/src/bootstrap.rs",
+        "production_lines": 12,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-ipc/src/lib.rs",
+        "production_lines": 25,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-ipc/src/vhost_user.rs",
+        "production_lines": 138,
+        "test_lines": 29,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-launch/src/lib.rs",
+        "production_lines": 708,
+        "test_lines": 85,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-hvf/src/hypervisor.rs",
+        "production_lines": 673,
+        "test_lines": 408,
+        "files": 1,
+        "production_unsafe_blocks": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-hvf/src/lib.rs",
+        "production_lines": 1027,
+        "test_lines": 420,
+        "files": 1,
+        "production_unsafe_blocks": 5
+      },
+      {
+        "path": "deps/dillo-machine-hvf/src/worker.rs",
+        "production_lines": 113,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_functions": 2,
+        "production_unsafe_blocks": 3
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/amd_tsc/mod.rs",
+        "production_lines": 72,
+        "test_lines": 88,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/cpuid_x86.rs",
+        "production_lines": 94,
+        "test_lines": 117,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/hypervisor.rs",
+        "production_lines": 1022,
+        "test_lines": 524,
+        "files": 1,
+        "production_unsafe_blocks": 6,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/intc_x86.rs",
+        "production_lines": 232,
+        "test_lines": 183,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/irq.rs",
+        "production_lines": 433,
+        "test_lines": 403,
+        "files": 1,
+        "production_unsafe_blocks": 3,
+        "test_unsafe_blocks": 6
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/lib.rs",
+        "production_lines": 1040,
+        "test_lines": 330,
+        "files": 1,
+        "production_unsafe_blocks": 8,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/memory.rs",
+        "production_lines": 147,
+        "test_lines": 126,
+        "files": 1,
+        "production_unsafe_blocks": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/msi.rs",
+        "production_lines": 246,
+        "test_lines": 68,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/notification.rs",
+        "production_lines": 121,
+        "test_lines": 206,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/wired_completion.rs",
+        "production_lines": 185,
+        "test_lines": 287,
+        "files": 1,
+        "production_unsafe_blocks": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-kvm/src/worker.rs",
+        "production_lines": 283,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 3
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/channel.rs",
+        "production_lines": 272,
+        "test_lines": 83,
+        "files": 1,
+        "production_unsafe_blocks": 2,
+        "production_unsafe_functions": 1
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/lib.rs",
+        "production_lines": 16,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/memory.rs",
+        "production_lines": 130,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_functions": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/notification.rs",
+        "production_lines": 198,
+        "test_lines": 63,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-unix/src/vhost_user.rs",
+        "production_lines": 131,
+        "test_lines": 84,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/hypervisor.rs",
+        "production_lines": 1806,
+        "test_lines": 1347,
+        "files": 1,
+        "production_unsafe_blocks": 41,
+        "production_unsafe_functions": 5,
+        "test_unsafe_blocks": 5
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/ioapic.rs",
+        "production_lines": 227,
+        "test_lines": 70,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/lib.rs",
+        "production_lines": 976,
+        "test_lines": 93,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/memory.rs",
+        "production_lines": 78,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/wired_completion.rs",
+        "production_lines": 136,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/worker.rs",
+        "production_lines": 695,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 21,
+        "production_unsafe_functions": 3
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/worker/socket.rs",
+        "production_lines": 92,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 4
+      },
+      {
+        "path": "deps/dillo-machine-whp/src/worker/vhost_user.rs",
+        "production_lines": 134,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine/src/cpuid_x86.rs",
+        "production_lines": 157,
+        "test_lines": 27,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine/src/lib.rs",
+        "production_lines": 261,
+        "test_lines": 307,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-machine/src/worker.rs",
+        "production_lines": 334,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_functions": 7,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-mmio-uart/src/lib.rs",
+        "production_lines": 272,
+        "test_lines": 108,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-mmio-virtio/src/lib.rs",
+        "production_lines": 675,
+        "test_lines": 307,
+        "files": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-mmio/src/lib.rs",
+        "production_lines": 884,
+        "test_lines": 437,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-mmio/src/syscon.rs",
+        "production_lines": 132,
+        "test_lines": 133,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci-virtio/src/capabilities.rs",
+        "production_lines": 91,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci-virtio/src/lib.rs",
+        "production_lines": 134,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci-virtio/src/transport.rs",
+        "production_lines": 942,
+        "test_lines": 743,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci-virtio/tests/msix_bounds.rs",
+        "production_lines": 0,
+        "test_lines": 199,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/address.rs",
+        "production_lines": 20,
+        "test_lines": 21,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/bar.rs",
+        "production_lines": 34,
+        "test_lines": 24,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/bdf.rs",
+        "production_lines": 42,
+        "test_lines": 28,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/capability.rs",
+        "production_lines": 15,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/configuration.rs",
+        "production_lines": 210,
+        "test_lines": 99,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/lib.rs",
+        "production_lines": 778,
+        "test_lines": 629,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/msix.rs",
+        "production_lines": 455,
+        "test_lines": 349,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-pci/src/msix_tests.rs",
+        "production_lines": 214,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-runtime/src/lib.rs",
+        "production_lines": 252,
+        "test_lines": 2,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-runtime/src/tests.rs",
+        "production_lines": 0,
+        "test_lines": 408,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-storage/src/lib.rs",
+        "production_lines": 201,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-blk/src/lib.rs",
+        "production_lines": 702,
+        "test_lines": 538,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/control.rs",
+        "production_lines": 288,
+        "test_lines": 179,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/input.rs",
+        "production_lines": 69,
+        "test_lines": 21,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/lib.rs",
+        "production_lines": 1149,
+        "test_lines": 679,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/liveness.rs",
+        "production_lines": 204,
+        "test_lines": 112,
+        "files": 1,
+        "production_unsafe_blocks": 2
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/pipe.rs",
+        "production_lines": 453,
+        "test_lines": 101,
+        "files": 1,
+        "production_unsafe_blocks": 12
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/resize.rs",
+        "production_lines": 216,
+        "test_lines": 69,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-console/src/stdio.rs",
+        "production_lines": 102,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-fs/src/backend.rs",
+        "production_lines": 1606,
+        "test_lines": 425,
+        "files": 1,
+        "production_unsafe_blocks": 6
+      },
+      {
+        "path": "deps/dillo-virtio-fs/src/fuse.rs",
+        "production_lines": 1432,
+        "test_lines": 1160,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-fs/src/lib.rs",
+        "production_lines": 384,
+        "test_lines": 252,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-gpt/src/lib.rs",
+        "production_lines": 91,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-gpt/src/synth_gpt.rs",
+        "production_lines": 398,
+        "test_lines": 258,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-gpt/src/vgpt_backing.rs",
+        "production_lines": 226,
+        "test_lines": 371,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/backend.rs",
+        "production_lines": 97,
+        "test_lines": 13,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/bridge/linux.rs",
+        "production_lines": 221,
+        "test_lines": 47,
+        "files": 1,
+        "production_unsafe_blocks": 6
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/bridge/macos.rs",
+        "production_lines": 358,
+        "test_lines": 21,
+        "files": 1,
+        "production_unsafe_blocks": 12,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/bridge/mod.rs",
+        "production_lines": 26,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/lib.rs",
+        "production_lines": 542,
+        "test_lines": 375,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/linux_fd.rs",
+        "production_lines": 90,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/macvtap.rs",
+        "production_lines": 91,
+        "test_lines": 15,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/device.rs",
+        "production_lines": 114,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/dhcp.rs",
+        "production_lines": 188,
+        "test_lines": 124,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/dns.rs",
+        "production_lines": 307,
+        "test_lines": 96,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/forward.rs",
+        "production_lines": 80,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/mod.rs",
+        "production_lines": 337,
+        "test_lines": 2,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/ndp.rs",
+        "production_lines": 142,
+        "test_lines": 97,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/resources.rs",
+        "production_lines": 57,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/stack.rs",
+        "production_lines": 946,
+        "test_lines": 99,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/tcp.rs",
+        "production_lines": 254,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/tests.rs",
+        "production_lines": 0,
+        "test_lines": 1413,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-net/src/user/udp.rs",
+        "production_lines": 152,
+        "test_lines": 14,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-vsock/src/csm.rs",
+        "production_lines": 380,
+        "test_lines": 336,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-vsock/src/lib.rs",
+        "production_lines": 465,
+        "test_lines": 119,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-vsock/src/packet.rs",
+        "production_lines": 130,
+        "test_lines": 52,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio-vsock/src/uds.rs",
+        "production_lines": 113,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/device.rs",
+        "production_lines": 420,
+        "test_lines": 221,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/features.rs",
+        "production_lines": 24,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/kick.rs",
+        "production_lines": 68,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/lib.rs",
+        "production_lines": 46,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/lifecycle.rs",
+        "production_lines": 718,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/memory.rs",
+        "production_lines": 107,
+        "test_lines": 47,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/pause.rs",
+        "production_lines": 73,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/queue.rs",
+        "production_lines": 444,
+        "test_lines": 305,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-virtio/src/ring.rs",
+        "production_lines": 132,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-windows-channel/src/lib.rs",
+        "production_lines": 364,
+        "test_lines": 2,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-windows-channel/src/native.rs",
+        "production_lines": 383,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 13
+      },
+      {
+        "path": "deps/dillo-windows-channel/src/tests.rs",
+        "production_lines": 0,
+        "test_lines": 216,
+        "files": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/child.rs",
+        "production_lines": 694,
+        "test_lines": 0,
+        "files": 1,
+        "production_unsafe_blocks": 4,
+        "production_unsafe_functions": 2
+      },
+      {
+        "path": "deps/dillo-worker/src/grant.rs",
+        "production_lines": 173,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/lib.rs",
+        "production_lines": 13,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/parent.rs",
+        "production_lines": 1004,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/queue.rs",
+        "production_lines": 50,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/src/ring.rs",
+        "production_lines": 132,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/bad_peer.rs",
+        "production_lines": 0,
+        "test_lines": 115,
+        "files": 1,
+        "test_unsafe_functions": 3,
+        "test_unsafe_blocks": 3
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/console.rs",
+        "production_lines": 0,
+        "test_lines": 162,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/filesystem.rs",
+        "production_lines": 0,
+        "test_lines": 278,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/frames.rs",
+        "production_lines": 0,
+        "test_lines": 76,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/queues.rs",
+        "production_lines": 0,
+        "test_lines": 58,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/rings.rs",
+        "production_lines": 0,
+        "test_lines": 291,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/sockets.rs",
+        "production_lines": 0,
+        "test_lines": 138,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/vmnet.rs",
+        "production_lines": 0,
+        "test_lines": 68,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/cases/vsock.rs",
+        "production_lines": 0,
+        "test_lines": 177,
+        "files": 1
+      },
+      {
+        "path": "deps/dillo-worker/tests/device_process.rs",
+        "production_lines": 0,
+        "test_lines": 1107,
+        "files": 1,
+        "test_unsafe_blocks": 8
+      },
+      {
+        "path": "deps/dillo-worker/tests/lifecycle.rs",
+        "production_lines": 0,
+        "test_lines": 247,
+        "files": 1
+      },
+      {
+        "path": "src/device_worker/benchmark.rs",
+        "production_lines": 37,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/device_worker/filesystem.rs",
+        "production_lines": 300,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/device_worker/mod.rs",
+        "production_lines": 285,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/device_worker/network.rs",
+        "production_lines": 207,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/launch/bootconfig.rs",
+        "production_lines": 85,
+        "test_lines": 76,
+        "files": 1
+      },
+      {
+        "path": "src/launch/delegation_tests.rs",
+        "production_lines": 844,
+        "test_lines": 0,
+        "files": 1
+      },
+      {
+        "path": "src/main.rs",
+        "production_lines": 2292,
+        "test_lines": 481,
+        "files": 1,
+        "production_unsafe_blocks": 1
+      },
+      {
+        "path": "tests/architecture_cfg.rs",
+        "production_lines": 0,
+        "test_lines": 152,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/benchmark.rs",
+        "production_lines": 0,
+        "test_lines": 41,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/bootconfig.rs",
+        "production_lines": 0,
+        "test_lines": 133,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/console_input.rs",
+        "production_lines": 0,
+        "test_lines": 67,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/console_lifetime.rs",
+        "production_lines": 0,
+        "test_lines": 193,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/console_resize.rs",
+        "production_lines": 0,
+        "test_lines": 149,
+        "files": 1
+      },
+      {
+        "path": "tests/boot/main.rs",
+        "production_lines": 0,
+        "test_lines": 1911,
+        "files": 1,
+        "test_unsafe_blocks": 6
+      },
+      {
+        "path": "tests/boot/virtiofs.rs",
+        "production_lines": 0,
+        "test_lines": 287,
+        "files": 1,
+        "test_unsafe_blocks": 1
+      },
+      {
+        "path": "tests/pmi_adversarial.rs",
+        "production_lines": 0,
+        "test_lines": 327,
+        "files": 1
+      }
+    ]
+  }
+}

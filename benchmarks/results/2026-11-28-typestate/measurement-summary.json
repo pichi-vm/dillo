@@ -1,0 +1,758 @@
+{
+  "linux-x86": {
+    "throughput": {
+      "block-pci": {
+        "local": {
+          "min_percent": 98.59542678557352,
+          "max_percent": 100.00585093062142
+        },
+        "worker": {
+          "min_percent": 99.37984243606321,
+          "max_percent": 100.23670671886276
+        }
+      },
+      "block-mmio-only": {
+        "local": {
+          "min_percent": 99.12595823991732,
+          "max_percent": 105.21402457443642
+        },
+        "worker": {
+          "min_percent": 97.36242877294006,
+          "max_percent": 101.98470147855734
+        }
+      },
+      "net-pci": {
+        "local": {
+          "min_percent": 100.0219158642377,
+          "max_percent": 100.65340309925115
+        },
+        "worker": {
+          "min_percent": 98.64237602790338,
+          "max_percent": 99.7699114970531
+        }
+      },
+      "net-mmio-only": {
+        "local": {
+          "min_percent": 99.22045300839464,
+          "max_percent": 99.27658809167879
+        },
+        "worker": {
+          "min_percent": 100.03898032184584,
+          "max_percent": 100.08168477898533
+        }
+      }
+    },
+    "outside_paired_interval": [
+      {
+        "case": "net-pci",
+        "mode": "worker",
+        "metric": "net/tcp_echo/65536/MiBps",
+        "ratio_median": 0.9864237602790338,
+        "ratio_median_ci95": [
+          0.9738060539333242,
+          0.9934762466264871
+        ]
+      },
+      {
+        "case": "net-pci",
+        "mode": "worker",
+        "metric": "net/tcp_echo/65536/cpu_s_per_GiB",
+        "ratio_median": 1.0290132995624042,
+        "ratio_median_ci95": [
+          1.013879425653872,
+          1.0420294056936643
+        ]
+      },
+      {
+        "case": "net-pci",
+        "mode": "local",
+        "metric": "net/tcp_echo/65536/p99_upper_ns",
+        "ratio_median": 0.9834553889028824,
+        "ratio_median_ci95": [
+          0.9728818849292926,
+          0.9890109595288878
+        ]
+      },
+      {
+        "case": "net-pci",
+        "mode": "worker",
+        "metric": "net/tcp_echo/65536/p99_upper_ns",
+        "ratio_median": 1.0163641142976156,
+        "ratio_median_ci95": [
+          1.0106383255026323,
+          1.0271181150707074
+        ]
+      }
+    ],
+    "memory": [
+      {
+        "case": "block-pci",
+        "mode": "local",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": -225280.0
+      },
+      {
+        "case": "block-pci",
+        "mode": "worker",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": -63488.0
+      },
+      {
+        "case": "block-pci",
+        "mode": "local",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 144384.0
+      },
+      {
+        "case": "block-pci",
+        "mode": "worker",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 168960.0
+      },
+      {
+        "case": "block-pci",
+        "mode": "local",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": -225280.0
+      },
+      {
+        "case": "block-pci",
+        "mode": "worker",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": 923648.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "local",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": -10240.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "worker",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": -98304.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "local",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 100864.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "worker",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 166912.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "local",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": -96256.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "worker",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": -8192.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "local",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": -206848.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "worker",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": -63488.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "local",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 87040.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "worker",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 157696.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "local",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": -206848.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "worker",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": -28672.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "local",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": -178176.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "worker",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": -108544.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "local",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 98304.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "worker",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 134656.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "local",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": 866304.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "worker",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": -20480.0
+      }
+    ],
+    "unmatched_metrics": {}
+  },
+  "linux-arm": {
+    "throughput": {
+      "block-pci": {
+        "local": {
+          "min_percent": 98.61181787829176,
+          "max_percent": 99.74327977077809
+        },
+        "worker": {
+          "min_percent": 99.43278824784795,
+          "max_percent": 100.5032528252858
+        }
+      },
+      "block-mmio-only": {
+        "local": {
+          "min_percent": 96.99784602220159,
+          "max_percent": 100.05116829674235
+        },
+        "worker": {
+          "min_percent": 99.62530815053164,
+          "max_percent": 100.99073794510191
+        }
+      },
+      "net-pci": {
+        "local": {
+          "min_percent": 96.95154112070479,
+          "max_percent": 101.9288279997065
+        },
+        "worker": {
+          "min_percent": 95.64147726965561,
+          "max_percent": 97.37852594255658
+        }
+      },
+      "net-mmio-only": {
+        "local": {
+          "min_percent": 100.26845763999393,
+          "max_percent": 100.71321436220072
+        },
+        "worker": {
+          "min_percent": 97.44244120832246,
+          "max_percent": 99.76214432396853
+        }
+      }
+    },
+    "outside_paired_interval": [],
+    "memory": [
+      {
+        "case": "block-pci",
+        "mode": "local",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": 131072.0
+      },
+      {
+        "case": "block-pci",
+        "mode": "worker",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": 67584.0
+      },
+      {
+        "case": "block-pci",
+        "mode": "local",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 328192.0
+      },
+      {
+        "case": "block-pci",
+        "mode": "worker",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 330240.0
+      },
+      {
+        "case": "block-pci",
+        "mode": "local",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": 131072.0
+      },
+      {
+        "case": "block-pci",
+        "mode": "worker",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": 63488.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "local",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": 131072.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "worker",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": 69632.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "local",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 327680.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "worker",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 330240.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "local",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": 129024.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "worker",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": 69632.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "local",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": 2048.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "worker",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": -198656.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "local",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 198656.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "worker",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 194048.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "local",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": 2048.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "worker",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": -198656.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "local",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": 4096.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "worker",
+        "metric": "idle_private_excluding_hugetlb_bytes",
+        "paired_delta_bytes": -204800.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "local",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 201216.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "worker",
+        "metric": "idle_sum_pss_bytes",
+        "paired_delta_bytes": 188416.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "local",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": -12288.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "worker",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": -204800.0
+      }
+    ],
+    "unmatched_metrics": {}
+  },
+  "macos-arm": {
+    "throughput": {
+      "block-pci": {
+        "local": {
+          "min_percent": 99.47547811563805,
+          "max_percent": 101.05430886041236
+        },
+        "worker": {
+          "min_percent": 95.98477980317509,
+          "max_percent": 100.17869668980559
+        }
+      },
+      "block-mmio-only": {
+        "local": {
+          "min_percent": 97.25058791597509,
+          "max_percent": 100.24336826067054
+        },
+        "worker": {
+          "min_percent": 100.19016426312093,
+          "max_percent": 101.88217844632506
+        }
+      },
+      "net-pci": {
+        "local": {
+          "min_percent": 99.57372875969894,
+          "max_percent": 99.75709374743312
+        },
+        "worker": {
+          "min_percent": 99.72313941713627,
+          "max_percent": 100.11223988861335
+        }
+      },
+      "net-mmio-only": {
+        "local": {
+          "min_percent": 99.66268025610783,
+          "max_percent": 99.83410516604478
+        },
+        "worker": {
+          "min_percent": 99.72796448420304,
+          "max_percent": 100.02349214854671
+        }
+      }
+    },
+    "outside_paired_interval": [
+      {
+        "case": "block-pci",
+        "mode": "local",
+        "metric": "vda/rand_read/4096/MiBps",
+        "ratio_median": 0.9947547811563805,
+        "ratio_median_ci95": [
+          0.9844557913208539,
+          0.9977026059414141
+        ]
+      },
+      {
+        "case": "block-pci",
+        "mode": "local",
+        "metric": "vda/rand_read/4096/cpu_s_per_GiB",
+        "ratio_median": 0.9932434687441118,
+        "ratio_median_ci95": [
+          0.9806346326123908,
+          0.9959927810096654
+        ]
+      },
+      {
+        "case": "block-pci",
+        "mode": "local",
+        "metric": "vda/rand_read/4096/p99_upper_ns",
+        "ratio_median": 0.9725271777040876,
+        "ratio_median_ci95": [
+          0.9399778600738289,
+          0.9887000795919787
+        ]
+      },
+      {
+        "case": "block-pci",
+        "mode": "local",
+        "metric": "vda/rand_write/4096/cpu_s_per_GiB",
+        "ratio_median": 0.9910622952273513,
+        "ratio_median_ci95": [
+          0.9832422769471175,
+          0.9997208974095972
+        ]
+      },
+      {
+        "case": "block-pci",
+        "mode": "worker",
+        "metric": "vda/rand_write/4096/cpu_s_per_GiB",
+        "ratio_median": 0.9950384520578062,
+        "ratio_median_ci95": [
+          0.9900115342605555,
+          0.9988439153913935
+        ]
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "worker",
+        "metric": "vda/rand_read/4096/cpu_s_per_GiB",
+        "ratio_median": 0.9942727718322679,
+        "ratio_median_ci95": [
+          0.9904144364166068,
+          0.9981074729108461
+        ]
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "worker",
+        "metric": "vda/seq_read/65536/cpu_s_per_GiB",
+        "ratio_median": 0.9947960164820473,
+        "ratio_median_ci95": [
+          0.9906933797720472,
+          0.9981181453292874
+        ]
+      },
+      {
+        "case": "net-pci",
+        "mode": "local",
+        "metric": "net/tcp_echo/65536/p99_upper_ns",
+        "ratio_median": 1.029101922826849,
+        "ratio_median_ci95": [
+          1.0043050187666893,
+          1.0651940789620984
+        ]
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "local",
+        "metric": "net/tcp_echo/64/MiBps",
+        "ratio_median": 0.9966268025610783,
+        "ratio_median_ci95": [
+          0.9933600307640958,
+          0.9996533498362514
+        ]
+      }
+    ],
+    "memory": [],
+    "unmatched_metrics": {}
+  },
+  "windows-msvc": {
+    "throughput": {
+      "block-pci": {
+        "local": {
+          "min_percent": 95.89710728398583,
+          "max_percent": 104.5507323543589
+        },
+        "worker": {
+          "min_percent": 86.5515170683707,
+          "max_percent": 98.66984676357232
+        }
+      },
+      "block-mmio-only": {
+        "local": {
+          "min_percent": 100.41244745646458,
+          "max_percent": 104.62757495957548
+        },
+        "worker": {
+          "min_percent": 95.08966676535397,
+          "max_percent": 103.43242209122452
+        }
+      },
+      "net-pci": {
+        "local": {
+          "min_percent": 99.13659128788628,
+          "max_percent": 99.46882830515575
+        },
+        "worker": {
+          "min_percent": 99.34223618258902,
+          "max_percent": 100.00632552640589
+        }
+      },
+      "net-mmio-only": {
+        "local": {
+          "min_percent": 98.91996647561885,
+          "max_percent": 100.4035216434336
+        },
+        "worker": {
+          "min_percent": 100.86697198378486,
+          "max_percent": 102.49266133643498
+        }
+      }
+    },
+    "outside_paired_interval": [
+      {
+        "case": "block-mmio-only",
+        "mode": "local",
+        "metric": "vda/seq_read/65536/MiBps",
+        "ratio_median": 1.0462757495957549,
+        "ratio_median_ci95": [
+          1.0004800576069126,
+          2.007701037613489
+        ]
+      },
+      {
+        "case": "net-pci",
+        "mode": "worker",
+        "metric": "net/tcp_echo/65536/MiBps",
+        "ratio_median": 0.9934223618258902,
+        "ratio_median_ci95": [
+          0.9770104357373011,
+          0.9999048641940029
+        ]
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "worker",
+        "metric": "net/tcp_echo/64/MiBps",
+        "ratio_median": 1.0249266133643498,
+        "ratio_median_ci95": [
+          1.0149077354281855,
+          1.0447309235486228
+        ]
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "local",
+        "metric": "net/tcp_echo/65536/cpu_s_per_GiB",
+        "ratio_median": 1.0297506765057278,
+        "ratio_median_ci95": [
+          1.0081973130670694,
+          1.03806633618797
+        ]
+      }
+    ],
+    "memory": [
+      {
+        "case": "block-pci",
+        "mode": "local",
+        "metric": "idle_sum_private_bytes",
+        "paired_delta_bytes": 40960.0
+      },
+      {
+        "case": "block-pci",
+        "mode": "worker",
+        "metric": "idle_sum_private_bytes",
+        "paired_delta_bytes": 10240.0
+      },
+      {
+        "case": "block-pci",
+        "mode": "local",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": 67584.0
+      },
+      {
+        "case": "block-pci",
+        "mode": "worker",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": -30720.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "local",
+        "metric": "idle_sum_private_bytes",
+        "paired_delta_bytes": 40960.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "worker",
+        "metric": "idle_sum_private_bytes",
+        "paired_delta_bytes": 0.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "local",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": 51200.0
+      },
+      {
+        "case": "block-mmio-only",
+        "mode": "worker",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": -61440.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "local",
+        "metric": "idle_sum_private_bytes",
+        "paired_delta_bytes": -38912.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "worker",
+        "metric": "idle_sum_private_bytes",
+        "paired_delta_bytes": 16384.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "local",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": -6144.0
+      },
+      {
+        "case": "net-pci",
+        "mode": "worker",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": 43008.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "local",
+        "metric": "idle_sum_private_bytes",
+        "paired_delta_bytes": 6144.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "worker",
+        "metric": "idle_sum_private_bytes",
+        "paired_delta_bytes": 6144.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "local",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": 94208.0
+      },
+      {
+        "case": "net-mmio-only",
+        "mode": "worker",
+        "metric": "idle_sum_uss_bytes",
+        "paired_delta_bytes": 122880.0
+      }
+    ],
+    "unmatched_metrics": {
+      "baseline": [
+        [
+          "block-mmio-only",
+          "vda/rand_read/4096/p95_upper_ns"
+        ]
+      ],
+      "candidate": []
+    }
+  }
+}

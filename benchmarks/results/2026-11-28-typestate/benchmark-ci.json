@@ -1,0 +1,592 @@
+{
+  "run_id": 46154219252,
+  "source": "e3eb0d86213143ba535dce7084d7b83cb09a8931",
+  "jobs": [
+    {
+      "id": 141007176340,
+      "name": "windows-msvc paired measurements",
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 46154219252,
+      "logs_url": null,
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1
+        },
+        {
+          "name": "Run actions/checkout@v7.0.1",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2
+        },
+        {
+          "name": "Use the writable job temporary directory",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4
+        },
+        {
+          "name": "Install measurement tools",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5
+        },
+        {
+          "name": "Install toolchain",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6
+        },
+        {
+          "name": "Run Swatinem/rust-cache@master",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7
+        },
+        {
+          "name": "Provide native KVM RAM",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 8
+        },
+        {
+          "name": "Check native wired completion lifecycle",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 9
+        },
+        {
+          "name": "Check native WHP completion lifecycle",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10
+        },
+        {
+          "name": "Check notification and network behavior",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11
+        },
+        {
+          "name": "Build comparison executable",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12
+        },
+        {
+          "name": "Build matched release assets",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13
+        },
+        {
+          "name": "Select the prebuilt clock diagnostic kernel",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 14
+        },
+        {
+          "name": "Measure paired workloads",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15
+        },
+        {
+          "name": "Upload measurements and logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16
+        },
+        {
+          "name": "Post Run Swatinem/rust-cache@master",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 30
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 31
+        },
+        {
+          "name": "Post Run actions/checkout@v7.0.1",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 32
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 33
+        }
+      ]
+    },
+    {
+      "id": 141007176472,
+      "name": "linux-arm paired measurements",
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 46154219252,
+      "logs_url": null,
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1
+        },
+        {
+          "name": "Run actions/checkout@v7.0.1",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2
+        },
+        {
+          "name": "Use the writable job temporary directory",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 4
+        },
+        {
+          "name": "Install measurement tools",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5
+        },
+        {
+          "name": "Install toolchain",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6
+        },
+        {
+          "name": "Run Swatinem/rust-cache@master",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7
+        },
+        {
+          "name": "Provide native KVM RAM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8
+        },
+        {
+          "name": "Check native wired completion lifecycle",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9
+        },
+        {
+          "name": "Check native WHP completion lifecycle",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 10
+        },
+        {
+          "name": "Check notification and network behavior",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11
+        },
+        {
+          "name": "Build comparison executable",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12
+        },
+        {
+          "name": "Build matched release assets",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13
+        },
+        {
+          "name": "Select the prebuilt clock diagnostic kernel",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 14
+        },
+        {
+          "name": "Measure paired workloads",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15
+        },
+        {
+          "name": "Upload measurements and logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16
+        },
+        {
+          "name": "Post Run Swatinem/rust-cache@master",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 31
+        },
+        {
+          "name": "Post Run actions/checkout@v7.0.1",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 32
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 33
+        }
+      ]
+    },
+    {
+      "id": 141007176564,
+      "name": "linux-x86 paired measurements",
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 46154219252,
+      "logs_url": null,
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1
+        },
+        {
+          "name": "Run actions/checkout@v7.0.1",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2
+        },
+        {
+          "name": "Use the writable job temporary directory",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4
+        },
+        {
+          "name": "Install measurement tools",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5
+        },
+        {
+          "name": "Install toolchain",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6
+        },
+        {
+          "name": "Run Swatinem/rust-cache@master",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7
+        },
+        {
+          "name": "Provide native KVM RAM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8
+        },
+        {
+          "name": "Check native wired completion lifecycle",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9
+        },
+        {
+          "name": "Check native WHP completion lifecycle",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 10
+        },
+        {
+          "name": "Check notification and network behavior",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11
+        },
+        {
+          "name": "Build comparison executable",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12
+        },
+        {
+          "name": "Build matched release assets",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13
+        },
+        {
+          "name": "Select the prebuilt clock diagnostic kernel",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 14
+        },
+        {
+          "name": "Measure paired workloads",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15
+        },
+        {
+          "name": "Upload measurements and logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16
+        },
+        {
+          "name": "Post Run Swatinem/rust-cache@master",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 30
+        },
+        {
+          "name": "Post Run actions/setup-python@v6",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 31
+        },
+        {
+          "name": "Post Run actions/checkout@v7.0.1",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 32
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 33
+        }
+      ]
+    },
+    {
+      "id": 141007176615,
+      "name": "macos-arm paired measurements",
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 46154219252,
+      "logs_url": null,
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1
+        },
+        {
+          "name": "Run actions/checkout@v7.0.1",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2
+        },
+        {
+          "name": "Use the writable job temporary directory",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3
+        },
+        {
+          "name": "Run actions/setup-python@v6",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 4
+        },
+        {
+          "name": "Install measurement tools",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5
+        },
+        {
+          "name": "Install toolchain",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6
+        },
+        {
+          "name": "Run Swatinem/rust-cache@master",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7
+        },
+        {
+          "name": "Provide native KVM RAM",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 8
+        },
+        {
+          "name": "Check native wired completion lifecycle",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 9
+        },
+        {
+          "name": "Check native WHP completion lifecycle",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 10
+        },
+        {
+          "name": "Check notification and network behavior",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11
+        },
+        {
+          "name": "Build comparison executable",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12
+        },
+        {
+          "name": "Build matched release assets",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13
+        },
+        {
+          "name": "Select the prebuilt clock diagnostic kernel",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 14
+        },
+        {
+          "name": "Measure paired workloads",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15
+        },
+        {
+          "name": "Upload measurements and logs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16
+        },
+        {
+          "name": "Post Run Swatinem/rust-cache@master",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 31
+        },
+        {
+          "name": "Post Run actions/checkout@v7.0.1",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 32
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 33
+        }
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "id": 15268825144,
+      "name": "device-benchmarks-linux-arm",
+      "size_in_bytes": 7839925,
+      "url": "https://api.github.com/repos/pichi-vm/dillo/actions/artifacts/15268825144",
+      "archive_download_url": "https://api.github.com/repos/pichi-vm/dillo/actions/artifacts/15268825144/zip",
+      "expired": false,
+      "created_at": "2026-11-28T15:04:01Z",
+      "expires_at": "2027-02-26T14:21:12Z",
+      "updated_at": "2026-11-28T15:04:01Z",
+      "digest": "sha256:fa5150afdd0933255689475468916276aec30e4d3c94f5b3d0a3d24e579e5f65",
+      "workflow_run": {
+        "id": 46154219252,
+        "repository_id": 1280481696,
+        "head_repository_id": 1280481696,
+        "head_branch": "milestone/device-typestate",
+        "head_sha": "e3eb0d86213143ba535dce7084d7b83cb09a8931"
+      }
+    },
+    {
+      "id": 15268751838,
+      "name": "device-benchmarks-windows-msvc",
+      "size_in_bytes": 10018825,
+      "url": "https://api.github.com/repos/pichi-vm/dillo/actions/artifacts/15268751838",
+      "archive_download_url": "https://api.github.com/repos/pichi-vm/dillo/actions/artifacts/15268751838/zip",
+      "expired": false,
+      "created_at": "2026-11-28T15:09:56Z",
+      "expires_at": "2027-02-26T14:21:12Z",
+      "updated_at": "2026-11-28T15:09:56Z",
+      "digest": "sha256:2e744bd2510083ee9e9f4c5ec575540e7a0e0be0e93c104bf07ed29c6a8f12c5",
+      "workflow_run": {
+        "id": 46154219252,
+        "repository_id": 1280481696,
+        "head_repository_id": 1280481696,
+        "head_branch": "milestone/device-typestate",
+        "head_sha": "e3eb0d86213143ba535dce7084d7b83cb09a8931"
+      }
+    },
+    {
+      "id": 15268127626,
+      "name": "device-benchmarks-linux-x86",
+      "size_in_bytes": 9401508,
+      "url": "https://api.github.com/repos/pichi-vm/dillo/actions/artifacts/15268127626",
+      "archive_download_url": "https://api.github.com/repos/pichi-vm/dillo/actions/artifacts/15268127626/zip",
+      "expired": false,
+      "created_at": "2026-11-28T14:59:12Z",
+      "expires_at": "2027-02-26T14:21:12Z",
+      "updated_at": "2026-11-28T14:59:12Z",
+      "digest": "sha256:356fcc86ad2cfabb6f37d05e75b862137c37da2a3ffc78abeac9b6435e4e4fb3",
+      "workflow_run": {
+        "id": 46154219252,
+        "repository_id": 1280481696,
+        "head_repository_id": 1280481696,
+        "head_branch": "milestone/device-typestate",
+        "head_sha": "e3eb0d86213143ba535dce7084d7b83cb09a8931"
+      }
+    },
+    {
+      "id": 15268112938,
+      "name": "device-benchmarks-macos-arm",
+      "size_in_bytes": 7488174,
+      "url": "https://api.github.com/repos/pichi-vm/dillo/actions/artifacts/15268112938",
+      "archive_download_url": "https://api.github.com/repos/pichi-vm/dillo/actions/artifacts/15268112938/zip",
+      "expired": false,
+      "created_at": "2026-11-28T15:01:21Z",
+      "expires_at": "2027-02-26T14:21:12Z",
+      "updated_at": "2026-11-28T15:01:21Z",
+      "digest": "sha256:f3c8d13ea4adf19ba96c69b15903f2aa8be6c25f3993264cb5e67d2b1222ac23",
+      "workflow_run": {
+        "id": 46154219252,
+        "repository_id": 1280481696,
+        "head_repository_id": 1280481696,
+        "head_branch": "milestone/device-typestate",
+        "head_sha": "e3eb0d86213143ba535dce7084d7b83cb09a8931"
+      }
+    }
+  ]
+}
