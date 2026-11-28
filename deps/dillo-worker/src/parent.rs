@@ -693,6 +693,12 @@ struct InterruptUpdate {
 }
 
 impl dillo_mmio::InterruptUpdate for InterruptUpdate {
+    fn failed(&self, error: String) {
+        if let Some(session) = self.session.upgrade() {
+            session.shared.fail(error);
+        }
+    }
+
     fn run(&self, update: &mut dyn FnMut() -> io::Result<()>) -> io::Result<()> {
         let session = self.session.upgrade().ok_or(io::ErrorKind::NotConnected)?;
         let mut paused = session.lifecycle.lock().unwrap();

@@ -560,6 +560,10 @@ impl InterruptLine for FnInterruptLine {
 /// handles and resumes them. A failed update must leave callers stopped.
 pub trait InterruptUpdate: Send + Sync + std::fmt::Debug {
     fn run(&self, change: &mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()>;
+
+    /// Record an asynchronous delivery failure and request supervisor shutdown.
+    /// Must not wait for the binding's thread or acquire its lifecycle barrier.
+    fn failed(&self, error: String);
 }
 
 /// Backend-resolved line interrupt.
