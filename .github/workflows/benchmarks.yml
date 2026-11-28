@@ -134,6 +134,10 @@ jobs:
         run: >-
           cargo --config .copr/cargo-config.toml test --locked
           -p dillo-machine-kvm wired_completion::tests -- --nocapture
+      - name: Check read-only scheduler counters
+        if: runner.os == 'Linux'
+        shell: bash
+        run: python benchmarks/linux_task.py
       - name: Check native WHP completion lifecycle
         if: runner.os == 'Windows'
         shell: bash

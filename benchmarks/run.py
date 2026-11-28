@@ -69,6 +69,12 @@ def snapshot(process, memory):
                                      re.findall(r"(\w+_Hugetlb):\s+(\d+) kB", text)}
         except (psutil.Error, OSError) as error:
             result["memory_error"] = str(error)
+        if platform.system() == "Linux":
+            import linux_task
+            try:
+                result["thread_scheduler"] = linux_task.threads(process.pid)
+            except OSError as error:
+                result["thread_scheduler_error"] = str(error)
     return result
 
 
@@ -297,6 +303,9 @@ def main():
         subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"], text=True)
         if platform.system() == "Darwin" else os.environ.get("PROCESSOR_IDENTIFIER"))
     environment["host_load"] = psutil.getloadavg()
+    if platform.system() == "Linux":
+        environment["sched_schedstats"] = Path("/proc/sys/kernel/sched_schedstats").read_text().strip()
+        environment["clock_ticks"] = os.sysconf("SC_CLK_TCK")
     if hasattr(psutil.Process(), "cpu_affinity"):
         environment["cpu_affinity"] = psutil.Process().cpu_affinity()
     variants = {"": assets}
