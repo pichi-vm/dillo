@@ -1294,3 +1294,23 @@ whose earlier storage comparison had ordering bias, rather than adding a new
 mechanism for the same cost. Profiled rates do not qualify performance.
 [network-user-profile-x86.json.gz](network-user-profile-x86.json.gz) retains
 all eight reports, phase windows, result records and raw-file hashes.
+
+[Arm run 46098122194](https://github.com/pichi-vm/dillo/actions/runs/46098122194)
+at `f29b960` completes the same eight-boot diagnostic. Region construction and
+destruction account for about 28–30% of worker samples and 27% of control
+samples in the measured pair. Atomic helpers and mapped-slice lookup are also
+prominent, but leaf samples do not identify their callers. Unresolved and
+guest/kernel-tagged addresses remain unassigned; this is not a complete CPU
+cost decomposition. The first attempt stopped before measurement because
+`perf` was absent; job-local tool provisioning resolved that without changing
+host permissions. All successful reports, observations, hashes and both run
+identities are in [network-user-profile-arm.json.gz](network-user-profile-arm.json.gz).
+
+The existing 16-line mapping-owner change is replayed as `ab4c264` against
+`ad6ac6a`, with no other runtime changes. All 51 memory/virtqueue tests and
+strict Clippy pass. Its prespecified comparison uses independent revision/mode
+rotation, five-second operations and twelve pairs. Local x86 first calibrates
+PCI-free block noise, then compares that storage case and both network
+transports; native macOS/Windows compare PCI-free block and network. This
+replaces the earlier confounded ordering, retaining that earlier evidence.
+Neither the profiles nor an unfinished comparison justify promotion.
