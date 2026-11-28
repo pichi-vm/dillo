@@ -138,6 +138,12 @@ jobs:
       - name: Check notification and network behavior
         shell: bash
         run: cargo --config .copr/cargo-config.toml test --locked -p dillo-machine-unix -p dillo-virtio-net --lib
+      - name: Validate macOS diagnostic counters
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          python benchmarks/macos_task.py
+          xcrun --find xctrace || true
       - name: Build comparison executable
         if: inputs.baseline_ref != ''
         shell: bash

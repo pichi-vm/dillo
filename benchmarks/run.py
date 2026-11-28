@@ -60,6 +60,12 @@ def snapshot(process, memory):
         result["context_switches"] = process.num_ctx_switches()._asdict()
     except (psutil.Error, NotImplementedError) as error:
         result["context_switches_error"] = str(error)
+    if platform.system() == "Darwin":
+        from macos_task import counters
+        try:
+            result["task_counters"] = counters(process.pid)
+        except OSError as error:
+            result["task_counters_error"] = str(error)
     if memory:
         try:
             result["memory"] = process.memory_full_info()._asdict()
