@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use dillo_machine::worker::NotificationState;
-use dillo_mmio::{InterruptError, InterruptLine};
+use dillo_mmio::{InterruptError, InterruptLine, InterruptUpdate};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::hypervisor::Vm;
@@ -20,6 +20,7 @@ pub(crate) fn bind(
     gsi: u32,
     level: bool,
     state: Arc<NotificationState>,
+    update: Option<Arc<dyn InterruptUpdate>>,
 ) -> Result<Arc<Completion>, InterruptError> {
     let event = EventFd::new(libc::EFD_CLOEXEC | libc::EFD_NONBLOCK).map_err(delivery)?;
     let resample = level
@@ -65,30 +66,41 @@ pub(crate) fn bind(
                 std::thread::Builder::new()
                     .name("mmio-resample".into())
                     .spawn(move || {
-                        loop {
-                            match read.read() {
-                                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                                result => {
-                                    result?;
+                        supervise(update, || {
+                            loop {
+                                read.read()?;
+                                if stopped.load(Ordering::Acquire) {
+                                    return Ok(());
                                 }
+                                // EOI clears the native level. Reassert only while
+                                // the transport's event latch still requires service.
+                                if state.load() != 0 {
+                                    signal.write(1)?;
+                                }
+                                #[cfg(test)]
+                                resamples.fetch_add(1, Ordering::Release);
                             }
-                            if stopped.load(Ordering::Acquire) {
-                                return Ok(());
-                            }
-                            // EOI clears the native level. Reassert only while
-                            // the transport's event latch still requires service.
-                            if state.load() != 0 {
-                                signal.write(1)?;
-                            }
-                            #[cfg(test)]
-                            resamples.fetch_add(1, Ordering::Release);
-                        }
+                        })
                     })
                     .map_err(delivery)?,
             );
         }
     }
     Ok(owner)
+}
+
+fn supervise(
+    update: Option<Arc<dyn InterruptUpdate>>,
+    run: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+        .unwrap_or_else(|_| Err(io::Error::other("resampler panicked")));
+    if let Err(error) = &result
+        && let Some(update) = update
+    {
+        update.failed(format!("MMIO irqfd resampler: {error}"));
+    }
+    result
 }
 
 #[derive(Debug)]
@@ -185,6 +197,45 @@ mod tests {
     use dillo_machine::worker::WorkerHost;
     use kvm_ioctls::{VcpuExit, VcpuFd};
     use std::time::{Duration, Instant};
+
+    #[derive(Debug)]
+    struct Failure(std::sync::mpsc::SyncSender<String>);
+
+    impl InterruptUpdate for Failure {
+        fn run(&self, change: &mut dyn FnMut() -> io::Result<()>) -> io::Result<()> {
+            change()
+        }
+
+        fn failed(&self, error: String) {
+            let _ = self.0.send(error);
+        }
+    }
+
+    #[test]
+    fn resampler_failure_notifies_before_join() {
+        for panics in [false, true] {
+            let (send, receive) = std::sync::mpsc::sync_channel(1);
+            let thread = std::thread::spawn(move || {
+                supervise(Some(Arc::new(Failure(send))), || {
+                    assert!(!panics, "injected resampler panic");
+                    Err(io::Error::other("injected resample error"))
+                })
+            });
+            let failure = receive.recv_timeout(Duration::from_secs(2)).unwrap();
+            let error = thread.join().unwrap().unwrap_err();
+            assert_eq!(failure, format!("MMIO irqfd resampler: {error}"));
+        }
+    }
+
+    #[test]
+    fn normal_resampler_stop_does_not_report_failure() {
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        supervise(Some(Arc::new(Failure(send))), || Ok(())).unwrap();
+        assert_eq!(
+            receive.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        );
+    }
 
     #[cfg(target_arch = "x86_64")]
     #[track_caller]
@@ -286,7 +337,7 @@ mod tests {
         }
         vm.fd().set_irqchip(&chip).unwrap();
         let state = crate::worker::Worker::create_notification_state().unwrap();
-        let event = bind(vm.clone(), 16, true, Arc::clone(&state)).unwrap();
+        let event = bind(vm.clone(), 16, true, Arc::clone(&state), None).unwrap();
         state.used();
         event.signal();
         wait(|| pending(&cpu));
@@ -300,7 +351,7 @@ mod tests {
         event.retire().unwrap();
         event.retire().unwrap();
         let replacement_state = crate::worker::Worker::create_notification_state().unwrap();
-        let replacement = bind(vm, 16, true, Arc::clone(&replacement_state)).unwrap();
+        let replacement = bind(vm, 16, true, Arc::clone(&replacement_state), None).unwrap();
         state.used();
         stale.write(1).unwrap();
         assert_eq!(replacement_state.load(), 0);
@@ -389,7 +440,7 @@ mod tests {
         };
         let (_, gsi) = manager.wired_binding(16).unwrap();
         let state = crate::worker::Worker::create_notification_state().unwrap();
-        let event = bind(vm.clone(), gsi, true, Arc::clone(&state)).unwrap();
+        let event = bind(vm.clone(), gsi, true, Arc::clone(&state), None).unwrap();
         state.used();
         event.signal();
         wait_value(|| command(&mut cpu, 1), 48);
@@ -408,7 +459,7 @@ mod tests {
         event.retire().unwrap();
         event.retire().unwrap();
         let replacement_state = crate::worker::Worker::create_notification_state().unwrap();
-        let replacement = bind(vm, gsi, true, Arc::clone(&replacement_state)).unwrap();
+        let replacement = bind(vm, gsi, true, Arc::clone(&replacement_state), None).unwrap();
         state.used();
         stale.write(1).unwrap();
         assert_eq!(replacement_state.load(), 0);

@@ -727,7 +727,7 @@ mod imp {
         fn bind_status(
             &self,
             state: Arc<dillo_machine::worker::NotificationState>,
-            _update: Option<Arc<dyn dillo_mmio::InterruptUpdate>>,
+            update: Option<Arc<dyn dillo_mmio::InterruptUpdate>>,
         ) -> Result<dillo_mmio::Interrupt, InterruptError> {
             let (vm, gsi) = self
                 .manager
@@ -735,7 +735,7 @@ mod imp {
                 .unwrap()
                 .wired_binding(self.source)
                 .map_err(|e| InterruptError::Delivery(e.to_string()))?;
-            crate::wired_completion::bind(vm, gsi, self.level, state)
+            crate::wired_completion::bind(vm, gsi, self.level, state, update)
                 .map(|owner| dillo_mmio::Interrupt::new(owner))
         }
 
