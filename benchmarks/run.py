@@ -99,6 +99,7 @@ def run_vm(args, assets, image, disks, case, mode, label):
     env["RUST_LOG"] = "warn,dillo::boot=trace"
     env["RUST_LOG_STYLE"] = "never"
     samples, phases, errors, known = [], [], [], {}
+    thread_priorities, last_priority_sample = [], -1
     last_memory, ready = 0, None
     expected = 2 + (0 if mode == "local" else (len(disks) or 1))
     phase, failure = "startup", None
@@ -132,6 +133,21 @@ def run_vm(args, assets, image, disks, case, mode, label):
                     except psutil.NoSuchProcess:
                         pass
                     next_discovery = elapsed + 0.5
+                if (args.thread_priorities and phase == "active:net:tcp_echo:65536"
+                        and len(thread_priorities) < 5 and elapsed - last_priority_sample >= 1):
+                    # Read-only scheduling evidence. These instrumented boots
+                    # cannot establish performance parity or core placement.
+                    last_priority_sample = elapsed
+                    command_ps = ["ps", "-M", "-p", ",".join(map(str, tracked)),
+                                  "-o", "pid,pri,state,time,comm"]
+                    observation = {"observed_s": elapsed, "command": command_ps}
+                    try:
+                        capture = subprocess.run(command_ps, capture_output=True, text=True, timeout=3)
+                        observation.update(returncode=capture.returncode,
+                                           stdout=capture.stdout, stderr=capture.stderr)
+                    except (OSError, subprocess.TimeoutExpired) as error:
+                        observation["error"] = str(error)
+                    thread_priorities.append(observation)
                 if not args.no_sample:
                     records = []
                     for process in tracked.values():
@@ -180,6 +196,8 @@ def run_vm(args, assets, image, disks, case, mode, label):
               "failure": failure,
               "sampler_and_echo_cpu_s": time.process_time() - sampler_start}
     save(directory / "result.json", result)
+    if args.thread_priorities:
+        save(directory / "thread-priorities.json", thread_priorities)
     assert not failure and child.returncode == 0 and ready is not None and report, f"boot failed: {directory}"
     if pci_free:
         assert not report["pci"], f"PCI device present in PCI-free case: {directory}"
@@ -262,7 +280,11 @@ def main():
     parser.add_argument("--backing-dir", type=Path, help="optional disposable disk directory, e.g. tmpfs")
     parser.add_argument("--extra-cmdline", default="", help="explicit guest settings for sensitivity runs")
     parser.add_argument("--serial", action="store_true", help="retain early boot diagnostics through SPCR")
+    parser.add_argument("--thread-priorities", action="store_true",
+                        help="diagnostic macOS thread priorities during large network echo")
     args = parser.parse_args()
+    if args.thread_priorities and platform.system() != "Darwin":
+        parser.error("--thread-priorities requires macOS ps -M")
     assert args.pairs > 0 and args.sample_ms > 0
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
