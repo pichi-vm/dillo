@@ -1331,3 +1331,53 @@ The analyzer now retains both components. Recomputing all four identical-binary
 calibrations verifies that user plus system time reproduces the existing total
 for all 768 measured operations. Paired components, intervals, provenance and
 input hashes are retained in [network-macos-cpu-split.json.gz](network-macos-cpu-split.json.gz).
+
+## Calibrated network status
+
+These are the completed identical-binary calibrations at runtime `06e7517`,
+excluding the pending mapping-owner and Windows socket changes. Within each
+balanced round, combine both identical labels' worker/control ratios by their
+geometric mean, then report the median of twelve rounds. No label is selected
+or discarded. All primary sizes, round values, temporal blocks, calibrations
+and source hashes are retained in
+[network-calibrated-status.json.gz](network-calibrated-status.json.gz).
+
+For 64-KiB TCP echo, 100% is the equally optimized in-process control. Higher
+throughput is better; lower CPU/GiB and p99 are better. These descriptive noise
+assessments do not establish whole-platform or storage qualification.
+
+| Platform / architecture | Transport | Throughput | CPU/GiB | p99 | Remaining gap relative to calibration |
+| --- | --- | ---: | ---: | ---: | --- |
+| Linux x86-64 | PCI | 98.1% | 102.4% | 101.9% | Small CPU excess; throughput/tail borderline |
+| Linux x86-64 | PCI-free MMIO | 99.4% | 101.5% | 101.4% | No clearly established bulk gap |
+| Linux AArch64 | PCI | 93.6% | 109.7% | 111.6% | CPU excess; throughput borderline, tail noisy |
+| Linux AArch64 | PCI-free MMIO | 97.2% | 106.8% | 100.9% | CPU unresolved because of drift |
+| macOS AArch64 | PCI | 93.9% | 116.7% | 108.6% | All three |
+| macOS AArch64 | PCI-free MMIO | 95.5% | 114.8% | 107.3% | All three |
+| Windows x86-64 | PCI | 95.6% | 103.1% | 131.6% | Tail latency clearly; throughput unresolved |
+| Windows x86-64 | PCI-free MMIO | 98.0% | 102.0% | 133.1% | Tail latency clearly |
+
+The 64-byte cases also leave clear macOS gaps: roughly 2–4% less throughput,
+12–18% more CPU and 6–7% worse p99. Linux/Windows differences are mostly within
+noise or borderline; x86 MMIO retains a small CPU excess. Borderline remains
+unresolved, not a pass or an established regression caused by a code change.
+
+## Physical x86 storage calibration
+
+The prespecified PCI-free block calibration completed all 52 boots before the
+mapping-owner comparison began. Both labels run the same frozen `ad6ac6a`
+binary and assets; harness source is `ab4c264`. Twelve balanced five-second
+rounds retain warmups, hashes, per-operation results and temporal blocks in
+[storage-noise-x86.json.gz](storage-noise-x86.json.gz). Affinity remains CPUs
+24–27, with no simultaneous local compilation or added VM tests. The unrelated
+long-lived VM remains present, so this is not an exclusive-host measurement.
+
+Identical-worker random-read throughput and CPU/GiB intervals stay within
+0.5% of unity. Random-write throughput varies from −6.6% to +0.4%, with a last
+four-round block around −7%; sequential throughput intervals span roughly ±6%.
+That distinguishes a stable read measurement from storage drift and prevents
+treating a small write difference as a code effect. The random-read worker
+itself retains about 99.1% of control throughput with 101.8% CPU/GiB; those small
+costs remain visible above its much narrower calibration. Write and sequential
+results remain less resolved. This calibration covers this host, transport and
+backing only; the network noise bands are not reused for storage.
