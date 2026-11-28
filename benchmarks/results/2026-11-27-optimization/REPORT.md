@@ -1112,3 +1112,42 @@ This probe does not reproduce Dillo's cancellation registration, batching or
 sandbox. It supplies no evidence to justify a new shared-memory notification
 endpoint or negotiated protocol extension. The existing pipe path is retained;
 all 18 observations are in [macos-native-wake-kqueue.json](macos-native-wake-kqueue.json).
+
+## Twenty-pair x86 transmit comparison
+
+The prespecified eight-pair extension of `06e7517` completed successfully.
+Together with the original twelve pairs, this retains all 176 boots, including
+both warm-up sets. Both batches used identical frozen executables and guest
+assets, five-second operations and CPUs 24–27, without concurrent compilation.
+Large-message worker throughput improves 2.6% on PCI and 3.3% on MMIO versus
+the prior worker; paired 95% intervals are +0.6–3.0% and +2.9–3.5%. CPU/GiB
+falls 7.0%/5.8%, and p99 bounds fall 4.6%/3.1%. Small-message throughput changes
+remain inconclusive.
+
+The equally optimized control still matters. Large-message PCI worker/control
+throughput is 97.3% (96.6–98.8%), CPU/GiB is 102.8% (102.0–103.6%), and p99 is
+102.4% (101.2–103.1%). MMIO throughput is 99.8% (98.9–100.3%) and CPU/GiB is
+100.8% (100.1–101.8%). These residual costs remain open; a result inside the
+measurement band is not equivalent-or-better performance. Both batches and
+their combined estimates are in
+[network-tx-scratch-x86-twenty.json.gz](network-tx-scratch-x86-twenty.json.gz).
+
+## Longer Arm transmit comparison
+
+[Run 46089194689](https://github.com/pichi-vm/dillo/actions/runs/46089194689)
+completed all 104 boots at `06e7517` against `aa9bbff`: twelve balanced
+five-second pairs per transport/revision plus warm-ups. Native lifecycle and
+network checks passed, executable hashes differ, and guest assets match within
+the comparison. Every PCI-free guest report contains no PCI devices. These are
+physical Arm KVM results, separate from the x86 series.
+
+The longer run exposes an unfavorable result: large-message PCI worker
+throughput falls 4.6% versus the prior worker (95% interval −6.3% to −1.0%),
+and its p99 bound rises 9.3% (+0.3–23.1%). MMIO CPU/GiB improves 2.3%
+(−5.5% to −1.1%), but its throughput change and p99 change remain uncertain.
+Against its optimized control, large-message worker throughput is 90.8% on
+PCI and 95.3% on MMIO; CPU/GiB is 112.8%/109.7%. The four-pair results did not
+establish these effects. The candidate remains separate rather than promoting
+the x86 gains across all platforms. All observations, intervals, hashes and
+run provenance are retained in
+[network-tx-scratch-arm-long.json.gz](network-tx-scratch-arm-long.json.gz).
