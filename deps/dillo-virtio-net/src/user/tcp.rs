@@ -117,10 +117,19 @@ impl TcpFlow {
                         if e.kind() == std::io::ErrorKind::NotConnected
                             || e.kind() == std::io::ErrorKind::WouldBlock => {}
                     // Any other peer_addr error: connect failed.
-                    Err(_) => self.reset = true,
+                    Err(error) => {
+                        log::warn!(
+                            "usernet connect {:?}: peer_addr failed: {error}",
+                            self.token
+                        );
+                        self.reset = true;
+                    }
                 }
             }
-            Ok(Some(_)) | Err(_) => self.reset = true,
+            Ok(Some(error)) | Err(error) => {
+                log::warn!("usernet connect {:?}: socket error: {error}", self.token);
+                self.reset = true;
+            }
         }
     }
 
@@ -176,6 +185,12 @@ impl TcpFlow {
         }
         if self.started.elapsed() >= CONNECT_TIMEOUT {
             self.reset = true;
+            log::warn!(
+                "usernet connect {:?}: deadline; peer={:?}, socket_error={:?}",
+                self.token,
+                self.stream.peer_addr(),
+                self.stream.take_error()
+            );
             return false;
         }
         false
@@ -196,6 +211,7 @@ impl TcpFlow {
             n > 0
         } else {
             // recv error (socket not in a receivable state) or host write error.
+            log::warn!("usernet write {:?}: {result:?}", self.token);
             self.reset = true;
             false
         }
@@ -228,7 +244,10 @@ impl TcpFlow {
             Ok(0) => (0, ReadOutcome::Eof),
             Ok(n) => (n, ReadOutcome::Bytes(n)),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (0, ReadOutcome::WouldBlock),
-            Err(_) => (0, ReadOutcome::Errored),
+            Err(error) => {
+                log::warn!("usernet read {:?}: {error}", self.token);
+                (0, ReadOutcome::Errored)
+            }
         });
         match result {
             Ok(ReadOutcome::Bytes(n)) => n > 0,
