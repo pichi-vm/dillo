@@ -39,13 +39,14 @@ mod linux_fd;
 #[cfg(target_os = "linux")]
 mod macvtap;
 
+use std::sync::atomic::{Ordering, fence};
 use std::sync::{Arc, Mutex};
 
 use dillo_mmio::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
 use dillo_virtio::{
-    ActivateError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle, VirtioDeviceHost,
-    VirtioMemory, VirtioRunToken,
+    ActivateError, DeviceJoinError, Kick, VirtioActivate, VirtioDevice, VirtioDeviceHandle,
+    VirtioDeviceHost, VirtioMemory, VirtioRunToken,
 };
 
 pub use backend::{MAX_FRAME_LEN, NetBackend, NullBackend, RECV_POLL};
@@ -298,8 +299,7 @@ fn spawn_tx_worker(
             &kick,
             interrupt.as_ref(),
             &token,
-        );
-        Ok(())
+        )
     }))
     .map(|handle| handle.with_shutdown_wake(wake))
 }
@@ -336,17 +336,17 @@ fn tx_worker(
     kick: &Kick,
     interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
-) {
+) -> Result<(), DeviceJoinError> {
     let queue = Mutex::new(queue);
     let mut scratch = Vec::new();
     loop {
         token.checkpoint();
         if let Err(e) = kick.read() {
             log::error!("virtio-net TX: kick read error: {e}");
-            return;
+            return Ok(());
         }
         if token.is_shutdown_requested() {
-            return;
+            return Ok(());
         }
         drain_tx(
             backend,
@@ -355,7 +355,7 @@ fn tx_worker(
             &queue,
             interrupt,
             &mut scratch,
-        );
+        )?;
     }
 }
 
@@ -367,10 +367,31 @@ fn drain_tx(
     queue: &Mutex<Queue>,
     interrupt: Option<&Interrupt>,
     scratch: &mut Vec<u8>,
-) {
+) -> Result<(), DeviceJoinError> {
     let mut q = queue.lock().expect("virtio-net TX queue mutex");
     let mut signaled = false;
-    while let Some(head) = q.pop(queue_memory) {
+    let mut suppressed = None;
+    loop {
+        let Some(head) = q.pop(queue_memory) else {
+            if let Some(used_ring) = suppressed.take() {
+                queue_memory.write_u16(used_ring, 0).ok_or_else(|| {
+                    DeviceJoinError::Worker("virtio-net TX: enabling kicks failed".into())
+                })?;
+                // Recheck after enabling: the driver may have published work
+                // while NO_NOTIFY was set and therefore sent no kick.
+                fence(Ordering::SeqCst);
+                continue;
+            }
+            break;
+        };
+        // The first pop adopts any pending queue configuration. Keep its ring
+        // until drained, as required by the control-plane quiescence barrier.
+        if suppressed.is_none() && !q.uses_notif_suppression {
+            queue_memory.write_u16(q.used_ring, 1).ok_or_else(|| {
+                DeviceJoinError::Worker("virtio-net TX: suppressing kicks failed".into())
+            })?;
+            suppressed = Some(q.used_ring);
+        }
         let head_index = head.index;
         if q.enabled()
             && let Some(frame) = read_tx_frame(queue_memory, buffer_memory, head, scratch)
@@ -390,6 +411,7 @@ fn drain_tx(
     if signaled && let Some(intr) = interrupt {
         intr.signal();
     }
+    Ok(())
 }
 
 /// Gather a TX chain into reusable storage and borrow its Ethernet payload.
@@ -708,9 +730,99 @@ mod tests {
             .unwrap();
         let backend = Arc::new(MockBackend::default());
         let sender: Arc<dyn NetBackend> = backend.clone();
-        drain_tx(&sender, &qmem, &bmem, &Mutex::new(q), None, &mut scratch);
+        drain_tx(&sender, &qmem, &bmem, &Mutex::new(q), None, &mut scratch).unwrap();
         assert_eq!(backend.sent.lock().unwrap()[0], frame[NET_HDR_LEN..]);
         assert_eq!(scratch.capacity(), 0, "oversized TX storage stayed cached");
+    }
+
+    /// Recover a driver publication racing with re-enable, and stop on either
+    /// flag-write failure instead of leaving the worker asleep with kicks off.
+    #[test]
+    fn tx_rechecks_after_enabling_kicks() {
+        struct RacedMemory {
+            inner: SharedQueueMemory,
+            mem: GuestMemoryMmap,
+            injected: std::sync::atomic::AtomicBool,
+            writes: Mutex<Vec<u16>>,
+            fail: Option<u16>,
+        }
+        impl QueueMemory for RacedMemory {
+            fn read_u16(&self, addr: GuestAddress) -> Option<u16> {
+                self.inner.read_u16(addr)
+            }
+            fn read_u32(&self, addr: GuestAddress) -> Option<u32> {
+                self.inner.read_u32(addr)
+            }
+            fn read_u64(&self, addr: GuestAddress) -> Option<u64> {
+                self.inner.read_u64(addr)
+            }
+            fn write_u32(&self, addr: GuestAddress, value: u32) -> Option<()> {
+                self.inner.write_u32(addr, value)
+            }
+            fn write_u16(&self, addr: GuestAddress, value: u16) -> Option<()> {
+                if addr == GuestAddress(0x2000) {
+                    self.writes.lock().unwrap().push(value);
+                    if self.fail == Some(value) {
+                        return None;
+                    }
+                    if value == 0 && !self.injected.swap(true, Ordering::Relaxed) {
+                        // A driver adds work while NO_NOTIFY is still set. It
+                        // reuses the returned descriptor and sends no kick.
+                        assert_eq!(self.inner.read_u16(addr), Some(1));
+                        self.mem.write_obj(0u16, GuestAddress(0x1006)).unwrap();
+                        self.mem.write_obj(2u16, GuestAddress(0x1002)).unwrap();
+                    }
+                }
+                self.inner.write_u16(addr, value)
+            }
+        }
+
+        for fail in [None, Some(1), Some(0)] {
+            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            mem.write_obj(0xfaceu16, GuestAddress(0)).unwrap();
+            mem.write_obj(0x5000u64, GuestAddress(0x100)).unwrap();
+            mem.write_obj(13u32, GuestAddress(0x108)).unwrap();
+            mem.write_obj(1u16, GuestAddress(0x1002)).unwrap();
+            mem.write_obj(0x42u8, GuestAddress(0x500c)).unwrap();
+            let memory = Arc::new(RacedMemory {
+                inner: SharedQueueMemory::new(vec![shared(&mem, 0, 0x10000)]),
+                mem: mem.clone(),
+                injected: std::sync::atomic::AtomicBool::new(false),
+                writes: Mutex::new(Vec::new()),
+                fail,
+            });
+            let qmem: Arc<dyn QueueMemory> = memory.clone();
+            let bmem: Arc<dyn VirtioMemory> =
+                Arc::new(SharedVirtioMemory::new(vec![shared(&mem, 0, 0x10000)]));
+            let backend = Arc::new(MockBackend::default());
+            let sender: Arc<dyn NetBackend> = backend.clone();
+            let control = Arc::new(dillo_virtio::queue::QueueControl::default());
+            control.configure(ready_queue(0x100, 0x1000, 0x2000));
+            control.set_enabled(true);
+            control.set_started(true);
+            let mut q = Queue::new(16);
+            q.control_with(control);
+            let result = drain_tx(&sender, &qmem, &bmem, &Mutex::new(q), None, &mut Vec::new());
+            assert_eq!(result.is_err(), fail.is_some());
+            let expected = match fail {
+                None => 2,
+                Some(1) => 0,
+                _ => 1,
+            };
+            assert_eq!(
+                backend.sent.lock().unwrap().as_slice(),
+                vec![vec![0x42]; expected]
+            );
+            assert_eq!(
+                mem.read_obj::<u16>(GuestAddress(0x2002)).unwrap(),
+                expected as u16
+            );
+            assert_eq!(mem.read_obj::<u16>(GuestAddress(0)).unwrap(), 0xface);
+            if fail.is_none() {
+                assert_eq!(*memory.writes.lock().unwrap(), [1, 0, 1, 0]);
+                assert_eq!(memory.inner.read_u16(GuestAddress(0x2000)), Some(0));
+            }
+        }
     }
 
     /// A round-trip through the mock backend: TX records, RX replays.
