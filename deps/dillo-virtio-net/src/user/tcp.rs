@@ -152,8 +152,10 @@ impl TcpFlow {
             self.established_seen = true;
         }
 
-        let mut worked = false;
-        worked |= self.guest_to_host(socket);
+        let mut worked = self.guest_to_host(socket);
+        // A reply may arrive before its readiness event. Probe after sending
+        // new bytes, but do not retry blocked reads on unrelated guest wakes.
+        self.readable |= worked;
         if !self.reset {
             self.maybe_shutdown_host_write(socket);
             worked |= self.host_to_guest(socket);
