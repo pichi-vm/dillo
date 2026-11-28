@@ -2135,3 +2135,27 @@ before attributing the remaining network cost entirely to runtime design.
 [hvf-shared-status-macos-short.json.gz](hvf-shared-status-macos-short.json.gz)
 contains all 80 raw boot reports/logs, comparisons, hashes and the complete
 native job log; no slow observations were removed.
+
+## Arm concurrent storage sampling diagnostic
+
+[Run 46121407095](https://github.com/pichi-vm/dillo/actions/runs/46121407095)
+completed all 40 boots at `6f9be52`, with runtime equivalent to `8196bb4`.
+The same executable and guest assets run with process sampling off/on and
+in-process/worker execution. Four balanced five-second pairs cover PCI and
+PCI-free MMIO, four disks and QD8 per disk (32 requests total). All boot reports,
+write verification and PCI-free inventories validate; no observations were
+discarded.
+
+The large read tails persist without process sampling. With sampling off,
+worker/control sequential-read throughput is 155.2%/152.5% on PCI/MMIO, while
+p99 is 223.7%/259.8%. MMIO random reads retain 89.5% throughput with 252.0% p99.
+Turning sampling on changes sequential-read p99 by -6.2%/-1.1% for the control
+and -4.4%/0.0% for the worker on PCI/MMIO. This diagnostic therefore does not
+support attributing the concurrent read tail to the Windows network sampling
+effect. It does not isolate the underlying scheduling or notification cause.
+
+These four-pair results have no matching identical-mode concurrent-workload
+noise calibration and do not qualify small differences. Unsampled runs provide
+no process CPU or memory estimates. All raw reports, logs, schedules, paired
+values and artifact provenance are retained in
+[concurrent-sampling-arm-short.json.gz](concurrent-sampling-arm-short.json.gz).
