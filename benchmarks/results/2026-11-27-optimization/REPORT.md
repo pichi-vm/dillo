@@ -1619,3 +1619,38 @@ execution. They do not apportion host CPU, qualify performance, or prove that
 notification cost alone explains the remaining gap. The full stack reports,
 profiler logs, boot records, parsing checks, timestamps and archive hashes are
 retained in [macos-network-stacks-current.json.gz](macos-network-stacks-current.json.gz).
+
+## Windows writable-readiness screening
+
+[Run 46106783368](https://github.com/pichi-vm/dillo/actions/runs/46106783368)
+completes all 40 boots at `ceda4c5` against `8937f91`: four balanced
+five-second pairs per network transport, with matched assets and distinct
+executables. Native network checks reproduce repeated writable events after
+blocked reads under the original interest set, then verify that removing idle
+writable interest prevents them. The change retains writable interest for
+connection completion and pending guest output.
+
+Worker CPU per operation falls about 40%/42% for small PCI/MMIO messages and
+13%/19% for bulk traffic. All four CPU ratios improve in each case. There is
+also a throughput tradeoff: small PCI messages lose 10.5%, and bulk PCI/MMIO
+lose about 4%; small MMIO messages improve 2.8%. The small PCI throughput loss
+appears in all four pairs and affects the control too. These short observations
+are a reason to investigate the tradeoff, not to promote the candidate.
+
+The host reports AMD family 26/model 2; the earlier Windows noise and NODELAY
+comparisons report family 25/model 1. The unchanged baseline's median bulk
+worker/control p99 is now about 109.8%/101.1% on PCI/MMIO, rather than the
+previous roughly 130% values. The candidate's 103.5%/102.4% therefore cannot be
+credited with resolving the earlier tail gap. The generic runner hostname is
+not evidence of identical hardware. All observations, including the large
+second-pair PCI tail in both revisions, remain in
+[network-write-interest-windows-short.json.gz](network-write-interest-windows-short.json.gz).
+
+A separate 50-line follow-up at `2619d65` retains read readiness until
+WouldBlock, then waits for a readable/closed/error event instead of retrying
+blocked host reads on unrelated guest wakes. It preserves readiness when the
+guest cannot accept more data and removes a temporary readiness-token vector.
+All 58 applicable local network tests and strict Clippy pass; four
+hardware-dependent/external tests remain intentionally ignored. A new native
+Windows comparison against `ceda4c5` is running. Neither candidate is integrated
+into the performance branch or treated as final parity qualification.
