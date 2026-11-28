@@ -11,9 +11,10 @@ the workloads in the [baseline report](results/2026-11-27/REPORT.md). Optimize
 the entire request path, especially native queue notifications. Keep devices
 isolated, transports in the parent, and the existing vhost-user control plane.
 
-The target is at least the control's throughput, with no increase in CPU per
-operation or request latency. Evaluate each platform, transport and workload
-separately. A gain under load does not compensate for a queue-depth-one loss.
+Success means matching the control within measured noise, or improving on it,
+for throughput, CPU per operation and request latency. Evaluate each platform,
+transport and workload separately. A gain under load does not compensate for
+a queue-depth-one loss.
 PCI and MMIO are equally first-class targets, with the same correctness and
 performance requirements. Qualify both independently; gains in one transport
 do not compensate for a regression in the other. Include PCI-free guests:
@@ -308,14 +309,21 @@ Use shorter targeted pairs between changes and reserve the full matrix for
 integrated candidates. Run independent native lanes without waiting on PRs.
 
 Report absolute rates, p50/p95/p99 latency, paired ratios and 95% paired
-confidence intervals. The goal is worker/control >= 1 for useful work per
-second and <= 1 for latency and total process-tree CPU per operation. Use a
-5% noninferiority margin as an explicit *measurement decision band*: the
-interval must exclude a worse loss before calling a result indistinguishable
-at that resolution. A repeatable smaller regression remains an open item;
-the band is not permission to quietly redefine the goal as “95% as fast.”
-An inconclusive interval is not parity. Report cases separately, not one
-geometric mean that conceals a platform or QD1 failure.
+confidence intervals. Per the user's clarification, parity within measured
+noise is success; an exact ratio of 1 or a measurable gain is not required.
+Calibrate noise with identical executables and assets under the same balanced
+schedule, comparing like execution modes. Determine resolution separately for
+each platform, transport, workload and metric, before judging a candidate.
+Retain temporal block results: resampling individual pairs assumes exchangeable
+observations and can understate uncertainty when the host drifts.
+
+Keep the existing 5% measurement band as a precision check, not a universal
+allowance for loss. Qualification must rule out a meaningful loss beyond the
+calibrated resolution; wide intervals or a failed significance test alone do
+not establish parity. A repeatable loss beyond measured noise remains open.
+Do not enlarge the noise allowance to absorb a candidate's loss, or pursue
+smaller point-estimate differences that the calibration cannot distinguish.
+Report cases separately, not a mean that conceals a platform or QD1 failure.
 
 The Windows guest's refined-jiffies clock cannot establish microsecond
 request latency. Validate an existing high-resolution clock on that host, or

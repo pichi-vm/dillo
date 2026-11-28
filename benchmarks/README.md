@@ -120,7 +120,9 @@ architectural question.
   the whole process tree after failure. Never silently discard a failed run.
 - Report every pair and median paired ratios with spread. Repeat only when
   failures or noise make a result inconclusive; preserve initial samples.
-  A small difference within run-to-run variation is inconclusive.
+  Parity within calibrated run-to-run noise meets the performance target.
+  Wide uncertainty alone does not: calibrate with identical binaries and
+  retain enough precision to exclude a meaningful loss.
 
 ## Measurements and attribution
 

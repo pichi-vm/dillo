@@ -4,6 +4,12 @@ This is an incremental diagnostic, not the final parity qualification. The
 milestone remains active. Source: `8690c35` for the initial direct completion
 candidate (`c442891` after a message-only history rewrite).
 
+Acceptance clarification: matching the equally optimized control within
+measured noise is success. Earlier entries requiring every small nonzero
+point estimate to improve are superseded by this rule; their observations
+remain unchanged. Calibration is specific to the platform, transport,
+workload and metric. Wide uncertainty alone does not qualify a result.
+
 ## Changes
 
 - Native queue endpoints eliminate the extra kick forwarding thread on all
@@ -911,8 +917,8 @@ qualification; this result cannot establish its optimal wake policy.
 
 The rejected x86 candidate also remains below its same-revision control for
 large-message throughput: 97.9% on PCI and 98.7% on MMIO, with CPU/GiB at
-102.7%/102.5%. Those repeatable smaller gaps remain open despite falling within
-the 5% measurement band. Full paired observations, intervals, schedule and
+102.7%/102.5%. These smaller differences require calibrated noise before being
+classified as residual costs. Full paired observations, intervals, schedule and
 source/asset provenance are retained in
 [network-integrated-x86-long.json.gz](network-integrated-x86-long.json.gz).
 
@@ -1127,8 +1133,8 @@ remain inconclusive.
 The equally optimized control still matters. Large-message PCI worker/control
 throughput is 97.3% (96.6–98.8%), CPU/GiB is 102.8% (102.0–103.6%), and p99 is
 102.4% (101.2–103.1%). MMIO throughput is 99.8% (98.9–100.3%) and CPU/GiB is
-100.8% (100.1–101.8%). These residual costs remain open; a result inside the
-measurement band is not equivalent-or-better performance. Both batches and
+100.8% (100.1–101.8%). These differences require noise calibration; parity
+within measured noise satisfies the clarified target. Both batches and
 their combined estimates are in
 [network-tx-scratch-x86-twenty.json.gz](network-tx-scratch-x86-twenty.json.gz).
 
