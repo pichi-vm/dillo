@@ -1346,6 +1346,11 @@ For 64-KiB TCP echo, 100% is the equally optimized in-process control. Higher
 throughput is better; lower CPU/GiB and p99 are better. These descriptive noise
 assessments do not establish whole-platform or storage qualification.
 
+The later [sampling diagnostic](#windows-network-sampling-diagnostic) shows
+that instrumentation substantially amplifies the Windows network tail gap.
+The Windows rows below remain the recorded sampled results; they should not
+be interpreted as an isolated Dillo runtime cost or as unsampled qualification.
+
 | Platform / architecture | Transport | Throughput | CPU/GiB | p99 | Remaining gap relative to calibration |
 | --- | --- | ---: | ---: | ---: | --- |
 | Linux x86-64 | PCI | 98.1% | 102.4% | 101.9% | Small CPU excess; throughput/tail borderline |
@@ -1997,3 +2002,44 @@ result. The predeclared comparison against `8196bb4` uses four balanced
 five-second pairs across PCI/MMIO block and network cases. The runtime remains
 outside the main optimization branch pending those measurements and remaining
 shared-status qualification.
+
+## Windows network sampling diagnostic
+
+[Run 46116857993](https://github.com/pichi-vm/dillo/actions/runs/46116857993)
+completed all 104 boots at `cb1cae2` (runtime equivalent to `0ab175a`). Twelve
+balanced five-second rounds per transport interleave sampling off/on and
+in-process/worker execution, with identical executable and guest-asset hashes.
+All reports validate, including the PCI-free inventory. The host reports AMD
+family 25/model 1; the prebuilt WSL kernel retains its Hyper-V clock.
+
+Sampling substantially perturbs both modes. For 64-KiB echo, sampling-on/off
+throughput is 93.7%/93.0% on PCI and 95.2%/92.7% on MMIO (control/worker).
+The corresponding p99 ratios are 324.9%/420.8% and 271.2%/350.1%. Each of
+the three four-round blocks has the same large latency increase. This is
+instrumentation sensitivity, not a Dillo optimization or ordinary noise.
+
+| Transport | Sampling | Worker/control throughput | Worker/control p99 |
+| --- | --- | ---: | ---: |
+| PCI | Off | 98.4% | 106.5% |
+| PCI | On | 97.3% | 138.9% |
+| PCI-free MMIO | Off | 99.2% | 103.5% |
+| PCI-free MMIO | On | 96.8% | 132.0% |
+
+The unsampled PCI p99 median interval is 100.0–110.0%; MMIO is
+99.4–106.2%. These are paired bootstrap intervals, not a new identical-mode
+noise calibration. One slow unsampled PCI boot remains in the evidence; no
+sample was excluded. Unsampled runs supply no process CPU or memory estimates,
+and the smaller gaps do not establish full parity.
+
+Source inspection shows the TCP echo service and process sampler run in the
+same Python interpreter. The diagnostic isolates process sampling while
+leaving echo and console-marker polling active; it does not distinguish GIL
+contention from host scheduling or individual sampling calls. The next bounded
+harness experiment moves the same echo service into its own process, then
+repeats the balanced on/off comparison with unchanged Dillo and guest assets.
+Host echo remains outside the measured Dillo process tree in both cases.
+
+[network-sampling-windows.json.gz](network-sampling-windows.json.gz) retains
+all raw reports, logs, schedules, hashes, per-mode comparisons and temporal
+blocks. The separate Windows four-disk screen starts only after this run
+finishes; its results must not be inferred from the network diagnostic.
