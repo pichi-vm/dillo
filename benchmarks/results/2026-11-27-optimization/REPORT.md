@@ -2310,3 +2310,37 @@ The [Arm comparison](https://github.com/pichi-vm/dillo/actions/runs/46128203605)
 uses four balanced five-second pairs per transport and revision, comparing
 `4e7485f` with `3c6d63a` using identical guest assets. All 40 boots, including
 warmups and slow observations, are required for the planned analysis.
+
+## Block notification-suppression experiment
+
+The fixture kernel's
+[block callback](https://github.com/gregkh/linux/blob/v6.1.155/drivers/block/virtio_blk.c#L275)
+disables notifications while consuming used buffers, then re-enables and checks
+for raced completions. Without EVENT_IDX, its
+[ring implementation](https://github.com/gregkh/linux/blob/v6.1.155/drivers/virtio/virtio_ring.c#L845)
+uses the available-ring NO_INTERRUPT flag. Dillo's block device does not offer
+EVENT_IDX, but previously sent its drain notification regardless of this flag.
+[Virtio section 2.7.7.2](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html)
+allows this existing hint to suppress notifications; it does not suppress used
+ring publication or require another negotiated feature.
+
+The separate `4c48281` candidate checks that flag after the existing publication
+fence. An unreadable flag retains the previous notification behavior. The read
+fixture now verifies publication with callbacks disabled, and notification on
+the next completion after re-enabling. It fails against the unchanged source
+because of an unwanted second interrupt, and passes with the candidate. All
+28 queue and eight block checks pass (one external qcow2 case is ignored),
+as do strict Clippy and formatting checks. The complete commit is 59 changed
+lines across the block implementation/fixture and native-check selection.
+
+All eight local smoke boots pass on PCI and PCI-free MMIO with four disks at
+queue depth eight; 1,024 thread records match their aggregate reports and writes
+verify. [block-notification-suppression-smoke.json.gz](block-notification-suppression-smoke.json.gz)
+retains all output, check logs, the failing old-code control and preregistration.
+The [macOS comparison](https://github.com/pichi-vm/dillo/actions/runs/46129135439)
+is prespecified as four balanced five-second pairs per transport and revision,
+using `3c6d63a` as its baseline and identical guest assets. Arm follows only
+after its live bounded-batch comparison finishes. This experiment does not
+include the bounded-batch change or the separate HVF shared-status prototype;
+their effects must not be combined without a composition comparison. No
+performance improvement or runtime promotion is established yet.
