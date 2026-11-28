@@ -1744,3 +1744,45 @@ must not be multiplied across different runs to estimate a combined gain.
 retains both revisions, all paired values, warmups, source identities and
 artifact hashes. The separate six-line reply-probe candidate `281772e` is
 being screened locally; no result from it is included here.
+
+## Completed readiness screens and reply probe
+
+The combined writable-interest/read-tracking candidate `2619d65` completed
+[macOS run 46109756741](https://github.com/pichi-vm/dillo/actions/runs/46109756741)
+and [Arm run 46109764877](https://github.com/pichi-vm/dillo/actions/runs/46109764877).
+Both compare with `8937f91`: four balanced five-second pairs per network
+transport, 40 boots including warmups, shared completion, sampling and QD1.
+All boots, matched guest assets, distinct frozen binaries, clean source state
+and PCI-free declarations validate. Native prerequisite checks also pass.
+
+On macOS, bulk worker CPU/GiB falls 1.9% on PCI and 2.2% on MMIO, with every
+pair lower. Control CPU falls by similar amounts; throughput changes are
+under 1%. Small-message worker CPU falls 5.3%/2.4%, while throughput falls
+0.4%/0.8%. These are short screens, not a new calibrated matrix. Bulk
+worker/control CPU remains 115.7%/113.3%, with throughput 93.7%/95.4% and p99
+109.4%/106.0%. The isolation cost is still present.
+
+Arm small-PCI worker throughput improves 2.6% with 4.2% lower CPU, but small
+MMIO throughput falls 2.1%. Bulk PCI pairs vary in direction; bulk MMIO
+worker throughput falls in all four pairs (median 5.4%), with higher CPU
+(median 4.0%). The control also varies, including a 15.3% MMIO throughput
+drop in one pair. Keep these observations without inferring a scheduling
+cause or accepting the policy as a general improvement.
+
+The local six-line reply probe `281772e` compares with `2619d65`. It permits
+one host read after successfully writing guest bytes, even before a readable
+event arrives. The completed 40-boot screen uses the same balanced design
+and CPUs 24–27; no local compilation or extra test VM ran during measurement.
+The unrelated long-lived VM remained untouched, so this is not an exclusive
+host measurement. Bulk PCI worker throughput falls 5.3% and CPU rises 5.4%;
+all four pairs worsen, as do the control pairs. Bulk MMIO throughput rises
+5.9%, with 3.0% lower CPU; the control improves too. Small PCI improves, while
+small MMIO changes little. This reverses the preceding PCI/MMIO tradeoff
+rather than establishing a policy that benefits both transports. Neither
+candidate is promoted; gains from separate runs are not multiplied together.
+
+All paired observations, warmups, hashes and run identities are retained in
+[network-readiness-macos-short.json.gz](network-readiness-macos-short.json.gz),
+[network-readiness-arm-short.json.gz](network-readiness-arm-short.json.gz), and
+[network-reply-probe-x86-short.json.gz](network-reply-probe-x86-short.json.gz).
+Four pairs do not justify narrow confidence intervals or a parity conclusion.
