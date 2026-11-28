@@ -144,9 +144,9 @@ jobs:
         run: >-
           cargo --config .copr/cargo-config.toml test --locked
           -p dillo-machine-whp whp_trigger_ -- --nocapture
-      - name: Check memory, notification and network behavior
+      - name: Check memory, notification, block and network behavior
         shell: bash
-        run: cargo --config .copr/cargo-config.toml test --locked -p dillo-machine-unix -p dillo-mmio -p dillo-virtio -p dillo-virtio-net --lib
+        run: cargo --config .copr/cargo-config.toml test --locked -p dillo-machine-unix -p dillo-mmio -p dillo-virtio -p dillo-virtio-blk -p dillo-virtio-net --lib
       - name: Build comparison executable
         if: inputs.baseline_ref != ''
         shell: bash

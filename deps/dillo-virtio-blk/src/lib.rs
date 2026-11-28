@@ -557,10 +557,24 @@ fn drain_requests(
 ) {
     let mut q = queue.lock().expect("virtio-blk queue mutex");
     let mut signaled = false;
+    let mut remaining = 0;
     while !token.is_shutdown_requested()
         && !quiescing.load(Ordering::Acquire)
         && let Some(head) = q.pop(queue_memory)
     {
+        if remaining == 0 {
+            if signaled && let Some(intr) = call_interrupt {
+                intr.signal();
+            }
+            // Pop adopts any pending queue configuration first. Snapshot a
+            // bounded batch so refills cannot postpone its notification.
+            remaining = queue_memory
+                .read_u16(q.avail_ring.unchecked_add(2))
+                .map_or(0, |index| index.wrapping_sub(q.next_avail.0))
+                .min(q.size - 1)
+                + 1;
+        }
+        remaining -= 1;
         let head_index = head.index;
         if !q.enabled() {
             q.add_used(queue_memory, head_index, 0);
@@ -1039,6 +1053,142 @@ mod tests {
         assert_eq!(used_idx, 1);
         let used_len: u32 = mem.read_obj(used.unchecked_add(8)).unwrap();
         assert_eq!(used_len, 513);
+    }
+
+    #[test]
+    fn refilled_queue_notifies_before_becoming_empty() {
+        struct RefillingBacking {
+            memory: GuestMemoryMmap,
+            start: u16,
+            completed: std::sync::atomic::AtomicU16,
+        }
+        impl BlockBacking for RefillingBacking {
+            fn len_bytes(&self) -> u64 {
+                512
+            }
+            fn is_read_only(&self) -> bool {
+                false
+            }
+            fn read_at(&self, _: u64, _: &mut [u8]) -> std::io::Result<usize> {
+                unreachable!()
+            }
+            fn get_id(&self) -> [u8; 20] {
+                [0; 20]
+            }
+            fn flush(&self) -> std::io::Result<()> {
+                let done = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
+                // Append work while the original two requests are being served.
+                self.memory
+                    .write_obj(
+                        self.start.wrapping_add((done + 2).min(4)),
+                        GuestAddress(0x1002),
+                    )
+                    .unwrap();
+                Ok(())
+            }
+        }
+
+        for start in [0u16, u16::MAX - 1] {
+            let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            memory
+                .write_obj(VIRTIO_BLK_T_FLUSH, GuestAddress(0x5000))
+                .unwrap();
+            memory
+                .write_slice(&[0xff; 4], GuestAddress(0x6000))
+                .unwrap();
+            for i in 0..4u16 {
+                write_desc(
+                    &memory,
+                    GuestAddress(0x100),
+                    u64::from(2 * i),
+                    0x5000,
+                    16,
+                    VIRTQ_DESC_F_NEXT,
+                    2 * i + 1,
+                );
+                write_desc(
+                    &memory,
+                    GuestAddress(0x100),
+                    u64::from(2 * i + 1),
+                    0x6000 + u64::from(i),
+                    1,
+                    VIRTQ_DESC_F_WRITE,
+                    0,
+                );
+                memory
+                    .write_obj(
+                        2 * i,
+                        GuestAddress(0x1004 + 2 * u64::from(start.wrapping_add(i) % 8)),
+                    )
+                    .unwrap();
+            }
+            memory
+                .write_obj(start.wrapping_add(2), GuestAddress(0x1002))
+                .unwrap();
+            let shared = Arc::new(MappedSharedMemory::new(
+                memory.clone(),
+                SharedMemoryRequirement {
+                    range: AddressRange {
+                        base: 0,
+                        size: 0x10000,
+                    },
+                    access: SharedAccess::ReadWrite,
+                },
+            ));
+            let queue_memory: Arc<dyn QueueMemory> =
+                Arc::new(SharedQueueMemory::new(vec![shared.clone()]));
+            let buffer_memory: Arc<dyn VirtioMemory> =
+                Arc::new(SharedVirtioMemory::new(vec![shared]));
+            let mut configured = Queue::new(8);
+            configured.ready = true;
+            configured.desc_table = GuestAddress(0x100);
+            configured.avail_ring = GuestAddress(0x1000);
+            configured.used_ring = GuestAddress(0x2000);
+            configured.next_avail = std::num::Wrapping(start);
+            configured.next_used = std::num::Wrapping(start);
+            // The snapshot must use the configuration adopted by the first pop.
+            let control = Arc::new(dillo_virtio::queue::QueueControl::default());
+            control.configure(configured);
+            control.set_enabled(true);
+            control.set_started(true);
+            let mut queue = Queue::new(8);
+            queue.control_with(control);
+            let backing = Arc::new(RefillingBacking {
+                memory: memory.clone(),
+                start,
+                completed: std::sync::atomic::AtomicU16::new(0),
+            });
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            let calls = observed.clone();
+            let source = backing.clone();
+            let interrupt = Interrupt::from_fn(move || {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push(source.completed.load(Ordering::Relaxed));
+            });
+            drain_requests(
+                &queue_memory,
+                &buffer_memory,
+                &Arc::new(Mutex::new(queue)),
+                Some(&interrupt),
+                backing.as_ref(),
+                false,
+                VIRTIO_BLK_F_FLUSH,
+                &VirtioRunToken::from_fn(|| false),
+                &AtomicBool::new(false),
+            );
+            assert_eq!(*observed.lock().unwrap(), [2, 4]);
+            assert_eq!(
+                memory.read_obj::<u16>(GuestAddress(0x2002)).unwrap(),
+                start.wrapping_add(4)
+            );
+            let mut status = [0xff; 4];
+            memory
+                .read_slice(&mut status, GuestAddress(0x6000))
+                .unwrap();
+            assert_eq!(status, [VIRTIO_BLK_S_OK; 4]);
+        }
     }
 
     fn write_desc(
