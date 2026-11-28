@@ -40,7 +40,7 @@ jobs:
         env:
           DILLO_BENCH_SHARED_ISR: "1"
       - if: runner.os == 'Windows'
-        run: cargo test --locked -p dillo-machine-whp worker::vhost_user
+        run: cargo test --locked -p dillo-windows-channel
       - if: inputs.native_notifications && runner.os == 'Windows'
         run: |
           cargo test --locked -p dillo-machine-whp whp_trigger_
