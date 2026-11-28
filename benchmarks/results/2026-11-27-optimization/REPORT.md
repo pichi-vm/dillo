@@ -2534,3 +2534,29 @@ control/worker and +9.7%/+4.0% for MMIO. These four-pair diagnostics provide no
 unsampled CPU estimates or matching noise calibration. No samples are
 discarded, no parity is claimed, and no repeat is scheduled to seek a reset
 or favorable performance result.
+
+## Cutoff after transmit-buffer reuse, 2026-11-28
+
+The user considers the transmit-buffer change a sufficient stopping point for
+now. This supersedes the next-experiment discussion above: no further
+optimization or benchmark run is scheduled. Preserve the integrated changes
+and all favorable, unfavorable and inconclusive observations, then pause for
+reflection. The parity objective remains unfinished, especially the recorded
+macOS network costs and concurrent Arm storage tails. Uncalibrated results
+remain uncertain rather than being counted as parity.
+
+[Native CI run 46133607489](https://github.com/pichi-vm/dillo/actions/runs/46133607489)
+at `af5147b` passes all four platform jobs: Linux x86/Arm, macOS Arm and Windows
+x86, including their native boot checks. Confinement, license and dependency
+checks also pass. The overall run fails because the benchmark histogram used
+a large stack array and the experimental history violates commit-message
+rules; it is not a green whole-branch qualification.
+
+`0fe9bc1` fixes the histogram lint with heap-allocated, fixed-size bins. The
+existing histogram test, full workspace and fuzz Clippy, and formatting pass
+locally. No bins, percentile rules or recording operations change. The native
+run above predates this three-line fix; no new native run is claimed for it.
+[Validation evidence](cutoff-correctness-validation.json.gz) retains the job
+statuses and local logs. Historical commit-message cleanup remains for
+preparing a reviewable series; no checks were disabled and no experimental
+history was rewritten to obtain a green status.

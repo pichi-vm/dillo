@@ -1,8 +1,11 @@
 # Device performance milestone
 
 Plan dated 2026-11-27. Source inspected: `7604a035dc25d13e7fe274d42836a75c58a04494`.
-Implementation is underway. Interim measurements and qualification status are
-recorded in [the execution report](results/2026-11-27-optimization/REPORT.md).
+This pass stops at the transmit-buffer change on 2026-11-28, at the user's
+requested cutoff. Further optimization is paused for reflection. Measurements,
+validation and unresolved gaps are recorded in
+[the execution report](results/2026-11-27-optimization/REPORT.md).
+The full performance-parity objective below remains unfinished.
 
 ## Outcome
 
