@@ -53,6 +53,7 @@ fn serve(bytes: &[u8], channel: &dyn Channel, forwards: &[Forward]) -> io::Resul
                 // after the worker imports the shared socket description.
                 let socket =
                     TcpStream::connect_timeout(&address, std::time::Duration::from_secs(3))?;
+                socket.set_nodelay(true)?;
                 socket.set_nonblocking(true)?;
                 socket.into()
             }
