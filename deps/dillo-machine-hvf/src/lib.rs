@@ -4,6 +4,7 @@
 #![cfg(target_os = "macos")]
 
 mod hypervisor;
+mod wired_completion;
 pub mod worker;
 
 use applevisor::prelude::VcpuHandle;
@@ -175,7 +176,10 @@ mod imp {
                 .map(|requirement| match requirement {
                     MmioInterruptRequirement::Line { source } => {
                         let irq = Self::wired_irq_from_cells(&source.cells, source.cell_count)?;
-                        Ok(MmioInterrupt::Line(self.create_line_interrupt(irq)))
+                        Ok(MmioInterrupt::Line(self.create_line_interrupt(
+                            irq,
+                            source.cell_count >= 3 && source.cells[2] & 0xf == 4,
+                        )))
                     }
                     MmioInterruptRequirement::MessageDomain { vectors, .. } => {
                         Ok(MmioInterrupt::MessageDomain(
@@ -196,7 +200,7 @@ mod imp {
             }
         }
 
-        fn create_line_interrupt(&self, source: u32) -> Interrupt {
+        fn create_line_interrupt(&self, source: u32, level: bool) -> Interrupt {
             // `source` is the DTB SPI number (0-based); hv_gic's gic_set_spi
             // wants the absolute GIC INTID (SPI + 32 — INTIDs 0..31 are SGI/PPI,
             // so a raw SPI number is rejected as an invalid argument). This
@@ -204,6 +208,7 @@ mod imp {
             Interrupt::new(Arc::new(SpiInterruptLine {
                 intid: source + 32,
                 vm: self.inner.clone(),
+                level,
             }))
         }
 
@@ -351,9 +356,24 @@ mod imp {
     struct SpiInterruptLine {
         intid: u32,
         vm: NativeVm,
+        level: bool,
     }
 
     impl InterruptLine for SpiInterruptLine {
+        fn bind_status(
+            &self,
+            state: Arc<dillo_machine::worker::NotificationState>,
+            update: Option<Arc<dyn dillo_mmio::InterruptUpdate>>,
+        ) -> Result<Interrupt, InterruptError> {
+            Ok(Interrupt::new(crate::wired_completion::bind(
+                self.vm.clone(),
+                self.intid,
+                self.level,
+                state,
+                update,
+            )))
+        }
+
         // Edge-style notify (virtio-mmio): pulse the line so the GIC sees a
         // fresh 0→1 edge each time. Asserting without deasserting leaves the SPI
         // latched high — the guest takes one interrupt, ACKs the virtio queue,

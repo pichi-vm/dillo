@@ -2467,7 +2467,7 @@ mod machine_select {
                     Attach::attach(vm, Arc::clone(&transport)).map_err(RunError::machine)?;
                 transport.set_attachment(attachment);
                 #[cfg(all(
-                    any(target_os = "linux", target_os = "windows"),
+                    any(target_os = "linux", target_os = "windows", target_os = "macos"),
                     feature = "bench-in-process"
                 ))]
                 if std::env::var_os("DILLO_BENCH_SHARED_ISR").is_some() {

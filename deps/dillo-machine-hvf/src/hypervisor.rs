@@ -1046,6 +1046,84 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "requires a codesigned binary with com.apple.security.hypervisor"]
+    fn hvf_shared_status_delivery_and_retirement() {
+        use applevisor::gic::GicDistributorReg as Reg;
+        use dillo_machine::worker::{NotificationRole, WorkerHost};
+        use dillo_mmio::InterruptLine;
+        use std::time::{Duration, Instant};
+
+        if !native_test_child("hypervisor::tests::hvf_shared_status_delivery_and_retirement") {
+            return;
+        }
+        let _native_test = NATIVE_TESTS.lock().unwrap();
+        let vm = Vm::new(&gic(), 36).unwrap();
+        let mask = 1 << 16; // INTID 48 in distributor bank 1.
+        let pending = || {
+            vm.instance()
+                .gic_get_distributor_reg(Reg::ISPENDR1)
+                .unwrap()
+                & mask
+        };
+        let clear = || {
+            vm.instance()
+                .gic_set_distributor_reg(Reg::ICPENDR1, mask)
+                .unwrap()
+        };
+        for level in [false, true] {
+            vm.instance()
+                .gic_set_distributor_reg(Reg::ICFGR3, if level { 0 } else { 2 })
+                .unwrap();
+            let state = crate::worker::Worker::create_notification_state().unwrap();
+            let binding =
+                crate::wired_completion::bind(vm.clone(), 48, level, Arc::clone(&state), None);
+            let call = dillo_machine_unix::notification::adopt(
+                binding.export().unwrap().unwrap(),
+                NotificationRole::Signal,
+            )
+            .unwrap();
+            assert!(state.used());
+            call.write(1).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while pending() == 0 && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert_eq!(pending(), mask, "exported call did not assert INTID 48");
+            assert!(!state.used(), "unacknowledged completion must coalesce");
+            state.acknowledge(1);
+            if level {
+                // Reproduce an ACK whose earlier zero observation becomes
+                // stale before native deassertion.
+                assert!(state.used());
+                binding.set_level(false).unwrap();
+                clear();
+                assert_eq!(pending(), mask, "stale ACK lowered a new level");
+                state.acknowledge(1);
+            }
+            binding.set_level(false).unwrap();
+            clear();
+            assert_eq!(pending(), 0);
+            binding.retire().unwrap();
+            assert!(state.used());
+            assert!(call.write(1).is_err(), "retired pipe still has a receiver");
+            binding.signal();
+            assert_eq!(pending(), 0, "retired activation delivered");
+
+            let next_state = crate::worker::Worker::create_notification_state().unwrap();
+            let next =
+                crate::wired_completion::bind(vm.clone(), 48, level, Arc::clone(&next_state), None);
+            assert!(next_state.used());
+            next.signal();
+            drop(binding); // Repeated old retirement must not lower the new line.
+            assert_eq!(pending(), mask);
+            next_state.acknowledge(1);
+            next.set_level(false).unwrap();
+            next.retire().unwrap();
+            clear();
+        }
+    }
+
     fn native_test_child(name: &str) -> bool {
         use std::process::Stdio;
         use std::time::Duration;

@@ -386,7 +386,13 @@ impl VirtioMmio {
                     self.int_status.load(Ordering::SeqCst)
                 };
                 if pending == 0 {
-                    self.irq.set(false);
+                    if let Some(completion) = &g.completion {
+                        completion
+                            .set_level(false)
+                            .map_err(|e| MmioError::Device(e.to_string()))?;
+                    } else {
+                        self.irq.set(false);
+                    }
                 }
             }
             STATUS => {
@@ -491,6 +497,10 @@ impl dillo_mmio::InterruptLine for SharedCompletion {
     fn set_level(&self, level: bool) -> Result<(), dillo_mmio::InterruptError> {
         if level {
             self.signal();
+        } else {
+            // A native level binding must recheck the shared status while
+            // serializing deassertion with completion delivery.
+            self.native.set_level(false)?;
         }
         Ok(())
     }
@@ -857,6 +867,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct TestCompletion {
         signals: AtomicU32,
+        acknowledgements: AtomicU32,
         retired: std::sync::atomic::AtomicBool,
         bindings: Mutex<Vec<Arc<TestCompletion>>>,
     }
@@ -868,6 +879,8 @@ mod tests {
         fn set_level(&self, level: bool) -> Result<(), dillo_mmio::InterruptError> {
             if level {
                 self.signal();
+            } else {
+                self.acknowledgements.fetch_add(1, Ordering::SeqCst);
             }
             Ok(())
         }
@@ -940,10 +953,12 @@ mod tests {
                     assert_eq!(binding.signals.load(Ordering::SeqCst), 1);
                     transport.write(INTERRUPT_ACK, &2u32.to_le_bytes()).unwrap();
                     assert_eq!(status(), INT_VRING);
+                    assert_eq!(binding.acknowledgements.load(Ordering::SeqCst), 0);
                     transport
                         .write(INTERRUPT_ACK, &INT_VRING.to_le_bytes())
                         .unwrap();
                     assert_eq!(status(), 0);
+                    assert_eq!(binding.acknowledgements.load(Ordering::SeqCst), 1);
                     completion.signal();
                     assert_eq!(binding.signals.load(Ordering::SeqCst), 2);
                 }
