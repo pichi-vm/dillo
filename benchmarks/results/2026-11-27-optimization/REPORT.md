@@ -1208,3 +1208,23 @@ evidence; the one-second smoke schedule does not qualify performance.
 [kvm-resampler-lifecycle.json](kvm-resampler-lifecycle.json) retains the exact
 source, native job evidence and boot hashes. Shared-status interoperability,
 concurrent ACK/reset qualification and WHP level/EOI behavior remain open.
+
+## WHP level-triggered EOI boundary
+
+[Native run 46095825972](https://github.com/pichi-vm/dillo/actions/runs/46095825972)
+at `a84e4b0` passes a protected-mode guest probe for both edge and level
+triggers. The guest accepts vector 0x41, increments a memory counter and
+writes LAPIC EOI. Only level delivery returns the documented
+[APIC EOI exit](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/apiceoi),
+with the matching vector; resuming reaches the following guest completion
+marker. Both cases record exactly one handler entry. Existing native trigger
+retirement checks and four PCI-free block smoke boots also pass.
+
+This establishes the native exit mechanism, not a complete IOAPIC level,
+remote-IRR, concurrent ACK or reset implementation. Production still uses the
+existing edge-injecting path. The new fixture changes no production API or
+delivery policy. The initial probe build failed the unsafe-code lint before
+execution; the correction scopes the existing native-test allowance to this
+function. [whp-level-eoi-probe.json](whp-level-eoi-probe.json) records both runs
+and the successful artifact provenance. These smoke timings are not parity
+evidence.

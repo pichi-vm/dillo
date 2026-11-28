@@ -1,0 +1,35 @@
+{
+  "description": "Native WHP level/edge trigger EOI boundary probe; no production delivery change or full IOAPIC-level qualification.",
+  "source": "a84e4b01ad46bcee8bdeeade46051de14ffe8be6",
+  "run": 46095825972,
+  "job": 140826823403,
+  "artifact_sha256": "6805d8b79e6dda955324d2f16889960c324dcfa8f8f3b404ab560e3a41eba25f",
+  "raw_root": "/home/personal/Projects/pichi-vm/dillo-device-performance/target/performance/whp-level-eoi-46095825972",
+  "checked_boots": 4,
+  "hashes": {
+    "dillo": "06615d7b8b78805eed9b24a112cbda5be126dc728aa332537e127e3ebcb9d005",
+    "arma": "4d8e1274dabfb9715eba158add33c29dc33456b5859d58dd256eac36c956288d",
+    "snuffler": "bab1aac3b44b7c95336190891074038d1f88a3f29fcecbf7f18dab1e5ccd93dc",
+    "kernel": "e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2"
+  },
+  "tests": [
+    "whp_trigger_level_reports_guest_eoi",
+    "whp_trigger_retargets_and_revokes_exported_event",
+    "whp_trigger_wired_mask_and_retirement"
+  ],
+  "result_hashes": {
+    "shared/on/block-mmio-only-00-local/result.json": "6f3d48238dd9970131e928ccfcf8bdf507cfe415b19301c41dc03ccf57cc2e86",
+    "shared/on/block-mmio-only-00-worker/result.json": "ebd82e46fcc752e6910839cbadd30670fdf1609f4afc6e04bc982e5677b9589a",
+    "shared/on/block-mmio-only-01-local/result.json": "a12a6b029ab63669454bd39c72d5004913e99b56bde5cee8c767342f09d64b61",
+    "shared/on/block-mmio-only-01-worker/result.json": "571bee8ea279b5b0e3b5cbd81be3cf431fc9bedf296a82304d4a824e0b899676"
+  },
+  "earlier_failure": {
+    "run": 46095604830,
+    "source": "c15bca546d0d4bdf2d32c756ce9ab67bc84c747b",
+    "reason": "Four unsafe-code lint errors before execution; corrected with a function-scoped allowance and existing safety comments."
+  },
+  "limits": [
+    "No complete IOAPIC remote-IRR/level reassertion or concurrent ACK/reset proof.",
+    "One-second boot smoke is correctness only, not performance."
+  ]
+}
