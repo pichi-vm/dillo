@@ -1459,3 +1459,44 @@ resource authority or lifetime changes are involved.
 [windows-network-nodelay-balanced.json.gz](windows-network-nodelay-balanced.json.gz)
 retains all boots, comparisons, temporal blocks, asset/source hashes and
 artifact provenance. This experiment excludes the mapping-owner change.
+
+## Physical x86 mapping-owner comparison
+
+All 156 boots at `ab4c264` against `ad6ac6a` complete: twelve balanced
+five-second pairs for PCI-free block and both network transports. Sources
+are clean, frozen executable hashes match the predeclared comparison, and
+guest assets match. No local compilation or additional VM tests ran during
+measurement; the unrelated long-lived VM was left untouched.
+
+Bulk PCI network throughput rises 5.9% (paired interval +5.7% to +6.0%) and
+CPU/GiB falls 9.5% (−9.9% to −9.3%), consistently across temporal blocks.
+PCI-free bulk throughput is essentially unchanged, with CPU/GiB falling
+2.6% (−3.1% to −2.1%). Small-message differences remain uncertain.
+Random-read throughput rises 1.1% and CPU/GiB falls 1.9%, beyond the much
+narrower preceding read calibration.
+
+Random-write throughput instead appears 4.9% lower and CPU/GiB 7.9% higher,
+with broad intervals. The preceding identical-binary write calibration also
+shows changes through −6.6%/+9.3%, so the source effect remains unresolved.
+The prespecified single extension to twenty storage pairs is now running:
+eight additional pairs, unchanged binaries/assets and affinity, with the
+original twelve and all warmups retained. This is not a new search for a
+favorable run. [mapping-owner-x86-balanced.json.gz](mapping-owner-x86-balanced.json.gz)
+retains the completed first series independently.
+
+## macOS storage calibration
+
+[Run 46102319802](https://github.com/pichi-vm/dillo/actions/runs/46102319802)
+completes all 52 PCI-free block boots using the identical `ab4c264` executable
+and assets under both labels. Random-read throughput/CPU calibration intervals
+stay within about 0.3% of unity; random-write intervals span roughly 1.3%/1.0%.
+Identical sequential writers nevertheless show a 1.2% throughput difference,
+with all three temporal blocks agreeing. Thus an ordinary interval excluding
+zero still does not by itself establish a code effect.
+
+The earlier mapping-owner random-read CPU observation of +0.6% remains open:
+it is small but cannot simply be dismissed using this narrower calibration.
+The large sequential-read/write improvements exceed the observed calibration.
+All observations, hashes and temporal blocks are retained in
+[storage-noise-macos.json.gz](storage-noise-macos.json.gz). These measurements
+do not transfer noise bounds to other hosts or establish storage parity.
