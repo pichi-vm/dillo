@@ -11,13 +11,30 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/event.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
-static void transfer(int fd, bool send) {
+static int readiness(int fd) {
+    int ready = kqueue();
+    if (ready < 0) err(1, "kqueue");
+    struct kevent event;
+    EV_SET(&event, fd, EVFILT_READ, EV_ADD, 0, 0, NULL);
+    if (kevent(ready, &event, 1, NULL, 0, NULL) < 0) err(1, "register read");
+    return ready;
+}
+
+static void transfer(int fd, bool send, int ready) {
+    if (!send && ready >= 0) {
+        struct kevent event;
+        int n;
+        do { n = kevent(ready, NULL, 0, &event, 1, NULL); } while (n < 0 && errno == EINTR);
+        if (n < 0) err(1, "wait read");
+        if (n != 1 || event.flags & EV_ERROR) errx(1, "read event failed");
+    }
     uint64_t value = 1;
     ssize_t n;
     do {
@@ -55,8 +72,9 @@ static double cpu(void) {
            + children.ru_utime.tv_usec + children.ru_stime.tv_usec) / 1000000.0;
 }
 
-static void run(unsigned trial, bool shared) {
+static void run(unsigned trial, unsigned mode) {
     const unsigned warmup = 1000, count = 100000;
+    bool shared = mode == 1;
     long page = sysconf(_SC_PAGESIZE);
     FILE *file = tmpfile();
     if (page <= 0 || !file || ftruncate(fileno(file), page)) err(1, "backing");
@@ -77,34 +95,37 @@ static void run(unsigned trial, bool shared) {
     if (pid == 0) {
         munmap(parent, page);
         close(request[1]); close(reply[0]);
+        int ready = mode == 2 ? readiness(request[0]) : -1;
         for (unsigned i = 0; i < warmup + count; ++i) {
             if (shared) { notify(&child[0], false); notify(&child[1], true); }
-            else { transfer(request[0], false); transfer(reply[1], true); }
+            else { transfer(request[0], false, ready); transfer(reply[1], true, -1); }
         }
         _exit(0);
     }
     munmap(child, page);
     close(request[0]); close(reply[1]);
+    int ready = mode == 2 ? readiness(reply[0]) : -1;
     uint64_t start = 0;
     for (unsigned i = 0; i < warmup + count; ++i) {
         if (i == warmup) start = now();
         if (shared) { notify(&parent[0], true); notify(&parent[1], false); }
-        else { transfer(request[1], true); transfer(reply[0], false); }
+        else { transfer(request[1], true, -1); transfer(reply[0], false, ready); }
     }
     uint64_t elapsed = now() - start;
     int status;
     if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status)) errx(1, "child failed");
     // CPU includes warm-up and process startup/retirement; RTT excludes them.
     printf("{\"trial\":%u,\"method\":\"%s\",\"round_trip_ns\":%.1f,\"tree_cpu_s\":%.6f,\"exchanges\":%u,\"warmup\":%u}\n",
-           trial, shared ? "shared-futex" : "pipe", (double)elapsed / count, cpu() - before_cpu, count, warmup);
+           trial, mode == 2 ? "pipe-kqueue" : shared ? "shared-futex" : "pipe",
+           (double)elapsed / count, cpu() - before_cpu, count, warmup);
     fflush(stdout);
     close(request[1]); close(reply[0]); munmap(parent, page);
+    if (ready >= 0) close(ready);
     alarm(0);
 }
 
 int main(void) {
     for (unsigned i = 0; i < 6; ++i) {
-        run(i, i % 2 != 0);
-        run(i, i % 2 == 0);
+        for (unsigned mode = 0; mode < 3; ++mode) run(i, (i + mode) % 3);
     }
 }
