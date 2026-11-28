@@ -267,6 +267,8 @@ pub struct Queue {
 
     /// Whether event index suppression is enabled.
     pub uses_notif_suppression: bool,
+    /// Completions since the last notification check; retain a full wrap.
+    added_since_check: u32,
 
     /// MSI-X vector assigned to this queue by the guest (0xFFFF = no vector).
     pub msix_vector: u16,
@@ -306,6 +308,7 @@ impl Queue {
             pause: None,
             next_used: Wrapping(0),
             uses_notif_suppression: false,
+            added_since_check: 0,
             msix_vector: 0xFFFF,
         }
     }
@@ -359,6 +362,8 @@ impl Queue {
             }
             if control.updated.swap(false, Ordering::Acquire) {
                 let mut next = control.pending.lock().unwrap().take()?;
+                // Features belong to activation, not mutable ring geometry.
+                next.uses_notif_suppression = self.uses_notif_suppression;
                 next.control = self.control.take();
                 next.pause = self.pause.take();
                 *self = next;
@@ -425,6 +430,7 @@ impl Queue {
         // Only EVENT_IDX queues have an avail_event field. Ask for a kick
         // when the driver adds descriptors past those already consumed.
         if self.uses_notif_suppression {
+            self.added_since_check = self.added_since_check.saturating_add(1);
             let avail_event_offset = 4 + 8 * self.size as u64;
             let _ = mem.write_u16(
                 self.used_ring.unchecked_add(avail_event_offset),
@@ -438,12 +444,21 @@ impl Queue {
 
     /// Check the driver's available-ring flag after `add_used` has published
     /// completions and issued its full barrier. Unreadable flags conservatively
-    /// leave notifications enabled. Event-index suppression is not implemented.
-    pub fn needs_notification<M: QueueMemory>(&self, mem: &M) -> bool {
-        self.uses_notif_suppression
-            || mem
-                .read_u16(self.avail_ring)
-                .is_none_or(|flags| flags & 1 == 0) // VIRTQ_AVAIL_F_NO_INTERRUPT
+    /// leave notifications enabled. With EVENT_IDX, notify if this batch passed
+    /// the requested used index, including wraparound and a complete cycle.
+    pub fn needs_notification<M: QueueMemory>(&mut self, mem: &M) -> bool {
+        if self.uses_notif_suppression {
+            let added = std::mem::take(&mut self.added_since_check);
+            if added == 0 {
+                return false;
+            }
+            let event = mem.read_u16(self.avail_ring.unchecked_add(4 + 2 * u64::from(self.size)));
+            return event.is_none_or(|event| {
+                u32::from(self.next_used.0.wrapping_sub(event).wrapping_sub(1)) < added
+            });
+        }
+        mem.read_u16(self.avail_ring)
+            .is_none_or(|flags| flags & 1 == 0) // VIRTQ_AVAIL_F_NO_INTERRUPT
     }
 }
 
@@ -744,8 +759,53 @@ mod tests {
         let flags = shared_queue_memory(&mem, 0x1000, 0x1000);
         assert!(!q.needs_notification(&flags));
         // EVENT_IDX must ignore the available-ring suppression bit.
+        let mut q = make_valid_queue(QUEUE_SIZE);
         q.uses_notif_suppression = true;
+        q.add_used(&shared, 0, 64);
+        assert!(q.needs_notification(&shared)); // used_event is not readable
+        mem.write_obj::<u16>(1, avail.unchecked_add(4 + 2 * u64::from(QUEUE_SIZE)))
+            .unwrap();
+        q.add_used(&shared, 1, 64);
         assert!(q.needs_notification(&flags));
+    }
+
+    #[test]
+    fn event_index_covers_batches_wraparound_and_reconfiguration() {
+        let (mem, _, avail, _) = setup_queue_memory(QUEUE_SIZE);
+        let shared = shared_queue_memory(&mem, 0, 0x10000);
+        for (start, count, event, notify) in [
+            (0, 1, 0, true),
+            (0, 1, 1, false),
+            (4, 3, 5, true),
+            (4, 3, 3, false),
+            (65534, 3, 65535, true),
+            (65534, 3, 0, true),
+            (65534, 3, 1, false),
+            (0, 65536, 1234, true),
+        ] {
+            let mut q = make_valid_queue(QUEUE_SIZE);
+            q.uses_notif_suppression = true;
+            q.next_used = Wrapping(start);
+            mem.write_obj::<u16>(event, avail.unchecked_add(4 + 2 * u64::from(QUEUE_SIZE)))
+                .unwrap();
+            for _ in 0..count {
+                q.add_used(&shared, 0, 0);
+            }
+            assert_eq!(
+                q.needs_notification(&shared),
+                notify,
+                "start={start} count={count} event={event}"
+            );
+            assert!(!q.needs_notification(&shared));
+        }
+        let control = Arc::new(QueueControl::default());
+        control.configure(make_valid_queue(QUEUE_SIZE));
+        control.set_started(true);
+        let mut q = Queue::new(QUEUE_SIZE);
+        q.uses_notif_suppression = true;
+        q.control_with(control);
+        assert!(q.pop(&shared).is_none());
+        assert!(q.uses_notif_suppression);
     }
 
     #[test]

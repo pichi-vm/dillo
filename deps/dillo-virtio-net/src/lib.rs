@@ -21,8 +21,8 @@
 //! queue 1 = TX (guest → host). No control queue (`VIRTIO_NET_F_CTRL_VQ`
 //! unset), no multiqueue (`VIRTIO_NET_F_MQ` unset), no checksum/GSO offloads —
 //! a minimal, always-correct device. We negotiate only `VIRTIO_F_VERSION_1`,
-//! `VIRTIO_NET_F_MAC` (config-space MAC), and `VIRTIO_NET_F_STATUS` (link
-//! status), so the guest reads the host-assigned MAC and sees a link-up NIC.
+//! `VIRTIO_NET_F_MAC` (config-space MAC), `VIRTIO_NET_F_STATUS` (link
+//! status), and `VIRTIO_F_RING_EVENT_IDX` (queue notification thresholds).
 //!
 //! The L2 transport itself lives behind [`NetBackend`]: the cross-platform,
 //! no-privilege [`UserNetBackend`] (the default), plus the Linux
@@ -145,7 +145,10 @@ impl VirtioDevice for VirtioNet {
     }
 
     fn features(&self) -> u64 {
-        VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC | VIRTIO_NET_F_STATUS
+        VIRTIO_F_VERSION_1
+            | VIRTIO_NET_F_MAC
+            | VIRTIO_NET_F_STATUS
+            | dillo_virtio::VIRTIO_F_RING_EVENT_IDX
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
@@ -199,6 +202,10 @@ impl VirtioDevice for VirtioNet {
 
         let rx_interrupt = activation.queue_interrupt(0);
         let tx_interrupt = activation.queue_interrupt(1);
+        for queue in &mut queues {
+            queue.uses_notif_suppression =
+                activation.negotiated_features() & dillo_virtio::VIRTIO_F_RING_EVENT_IDX != 0;
+        }
 
         // Queue 1 is TX (guest → host). Kick-driven worker.
         let tx_queue = queues.remove(1);
@@ -329,6 +336,7 @@ fn spawn_rx_worker(
 #[derive(Default)]
 struct QueueCounters {
     queue: &'static str,
+    event_index: bool,
     frames: u64,
     batches: u64,
     calls: u64,
@@ -339,9 +347,18 @@ struct QueueCounters {
 #[cfg(feature = "bench-counters")]
 impl Drop for QueueCounters {
     fn drop(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
         eprintln!(
-            "DILLO_NET_COUNTERS queue={} frames={} batches={} calls={} suppressed={} no_buffer={}",
-            self.queue, self.frames, self.batches, self.calls, self.suppressed, self.no_buffer
+            "DILLO_NET_COUNTERS queue={} event_index={} frames={} batches={} calls={} suppressed={} no_buffer={}",
+            self.queue,
+            self.event_index,
+            self.frames,
+            self.batches,
+            self.calls,
+            self.suppressed,
+            self.no_buffer
         );
     }
 }
@@ -358,10 +375,13 @@ fn tx_worker(
     interrupt: Option<&Interrupt>,
     token: &VirtioRunToken,
 ) {
+    #[cfg(feature = "bench-counters")]
+    let event_index = queue.uses_notif_suppression;
     let queue = Mutex::new(queue);
     #[cfg(feature = "bench-counters")]
     let mut counters = QueueCounters {
         queue: "tx",
+        event_index,
         ..QueueCounters::default()
     };
     loop {
@@ -478,6 +498,7 @@ fn rx_worker(
     #[cfg(feature = "bench-counters")]
     let mut counters = QueueCounters {
         queue: "rx",
+        event_index: queue.uses_notif_suppression,
         ..QueueCounters::default()
     };
     loop {
