@@ -1786,3 +1786,35 @@ All paired observations, warmups, hashes and run identities are retained in
 [network-readiness-arm-short.json.gz](network-readiness-arm-short.json.gz), and
 [network-reply-probe-x86-short.json.gz](network-reply-probe-x86-short.json.gz).
 Four pairs do not justify narrow confidence intervals or a parity conclusion.
+
+## Shared-status negotiation fallback
+
+The parent previously sent the private shared-status request whenever the
+transport supplied a status page, even if the backend had not negotiated the
+optional feature. The 81-line change `75b3cc6` retains the negotiated choice
+and uses the ordinary parent status/call relay when the feature is absent.
+Native PCI calls without shared status retain their export path. The existing
+process fixture now also withholds the feature from the backend's reply and
+checks actual I/O, status publication, endpoint replacement and reactivation.
+
+With only production `parent.rs` restored to its old version, that fixture
+fails at the unnegotiated private request. The fixed full worker suite,
+formatting and strict all-target/all-feature Clippy pass locally.
+[Windows run 46111595241](https://github.com/pichi-vm/dillo/actions/runs/46111595241)
+also passes the real process fixture over ALPC, including direct, shared and
+unnegotiated calls. Its separate old `worker::vhost_user` filter selected zero
+tests; it is not channel-unit evidence. The workflow now selects the owning
+`dillo-windows-channel` crate instead. Runtime source integrated at `715a13a`
+is identical to the native-tested source; only benchmark reports differ.
+
+[Integrated Windows run 46112198993](https://github.com/pichi-vm/dillo/actions/runs/46112198993)
+checks out `31e4eeb` and passes the worker fixture again. The corrected channel
+step runs eight passing tests (one ignored), including bidirectional handles,
+connection shutdown, peer-death cleanup and listener survival. Network checks
+pass 51 tests, with four external-network cases ignored. The complete native
+logs are retained; expected failure-case diagnostics are not removed.
+
+[shared-isr-negotiation.json.gz](shared-isr-negotiation.json.gz) retains the
+negative-control and fixed logs, native log, source identities and scope.
+This establishes optional-feature fallback, not an assigned extension,
+complete external-backend interoperability, or all ACK/EOI/reset races.
