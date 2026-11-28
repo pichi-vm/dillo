@@ -2452,3 +2452,49 @@ now compare four balanced five-second pairs per transport and revision (forty
 boots per host). The local baseline is the frozen `8196bb4` binary; the native
 baseline is `3c6d63a`, whose runtime source is unchanged from it. Both use the
 candidate's guest assets. This is independent of either block experiment.
+
+## Physical x86 TX kick-suppression outcome
+
+The local `a26a864`/`8196bb4` comparison completes all forty planned boots,
+with matched guest assets, balanced mode/revision positions, five-second
+operations and valid PCI-free inventories. [Every observation](network-kick-suppression-x86-short.json.gz)
+is retained. Bulk worker throughput changes by +1.2% on PCI and -2.0% on
+MMIO; CPU/GiB changes by -0.9% and +3.2%, respectively. Small-message results
+are mixed, and the PCI series contains substantial movement in both binaries.
+Three of four MMIO bulk pairs have higher worker CPU cost while all four
+control throughput pairs are near unchanged or better. These short results
+do not establish a general benefit or justify promoting the extra flag writes
+and fence. The independent macOS comparison remains pending; no measurements
+are discarded and no repeated x86 screen is scheduled to seek a better result.
+
+## Completed suppression screens
+
+macOS run 46131629456 completes all forty `a26a864`/`3c6d63a` network boots.
+[The retained results](network-kick-suppression-macos-short.json.gz) show bulk
+worker throughput at 99.75%/100.01% of the old worker on PCI/MMIO, with CPU/GiB
+at 100.51%/100.63%. Small messages do not improve either. The additional flag
+writes and fence have not earned their cost; this candidate is not promoted.
+
+Arm run 46130544447 completes all forty `4c48281`/`3c6d63a` concurrent block
+boots, including all thread-count reconciliations and write verification.
+[All results](block-notification-suppression-arm-short.json.gz) are retained.
+Throughput changes range from -1.8% to +1.7%, with mixed CPU and latency changes.
+Sequential-read p99 remains 232.0%/248.7% of the same-revision PCI/MMIO control.
+The experiment has not removed the large tail gap or established a general
+benefit. It is not promoted.
+
+## Execution reassessment, 2026-11-28
+
+The user's cost concern is supported by the recent outcomes: repeated small
+notification changes have consumed measurement time without a demonstrated
+integrated gain. Benchmark corrections and rejected candidates are evidence,
+not runtime speedups. The completed suppression screens are closed; no repeat
+is scheduled to seek favorable numbers. Existing raw evidence remains intact.
+
+The next work is to collect the already-running Windows reset diagnostic and
+audit which earlier gains are ready to integrate. Before another optimization
+experiment, identify the specific measured cost it can remove, estimate its
+maximum plausible benefit, and state a fixed go/no-go comparison. Favor costs
+large enough to affect the remaining gaps. Do not begin another sequence of
+small notification-policy variants or equate uncertainty with parity. The full
+platform/transport/workload objective remains active and unfinished.
