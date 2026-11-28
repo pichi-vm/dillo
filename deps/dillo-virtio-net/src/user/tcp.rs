@@ -36,6 +36,8 @@ pub(super) struct TcpFlow {
     pub(super) token: Token,
     /// Readiness currently registered with mio.
     interest: Interest,
+    /// Try reads until WouldBlock, then wait for the next readiness event.
+    readable: bool,
     /// The non-blocking connect has completed (peer address resolved).
     connected: bool,
     /// The guest connection has reached `Established` at least once. Until then
@@ -72,6 +74,7 @@ impl TcpFlow {
             stream,
             token,
             interest: Interest::READABLE | Interest::WRITABLE,
+            readable: true,
             connected: false,
             established_seen: false,
             host_write_closed: false,
@@ -88,6 +91,7 @@ impl TcpFlow {
             stream,
             token,
             interest: Interest::READABLE | Interest::WRITABLE,
+            readable: true,
             connected: true,
             established_seen: false,
             host_write_closed: false,
@@ -97,16 +101,18 @@ impl TcpFlow {
         }
     }
 
-    /// Handle a mio WRITABLE readiness event for the host stream. For a
-    /// connecting socket this is the only cross-platform way to observe connect
-    /// completion: mio's IOCP backend on Windows does not surface it through
-    /// `take_error`/`peer_addr` polling while the connect is in progress.
+    /// Record read readiness across guest backpressure. WRITABLE also resolves
+    /// a pending connection: mio's Windows backend does not report completion
+    /// through `take_error`/`peer_addr` polling before that event.
     ///
     /// Follows the mio-recommended protocol: check `take_error` for a connect
     /// error, then confirm with `peer_addr` (a spurious WRITABLE may fire before
     /// the connect is truly established on some platforms).
-    pub(super) fn note_writable(&mut self) {
-        if self.connected || self.reset {
+    pub(super) fn note_ready(&mut self, event: &mio::event::Event) {
+        if event.is_readable() || event.is_read_closed() || event.is_error() {
+            self.readable = true;
+        }
+        if !event.is_writable() || self.connected || self.reset {
             return;
         }
         match self.stream.take_error() {
@@ -185,17 +191,17 @@ impl TcpFlow {
     }
 
     /// Wait for the non-blocking connect to complete. Sets `reset` on timeout.
-    /// Returns `true` once the host side is usable (after [`note_writable`] has
+    /// Returns `true` once the host side is usable (after [`note_ready`] has
     /// observed a WRITABLE event and confirmed connect success).
     ///
     /// We do NOT poll `take_error`/`peer_addr` here: mio's IOCP backend on
     /// Windows doesn't surface connect completion through those calls while the
     /// connect is in progress — they reliably reflect the outcome only after a
-    /// WRITABLE readiness event is delivered, which [`note_writable`] handles.
+    /// WRITABLE readiness event is delivered, which [`note_ready`] handles.
     /// The timeout here is the backstop for black-holed destinations (the OS
     /// never delivers a WRITABLE event for a connect that silently drops).
     ///
-    /// [`note_writable`]: Self::note_writable
+    /// [`note_ready`]: Self::note_ready
     fn ensure_connected(&mut self) -> bool {
         if self.connected {
             return true;
@@ -247,7 +253,7 @@ impl TcpFlow {
     /// failure that some platforms only surface on the first read) becomes a
     /// guest RST via `reset`.
     fn host_to_guest(&mut self, socket: &mut tcp::Socket<'_>) -> bool {
-        if !socket.can_send() || self.host_read_closed {
+        if !self.readable || !socket.can_send() || self.host_read_closed {
             return false;
         }
         let result = socket.send(|buf| match self.stream.read(buf) {
@@ -267,7 +273,11 @@ impl TcpFlow {
                 self.reset = true;
                 false
             }
-            Ok(ReadOutcome::WouldBlock) | Err(_) => false,
+            Ok(ReadOutcome::WouldBlock) => {
+                self.readable = false;
+                false
+            }
+            Err(_) => false,
         }
     }
 }

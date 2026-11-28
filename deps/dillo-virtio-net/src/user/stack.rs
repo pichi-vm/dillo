@@ -215,21 +215,13 @@ impl Stack {
             let now = Instant::now();
             let wait = mio_wait(self.iface.poll_delay(now, &self.sockets));
             let _ = self.poll.poll(&mut self.events, Some(wait));
-            // Data readiness needs no routing — every source is serviced each
-            // iteration. A WRITABLE event, though, is how a TCP flow's connect
-            // completion is observed portably (Windows IOCP doesn't surface it
-            // via peer_addr polling), so route those to the owning flow.
-            let writable: Vec<Token> = self
-                .events
-                .iter()
-                .filter(|e| e.is_writable())
-                .map(mio::event::Event::token)
-                .collect();
-            for token in writable {
-                if let Some(handle) = self.tcp_flow_tokens.get(&token).copied()
+            // Read readiness survives until WouldBlock, including guest-side
+            // backpressure. Writable events also resolve host TCP connects.
+            for event in &self.events {
+                if let Some(handle) = self.tcp_flow_tokens.get(&event.token()).copied()
                     && let Some(flow) = self.tcp_flows.get_mut(&handle)
                 {
-                    flow.note_writable();
+                    flow.note_ready(event);
                 }
             }
         }
