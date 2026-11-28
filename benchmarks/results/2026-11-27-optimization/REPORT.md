@@ -1266,10 +1266,20 @@ unrelated long-lived VM; its ownership and state were left untouched. Full
 paired results, temporal block medians, schedules, hashes and provenance are in
 [network-noise-x86.json.gz](network-noise-x86.json.gz),
 [network-noise-arm.json.gz](network-noise-arm.json.gz) and
-[network-noise-macos.json.gz](network-noise-macos.json.gz). Windows calibration
-is still running. No discarded samples or rerun-until-success qualification
-is used, and no full platform/transport qualification follows from this
+[network-noise-macos.json.gz](network-noise-macos.json.gz). No discarded samples
+or rerun-until-success qualification is used, and no full platform/transport
+qualification follows from this
 network-only calibration.
+
+[Windows run 46094862882](https://github.com/pichi-vm/dillo/actions/runs/46094862882)
+also completed all 104 boots with identical binaries/assets and the same
+balanced schedule. Bulk worker throughput differences are −1.2%/+0.4% for
+PCI/MMIO, with intervals [−1.8%, +1.1%]/[−2.4%, +3.8%]. CPU/GiB intervals are
+wider, within roughly ±5%. PCI bulk p99 varies substantially: an apparent
++5.0% change has interval [−5.8%, +13.5%]. This does not explain the entire
+previous 33–37% worker/control p99 gap. The clock remains the unmodified
+prebuilt WSL kernel's Hyper-V clock. All observations and artifact provenance
+are retained in [network-noise-windows.json.gz](network-noise-windows.json.gz).
 
 ## Remaining host-user work
 
