@@ -1559,3 +1559,37 @@ not demonstrated regressions or a parity result. Full observations are in
 These checks calibrate this QD1 PCI-free storage workload, not PCI or concurrent
 storage. The mapping-owner candidate remains separate, including the small
 macOS random-read CPU observation recorded above.
+
+## Windows scheduler diagnostic and TCP readiness candidate
+
+[Run 46104224464](https://github.com/pichi-vm/dillo/actions/runs/46104224464)
+completes eight instrumented boots at `873af3b`, with the `72fc019` runtime.
+The hash-pinned PerfView 4.0.2 capture retains 2,981,588 context-switch and
+1,884,880 ready-thread events involving observed Dillo PIDs. Analysis restricts
+events to their actual process lifetimes, excludes phase boundaries, and
+separates blocked time from ready-to-run delay. Two duplicate ready events and
+unmatched transitions are retained. Decode logs contain symbol/stack warnings
+but no reported event loss; this is not a fully symbolicated CPU profile.
+
+For the measured bulk MMIO pair, network-loop ready-to-run p99 is 53/49 µs
+for control/worker, while vCPU p99 is 75/119 µs. Some longer stalls occur,
+especially in the PCI pair, but this short trace does not establish a general
+millisecond-scale scheduler delay as the cause of the network tail gap. The
+network-loop thread instead spends about 3.9–4.2 seconds running in each
+trimmed bulk window of roughly 4.7 seconds, in both execution modes.
+[windows-scheduler-diagnostic.json.gz](windows-scheduler-diagnostic.json.gz)
+retains phase/process data, distributions, unknown transitions, analysis code,
+logs, raw-event hashes and artifact provenance. Instrumented rates are not
+used for qualification.
+
+Source inspection identifies a concrete candidate: Mio 1.2.1 rearms all
+registered interests after `WouldBlock` on Windows, while Dillo leaves
+`WRITABLE` registered for an established stream even without pending output.
+The separate 80-line `ceda4c5` change retains writable interest for connection
+completion and pending guest bytes, removing it after draining. Existing
+backpressure and half-close paths remain; failed interest changes reset the
+flow through its existing error path. All 58 Linux network tests and strict
+Clippy pass. A Windows native fixture checks the old repeated readiness and
+the new quiet state before [run 46106783368](https://github.com/pichi-vm/dillo/actions/runs/46106783368)
+compares four balanced five-second pairs on both transports. The candidate
+is not integrated and no performance benefit is claimed before that result.
