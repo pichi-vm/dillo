@@ -1528,3 +1528,34 @@ experiment also batched words, so repeating it as a new batching optimization
 is not supported by this evidence. `xctrace` is unavailable on the runner.
 [macos-task-counters.json.gz](macos-task-counters.json.gz) retains all eight
 boots, counters, normalized observations, source and artifact hashes.
+
+## Completed storage noise checks and x86 extension
+
+The single prespecified x86 extension completes 36 more boots. Combining all
+twelve original storage pairs with all eight new pairs preserves their order,
+binaries, assets and four-round balance. Random-read throughput improves 1.2%
+and CPU/GiB falls 1.9%; sequential-read throughput improves 5.1% and CPU/GiB
+falls 6.5%. Random-write throughput is 3.3% lower (paired interval −6.0% to
++1.1%), with CPU/GiB 5.9% higher (−1.8% to +10.0%). Those write observations
+still overlap the earlier identical-binary variation; the extension does not
+establish their cause. No further repetition to seek a favorable result is
+scheduled. [The extension](mapping-owner-x86-storage-extension.json.gz) and
+[combined twenty pairs](mapping-owner-x86-storage-twenty.json.gz) retain both
+series rather than replacing the initial result.
+
+[Arm run 46103662489](https://github.com/pichi-vm/dillo/actions/runs/46103662489)
+and [Windows run 46103663630](https://github.com/pichi-vm/dillo/actions/runs/46103663630)
+each complete 52 PCI-free block boots with identical `ab4c264` executables and
+assets under both labels. Arm random writes show an apparent 4.8% throughput
+loss and 6.4% CPU/GiB increase despite identical code; all three temporal blocks
+have that direction. This further undermines assigning the earlier 3.8% write
+observation to the owner change. Windows sequential-read p99 varies from
+90.9% to 112.0% and sequential-write p99 from 78.2% to 105.1% across paired
+calibration intervals. The prior tail observations therefore remain unresolved,
+not demonstrated regressions or a parity result. Full observations are in
+[storage-noise-arm.json.gz](storage-noise-arm.json.gz) and
+[storage-noise-windows.json.gz](storage-noise-windows.json.gz).
+
+These checks calibrate this QD1 PCI-free storage workload, not PCI or concurrent
+storage. The mapping-owner candidate remains separate, including the small
+macOS random-read CPU observation recorded above.
