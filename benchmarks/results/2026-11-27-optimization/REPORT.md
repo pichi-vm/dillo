@@ -1101,3 +1101,14 @@ readiness; a follow-up includes that additional operation before drawing an
 implementation conclusion. No notification or protocol change has been made.
 The complete observations and provenance are in
 [macos-native-wake.json](macos-native-wake.json).
+
+The follow-up [run 46090753159](https://github.com/pichi-vm/dillo/actions/runs/46090753159)
+at `1c4e901` adds persistent kqueue read readiness before each pipe receive.
+Six trials rotate all three methods through each execution position equally.
+Median round-trip times are 3.10 microseconds for the blocking pipe, 3.62 for
+pipe plus kqueue, and 4.40 for the shared futex. Paired against pipe plus
+kqueue, the futex costs 22.3% more round-trip time and 31.1% more total CPU.
+This probe does not reproduce Dillo's cancellation registration, batching or
+sandbox. It supplies no evidence to justify a new shared-memory notification
+endpoint or negotiated protocol extension. The existing pipe path is retained;
+all 18 observations are in [macos-native-wake-kqueue.json](macos-native-wake-kqueue.json).

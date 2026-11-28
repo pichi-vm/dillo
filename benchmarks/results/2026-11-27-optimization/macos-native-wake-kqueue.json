@@ -1,0 +1,152 @@
+{
+  "run": 46090753159,
+  "source": "1c4e9011133468ad11b620029a6572aad524ce35",
+  "artifact_sha256": "7118a8e7ba4733f6adee0c203f647f1e67500a399480a03153572f577ae359be",
+  "definition": "Native two-process ping-pong: three methods, six balanced rotations. pipe-kqueue adds persistent read readiness before each blocking pipe read; it does not reproduce Dillo cancellation registration, batching, guest or confinement. RTT excludes warm-up/process creation; CPU includes them.",
+  "observations": [
+    {
+      "trial": 0,
+      "method": "pipe",
+      "round_trip_ns": 3475.3,
+      "tree_cpu_s": 0.351881,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 0,
+      "method": "shared-futex",
+      "round_trip_ns": 4480.8,
+      "tree_cpu_s": 0.493694,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 0,
+      "method": "pipe-kqueue",
+      "round_trip_ns": 3616.8,
+      "tree_cpu_s": 0.373611,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 1,
+      "method": "shared-futex",
+      "round_trip_ns": 4131.0,
+      "tree_cpu_s": 0.458207,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 1,
+      "method": "pipe-kqueue",
+      "round_trip_ns": 3569.4,
+      "tree_cpu_s": 0.367184,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 1,
+      "method": "pipe",
+      "round_trip_ns": 3085.0,
+      "tree_cpu_s": 0.312595,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 2,
+      "method": "pipe-kqueue",
+      "round_trip_ns": 3651.0,
+      "tree_cpu_s": 0.374255,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 2,
+      "method": "pipe",
+      "round_trip_ns": 3101.4,
+      "tree_cpu_s": 0.314296,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 2,
+      "method": "shared-futex",
+      "round_trip_ns": 4682.4,
+      "tree_cpu_s": 0.512465,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 3,
+      "method": "pipe",
+      "round_trip_ns": 3087.8,
+      "tree_cpu_s": 0.312911,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 3,
+      "method": "shared-futex",
+      "round_trip_ns": 4410.4,
+      "tree_cpu_s": 0.488621,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 3,
+      "method": "pipe-kqueue",
+      "round_trip_ns": 3576.2,
+      "tree_cpu_s": 0.368102,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 4,
+      "method": "shared-futex",
+      "round_trip_ns": 4396.4,
+      "tree_cpu_s": 0.486431,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 4,
+      "method": "pipe-kqueue",
+      "round_trip_ns": 3622.7,
+      "tree_cpu_s": 0.37389,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 4,
+      "method": "pipe",
+      "round_trip_ns": 3135.0,
+      "tree_cpu_s": 0.317626,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 5,
+      "method": "pipe-kqueue",
+      "round_trip_ns": 3618.5,
+      "tree_cpu_s": 0.373665,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 5,
+      "method": "pipe",
+      "round_trip_ns": 3098.3,
+      "tree_cpu_s": 0.314073,
+      "exchanges": 100000,
+      "warmup": 1000
+    },
+    {
+      "trial": 5,
+      "method": "shared-futex",
+      "round_trip_ns": 4342.8,
+      "tree_cpu_s": 0.478006,
+      "exchanges": 100000,
+      "warmup": 1000
+    }
+  ]
+}
