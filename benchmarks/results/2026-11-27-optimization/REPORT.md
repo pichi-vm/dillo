@@ -2344,3 +2344,50 @@ after its live bounded-batch comparison finishes. This experiment does not
 include the bounded-batch change or the separate HVF shared-status prototype;
 their effects must not be combined without a composition comparison. No
 performance improvement or runtime promotion is established yet.
+
+## Arm bounded-batch outcome
+
+[Run 46128203605](https://github.com/pichi-vm/dillo/actions/runs/46128203605)
+completed all 40 boots at `4e7485f` against `3c6d63a`: four balanced five-second
+pairs per revision and transport, with four disks and eight requests per disk.
+Executables differ, guest assets match, all 5,120 thread records reconcile, and
+write verification and PCI-free inventory checks pass. Native and queue checks
+also pass. [The complete archive](block-completion-batches-arm-short.json.gz)
+retains every observation, source identity and the preregistered schedule.
+
+The screen does not support integration. PCI sequential-read worker p99 falls
+29.8%, but throughput falls 6.1% and CPU/GiB rises 3.8%; worker/control p99 is
+still 178.2%. PCI random-read/write throughput falls 9.7%/9.2%, with CPU/GiB
+rising 8.6%/9.0%. MMIO sequential-read throughput falls 15.9%, while p99 changes
+only -3.0%; random-write throughput falls 33.8% with p99 more than doubling.
+PCI sequential writes improve, but gains cannot compensate for other losses.
+Four pairs do not replace workload-specific noise calibration or establish
+the cause of each change. This candidate remains separate rather than being
+promoted on the strength of its best metric. The independent standard
+NO_INTERRUPT experiment proceeds without this batching change.
+
+## Windows concurrent-screen stall
+
+[Run 46120386739](https://github.com/pichi-vm/dillo/actions/runs/46120386739),
+at `3383874`, ended cancelled at the workflow's 120-minute bound. Both PCI
+warm-up guests printed complete reports for all four operations, with successful
+write verification. The worker exited zero and its result was saved after
+39.7 seconds. The local guest also finished its workload, but the driver never
+saved its result; no measured pair or MMIO boot ran. These warm-ups do not
+establish a performance comparison.
+
+The blocking location is unknown. The driver's 180-second deadline is checked
+on its sampling thread, so it cannot interrupt a blocked native call; its final
+child wait is also unbounded. Guest completion alone does not establish host
+retirement or identify either path as the cause.
+[The failure archive](concurrent-transports-windows-cancelled.json.gz) preserves
+all eight artifact files, the complete job log, hashes and exact run identity.
+
+The separate echo-process sampling diagnostic now adds a delayed Python stack
+dump at that existing deadline, cancelled on normal completion or exceptions.
+This 16-line harness change does not change Dillo or guest assets. A forced
+stall verifies stack capture, cancellation and exception cleanup; eight local
+PCI/MMIO guest boots verify the normal path with empty timeout logs.
+[The smoke evidence](timeout-stack-smoke.json.gz) retains every result.
+The original twelve-pair on/off sampling design is unchanged; the diagnostic
+runs at `361829b` in [run 46130450659](https://github.com/pichi-vm/dillo/actions/runs/46130450659).
