@@ -2737,6 +2737,136 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
+    fn whp_trigger_level_reports_guest_eoi() {
+        // Probe the native EOI boundary, not complete IOAPIC level semantics.
+        use dillo_machine::worker::WriteNotification;
+        use windows_sys::Win32::System::Hypervisor::*;
+        if !native_test_child("whp_trigger_level_reports_guest_eoi") {
+            return;
+        }
+        for level in [false, true] {
+            let mut vm = Vm::new_x86_64_with_local_apic_count(1).unwrap();
+            vm.add_memory(0x30000, 0x2000).unwrap();
+            vm.write_guest(
+                0x30000,
+                &[
+                    0xc7, 0x05, 0xf0, 0, 0xe0, 0xfe, 0xff, 1, 0, 0, // enable LAPIC
+                    0xfb, 0x90, 0xb0, 0xa5, 0xe6, 0x42, 0xeb, 0xfe, // sti; ready; spin
+                ],
+            )
+            .unwrap();
+            vm.write_guest(
+                0x30100,
+                &[
+                    0xff, 0x05, 0, 0x08, 3, 0, // increment guest handler count
+                    0xc7, 0x05, 0xb0, 0, 0xe0, 0xfe, 0, 0, 0, 0, // LAPIC EOI
+                    0xb0, 0x5a, 0xe6, 0x42, 0xcf, // completion; iret
+                ],
+            )
+            .unwrap();
+            for (offset, descriptor) in [(8, 0x00cf_9b00_0000_ffffu64), (16, 0x00cf_9300_0000_ffff)]
+            {
+                vm.write_guest(0x30200 + offset, &descriptor.to_le_bytes())
+                    .unwrap();
+            }
+            // Vector 0x41, present 32-bit interrupt gate, CS=8, handler=0x30100.
+            vm.write_guest(0x30608, &0x0003_8e00_0008_0100u64.to_le_bytes())
+                .unwrap();
+            let memory = vm.guest_memory().unwrap();
+            let mut cpu = vm.create_vcpu(0, Profile::V1).unwrap();
+            set_protected_mode(&cpu, 0x30000);
+            cpu.set_registers(vec![
+                (WHvX64RegisterRsp, WHV_REGISTER_VALUE { Reg64: 0x31ff0 }),
+                (
+                    WHvX64RegisterGdtr,
+                    WHV_REGISTER_VALUE {
+                        Table: WHV_X64_TABLE_REGISTER {
+                            Pad: [0; 3],
+                            Limit: 23,
+                            Base: 0x30200,
+                        },
+                    },
+                ),
+                (
+                    WHvX64RegisterIdtr,
+                    WHV_REGISTER_VALUE {
+                        Table: WHV_X64_TABLE_REGISTER {
+                            Pad: [0; 3],
+                            Limit: 0x20f,
+                            Base: 0x30400,
+                        },
+                    },
+                ),
+            ])
+            .unwrap();
+            assert!(matches!(
+                cpu.run(|_, _| 0, |_, _| false).unwrap(),
+                VmExit::PioWrite {
+                    port: 0x42,
+                    data: [0xa5, ..],
+                    ..
+                }
+            ));
+            let (mut trigger, event) = vm.interrupt_controller().trigger(0, 0x41).unwrap();
+            let parameters = WHV_TRIGGER_PARAMETERS {
+                TriggerType: WHvTriggerTypeInterrupt,
+                Anonymous: WHV_TRIGGER_PARAMETERS_0 {
+                    Interrupt: WHV_INTERRUPT_CONTROL {
+                        _bitfield: u64::from(level) << 12,
+                        Destination: 0,
+                        Vector: 0x41,
+                    },
+                },
+                ..Default::default()
+            };
+            // SAFETY: the trigger belongs to the retained partition; initialized
+            // parameters select fixed, physical delivery and the requested mode.
+            assert_eq!(
+                unsafe {
+                    WHvUpdateTriggerParameters(
+                        vm.inner.partition,
+                        &parameters,
+                        trigger.handle.unwrap() as _,
+                    )
+                },
+                0
+            );
+            event.write(1).unwrap();
+            let run = || {
+                let mut exit = WHV_RUN_VP_EXIT_CONTEXT::default();
+                // SAFETY: the live VP is exclusively owned; exit has the exact
+                // native ABI size. The existing child deadline bounds execution.
+                assert_eq!(
+                    unsafe {
+                        WHvRunVirtualProcessor(
+                            vm.inner.partition,
+                            0,
+                            std::ptr::from_mut(&mut exit).cast(),
+                            size_of::<WHV_RUN_VP_EXIT_CONTEXT>() as u32,
+                        )
+                    },
+                    0
+                );
+                exit
+            };
+            let mut exit = run();
+            if level {
+                assert_eq!(exit.ExitReason, WHvRunVpExitReasonX64ApicEoi);
+                // SAFETY: the checked exit reason selects this union member.
+                assert_eq!(unsafe { exit.Anonymous.ApicEoi.InterruptVector }, 0x41);
+                exit = run();
+            }
+            assert_eq!(exit.ExitReason, WHvRunVpExitReasonX64IoPortAccess);
+            // SAFETY: the checked exit reason selects this union member.
+            let io = unsafe { exit.Anonymous.IoPortAccess };
+            assert_eq!((io.PortNumber, io.Rax as u8), (0x42, 0x5a));
+            assert_eq!(memory.read_obj::<u32>(GuestAddress(0x30800)).unwrap(), 1);
+            trigger.retire().unwrap();
+        }
+    }
+
+    #[test]
     fn whp_trigger_wired_mask_and_retirement() {
         use crate::worker::Worker;
         use dillo_machine::worker::{NotificationRole, WorkerHost};
