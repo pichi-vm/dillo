@@ -252,10 +252,13 @@ def summarize(results, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--assets", type=Path, required=True)
-    parser.add_argument("--baseline-assets", type=Path,
-                        help="interleave a frozen runtime with identical guest assets")
-    parser.add_argument("--calibrate-noise", action="store_true",
-                        help="run the same executable under both comparison labels")
+    comparison = parser.add_mutually_exclusive_group()
+    comparison.add_argument("--baseline-assets", type=Path,
+                            help="interleave a frozen runtime with identical guest assets")
+    comparison.add_argument("--calibrate-noise", action="store_true",
+                            help="run the same executable under both comparison labels")
+    comparison.add_argument("--calibrate-sampling", action="store_true",
+                            help="interleave sampling off/on with the same executable")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cases", default="block-pci,block-mmio,block4-pci,net-pci")
     parser.add_argument("--pairs", type=int, default=5)
@@ -270,8 +273,8 @@ def main():
     parser.add_argument("--extra-cmdline", default="", help="explicit guest settings for sensitivity runs")
     parser.add_argument("--serial", action="store_true", help="retain early boot diagnostics through SPCR")
     args = parser.parse_args()
-    if args.calibrate_noise and args.baseline_assets:
-        parser.error("noise calibration cannot compare different runtimes")
+    if args.calibrate_sampling and args.no_sample:
+        parser.error("sampling calibration needs both sampled and unsampled boots")
     assert args.pairs > 0 and args.sample_ms > 0
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -297,7 +300,7 @@ def main():
     if hasattr(psutil.Process(), "cpu_affinity"):
         environment["cpu_affinity"] = psutil.Process().cpu_affinity()
     variants = {"": assets}
-    if args.calibrate_noise:
+    if args.calibrate_noise or args.calibrate_sampling:
         variants = {"baseline": assets, "candidate": assets}
     if args.baseline_assets:
         baseline = json.loads(args.baseline_assets.read_text())
@@ -307,6 +310,8 @@ def main():
         if digest(baseline["dillo"]) == environment["hashes"]["dillo"]:
             parser.error("baseline and candidate executables are identical")
         variants = {"baseline": baseline, "candidate": assets}
+    no_sample = {name: args.no_sample or args.calibrate_sampling and name == "baseline"
+                 for name in variants}
     for name, runtime in variants.items():
         output = args.output / name
         output.mkdir(exist_ok=True)
@@ -314,6 +319,7 @@ def main():
             "assets": runtime,
             "runtime_source": runtime.get("runtime_source", environment["source"]),
             "hashes": environment["hashes"] | {"dillo": digest(runtime["dillo"])},
+            "options": environment["options"] | {"no_sample": no_sample[name]},
         })
     plan = []
     for case in args.cases.split(","):
@@ -364,6 +370,7 @@ def main():
                 pair, name, mode = (item[key] for key in ("pair", "variant", "mode"))
                 options = argparse.Namespace(**vars(args))
                 options.output = args.output / name
+                options.no_sample = no_sample[name]
                 label = f"{case}-{pair + 1:02d}-{mode}"
                 result = run_vm(options, variants[name], image, disks, case, mode, label)
                 result["pair"] = pair
