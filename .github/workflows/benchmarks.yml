@@ -11,7 +11,7 @@ on:
       cases:
         description: Workload selection
         type: choice
-        options: [all, block-transports, net-transports, pci-free, block-pci, block-mmio, block4-pci, block4-concurrent-pci, net-pci, block-mmio-only, net-mmio-only]
+        options: [all, primary-transports, block-transports, net-transports, pci-free, block-pci, block-mmio, block4-pci, block4-concurrent-pci, net-pci, block-mmio-only, net-mmio-only]
         default: all
       pairs:
         description: Measured pairs after the retained warm-up
@@ -135,9 +135,9 @@ jobs:
         run: >-
           cargo --config .copr/cargo-config.toml test --locked
           -p dillo-machine-whp whp_trigger_ -- --nocapture
-      - name: Check notification and network behavior
+      - name: Check memory, notification and network behavior
         shell: bash
-        run: cargo --config .copr/cargo-config.toml test --locked -p dillo-machine-unix -p dillo-virtio-net --lib
+        run: cargo --config .copr/cargo-config.toml test --locked -p dillo-machine-unix -p dillo-mmio -p dillo-virtio -p dillo-virtio-net --lib
       - name: Build comparison executable
         if: inputs.baseline_ref != ''
         shell: bash
@@ -172,7 +172,7 @@ jobs:
       - name: Measure paired workloads
         shell: bash
         env:
-          BENCH_CASES: ${{ inputs.cases == 'block-transports' && 'block-pci,block-mmio-only' || inputs.cases == 'net-transports' && 'net-pci,net-mmio-only' || inputs.cases == 'pci-free' && 'block-mmio-only,net-mmio-only' || inputs.cases != 'all' && inputs.cases || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,net-pci,block-mmio-only,net-mmio-only' }}
+          BENCH_CASES: ${{ inputs.cases == 'primary-transports' && 'block-pci,block-mmio-only,net-pci,net-mmio-only' || inputs.cases == 'block-transports' && 'block-pci,block-mmio-only' || inputs.cases == 'net-transports' && 'net-pci,net-mmio-only' || inputs.cases == 'pci-free' && 'block-mmio-only,net-mmio-only' || inputs.cases != 'all' && inputs.cases || 'block-pci,block-mmio,block4-pci,block4-concurrent-pci,net-pci,block-mmio-only,net-mmio-only' }}
           BENCH_SAMPLING: ${{ inputs.sampling || 'on' }}
           BENCH_PAIRS: ${{ inputs.pairs || 10 }}
           BENCH_DURATION_MS: ${{ inputs.duration_ms || 5000 }}
