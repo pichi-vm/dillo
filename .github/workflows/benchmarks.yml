@@ -110,6 +110,11 @@ jobs:
         shell: bash
         run: |
           test "$RUNNER_OS" = Linux
+          if ! command -v perf >/dev/null; then
+            bench_perf=$(nix build --no-link --print-out-paths nixpkgs#linuxPackages.perf)
+            export PATH="$bench_perf/bin:$PATH"
+            echo "$bench_perf/bin" >> "$GITHUB_PATH"
+          fi
           perf version
           perf record -q -e cycles:u --clockid mono -o "$RUNNER_TEMP/perf-probe.data" -- true
           echo 'CARGO_PROFILE_RELEASE_DEBUG=1' >> "$GITHUB_ENV"
