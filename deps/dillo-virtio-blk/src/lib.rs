@@ -629,7 +629,14 @@ fn drain_requests(
         );
         signaled = true;
     }
-    if signaled && let Some(intr) = call_interrupt {
+    // Block does not negotiate EVENT_IDX. add_used's full fence publishes the
+    // completion before reading the driver's VIRTQ_AVAIL_F_NO_INTERRUPT bit.
+    if signaled
+        && let Some(intr) = call_interrupt
+        && queue_memory
+            .read_u16(q.avail_ring)
+            .is_none_or(|flags| flags & 1 == 0)
+    {
         intr.signal();
     }
 }
@@ -1012,18 +1019,25 @@ mod tests {
             *b = 0xAB;
         }
         let backing = RamBacking::new(data, false);
-
-        drain_requests(
-            &queue_memory,
-            &buffer_memory,
-            &q,
-            None,
-            &backing,
-            false,
-            VIRTIO_BLK_F_FLUSH,
-            &VirtioRunToken::from_fn(|| false),
-            &AtomicBool::new(false),
-        );
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let interrupt = Interrupt::from_fn(move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+        });
+        let submit = || {
+            drain_requests(
+                &queue_memory,
+                &buffer_memory,
+                &q,
+                Some(&interrupt),
+                &backing,
+                false,
+                VIRTIO_BLK_F_FLUSH,
+                &VirtioRunToken::from_fn(|| false),
+                &AtomicBool::new(false),
+            );
+        };
+        submit();
 
         // Guest data buffer filled with backing bytes.
         let mut out = [0u8; 512];
@@ -1039,6 +1053,21 @@ mod tests {
         assert_eq!(used_idx, 1);
         let used_len: u32 = mem.read_obj(used.unchecked_add(8)).unwrap();
         assert_eq!(used_len, 513);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        // Disabling callbacks suppresses only the notification; the used ring
+        // and status still advance. Re-enabling restores the next notification.
+        for (index, flags, expected_calls) in [(2u16, 1u16, 1), (3, 0, 2)] {
+            mem.write_obj(flags, avail).unwrap();
+            mem.write_obj(0u16, avail.unchecked_add(4 + 2 * u64::from(index - 1)))
+                .unwrap();
+            mem.write_obj(index, avail.unchecked_add(2)).unwrap();
+            mem.write_obj(0xffu8, status_buf).unwrap();
+            submit();
+            assert_eq!(mem.read_obj::<u16>(used.unchecked_add(2)).unwrap(), index);
+            assert_eq!(mem.read_obj::<u8>(status_buf).unwrap(), VIRTIO_BLK_S_OK);
+            assert_eq!(calls.load(Ordering::Relaxed), expected_calls);
+        }
     }
 
     fn write_desc(
