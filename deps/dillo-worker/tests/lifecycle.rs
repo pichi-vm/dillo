@@ -76,19 +76,22 @@ impl Backend for Gated {
     }
     fn activate(
         &mut self,
-        activation: VirtioActivate,
-    ) -> Result<VirtioDeviceHandle, ActivateError> {
+        mut activation: dillo_virtio::lifecycle::Activation<'_>,
+    ) -> Result<(), ActivateError> {
         let entered = self.entered.clone();
         let release = self.release.take().unwrap();
-        activation.host()?.spawn(Box::new(move |token| {
-            entered.send(()).unwrap();
-            release.recv().unwrap(); // an admitted blocking backend operation
-            while !token.is_shutdown_requested() {
-                token.checkpoint();
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            Ok(())
-        }))
+        activation.spawn(
+            None,
+            Box::new(move |token| {
+                entered.send(()).unwrap();
+                release.recv().unwrap(); // an admitted blocking backend operation
+                while !token.is_shutdown_requested() {
+                    token.checkpoint();
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Ok(())
+            }),
+        )
     }
     fn read_config(&self, _: u64, _: &mut [u8]) {}
     fn write_config(&mut self, _: u64, _: &[u8]) {}
@@ -154,8 +157,8 @@ fn partial_console_start_retires_every_spawned_worker() {
         let (failed, _) = device
             .start(VirtioActivate::with_host(queues, kicks, host.clone()))
             .unwrap_err();
-        assert_eq!(host.workers.load(Ordering::Acquire), 0);
         drop(failed);
+        assert_eq!(host.workers.load(Ordering::Acquire), 0);
     }
 }
 

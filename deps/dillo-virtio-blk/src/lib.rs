@@ -17,12 +17,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use dillo_mmio::Interrupt;
-use dillo_virtio::lifecycle::Backend;
+use dillo_virtio::lifecycle::{Activation, Backend};
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
-use dillo_virtio::{
-    ActivateError, Kick, VirtioActivate, VirtioDeviceHandle, VirtioDeviceHost, VirtioMemory,
-    VirtioRunToken,
-};
+use dillo_virtio::{ActivateError, Kick, VirtioMemory, VirtioRunToken};
 use vm_memory::{Address, GuestAddress};
 
 /// Cross-platform positional read (`pread`/`seek_read`).
@@ -323,15 +320,11 @@ impl Backend for VirtioBlk {
         features
     }
 
-    fn activate(
-        &mut self,
-        mut activation: VirtioActivate,
-    ) -> Result<VirtioDeviceHandle, ActivateError> {
+    fn activate(&mut self, mut activation: Activation<'_>) -> Result<(), ActivateError> {
         let queue_memory = activation.queue_memory();
         let buffer_memory = activation.buffer_memory();
         let mut queues = activation.take_queues();
         let mut queue_evts = activation.take_queue_evts();
-        let host = activation.host()?;
         if queues.len() != 1 || queue_evts.len() != 1 {
             return Err(ActivateError::InvalidConfig(format!(
                 "virtio-blk expects 1 queue + 1 evt, got {} / {}",
@@ -348,8 +341,8 @@ impl Backend for VirtioBlk {
         let read_only = self.read_only;
         let negotiated = activation.negotiated_features();
 
-        let handle = spawn_request_worker(
-            host,
+        spawn_request_worker(
+            &mut activation,
             queue_memory,
             buffer_memory,
             queue,
@@ -365,7 +358,7 @@ impl Backend for VirtioBlk {
             self.capacity,
             self.read_only
         );
-        Ok(handle)
+        Ok(())
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
@@ -383,7 +376,7 @@ impl Backend for VirtioBlk {
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_request_worker(
-    host: Arc<dyn VirtioDeviceHost>,
+    activation: &mut Activation<'_>,
     queue_memory: Arc<dyn QueueMemory>,
     buffer_memory: Arc<dyn VirtioMemory>,
     queue: Queue,
@@ -392,23 +385,25 @@ fn spawn_request_worker(
     backing: Arc<dyn BlockBacking>,
     read_only: bool,
     negotiated: u64,
-) -> Result<VirtioDeviceHandle, ActivateError> {
+) -> Result<(), ActivateError> {
     let wake = kick.clone();
-    host.spawn(Box::new(move |token| {
-        request_worker(
-            queue_memory,
-            buffer_memory,
-            queue,
-            kick,
-            call_interrupt,
-            backing,
-            read_only,
-            negotiated,
-            token,
-        )
-        .map_err(|e| dillo_virtio::DeviceJoinError::Worker(e.to_string()))
-    }))
-    .map(|handle| handle.with_shutdown_wake(wake))
+    activation.spawn(
+        Some(wake),
+        Box::new(move |token| {
+            request_worker(
+                queue_memory,
+                buffer_memory,
+                queue,
+                kick,
+                call_interrupt,
+                backing,
+                read_only,
+                negotiated,
+                token,
+            )
+            .map_err(|e| dillo_virtio::DeviceJoinError::Worker(e.to_string()))
+        }),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

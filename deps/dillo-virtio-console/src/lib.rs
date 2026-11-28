@@ -39,7 +39,7 @@ pub mod pipe;
 pub mod resize;
 pub mod stdio;
 
-use dillo_virtio::lifecycle::Backend;
+use dillo_virtio::lifecycle::{Activation, Backend};
 use std::collections::VecDeque;
 use std::io::{self, BufWriter, Write};
 use std::sync::OnceLock;
@@ -50,10 +50,7 @@ use std::time::Duration;
 
 use dillo_mmio::Interrupt;
 use dillo_virtio::queue::{Queue, QueueMemory, VIRTQ_DESC_F_WRITE};
-use dillo_virtio::{
-    ActivateError, Kick, VirtioActivate, VirtioDeviceHandle, VirtioDeviceHost, VirtioMemory,
-    VirtioRunToken,
-};
+use dillo_virtio::{ActivateError, Kick, VirtioMemory, VirtioRunToken};
 
 /// VIRTIO_F_VERSION_1 from the virtio 1.x spec.
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
@@ -356,15 +353,11 @@ impl Backend for VirtioConsole {
             | u64::from(self.size.is_some()) // VIRTIO_CONSOLE_F_SIZE (bit 0)
     }
 
-    fn activate(
-        &mut self,
-        mut activation: VirtioActivate,
-    ) -> Result<VirtioDeviceHandle, ActivateError> {
+    fn activate(&mut self, mut activation: Activation<'_>) -> Result<(), ActivateError> {
         let queue_memory = activation.queue_memory();
         let buffer_memory = activation.buffer_memory();
         let queues = activation.take_queues();
         let queue_evts = activation.take_queue_evts();
-        let host = activation.host()?;
         let expected = self.num_queues();
         if queues.len() != expected || queue_evts.len() != expected {
             return Err(ActivateError::InvalidConfig(format!(
@@ -379,31 +372,30 @@ impl Backend for VirtioConsole {
         let mut queues: Vec<Option<Queue>> = queues.into_iter().map(Some).collect();
         let mut queue_evts: Vec<Option<Kick>> = queue_evts.into_iter().map(Some).collect();
 
-        // Each worker owns its shutdown wake, including during rollback.
-        let mut workers: Vec<VirtioDeviceHandle> = Vec::new();
-
         // --- port 0: the unnamed console, identical with or without MULTIPORT
         let tx_queue = take(&mut queues[1], "port 0 TX queue")?;
         let tx_evt = take(&mut queue_evts[1], "port 0 TX kick")?;
-        workers.push(spawn_tx_worker(
-            Arc::clone(&host),
+        let tx_call = activation.queue_interrupt(1);
+        spawn_tx_worker(
+            &mut activation,
             Arc::clone(&queue_memory),
             Arc::clone(&buffer_memory),
             tx_queue,
             tx_evt,
-            activation.queue_interrupt(1),
-        )?);
+            tx_call,
+        )?;
 
         let rx_queue = take(&mut queues[0], "port 0 RX queue")?;
         let rx_evt = take(&mut queue_evts[0], "port 0 RX kick")?;
-        workers.push(spawn_rx_worker(
-            Arc::clone(&host),
+        let rx_call = activation.queue_interrupt(0);
+        spawn_rx_worker(
+            &mut activation,
             Arc::clone(&queue_memory),
             Arc::clone(&buffer_memory),
             rx_queue,
             rx_evt,
-            activation.queue_interrupt(0),
-        )?);
+            rx_call,
+        )?;
 
         // --- named ports: control plane first, then one worker per open
         //     open direction; a closed direction gets no worker at all.
@@ -422,18 +414,20 @@ impl Backend for VirtioConsole {
             // kick; the kicks are drained to keep the counters from growing.
             let _ = take(&mut queue_evts[CONTROL_RX_QUEUE], "control RX kick")?;
             let _ = take(&mut queue_evts[CONTROL_TX_QUEUE], "control TX kick")?;
-            workers.push(spawn_control_worker(
-                Arc::clone(&host),
+            let rx_call = activation.queue_interrupt(CONTROL_RX_QUEUE);
+            let tx_call = activation.queue_interrupt(CONTROL_TX_QUEUE);
+            spawn_control_worker(
+                &mut activation,
                 Arc::clone(&control_plane),
                 Arc::clone(&queue_memory),
                 Arc::clone(&buffer_memory),
                 control_rx_queue,
                 control_tx_queue,
-                activation.queue_interrupt(CONTROL_RX_QUEUE),
-                activation.queue_interrupt(CONTROL_TX_QUEUE),
+                rx_call,
+                tx_call,
                 self.resize.clone(),
                 self.size.clone(),
-            )?);
+            )?;
 
             // Take only PipeEnds. Emptying `ports` would collapse MULTIPORT
             // identity after activate: features(), queue_max_sizes(), and
@@ -453,29 +447,31 @@ impl Backend for VirtioConsole {
                 let rx_queue = take(&mut queues[rx_index], "named port RX queue")?;
                 let _ = take(&mut queue_evts[rx_index], "named port RX kick")?;
                 if let Some(end) = rx {
-                    workers.push(spawn_port_rx_worker(
-                        Arc::clone(&host),
+                    let call = activation.queue_interrupt(rx_index);
+                    spawn_port_rx_worker(
+                        &mut activation,
                         end,
                         Arc::clone(&liveness),
                         Arc::clone(&queue_memory),
                         Arc::clone(&buffer_memory),
                         rx_queue,
-                        activation.queue_interrupt(rx_index),
-                    )?);
+                        call,
+                    )?;
                 }
 
                 let tx_queue = take(&mut queues[tx_index], "named port TX queue")?;
                 let _ = take(&mut queue_evts[tx_index], "named port TX kick")?;
                 if let Some(end) = tx {
-                    workers.push(spawn_port_tx_worker(
-                        Arc::clone(&host),
+                    let call = activation.queue_interrupt(tx_index);
+                    spawn_port_tx_worker(
+                        &mut activation,
                         end,
                         Arc::clone(&liveness),
                         Arc::clone(&queue_memory),
                         Arc::clone(&buffer_memory),
                         tx_queue,
-                        activation.queue_interrupt(tx_index),
-                    )?);
+                        call,
+                    )?;
                 }
 
                 log::debug!(
@@ -486,47 +482,12 @@ impl Backend for VirtioConsole {
             }
         }
 
-        let workers = Arc::new(Mutex::new(workers));
-        let shutdown_workers = Arc::clone(&workers);
-
         log::info!(
             "virtio-console: activated ({} worker(s), multiport={})",
-            workers
-                .lock()
-                .expect("virtio-console worker list poisoned")
-                .len(),
+            activation.worker_count(),
             self.multiport()
         );
-        Ok(VirtioDeviceHandle::new(
-            move || {
-                for handle in shutdown_workers
-                    .lock()
-                    .expect("virtio-console worker list poisoned")
-                    .iter_mut()
-                {
-                    handle.shutdown();
-                }
-            },
-            move || {
-                let drained: Vec<_> = std::mem::take(
-                    &mut *workers.lock().expect("virtio-console worker list poisoned"),
-                );
-                let mut first_error = None;
-                for handle in drained {
-                    // Join every worker even if one fails: a half-joined
-                    // device would leave threads touching guest memory.
-                    if let Err(e) = handle.join()
-                        && first_error.is_none()
-                    {
-                        first_error = Some(e);
-                    }
-                }
-                match first_error {
-                    Some(e) => Err(e),
-                    None => Ok(()),
-                }
-            },
-        ))
+        Ok(())
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
@@ -560,49 +521,53 @@ impl Backend for VirtioConsole {
 }
 
 fn spawn_tx_worker(
-    host: Arc<dyn VirtioDeviceHost>,
+    activation: &mut Activation<'_>,
     queue_memory: Arc<dyn QueueMemory>,
     buffer_memory: Arc<dyn VirtioMemory>,
     queue: Queue,
     kick: Kick,
     call_interrupt: Option<Interrupt>,
-) -> Result<VirtioDeviceHandle, ActivateError> {
+) -> Result<(), ActivateError> {
     let wake = kick.clone();
-    host.spawn(Box::new(move |token| {
-        tx_worker(
-            queue_memory,
-            buffer_memory,
-            queue,
-            kick,
-            call_interrupt,
-            token,
-        );
-        Ok(())
-    }))
-    .map(|handle| handle.with_shutdown_wake(wake))
+    activation.spawn(
+        Some(wake),
+        Box::new(move |token| {
+            tx_worker(
+                queue_memory,
+                buffer_memory,
+                queue,
+                kick,
+                call_interrupt,
+                token,
+            );
+            Ok(())
+        }),
+    )
 }
 
 fn spawn_rx_worker(
-    host: Arc<dyn VirtioDeviceHost>,
+    activation: &mut Activation<'_>,
     queue_memory: Arc<dyn QueueMemory>,
     buffer_memory: Arc<dyn VirtioMemory>,
     queue: Queue,
     kick: Kick,
     call_interrupt: Option<Interrupt>,
-) -> Result<VirtioDeviceHandle, ActivateError> {
+) -> Result<(), ActivateError> {
     let wake = kick.clone();
-    host.spawn(Box::new(move |token| {
-        rx_worker(
-            queue_memory,
-            buffer_memory,
-            queue,
-            kick,
-            call_interrupt,
-            token,
-        );
-        Ok(())
-    }))
-    .map(|handle| handle.with_shutdown_wake(wake))
+    activation.spawn(
+        Some(wake),
+        Box::new(move |token| {
+            rx_worker(
+                queue_memory,
+                buffer_memory,
+                queue,
+                kick,
+                call_interrupt,
+                token,
+            );
+            Ok(())
+        }),
+    )
 }
 
 /// Take one indexed activation input, naming it if it is somehow already gone.
@@ -615,7 +580,7 @@ fn take<T>(slot: &mut Option<T>, what: &str) -> Result<T, ActivateError> {
 /// announcements and consumes the guest's replies.
 #[allow(clippy::too_many_arguments)]
 fn spawn_control_worker(
-    host: Arc<dyn VirtioDeviceHost>,
+    activation: &mut Activation<'_>,
     plane: Arc<control::ControlPlane>,
     queue_memory: Arc<dyn QueueMemory>,
     buffer_memory: Arc<dyn VirtioMemory>,
@@ -625,72 +590,81 @@ fn spawn_control_worker(
     tx_call_interrupt: Option<Interrupt>,
     resize: Option<Arc<Mutex<resize::Input>>>,
     size: Option<Arc<std::sync::atomic::AtomicU32>>,
-) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        control_worker(
-            &plane,
-            &queue_memory,
-            &buffer_memory,
-            rx_queue,
-            tx_queue,
-            rx_call_interrupt.as_ref(),
-            tx_call_interrupt.as_ref(),
-            &token,
-            resize,
-            size,
-        );
-        Ok(())
-    }))
+) -> Result<(), ActivateError> {
+    activation.spawn(
+        None,
+        Box::new(move |token| {
+            control_worker(
+                &plane,
+                &queue_memory,
+                &buffer_memory,
+                rx_queue,
+                tx_queue,
+                rx_call_interrupt.as_ref(),
+                tx_call_interrupt.as_ref(),
+                &token,
+                resize,
+                size,
+            );
+            Ok(())
+        }),
+    )
 }
 
 /// Spawn the host → guest worker for one named port: read its pipe, hand the
 /// bytes to the guest through that port's receiveq.
 fn spawn_port_rx_worker(
-    host: Arc<dyn VirtioDeviceHost>,
+    activation: &mut Activation<'_>,
     end: Arc<pipe::PipeEnd>,
     liveness: Arc<PortLiveness>,
     queue_memory: Arc<dyn QueueMemory>,
     buffer_memory: Arc<dyn VirtioMemory>,
     queue: Queue,
     call_interrupt: Option<Interrupt>,
-) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        port_rx_worker(
-            &end,
-            &liveness,
-            &queue_memory,
-            &buffer_memory,
-            queue,
-            call_interrupt.as_ref(),
-            &token,
-        );
-        Ok(())
-    }))
+) -> Result<(), ActivateError> {
+    activation.spawn(
+        None,
+        Box::new(move |token| {
+            port_rx_worker(
+                &end,
+                &liveness,
+                &queue_memory,
+                &buffer_memory,
+                queue,
+                call_interrupt.as_ref(),
+                &token,
+            );
+            Ok(())
+        }),
+    )
 }
 
 /// Spawn the guest → host worker for one named port: drain its transmitq and
 /// write the bytes to its pipe.
 fn spawn_port_tx_worker(
-    host: Arc<dyn VirtioDeviceHost>,
+    activation: &mut Activation<'_>,
     end: Arc<pipe::PipeEnd>,
     liveness: Arc<PortLiveness>,
     queue_memory: Arc<dyn QueueMemory>,
     buffer_memory: Arc<dyn VirtioMemory>,
     queue: Queue,
     call_interrupt: Option<Interrupt>,
-) -> Result<VirtioDeviceHandle, ActivateError> {
-    host.spawn(Box::new(move |token| {
-        port_tx_worker(
-            &end,
-            &liveness,
-            &queue_memory,
-            &buffer_memory,
-            queue,
-            call_interrupt.as_ref(),
-            &token,
-        );
-        Ok(())
-    }))
+) -> Result<(), ActivateError> {
+    activation.spawn(
+        None,
+        Box::new(move |token| {
+            port_tx_worker(
+                &end,
+                &liveness,
+                &queue_memory,
+                &buffer_memory,
+                queue,
+                call_interrupt.as_ref(),
+                &token,
+            );
+            Ok(())
+        }),
+    )
 }
 
 /// Drive the control plane until shutdown.

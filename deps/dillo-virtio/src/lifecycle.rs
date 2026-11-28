@@ -11,6 +11,20 @@
 //! use dillo_virtio::lifecycle::{Backend, Device, Quiescing};
 //! fn resume<B: Backend>(device: Device<B, Quiescing>) { device.resume(); }
 //! ```
+//! ```compile_fail
+//! use dillo_virtio::lifecycle::{Backend, Device, Quiesced};
+//! fn resume_with_live_borrow<B: Backend>(mut device: Device<B, Quiesced>) {
+//!     let proof = device.drained();
+//!     device.resume();
+//!     drop(proof);
+//! }
+//! ```
+//! ```compile_fail
+//! use dillo_virtio::lifecycle::Activation;
+//! fn retain_startup(activation: Activation<'_>) -> impl Send + 'static {
+//!     activation
+//! }
+//! ```
 
 use crate::pause::Barrier;
 use crate::{
@@ -25,7 +39,7 @@ use std::{
 
 /// Device logic; execution state lives in `Device`, not in each backend.
 /// Workers must checkpoint between admitted requests, after publication and
-/// releasing locks. Activation failure must retire every worker it started.
+/// releasing locks. `Activation` retains each spawned worker even on failure.
 pub trait Backend: Send + 'static {
     fn device_type(&self) -> u32;
     fn queue_max_sizes(&self) -> &[u16];
@@ -33,11 +47,56 @@ pub trait Backend: Send + 'static {
         self.queue_max_sizes().len()
     }
     fn features(&self) -> u64;
-    fn activate(&mut self, activation: VirtioActivate)
-    -> Result<VirtioDeviceHandle, ActivateError>;
+    fn activate(&mut self, activation: Activation<'_>) -> Result<(), ActivateError>;
     fn read_config(&self, offset: u64, data: &mut [u8]);
     fn write_config(&mut self, offset: u64, data: &[u8]);
     fn reset(&mut self) -> Result<(), ActivateError>;
+}
+
+/// Startup capability, constructed only by a configured device. It borrows
+/// the execution owner's worker list, so a backend cannot retain it in a
+/// worker or spawn through it after activation returns.
+#[derive(Debug)]
+pub struct Activation<'a> {
+    inputs: VirtioActivate,
+    workers: &'a mut Vec<VirtioDeviceHandle>,
+}
+impl Activation<'_> {
+    pub fn negotiated_features(&self) -> u64 {
+        self.inputs.negotiated_features()
+    }
+    pub fn queue_memory(&self) -> Arc<dyn crate::QueueMemory> {
+        self.inputs.queue_memory()
+    }
+    pub fn buffer_memory(&self) -> Arc<dyn crate::VirtioMemory> {
+        self.inputs.buffer_memory()
+    }
+    pub fn queue_interrupt(&self, i: usize) -> Option<dillo_mmio::Interrupt> {
+        self.inputs.queue_interrupt(i)
+    }
+    pub fn take_queues(&mut self) -> Vec<crate::Queue> {
+        self.inputs.take_queues()
+    }
+    pub fn take_queue_evts(&mut self) -> Vec<Kick> {
+        self.inputs.take_queue_evts()
+    }
+    pub fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+    pub fn spawn(
+        &mut self,
+        wake: Option<Kick>,
+        run: Box<dyn FnOnce(VirtioRunToken) -> Result<(), DeviceJoinError> + Send>,
+    ) -> Result<(), ActivateError> {
+        let handle = self.inputs.host()?.spawn(run)?;
+        let handle = if let Some(wake) = wake {
+            handle.with_shutdown_wake(wake)
+        } else {
+            handle
+        };
+        self.workers.push(handle);
+        Ok(())
+    }
 }
 
 /// Temporary bridge for device implementations outside the two-device pilot.
@@ -53,8 +112,10 @@ impl<T: VirtioDevice + 'static> Backend for Legacy<T> {
     fn features(&self) -> u64 {
         self.0.features()
     }
-    fn activate(&mut self, a: VirtioActivate) -> Result<VirtioDeviceHandle, ActivateError> {
-        self.0.activate(a)
+    fn activate(&mut self, activation: Activation<'_>) -> Result<(), ActivateError> {
+        let handle = self.0.activate(activation.inputs)?;
+        activation.workers.push(handle);
+        Ok(())
     }
     fn read_config(&self, o: u64, d: &mut [u8]) {
         self.0.read_config(o, d);
@@ -76,8 +137,8 @@ impl Backend for Box<dyn Backend> {
     fn features(&self) -> u64 {
         (**self).features()
     }
-    fn activate(&mut self, a: VirtioActivate) -> Result<VirtioDeviceHandle, ActivateError> {
-        (**self).activate(a)
+    fn activate(&mut self, activation: Activation<'_>) -> Result<(), ActivateError> {
+        (**self).activate(activation)
     }
     fn read_config(&self, o: u64, d: &mut [u8]) {
         (**self).read_config(o, d);
@@ -169,19 +230,22 @@ impl<B: Backend> Device<B, Configured> {
         activation = activation.with_negotiated_features(self.state.features);
         let result = activation.managed(&execution.barrier).and_then(|wakes| {
             execution.wakes = wakes;
-            self.backend.activate(activation)
+            self.backend.activate(Activation {
+                inputs: activation,
+                workers: &mut execution.workers,
+            })
         });
         match result {
-            Ok(handle) => {
-                execution.handle = Some(handle);
-                Ok(self.transition(Running(execution)))
+            Ok(()) => Ok(self.transition(Running(execution))),
+            Err(error) => {
+                execution.stop();
+                Err((
+                    self.transition(Failed {
+                        _execution: execution,
+                    }),
+                    error,
+                ))
             }
-            Err(error) => Err((
-                self.transition(Failed {
-                    _execution: execution,
-                }),
-                error,
-            )),
         }
     }
 }
@@ -306,7 +370,7 @@ impl<B: Backend> Device<B, Stopping> {
 
 #[derive(Debug, Default)]
 struct Execution {
-    handle: Option<VirtioDeviceHandle>,
+    workers: Vec<VirtioDeviceHandle>,
     barrier: Arc<Barrier>,
     wakes: Vec<Kick>,
     wake_error: Option<io::Error>,
@@ -322,14 +386,20 @@ impl Execution {
         first.map_or(Ok(()), Err)
     }
     fn stop(&mut self) {
-        if let Some(handle) = &mut self.handle {
+        for handle in &mut self.workers {
             handle.shutdown();
         }
         self.barrier.resume();
     }
     fn join(&mut self) -> Result<(), DeviceJoinError> {
         self.stop();
-        self.handle.take().map_or(Ok(()), VirtioDeviceHandle::join)
+        let mut first = None;
+        for handle in self.workers.drain(..) {
+            if let Err(error) = handle.join() {
+                first.get_or_insert(error);
+            }
+        }
+        first.map_or(Ok(()), Err)
     }
 }
 impl Drop for Execution {

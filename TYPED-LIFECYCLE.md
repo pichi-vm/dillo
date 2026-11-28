@@ -19,7 +19,8 @@ both execution modes. Use compile-fail examples for illegal lifecycle calls.
 
 Use the existing snuffler paired harness against the baseline on Linux x86
 and Arm, macOS Arm and Windows MSVC. Use ordinary vhost-user completion for
-both revisions. Run five measured pairs per selected case plus warm-up, then
+both revisions. Run ten measured pairs per selected case plus warm-up (the
+existing analysis needs ten pairs for an interval), then
 one bounded noise calibration if needed. Preserve failed observations. Within
 measured noise is success; wide uncertainty is inconclusive. Do not spend this
 milestone tuning small differences.

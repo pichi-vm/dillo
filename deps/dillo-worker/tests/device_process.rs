@@ -119,8 +119,8 @@ impl DeviceBackend for Backend {
     }
     fn activate(
         &mut self,
-        activation: VirtioActivate,
-    ) -> Result<VirtioDeviceHandle, ActivateError> {
+        activation: dillo_virtio::lifecycle::Activation<'_>,
+    ) -> Result<(), ActivateError> {
         match self.mode.as_str() {
             "crash" => std::process::exit(42),
             "hang" => std::thread::sleep(Duration::from_secs(300)),
