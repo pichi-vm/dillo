@@ -81,13 +81,16 @@ def analyze(root):
     return rows
 
 
-def compare(baseline, candidate):
+def compare(baseline, candidate, *, common_metrics_only=False):
     """Compare like execution modes across interleaved labels or revisions."""
     indexes = [{(r["case"], r["metric"]): r for r in rows}
                for rows in (baseline, candidate)]
-    assert indexes[0].keys() == indexes[1].keys(), "comparison metrics differ"
+    if not common_metrics_only:
+        assert indexes[0].keys() == indexes[1].keys(), "comparison metrics differ"
     rows = []
     for (case, metric), before in indexes[0].items():
+        if (case, metric) not in indexes[1]:
+            continue
         after = indexes[1][case, metric]
         assert before["pairs"] == after["pairs"], "comparison pair counts differ"
         for mode in ("local", "worker"):
@@ -115,7 +118,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     rows = analyze(args.results)
     if args.baseline:
-        rows = compare(analyze(args.baseline), rows)
+        environment = json.loads((args.results / "environment.json").read_text())
+        rows = compare(analyze(args.baseline), rows,
+                       common_metrics_only=environment["options"].get("calibrate_sampling", False))
     args.output.write_text(json.dumps(rows, indent=2) + "\n")
     with args.output.with_suffix(".csv").open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))

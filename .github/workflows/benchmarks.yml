@@ -29,7 +29,7 @@ on:
       sampling:
         description: Compare instrumentation on the same host
         type: choice
-        options: ["on", "off", both]
+        options: ["on", "off", both, interleaved]
         default: "on"
       kernel:
         description: Existing fixture or prebuilt Hyper-V clock diagnostic (x86 only)
@@ -74,9 +74,14 @@ jobs:
         env:
           BENCH_BASELINE: ${{ inputs.baseline_ref }}
           BENCH_CALIBRATE: ${{ inputs.calibrate_noise }}
+          BENCH_SAMPLING: ${{ inputs.sampling }}
         run: |
           if [ "$BENCH_CALIBRATE" = true ] && [ -n "$BENCH_BASELINE" ]; then
             echo 'Noise calibration requires an empty baseline_ref' >&2
+            exit 1
+          fi
+          if [ "$BENCH_SAMPLING" = interleaved ] && { [ "$BENCH_CALIBRATE" = true ] || [ -n "$BENCH_BASELINE" ]; }; then
+            echo 'Interleaved sampling requires one runtime and no noise calibration' >&2
             exit 1
           fi
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
@@ -202,6 +207,7 @@ jobs:
           for bench_mode in $bench_modes; do
             bench_options=()
             if [ "$bench_mode" = off ]; then bench_options+=(--no-sample); fi
+            if [ "$bench_mode" = interleaved ]; then bench_options+=(--calibrate-sampling); fi
             if [ "$BENCH_KERNEL" = wsl-clock ]; then bench_options+=(--serial); fi
             python benchmarks/run.py --assets target/benchmarks/assets.json \
               --output "$BENCH_RESULTS/$bench_latch/$bench_mode" --pairs "$BENCH_PAIRS" \
