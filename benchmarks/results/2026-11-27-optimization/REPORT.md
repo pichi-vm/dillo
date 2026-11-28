@@ -1863,7 +1863,7 @@ The local x86 comparison freezes both release builds before measurement and
 uses CPUs 24–27; no additional local compilation or test VM runs during timing.
 The unrelated long-lived VM remains present, so no host exclusivity is claimed.
 
-The local x86, macOS and Arm comparisons each complete all 80 boots. Source
+The local x86, macOS, Arm and Windows comparisons each complete all 80 boots. Source
 and executable hashes, matched guest assets, balanced schedules, minimum
 five-second operations and empty guest/sampling error lists are verified.
 The PCI-free images report no PCI devices. These are four-pair screens;
@@ -1886,11 +1886,19 @@ while PCI-free random reads improve by 6.0%/7.3%. macOS sequential I/O
 improves, but the earlier small PCI-free random-read CPU concern remains:
 this screen observes +0.4%. No storage parity or blanket promotion follows.
 
+Windows bulk network CPU/GiB falls by 14.2%/10.9% against the previous worker
+(PCI/MMIO). PCI p99 falls by 23.6%, but the new worker/control comparison is
+still 94.7% throughput, 108.2% CPU/GiB and 105.3% p99. MMIO is 96.1%, 99.2%
+and 132.4% respectively. These four-pair observations do not replace the
+calibrated table: this runner reports AMD family 25/model 17, whereas the
+earlier Windows calibration used family 25/model 1. The sampling-on/off
+diagnostic remains a separate experiment, not an assumed explanation.
+
 All workload metrics, both execution modes, every paired value and provenance
 are retained in [x86](memory-tx-integration-x86-short.json.gz),
-[Arm](memory-tx-integration-arm-short.json.gz) and
-[macOS](memory-tx-integration-macos-short.json.gz). Windows remains in progress
-at this checkpoint.
+[Arm](memory-tx-integration-arm-short.json.gz),
+[macOS](memory-tx-integration-macos-short.json.gz) and
+[Windows](memory-tx-integration-windows-short.json.gz).
 
 ## Concurrent PCI-free block workload
 
@@ -1910,6 +1918,43 @@ two for the control and six for the isolated configuration. Both the initial
 validator failure and the complete corrected records are retained in
 [concurrent-mmio-smoke.json.gz](concurrent-mmio-smoke.json.gz).
 This establishes workload execution and report validation, not performance
-parity. The prespecified four-pair, five-second screen now measures both
-transports locally and on the free Arm/macOS runners; Windows waits for its
-current comparison and sampler diagnostic.
+parity.
+
+The prespecified four-pair, five-second screens completed all 20 boots on
+each of local x86, [Arm](https://github.com/pichi-vm/dillo/actions/runs/46116324563)
+and [macOS](https://github.com/pichi-vm/dillo/actions/runs/46116323086). Each
+transport has four disks at queue depth eight, with 32 requests allowed in
+flight. Every boot retains all four operation reports and verified writes;
+MMIO reports no PCI devices. Runtime is the combined candidate above, with
+only the workload/validator changes at source `3383874`.
+
+Concurrent sequential reads show why throughput and CPU cannot substitute
+for latency. Ratios below are isolated worker / same-binary in-process control:
+
+| Host | Transport | Throughput | CPU/GiB | p99 |
+| --- | --- | ---: | ---: | ---: |
+| Linux x86-64 | PCI | 98.2% | 100.3% | 101.6% |
+| Linux x86-64 | PCI-free MMIO | 92.3% | 111.6% | 111.4% |
+| Linux AArch64 | PCI | 150.4% | 58.2% | 225.1% |
+| Linux AArch64 | PCI-free MMIO | 157.3% | 57.5% | 265.5% |
+| macOS AArch64 | PCI | 130.9% | 58.8% | 253.7% |
+| macOS AArch64 | PCI-free MMIO | 124.4% | 58.6% | 342.5% |
+
+Arm sequential-read p99 rises from roughly 1.9–2.1 ms to 4.3–5.4 ms;
+macOS rises from 1.0–1.6 ms to 2.7–4.5 ms. These are short screens without a
+matched concurrent-workload noise calibration, so they do not establish
+parity or identify a scheduling/interrupt cause. PCI random-read p99 on x86
+also remains about 30% above control in all four pairs. All other operations,
+including the slow individual x86 write/read pairs, remain in the evidence.
+
+Full raw reports, logs, schedules, hashes and analyses are retained in
+[x86](concurrent-transports-x86-short.json.gz),
+[Arm](concurrent-transports-arm-short.json.gz) and
+[macOS](concurrent-transports-macos-short.json.gz). Windows will run the same
+prespecified screen after its sampling diagnostic ends.
+
+Source inspection also limits the meaning of the `shared` experiment label:
+the launcher currently enables the shared interrupt-status factory only on
+Linux and Windows. macOS still uses the parent completion relay and its
+existing interrupt status; the environment flag alone does not establish
+shared-status operation there.
