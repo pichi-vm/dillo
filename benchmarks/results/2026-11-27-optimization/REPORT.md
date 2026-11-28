@@ -2043,3 +2043,28 @@ Host echo remains outside the measured Dillo process tree in both cases.
 all raw reports, logs, schedules, hashes, per-mode comparisons and temporal
 blocks. The separate Windows four-disk screen starts only after this run
 finishes; its results must not be inferred from the network diagnostic.
+
+## Separate benchmark echo process
+
+Harness `4936fd9` moves the unchanged TCP handler into a spawned process. Its
+control pipe reports the listening port, then keeps the service alive until
+the parent closes that pipe. The parent waits for exit and kills/reaps a
+stuck helper after a bounded shutdown wait. Both in-process and isolated Dillo
+use this same peer. The peer is a sibling of Dillo, so the sampler continues
+to count only Dillo and its workers. The harness's own CPU field is renamed
+to exclude echo work rather than silently changing the old field's meaning.
+
+Local checks exercise both message sizes, reconnect, an active connection at
+shutdown, caller failure and abrupt parent death. All sixteen 500-ms guest
+smoke boots pass using frozen runtime `8196bb4`: PCI and PCI-free MMIO,
+sampling off/on and both execution modes, including warmups. Sampled idle
+process counts remain two/three for control/worker; all guest reports and
+PCI-free inventories validate. Full evidence is retained in
+[echo-process-smoke.json.gz](echo-process-smoke.json.gz).
+
+This establishes local harness behavior, not a performance improvement. The
+prespecified Windows follow-up retains twelve balanced five-second rounds,
+the same runtime as the original sampling diagnostic and identical assets
+under both labels. It starts after the concurrent-storage run ends. Residual
+sampling effects, outliers and failures remain part of the result; correcting
+the measurement environment must not be credited as a Dillo runtime speedup.
