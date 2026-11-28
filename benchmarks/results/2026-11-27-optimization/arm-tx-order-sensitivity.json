@@ -1,0 +1,92 @@
+{
+  "description": "Post-hoc sensitivity analysis of within-run temporal/order dependence. Retains original independent-pair estimate; not a replacement or proof of runner causation. Only three complete four-pair order cycles are available.",
+  "source": "network-tx-scratch-arm-long.json.gz",
+  "case": "net-pci",
+  "metric": "net/tcp_echo/65536/MiBps",
+  "comparison": "candidate worker / prior worker",
+  "original": {
+    "ci95": [
+      0.9368114792475619,
+      0.9902701995416607
+    ],
+    "median": 0.9536371041194025,
+    "paired_ratios": [
+      0.9512870568490479,
+      0.9646188942485754,
+      0.9365839643527759,
+      0.9370389941423478,
+      0.9397104920260416,
+      0.9137385402462195,
+      0.9217521672967774,
+      0.9981113900864538,
+      1.06260120502618,
+      0.9824290089968677,
+      0.9559871513897571,
+      1.0342062046463647
+    ]
+  },
+  "four_pair_blocks": [
+    [
+      0.9512870568490479,
+      0.9646188942485754,
+      0.9365839643527759,
+      0.9370389941423478
+    ],
+    [
+      0.9397104920260416,
+      0.9137385402462195,
+      0.9217521672967774,
+      0.9981113900864538
+    ],
+    [
+      1.06260120502618,
+      0.9824290089968677,
+      0.9559871513897571,
+      1.0342062046463647
+    ]
+  ],
+  "block_medians": [
+    0.9441630254956979,
+    0.9307313296614095,
+    1.0083176068216162
+  ],
+  "enumerated_block_bootstrap_interval": [
+    0.9307313296614095,
+    1.0083176068216162
+  ],
+  "complete_block_resamples": [
+    0.9307313296614095,
+    0.9383747430841947,
+    0.9383747430841947,
+    0.9383747430841947,
+    0.9383747430841947,
+    0.9383747430841947,
+    0.9383747430841947,
+    0.9441630254956979,
+    0.9478488217078993,
+    0.9478488217078993,
+    0.9478488217078993,
+    0.9536371041194025,
+    0.9536371041194025,
+    0.9536371041194025,
+    0.9536371041194025,
+    0.9536371041194025,
+    0.9536371041194025,
+    0.9536371041194025,
+    0.9536371041194025,
+    0.9536371041194025,
+    0.9735239516227215,
+    0.9735239516227215,
+    0.9735239516227215,
+    0.9824290089968677,
+    0.9824290089968677,
+    0.9824290089968677,
+    1.0083176068216162
+  ],
+  "missing_evidence": [
+    "A/A same-executable calibration",
+    "per-phase host contention/frequency observations",
+    "exclusive host or CPU reservation evidence"
+  ],
+  "decision": "Cause remains unresolved; hold optimization pending evidence. Do not call the observed few-percent change an established code regression."
+}

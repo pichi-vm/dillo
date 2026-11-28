@@ -1141,9 +1141,9 @@ network checks passed, executable hashes differ, and guest assets match within
 the comparison. Every PCI-free guest report contains no PCI devices. These are
 physical Arm KVM results, separate from the x86 series.
 
-The longer run exposes an unfavorable result: large-message PCI worker
-throughput falls 4.6% versus the prior worker (95% interval −6.3% to −1.0%),
-and its p99 bound rises 9.3% (+0.3–23.1%). MMIO CPU/GiB improves 2.3%
+The longer run contains an unfavorable observation: large-message PCI worker
+throughput is 4.6% lower than the prior worker (95% interval −6.3% to −1.0%),
+and its p99 bound is 9.3% higher (+0.3–23.1%). MMIO CPU/GiB is 2.3% lower
 (−5.5% to −1.1%), but its throughput change and p99 change remain uncertain.
 Against its optimized control, large-message worker throughput is 90.8% on
 PCI and 95.3% on MMIO; CPU/GiB is 112.8%/109.7%. The four-pair results did not
@@ -1151,6 +1151,20 @@ establish these effects. The candidate remains separate rather than promoting
 the x86 gains across all platforms. All observations, intervals, hashes and
 run provenance are retained in
 [network-tx-scratch-arm-long.json.gz](network-tx-scratch-arm-long.json.gz).
+
+These observations do not establish that the code caused the difference.
+Three successive balanced four-pair blocks show throughput changes of −5.6%,
+−6.9% and +0.8%; the earlier four-pair experiment showed +4.7%. The original
+interval resamples individual pairs and does not account for dependence across
+time. A post-hoc block-resampling sensitivity check includes zero, but with
+only three blocks it is not a replacement qualification or proof of runner
+noise. The Arm runner is self-hosted bare metal; exclusive host/CPU reservation
+and per-phase contention/frequency evidence are absent. An A/A comparison of
+the same executable is needed to calibrate noise before attributing these
+small differences to implementation. The candidate remains unpromoted because
+its effect is unresolved, not because a regression has been established.
+[arm-tx-order-sensitivity.json](arm-tx-order-sensitivity.json) preserves the
+original estimate and the sensitivity calculation.
 
 ## KVM resampler lifetime and failure reporting
 
