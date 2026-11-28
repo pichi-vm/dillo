@@ -187,7 +187,12 @@ def run_vm(args, assets, image, disks, case, mode, label):
     assert not perf["errors"] and perf["operations"], f"guest benchmark failed: {directory}"
     expected_devices = {"net"} if case.startswith("net-") else {
         f"vd{chr(ord('a') + i)}" for i in range(len(disks))}
-    observed_devices = {op["device"] for op in perf["operations"]} - {"block-group"}
+    observed_devices = {op["device"] for op in perf["operations"]}
+    if case.startswith("block4-concurrent-"):
+        assert expected_devices <= {block["name"] for block in report["block"]}, directory
+        assert all(op["max_in_flight"] == len(disks) * args.queue_depth
+                   for op in perf["operations"]), f"wrong concurrent group size: {directory}"
+        expected_devices = {"block-group"}
     assert observed_devices == expected_devices, (expected_devices, observed_devices, directory)
     assert all(op["verified"] is not False and op["latency"]["count"] > 0
                for op in perf["operations"]), f"invalid result: {directory}"
