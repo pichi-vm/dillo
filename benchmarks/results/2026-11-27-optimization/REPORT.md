@@ -2498,3 +2498,39 @@ maximum plausible benefit, and state a fixed go/no-go comparison. Favor costs
 large enough to affect the remaining gaps. Do not begin another sequence of
 small notification-policy variants or equate uncertainty with parity. The full
 platform/transport/workload objective remains active and unfinished.
+
+## Consolidated transmit storage
+
+`2a81d6f` integrates the unchanged `c2531a9` network transmit-buffer change.
+The source blob matches the earlier combined candidate: normal TX frames
+reuse one worker-owned buffer, while allocations above the existing frame
+bound are released after processing. No mapping-owner, notification-policy,
+protocol or backend change is included. All 57 local network tests pass,
+four external-network tests remain ignored, and formatting plus strict
+all-target/all-feature Clippy pass. [Validation logs and source identity](tx-buffer-consolidation-validation.json.gz)
+are retained; native CI will check the consolidated branch.
+
+The existing longer x86/macOS comparisons support roughly 6–7% lower bulk
+network worker CPU cost. This is an absolute common-path improvement, not a
+new measurement or elimination of isolation overhead. The recorded Arm
+throughput uncertainty, Windows sampling sensitivity and remaining
+worker/control gaps remain open. Integration into this development branch
+does not establish full-platform performance acceptance. The mapping-owner
+candidate remains separate because its storage observations are unresolved.
+
+## Completed Windows reset diagnostic
+
+[Run 46131699335](https://github.com/pichi-vm/dillo/actions/runs/46131699335)
+completes all forty planned boots at `82c623f`, with identical binaries/assets
+under sampling-off/on labels, a separate echo process, clean source metadata,
+empty timeout stack files and successful guest/sampler reports. [Every raw
+observation](network-echo-sampling-windows-reset-diagnostic.json.gz) is retained.
+The earlier reset did not reproduce; this is neither a repair nor completion
+of the failed twelve-pair qualification.
+
+Unsampled bulk worker/control throughput is 98.4%/100.9% on PCI/MMIO, with
+p99 at 103.6%/100.7%. Sampling still changes bulk p99 by +12.2%/+17.5% for PCI
+control/worker and +9.7%/+4.0% for MMIO. These four-pair diagnostics provide no
+unsampled CPU estimates or matching noise calibration. No samples are
+discarded, no parity is claimed, and no repeat is scheduled to seek a reset
+or favorable performance result.
