@@ -993,3 +993,33 @@ standard EVENT_IDX mechanism is the next candidate to measure.
 [network-notification-counters.json.gz](network-notification-counters.json.gz)
 retains every counter record, schedule, asset hash and boot digest. The
 uninstrumented source and prior unfavorable performance evidence remain intact.
+
+## Negotiated EVENT_IDX network experiment
+
+`830ba5e` negotiates the standard split-ring EVENT_IDX feature for network
+queues and checks the driver's used-event threshold after publication. Both
+binaries retain the same diagnostic counters. Apollo and native runs
+[macOS 46086224330](https://github.com/pichi-vm/dillo/actions/runs/46086224330),
+[Arm 46086225913](https://github.com/pichi-vm/dillo/actions/runs/46086225913), and
+[Windows 46086227779](https://github.com/pichi-vm/dillo/actions/runs/46086227779)
+each complete all 40 boots against `f2e403a`: four independently balanced
+two-second pairs per revision and transport. Executable hashes differ, guest
+assets match, the candidate reports EVENT_IDX enabled in every queue, and no
+run reports RX buffer starvation. Local queue/network tests and strict Clippy
+passed; native workflow checks passed before measurement.
+
+The effects vary by platform. On macOS, large-message worker CPU/GiB falls
+3.4% on PCI and 2.5% on MMIO, with throughput nearly unchanged. Windows gains
+4.6%/6.6% large-message throughput and reduces CPU/GiB by 6.3%/6.8%; its
+worker/control p99 ratios still reach 146.9%/135.0%. Arm loses 7.3% large-message
+PCI throughput and 8.3% small-message MMIO throughput. Physical x86 results
+are mixed, including a 1.9% small-message PCI throughput reduction. These
+short, instrumented observations do not justify promoting the feature as a
+general optimization or establish parity.
+
+RX notification-request suppression rises on Windows from about 16–17% to
+26–32%, and on macOS from 8–9% to about 14–15%. Most batches still request a
+notification. These are queue requests before transport coalescing, not
+native interrupt counts. The candidate stays separate. All 160 boot records,
+counter observations, paired ratios, schedules and artifact provenance are
+retained in [network-event-index-short.json.gz](network-event-index-short.json.gz).
