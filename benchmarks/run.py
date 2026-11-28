@@ -249,6 +249,8 @@ def main():
     parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--baseline-assets", type=Path,
                         help="interleave a frozen runtime with identical guest assets")
+    parser.add_argument("--calibrate-noise", action="store_true",
+                        help="run the same executable under both comparison labels")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cases", default="block-pci,block-mmio,block4-pci,net-pci")
     parser.add_argument("--pairs", type=int, default=5)
@@ -263,6 +265,8 @@ def main():
     parser.add_argument("--extra-cmdline", default="", help="explicit guest settings for sensitivity runs")
     parser.add_argument("--serial", action="store_true", help="retain early boot diagnostics through SPCR")
     args = parser.parse_args()
+    if args.calibrate_noise and args.baseline_assets:
+        parser.error("noise calibration cannot compare different runtimes")
     assert args.pairs > 0 and args.sample_ms > 0
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -288,6 +292,8 @@ def main():
     if hasattr(psutil.Process(), "cpu_affinity"):
         environment["cpu_affinity"] = psutil.Process().cpu_affinity()
     variants = {"": assets}
+    if args.calibrate_noise:
+        variants = {"baseline": assets, "candidate": assets}
     if args.baseline_assets:
         baseline = json.loads(args.baseline_assets.read_text())
         for key in ("arma", "snuffler", "kernel"):
