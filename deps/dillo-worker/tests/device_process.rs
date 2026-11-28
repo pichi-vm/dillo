@@ -378,7 +378,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .chain(
         (cfg!(any(target_os = "linux", target_os = "windows"))
             && std::env::var_os("DILLO_BENCH_SHARED_ISR").is_some())
-        .then_some("shared-call"),
+        .then_some(["shared-call", "no-shared-isr"])
+        .into_iter()
+        .flatten(),
     )
     .chain(cfg!(target_os = "macos").then_some("inherited-fd"))
     {
@@ -590,8 +592,8 @@ fn exercise(mode: &str) -> io::Result<()> {
     if mode == "pci" {
         return pci_interrupts(proxy, control, &memory);
     }
-    if matches!(mode, "direct-call" | "shared-call") {
-        return direct_calls(proxy, control, &memory, mode == "shared-call");
+    if matches!(mode, "direct-call" | "shared-call" | "no-shared-isr") {
+        return direct_calls(proxy, control, &memory, mode);
     }
     let control = Arc::new(control);
     let interrupts = Arc::new(AtomicUsize::new(0));
@@ -802,16 +804,25 @@ fn without_inherited_reader<T>(start: impl FnOnce() -> io::Result<T>) -> io::Res
     Ok(ready)
 }
 
-// This endpoint deliberately cannot deliver through a parent callback.
-// Both queue directions must be transferred without spawning a relay.
+// Direct calls must bypass the parent; the unnegotiated case requires it to
+// publish status before notifying the guest.
 #[derive(Debug)]
 struct DirectCall {
     endpoint: Mutex<dillo_machine::worker::Resource>,
     status: Option<Arc<dillo_machine::worker::NotificationState>>,
+    relay: bool,
 }
 impl dillo_mmio::InterruptLine for DirectCall {
     fn signal(&self) {
-        panic!("exported call used a parent relay");
+        assert!(self.relay, "exported call used a parent relay");
+        self.status.as_ref().unwrap().used();
+        Worker::notification_endpoint(
+            self.endpoint.lock().unwrap().try_clone().unwrap(),
+            dillo_machine::worker::NotificationRole::Signal,
+        )
+        .unwrap()
+        .write(1)
+        .unwrap();
     }
     fn set_level(&self, _: bool) -> Result<(), dillo_mmio::InterruptError> {
         panic!("exported call used a parent relay");
@@ -831,8 +842,10 @@ fn direct_calls(
     mut proxy: dillo_worker::Proxy,
     control: dillo_worker::Control,
     memory: &GuestMemoryMmap,
-    shared_status: bool,
+    mode: &str,
 ) -> io::Result<()> {
+    let shared_status = mode != "direct-call";
+    let relay = mode == "no-shared-isr";
     let mut retired: Option<Arc<dillo_machine::worker::NotificationState>> = None;
     let update = proxy.interrupt_update().unwrap();
     for _ in 0..2 {
@@ -851,12 +864,13 @@ fn direct_calls(
         let interrupt = Arc::new(DirectCall {
             endpoint: Mutex::new(write),
             status: status.clone(),
+            relay,
         });
         let (mut params, kick) = activation(Arc::new(AtomicUsize::new(0)), false, "native");
         let params = VirtioActivate::with_host_and_queue_interrupts(
             params.take_queues(),
             params.take_queue_evts(),
-            Arc::new(Host(AtomicUsize::new(0))),
+            Arc::new(Host(AtomicUsize::new(usize::from(relay)))),
             vec![Some(Interrupt::new(interrupt.clone()))],
         )
         .with_negotiated_features(1 << 32);

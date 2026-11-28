@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Corrupt replies on the actual vhost-user connection after confinement.
+//! Alter protocol replies on the actual connection after confinement.
 
 use std::fs::File;
 use std::io;
@@ -24,6 +24,7 @@ pub(super) fn configure(mode: &str, files: &mut Vec<File>) -> bool {
     let mode = match mode {
         "bad-flags" => "bad-flags",
         "bad-request" => "bad-request",
+        "no-shared-isr" => "no-shared-isr",
         "reply-resource" => {
             RETURNED.set(files.remove(0)).unwrap();
             "reply-resource"
@@ -31,7 +32,7 @@ pub(super) fn configure(mode: &str, files: &mut Vec<File>) -> bool {
         _ => return false,
     };
     MODE.set(mode).unwrap();
-    true
+    mode != "no-shared-isr"
 }
 
 #[derive(Debug)]
@@ -43,6 +44,16 @@ impl Channel for Peer {
         match MODE.get().copied() {
             Some("bad-flags") => bytes[4..8].copy_from_slice(&0u32.to_ne_bytes()),
             Some("bad-request") => bytes[..4].copy_from_slice(&u32::MAX.to_ne_bytes()),
+            Some("no-shared-isr") => {
+                use dillo_ipc::vhost_user::{self as wire, Frame};
+                let mut frame = Frame::decode(&bytes)?;
+                if frame.request == wire::request::GET_PROTOCOL_FEATURES {
+                    frame.payload = (wire::scalar(&frame.payload)? & !wire::EXPERIMENT_SHARED_ISR)
+                        .to_ne_bytes()
+                        .to_vec();
+                    bytes = frame.encode()?;
+                }
+            }
             Some("reply-resource") => {
                 #[cfg(unix)]
                 let resource = RETURNED.get().unwrap().as_fd();
