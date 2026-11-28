@@ -2068,3 +2068,37 @@ the same runtime as the original sampling diagnostic and identical assets
 under both labels. It starts after the concurrent-storage run ends. Residual
 sampling effects, outliers and failures remain part of the result; correcting
 the measurement environment must not be credited as a Dillo runtime speedup.
+
+## Candidate resource footprint
+
+The completed four-pair screens at runtime `8196bb4` also retain post-workload
+idle resources and observed guest-ready time. For a single network device,
+both configurations already include an isolated console: the in-process
+control has two processes, and the isolated-network configuration has three.
+The echo service and sampler are outside that measured tree. Values below
+are control → isolated-network medians from the same run and revision.
+
+| Platform | Transport | Threads | Private memory (MiB) | Guest ready (ms) |
+| --- | --- | ---: | ---: | ---: |
+| Linux x86-64 | PCI | 22 → 26 | 2.61 → 2.59 | 137 → 137 |
+| Linux x86-64 | PCI-free MMIO | 22 → 26 | 2.40 → 2.43 | 137 → 133 |
+| Linux AArch64 | PCI | 21 → 25 | 2.26 → 2.53 | 103 → 103 |
+| Linux AArch64 | PCI-free MMIO | 21 → 25 | 2.17 → 2.49 | 103 → 103 |
+| macOS AArch64 | PCI | 23 → 29 | Unavailable | 230 → 597 |
+| macOS AArch64 | PCI-free MMIO | 22 → 27 | Unavailable | 213 → 508 |
+| Windows x86-64 | PCI | 28 → 37 | 5.69 → 7.52 | 3413 → 3610 |
+| Windows x86-64 | PCI-free MMIO | 28 → 37 | 5.60 → 7.47 | 3289 → 3532 |
+
+Linux private memory subtracts `Private_Hugetlb` from USS to exclude that
+guest-memory category; Windows reports private commit. These are different
+OS accounting categories, not interchangeable measures of total physical
+memory. Summed RSS is not used. Linux PSS and the original OS fields remain
+in the evidence. macOS missing memory data must not be read as zero cost.
+
+Sampled idle CPU medians range from zero to 0.021 cores over roughly two-second
+intervals. That short, quantized observation is retained rather than treated
+as precise idle-CPU parity. Guest-ready measurements are descriptive and keep
+the startup cost visible; this does not reopen startup optimization. Neither
+these observations nor the four-pair performance screens promote the candidate.
+[candidate-resource-footprint.json](candidate-resource-footprint.json) records
+all per-boot values and source-archive hashes.
