@@ -1,0 +1,30 @@
+name: macOS notification primitive diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [experiment/macos-native-wake]
+    paths: [benchmarks/macos_notify.c, .github/workflows/macos-notify.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: [self-hosted, macOS, ARM64, bare-metal, m1, self-managed-seatbelt]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Build and measure native wake primitives
+        shell: bash
+        run: |
+          sw_vers
+          xcrun clang -std=c11 -O2 -Wall -Wextra -Werror -mmacosx-version-min=14.4 \
+            benchmarks/macos_notify.c -o "$RUNNER_TEMP/dillo-macos-notify"
+          "$RUNNER_TEMP/dillo-macos-notify" > "$RUNNER_TEMP/dillo-macos-notify.jsonl"
+          cat "$RUNNER_TEMP/dillo-macos-notify.jsonl"
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: macos-notification-primitives
+          path: ${{ runner.temp }}/dillo-macos-notify.jsonl
