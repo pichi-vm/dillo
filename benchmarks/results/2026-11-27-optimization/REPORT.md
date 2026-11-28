@@ -1500,3 +1500,31 @@ The large sequential-read/write improvements exceed the observed calibration.
 All observations, hashes and temporal blocks are retained in
 [storage-noise-macos.json.gz](storage-noise-macos.json.gz). These measurements
 do not transfer noise bounds to other hosts or establish storage parity.
+
+## macOS notification syscall diagnostic
+
+[Run 46104433049](https://github.com/pichi-vm/dillo/actions/runs/46104433049)
+completes eight boots at `ba3bda8`, whose runtime is the `ab4c264` mapping-owner
+candidate. One measured five-second pair per network transport, plus warmups,
+records public `PROC_PIDTASKINFO` counters alongside the usual samples. The
+native layout and counter-growth selfcheck passes. Every active window has
+stable process identities and valid, monotone counters; no sampling errors or
+saturated counters occur. The hostname, OS and Apple M1 model match the earlier
+Hermes measurements. This instrumented diagnostic does not qualify performance.
+
+For each echo, total Unix syscalls rise from 17.4 to 23.6 on PCI and 17.6 to
+23.4 on PCI-free MMIO with 64-byte messages. With 64-KiB messages, they rise
+from 54.3 to 77.6 and 52.7 to 74.0 respectively. Bulk context switches rise
+from 16.2 to 23.9 and 15.9 to 22.1 per echo. Mach-call counts remain below
+0.05 per operation in every case. Counts are normalized using the sampled
+window duration and guest operation rate; the retained records include raw
+counter endpoints, process identities and all sample windows.
+
+This narrows the investigation to the extra Unix notification/scheduling work,
+but does not identify individual syscalls or assign CPU cost to them. The pipe
+reader already batches up to 256 bytes in one read after each readiness wait;
+it does not perform an extra drain-to-EAGAIN read. The earlier direct-reader
+experiment also batched words, so repeating it as a new batching optimization
+is not supported by this evidence. `xctrace` is unavailable on the runner.
+[macos-task-counters.json.gz](macos-task-counters.json.gz) retains all eight
+boots, counters, normalized observations, source and artifact hashes.
