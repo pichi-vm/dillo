@@ -24,6 +24,15 @@ Use `python benchmarks/analyze.py RESULTS/candidate --baseline RESULTS/baseline
 individual pairs; inspect execution order and calibration before attributing
 small changes to code.
 
+To check measurement overhead, use `--calibrate-sampling` or select workflow
+sampling `interleaved`, with no runtime comparison or noise calibration.
+The same balanced schedule uses sampling off under `baseline` and on under
+`candidate`; both labels use the same executable and image. Each environment
+records its actual sampling option. Compare throughput and guest latency;
+unsampled boots cannot supply process CPU or memory measurements. This isolates
+the process sampler's effect, not the echo server or console-marker polling,
+which remain active in both labels.
+
 Completed measurements: [2026-11-27 report](results/2026-11-27/REPORT.md).
 
 Active milestone: [device performance optimization](OPTIMIZATION.md).
