@@ -34,7 +34,9 @@ def analyze(root):
         marks = raw["boot_stages_us"]
         metrics["setup_to_guest_loaded_ms"] = marks["guest_loaded"] / 1000
         metrics["device_attachment_ms"] = (marks["guest_loaded"] - marks["sections_loaded"]) / 1000
-        metrics["sampler_and_echo_cpu_percent"] = raw["sampler_and_echo_cpu_s"] / raw["wall_s"] * 100
+        for owner in ("sampler", "sampler_and_echo"):
+            if f"{owner}_cpu_s" in raw:
+                metrics[f"{owner}_cpu_percent"] = raw[f"{owner}_cpu_s"] / raw["wall_s"] * 100
         idle = [s for s in raw["samples"] if s["phase"] == "idle-after"]
         if idle:
             metrics["idle_processes"] = statistics.median(len(s["processes"]) for s in idle)

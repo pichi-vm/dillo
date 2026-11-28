@@ -11,14 +11,13 @@ import os
 from pathlib import Path
 import platform
 import re
-import socket
-import socketserver
 import statistics
 import subprocess
-import threading
 import time
 
 import psutil
+
+from echo import echo_server
 
 MEMORY_MIB = 256
 DISK_BYTES = 64 * 1024 * 1024
@@ -36,18 +35,6 @@ def digest(path):
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             result.update(chunk)
     return result.hexdigest()
-
-
-class Echo(socketserver.BaseRequestHandler):
-    def handle(self):
-        self.request.settimeout(60)
-        self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        while data := self.request.recv(128 * 1024):
-            self.request.sendall(data)
-
-
-class Server(socketserver.ThreadingTCPServer):
-    daemon_threads = True
 
 
 def snapshot(process, memory):
@@ -178,7 +165,7 @@ def run_vm(args, assets, image, disks, case, mode, label):
               "samples": samples, "last_process_samples": list(known.values()),
               "sampling_errors": errors, "phases": phases, "guest": report,
               "failure": failure,
-              "sampler_and_echo_cpu_s": time.process_time() - sampler_start}
+              "sampler_cpu_s": time.process_time() - sampler_start}
     save(directory / "result.json", result)
     assert not failure and child.returncode == 0 and ready is not None and report, f"boot failed: {directory}"
     if pci_free:
@@ -279,6 +266,7 @@ def main():
         backing.mkdir(parents=True, exist_ok=False)
     assets = json.loads(args.assets.read_text())
     environment = {"platform": platform.platform(), "uname": platform.uname()._asdict(),
+                   "echo_process": "spawn",
                    "cpu_count": psutil.cpu_count(), "psutil": psutil.__version__,
                    "source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
                    "dirty": subprocess.check_output(["git", "status", "--porcelain"], text=True),
@@ -331,9 +319,7 @@ def main():
     config = args.output / "kernel.config"
     config.write_text(assets["config"])
     results = {name: [] for name in variants}
-    with Server(("127.0.0.1", 0), Echo) as server:
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        port = server.server_address[1]
+    with echo_server() as port:
         for case in args.cases.split(","):
             assert case in ("block-pci", "block-mmio", "block4-pci", "block4-concurrent-pci",
                             "net-pci", "block-mmio-only", "net-mmio-only")
@@ -373,7 +359,6 @@ def main():
                     results[name].append(result)
             for name in variants:
                 summarize(results[name], args.output / name)
-        server.shutdown()
 
 
 if __name__ == "__main__":
