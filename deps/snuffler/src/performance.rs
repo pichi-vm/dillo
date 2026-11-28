@@ -49,7 +49,7 @@ const BINS: usize = 64 * SUB_BUCKETS;
 /// Fixed storage: measurement memory does not grow with throughput.
 #[derive(Debug)]
 pub struct Histogram {
-    bins: [u64; BINS],
+    bins: Box<[u64]>,
     count: u64,
     max: u64,
 }
@@ -57,7 +57,7 @@ pub struct Histogram {
 impl Default for Histogram {
     fn default() -> Self {
         Self {
-            bins: [0; BINS],
+            bins: vec![0; BINS].into_boxed_slice(),
             count: 0,
             max: 0,
         }
@@ -66,7 +66,7 @@ impl Default for Histogram {
 
 impl Histogram {
     pub fn merge(&mut self, other: &Self) {
-        for (left, right) in self.bins.iter_mut().zip(other.bins) {
+        for (left, right) in self.bins.iter_mut().zip(other.bins.iter()) {
             *left += right;
         }
         self.count += other.count;
