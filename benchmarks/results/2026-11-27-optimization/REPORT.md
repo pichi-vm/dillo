@@ -1693,3 +1693,26 @@ cross-checks, warmups, input hashes and reproducing analysis are retained in
 [macos-network-thread-cpu.json.gz](macos-network-thread-cpu.json.gz). The
 protocol/control threads remain effectively idle. The next optimization must
 address measured queue/notification work rather than remove idle control RPC.
+
+## Linux x86 combined readiness screen
+
+Apollo completes forty boots comparing `2619d65` with `8937f91`: four balanced
+five-second pairs per network transport, with distinct frozen executables,
+matched guest assets, CPUs 24–27, and no concurrent local compilation. The
+unrelated existing VM was left running; this is not an exclusive-host claim.
+All boot reports and sampling records validate, including PCI-free guests.
+
+Bulk PCI worker throughput rises 3.9% and CPU/GiB falls 4.5%; all four pairs
+have those directions. Bulk MMIO throughput falls 5.1% and CPU/GiB rises 3.0%,
+also in every pair. The same-revision controls show the same transport split:
+PCI throughput rises about 4.3%, while MMIO falls about 7.5%. Small-message
+results are mixed and noisy. This screen does not support a universal policy
+change, even though the candidate's MMIO worker/control ratio looks favorable.
+
+The two changes respectively remove idle writable interest and defer blocked
+reads until a readiness event. A narrow follow-up will permit one optimistic
+read after a successful host write, when a reply might already be available,
+without retrying blocked reads on unrelated guest activity. That is a
+hypothesis to measure, not an established explanation of the transport split.
+All observations, including the losses, are retained in
+[network-readiness-x86-short.json.gz](network-readiness-x86-short.json.gz).
