@@ -1408,3 +1408,32 @@ Storage gaps also remain. No PCI or whole-platform qualification follows.
 retains both modes, all observations, temporal blocks, hashes and provenance.
 A separate identical-binary PCI-free storage calibration at `ab4c264` is
 running; no result from that unfinished series is included here.
+
+## Balanced mapping-owner comparison on Arm and Windows
+
+[Arm run 46099095912](https://github.com/pichi-vm/dillo/actions/runs/46099095912)
+and [Windows run 46098629522](https://github.com/pichi-vm/dillo/actions/runs/46098629522)
+each complete all 104 boots of the same `ab4c264` versus `ad6ac6a` comparison.
+Executable hashes differ, guest assets match, both source trees are clean,
+and all guests report no PCI devices. Twelve balanced five-second pairs per
+case retain both revision and execution-mode comparisons.
+
+Arm bulk network throughput rises 9.2% (paired interval +5.1% to +14.4%) and
+CPU/GiB falls 12.5% (−14.2% to −10.9%). All three four-pair blocks agree in
+direction. Worker/control ratios become 98.4% throughput, 103.4% CPU/GiB and
+102.8% p99; these ratios do not alone establish parity. Sequential-read
+throughput rises 7.7%, while random-write results vary substantially across
+blocks and their intervals span both improvement and regression.
+
+Windows bulk network throughput rises 3.4% (+2.0% to +4.3%) and CPU/GiB falls
+6.9% (−9.2% to −5.7%). Bulk p99 is essentially unchanged, leaving it at 130.0%
+of the control. This experiment does not include the separate TCP_NODELAY
+correction. Sequential-read/write throughput rises 2.2%/3.6%; their p99
+observations rise 6.3%/9.8%, with substantial variation. Storage-specific
+calibration is needed before attributing those tail changes to the source.
+
+These are common-path improvements, not full isolation qualification. Local
+x86 comparison remains in progress; no candidate is promoted from these
+partial-platform results. Full observations, temporal blocks, hashes and
+provenance are retained in [mapping-owner-arm-balanced.json.gz](mapping-owner-arm-balanced.json.gz)
+and [mapping-owner-windows-balanced.json.gz](mapping-owner-windows-balanced.json.gz).
