@@ -2102,3 +2102,36 @@ the startup cost visible; this does not reopen startup optimization. Neither
 these observations nor the four-pair performance screens promote the candidate.
 [candidate-resource-footprint.json](candidate-resource-footprint.json) records
 all per-boot values and source-archive hashes.
+
+## macOS shared-status comparison
+
+[Run 46119956012](https://github.com/pichi-vm/dillo/actions/runs/46119956012)
+completed all 80 planned boots at `f8dc0ed` against `8196bb4`. Both executables
+use matching guest assets; the four mode/revision positions rotate independently
+over four five-second pairs per case. All reports, writes and PCI-free
+inventories validate. The native fixed-backing and signed GIC lifecycle checks
+also pass on this exact source.
+
+For bulk MMIO network traffic, the worker uses 4.3% less CPU/GiB than before,
+with all four pairs improving by 3.3–4.6%. The control also improves by 2.4%.
+Worker/control CPU cost therefore falls from 114.1% to 111.8%, rather than
+removing the isolation cost. Worker throughput improves 1.3%; p99 is essentially
+unchanged (+0.4% median). Idle thread counts remain 22/27 for control/worker:
+the new receiver replaces the prior relay rather than removing that thread.
+
+| Current network case | Throughput/control | CPU/GiB/control | p99/control |
+| --- | ---: | ---: | ---: |
+| PCI, 64 bytes | 96.2% | 118.1% | 105.3% |
+| PCI, 64 KiB | 92.2% | 118.3% | 112.2% |
+| PCI-free MMIO, 64 bytes | 97.4% | 111.3% | 108.1% |
+| PCI-free MMIO, 64 KiB | 95.2% | 111.8% | 109.5% |
+
+Small-message MMIO CPU cost is +0.5% versus the prior worker, with mixed pairs;
+storage throughput/CPU changes stay within about 0.7%. PCI is similarly little
+changed. These four-pair results are a bounded screen, not fresh noise-qualified
+parity. The candidate remains outside the integrated runtime. The Windows
+sampling finding also motivates checking the Mac benchmark peer independently
+before attributing the remaining network cost entirely to runtime design.
+[hvf-shared-status-macos-short.json.gz](hvf-shared-status-macos-short.json.gz)
+contains all 80 raw boot reports/logs, comparisons, hashes and the complete
+native job log; no slow observations were removed.
