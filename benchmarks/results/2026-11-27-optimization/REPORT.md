@@ -1593,3 +1593,29 @@ Clippy pass. A Windows native fixture checks the old repeated readiness and
 the new quiet state before [run 46106783368](https://github.com/pichi-vm/dillo/actions/runs/46106783368)
 compares four balanced five-second pairs on both transports. The candidate
 is not integrated and no performance benefit is claimed before that result.
+
+## Current macOS network stacks
+
+[Run 46107215606](https://github.com/pichi-vm/dillo/actions/runs/46107215606)
+completes eight boots at `f58b360`, with the mapping-owner candidate's runtime
+and an optimized symbolized build. Each transport has an unprofiled warmup
+pair and one measured ten-second pair. Ten three-second process profiles
+cover the measured parents and their children. Every profiler exits normally;
+report timestamps lie inside the bulk phase, process identities match the
+recorded tree, and each parsed thread's leaf counts sum to its observation
+count. PCI-free reports contain no PCI devices.
+
+Control receivers, control senders and resource-grant receivers remain in
+waits throughout their captured observations. The user-network thread spends
+about 66–69% of wall-clock observations in `kevent`, in both execution modes.
+The worker queues retain their pipe/condition-variable waits, and the parent
+completion threads show pipe reads followed by native GIC delivery. Memory
+region creation and payload copies remain visible in the active queue stacks.
+There is no observed steady-state control RPC or Windows-style writable spin
+in these macOS captures.
+
+These are wall-clock stack observations, including sleeping threads and guest
+execution. They do not apportion host CPU, qualify performance, or prove that
+notification cost alone explains the remaining gap. The full stack reports,
+profiler logs, boot records, parsing checks, timestamps and archive hashes are
+retained in [macos-network-stacks-current.json.gz](macos-network-stacks-current.json.gz).
